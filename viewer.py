@@ -528,6 +528,54 @@ class MuleImageViewer(QGraphicsView):
             self.scene.addItem(item)
             self.paste_preview_items.append(item)
 
+
+    def _analysis_toggle_target_at(self, scene_pos):
+        """분석도에서 단일 클릭으로 ON/OFF 토글할 대상 박스를 찾는다.
+
+        QGraphicsItem 이벤트만 믿으면 텍스트 번호 라벨이나 ScrollHandDrag 상태에 따라
+        첫 클릭이 뷰 쪽으로 흘러가서 더블클릭처럼 느껴지는 경우가 생길 수 있다.
+        그래서 분석도에서는 뷰 레벨에서 먼저 hit-test를 수행해 단일 클릭을 확정 처리한다.
+        """
+        if getattr(self.main, "cb_mode", None) is None or self.main.cb_mode.currentIndex() != 1:
+            return None
+        try:
+            curr = self.main.data.get(self.main.idx)
+            rows = curr.get('data', []) if curr else []
+        except Exception:
+            return None
+        if not rows:
+            return None
+
+        try:
+            base_w = int(getattr(self.main, "analysis_number_box_width", 40) or 40)
+        except Exception:
+            base_w = 40
+        bg_h = max(18, int(base_w * 0.9))
+
+        x0 = float(scene_pos.x())
+        y0 = float(scene_pos.y())
+
+        # 위에 그려진 번호 박스/나중에 추가된 박스가 우선 잡히도록 역순으로 검사한다.
+        for d in reversed(rows):
+            try:
+                x, y, w, h = d['rect']
+            except Exception:
+                continue
+
+            # 텍스트 본체 박스
+            if x <= x0 <= x + w and y <= y0 <= y + h:
+                return d
+
+            # 번호 라벨 박스. draw_static_boxes와 같은 계산을 사용한다.
+            id_str = str(d.get('id', ''))
+            bg_w = max(20, base_w + (len(id_str) - 1) * max(8, int(base_w * 0.4)))
+            bx, by = x, y - bg_h
+            if by < 0:
+                by = y
+            if bx <= x0 <= bx + bg_w and by <= y0 <= by + bg_h:
+                return d
+        return None
+
     def contextMenuEvent(self, e):
         if (
             getattr(self.main, "cb_mode", None) is not None
@@ -556,6 +604,15 @@ class MuleImageViewer(QGraphicsView):
         super().contextMenuEvent(e)
 
     def mousePressEvent(self, e):
+        # 분석도에서는 영역/번호 라벨을 한 번 클릭하면 즉시 사용 여부를 토글한다.
+        # 이 처리는 분석도에만 한정해 마스크 편집/최종 식질 클릭 동작에는 영향을 주지 않는다.
+        if e.button() == Qt.MouseButton.LeftButton:
+            target = self._analysis_toggle_target_at(self.mapToScene(e.pos()))
+            if target is not None:
+                self.main.toggle_check_from_box(target)
+                e.accept()
+                return
+
         if getattr(self.main, "cb_mode", None) is not None and self.main.cb_mode.currentIndex() == 4:
             active_transform = self.main.current_transform_data_item() if hasattr(self.main, 'current_transform_data_item') else None
             if active_transform is not None:
@@ -667,6 +724,17 @@ class MuleImageViewer(QGraphicsView):
                 return
 
         super().mousePressEvent(e)
+
+
+    def mouseDoubleClickEvent(self, e):
+        # 분석도 박스는 단일 클릭 토글이 원칙이다.
+        # 더블클릭 이벤트는 추가 토글 없이 소비해서 상태가 두 번 바뀌는 일을 막는다.
+        if e.button() == Qt.MouseButton.LeftButton:
+            target = self._analysis_toggle_target_at(self.mapToScene(e.pos()))
+            if target is not None:
+                e.accept()
+                return
+        super().mouseDoubleClickEvent(e)
 
     def mouseMoveEvent(self, e):
         if self._active_transform_item is not None:

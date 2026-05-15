@@ -1,19 +1,16 @@
-import os
-import sys
 from pathlib import Path
+from workspace_manager import cache_dir
 
-CACHE_FOLDER_NAME = "ysik_cache"
+CACHE_FOLDER_NAME = "cache"
 
 
 def get_app_dir() -> Path:
-    """Return the folder where the program/script is running from."""
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
-    return Path(sys.argv[0]).resolve().parent
+    # 기존 호환용. 실제 캐시는 Documents\YSB_Translator\cache를 사용한다.
+    return cache_dir().parent
 
 
 def get_cache_dir() -> Path:
-    path = get_app_dir() / CACHE_FOLDER_NAME
+    path = cache_dir()
     path.mkdir(parents=True, exist_ok=True)
     return path
 

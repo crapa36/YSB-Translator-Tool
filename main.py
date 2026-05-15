@@ -14,7 +14,7 @@ from PyQt6.QtGui import *
 from PyQt6.QtCore import *
 
 from manga_engine import MangaProcessEngine, Config
-from project_store import ProjectStore, PROJECT_FILENAME
+from project_store import ProjectStore, PROJECT_FILENAME, YSB_EXTENSION, package_project, extract_ysb_package, read_ysb_manifest, safe_project_name, clean_workspace_name, unique_dir
 from api_settings import ApiSettingsStore, ApiSettingsDialog, apply_settings_to_config
 from shortcut_settings import ShortcutSettingsStore, ShortcutSettingsDialog, MacroSettingsDialog, TEXT_SYMBOLS, shortcut_label_map
 from viewer import MuleImageViewer
@@ -22,6 +22,7 @@ from graphics_items import TypesettingItem
 from delegates import MultilineDelegate
 from workers import UniversalBatchWorker, AnalysisWorker, InpaintWorker
 from cache_utils import get_cache_dir, get_cache_file
+from workspace_manager import get_workspace_root, temp_dir, workspaces_dir, default_package_dir, schedule_workspace_root_change, load_workspace_config, set_workspace_root, default_workspace_root, APP_FOLDER_NAME, configured_workspace_root_raw, configured_workspace_root_exists
 
 
 def resource_path(relative_path):
@@ -48,7 +49,11 @@ def close_pyinstaller_boot_splash():
         pass
 
 
-APP_OPTIONS_FILE = get_cache_file("app_options.json")
+APP_OPTIONS_FILE_NAME = "app_options.json"
+
+
+def app_options_file():
+    return get_cache_file(APP_OPTIONS_FILE_NAME)
 TRANSLATION_PROMPT_KEY = "translation_prompt"
 TRANSLATION_GLOSSARY_TEXT_KEY = "translation_glossary_text"
 TRANSLATION_GLOSSARY_PATH_KEY = "translation_glossary_path"
@@ -78,8 +83,9 @@ def read_text_file_for_cache(path):
 
 def load_app_options():
     try:
-        if APP_OPTIONS_FILE.exists():
-            with open(APP_OPTIONS_FILE, "r", encoding="utf-8") as f:
+        p = app_options_file()
+        if p.exists():
+            with open(p, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if isinstance(data, dict):
                 return data
@@ -90,12 +96,447 @@ def load_app_options():
 
 def save_app_options(options):
     try:
-        APP_OPTIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(APP_OPTIONS_FILE, "w", encoding="utf-8") as f:
+        p = app_options_file()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f:
             json.dump(dict(options or {}), f, ensure_ascii=False, indent=2)
     except Exception:
         pass
 
+
+
+YSBT_EXTENSION = ".ysbt"
+YSBT_PROG_ID = "YSBTranslator.YSBTProject"
+LEGACY_YSB_EXTENSION = ".ysb"
+LEGACY_YSB_PROG_ID = "YSBTranslator.Project"
+
+DARK_MESSAGEBOX_QSS = """
+QMessageBox { background-color: #1f1f22; color: #f2f2f2; }
+QMessageBox QLabel { color: #f2f2f2; }
+QMessageBox QPushButton { background-color: #343841; color: #f2f2f2; border: 1px solid #555b66; padding: 5px 14px; min-width: 52px; }
+QMessageBox QPushButton:hover { background-color: #434957; }
+"""
+
+
+def styled_question(parent, title, text, default_yes=False):
+    msg = QMessageBox(parent)
+    msg.setIcon(QMessageBox.Icon.Question)
+    msg.setWindowTitle(title)
+    msg.setText(text)
+    msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+    msg.setDefaultButton(QMessageBox.StandardButton.Yes if default_yes else QMessageBox.StandardButton.No)
+    msg.setStyleSheet(DARK_MESSAGEBOX_QSS)
+    return msg.exec()
+
+def is_windows():
+    return sys.platform.startswith("win")
+
+
+def get_executable_for_association() -> str:
+    """파일 연결에 사용할 실제 실행 파일 경로를 돌려준다."""
+    return sys.executable if getattr(sys, "frozen", False) else sys.executable
+
+
+def get_association_command() -> str:
+    """.ysbt 더블클릭 시 Windows가 실행할 명령어.
+
+    EXE 빌드 상태면 EXE를 직접 호출하고, 소스 실행 상태면 현재 Python으로 main.py를 실행한다.
+    그래서 개발 중에도 더블클릭 테스트가 가능하다.
+    """
+    if getattr(sys, "frozen", False):
+        return f'"{sys.executable}" "%1"'
+    script = os.path.abspath(sys.argv[0])
+    return f'"{sys.executable}" "{script}" "%1"'
+
+
+def get_association_icon() -> str:
+    """파일 탐색기에 표시할 아이콘 위치."""
+    if getattr(sys, "frozen", False):
+        return f'"{sys.executable}",0'
+    ico = resource_path("ysb_icon.ico")
+    if os.path.exists(ico):
+        return f'"{ico}",0'
+    return f'"{sys.executable}",0'
+
+
+def get_ysbt_file_association_prog_id() -> str | None:
+    """현재 사용자 계정에 등록된 .ysbt의 ProgID를 반환한다."""
+    if not is_windows():
+        return None
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\.ysbt") as k:
+            value, _ = winreg.QueryValueEx(k, "")
+        return value
+    except Exception:
+        return None
+
+
+def is_ysbt_file_association_ours() -> bool:
+    """.ysbt가 이 프로그램 계열의 ProgID에 연결되어 있는지 확인한다.
+
+    실행 파일 경로가 현재 EXE와 달라도, 같은 YSBTranslator.YSBTProject 등록이면
+    사용자 입장에서는 이미 .ysbt 연결이 켜진 상태로 본다.
+    """
+    return get_ysbt_file_association_prog_id() == YSBT_PROG_ID
+
+
+def get_registered_ysbt_file_association_command() -> str | None:
+    """레지스트리에 등록된 .ysbt 열기 명령을 가져온다.
+
+    이 값이 현재 실행 중인 프로그램의 명령과 다르면, 보통 구버전 EXE나
+    다른 위치의 포터블 EXE가 .ysbt에 연결된 상태라고 보면 된다.
+    """
+    if not is_windows():
+        return None
+    try:
+        import winreg
+        if not is_ysbt_file_association_ours():
+            return None
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, rf"Software\Classes\{YSBT_PROG_ID}\shell\open\command") as k:
+            command, _ = winreg.QueryValueEx(k, "")
+        return str(command)
+    except Exception:
+        return None
+
+
+def is_ysbt_file_association_registered_to_other_ysb() -> bool:
+    """.ysbt가 역식붕이 툴 계열이지만 현재 실행 프로그램과 다른 명령을 가리키는지 확인한다.
+
+    Windows가 버전 번호를 아는 것은 아니므로, 여기서 말하는 구버전 감지는
+    실제로는 "등록된 실행 명령이 현재 실행 중인 프로그램과 다름"을 뜻한다.
+    """
+    if not is_ysbt_file_association_ours():
+        return False
+    registered = (get_registered_ysbt_file_association_command() or "").strip().lower()
+    current = get_association_command().strip().lower()
+    return bool(registered and registered != current)
+
+
+def is_ysbt_file_association_registered() -> bool:
+    """현재 사용자 계정의 .ysbt 연결이 현재 실행 중인 역식붕이 툴을 가리키는지 확인한다."""
+    registered = get_registered_ysbt_file_association_command()
+    if not registered:
+        return False
+    return registered.strip().lower() == get_association_command().strip().lower()
+
+
+def register_ysbt_file_association_raw():
+    """메시지 없이 .ysbt 연결을 등록한다. Windows 전용."""
+    if not is_windows():
+        raise RuntimeError(".ysbt 확장자 연결 등록은 Windows에서만 지원합니다.")
+    import winreg
+    import ctypes
+    command = get_association_command()
+    icon = get_association_icon()
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\.ysbt") as k:
+        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, YSBT_PROG_ID)
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"Software\Classes\{YSBT_PROG_ID}") as k:
+        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, "YSBT Project File")
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"Software\Classes\{YSBT_PROG_ID}\DefaultIcon") as k:
+        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, icon)
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"Software\Classes\{YSBT_PROG_ID}\shell\open\command") as k:
+        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, command)
+    try:
+        ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x0000, None, None)
+    except Exception:
+        pass
+
+
+def unregister_ysbt_file_association_raw(include_legacy=True):
+    """메시지 없이 우리 툴이 등록한 확장자 연결을 제거한다. 다른 앱 연결은 건드리지 않는다."""
+    if not is_windows():
+        raise RuntimeError("확장자 연결 해제는 Windows에서만 지원합니다.")
+    import winreg
+    import ctypes
+
+    def reg_get_default(subkey):
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, subkey) as k:
+                value, _ = winreg.QueryValueEx(k, "")
+            return value
+        except Exception:
+            return None
+
+    def delete_tree(root, subkey):
+        try:
+            with winreg.OpenKey(root, subkey, 0, winreg.KEY_READ | winreg.KEY_WRITE) as k:
+                while True:
+                    try:
+                        child = winreg.EnumKey(k, 0)
+                    except OSError:
+                        break
+                    delete_tree(root, subkey + "\\" + child)
+            winreg.DeleteKey(root, subkey)
+            return True
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return False
+
+    removed = []
+    if reg_get_default(r"Software\Classes\.ysbt") == YSBT_PROG_ID:
+        if delete_tree(winreg.HKEY_CURRENT_USER, r"Software\Classes\.ysbt"):
+            removed.append(".ysbt")
+    if delete_tree(winreg.HKEY_CURRENT_USER, rf"Software\Classes\{YSBT_PROG_ID}"):
+        removed.append(YSBT_PROG_ID)
+
+    if include_legacy:
+        if reg_get_default(r"Software\Classes\.ysb") == LEGACY_YSB_PROG_ID:
+            if delete_tree(winreg.HKEY_CURRENT_USER, r"Software\Classes\.ysb"):
+                removed.append(".ysb legacy")
+        if delete_tree(winreg.HKEY_CURRENT_USER, rf"Software\Classes\{LEGACY_YSB_PROG_ID}"):
+            removed.append(f"{LEGACY_YSB_PROG_ID} legacy")
+
+    try:
+        ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x0000, None, None)
+    except Exception:
+        pass
+    return removed
+
+
+def is_workspace_root_configured() -> bool:
+    cfg = load_workspace_config()
+    return bool(cfg.get("workspace_root"))
+
+
+def workspace_root_needs_setup() -> tuple[bool, str, str]:
+    """첫 기동 설정창이 필요한지 검사한다. 이 함수는 작업 폴더를 새로 만들지 않는다.
+
+    return: (needs_setup, message, message_kind)
+    - message_kind = "info"    : 첫 설정처럼 정상 안내
+    - message_kind = "warning" : 저장된 설정이 있지만 실제 폴더를 찾지 못한 상태
+    """
+    cfg = load_workspace_config()
+    root_text = cfg.get("workspace_root")
+    if not root_text:
+        return True, "처음 실행입니다.\n작업 폴더 위치를 확인해 주세요.", "info"
+    try:
+        root = Path(root_text)
+    except Exception:
+        return True, "저장된 작업 폴더 경로를 읽을 수 없습니다.\n작업 폴더 위치를 다시 지정해 주세요.", "warning"
+    if not root.exists() or not root.is_dir():
+        return True, "저장된 작업 폴더를 찾을 수 없습니다.\n작업 폴더 위치를 다시 지정해 주세요.", "warning"
+    return False, "", "info"
+
+
+def normalize_workspace_root_from_user(path_text: str) -> Path:
+    p = Path((path_text or "").strip()).expanduser()
+    if not str(p):
+        p = default_workspace_root()
+    if p.name.lower() != APP_FOLDER_NAME.lower():
+        p = p / APP_FOLDER_NAME
+    return p
+
+
+class WorkspaceSetupDialog(QDialog):
+    """첫 실행/옵션 공용 작업 폴더 설정 창."""
+    def __init__(self, parent=None, *, first_run=False, reason_text="", reason_kind="info"):
+        super().__init__(parent)
+        self.first_run = bool(first_run)
+        self.reason_text = reason_text or ""
+        self.reason_kind = reason_kind or "info"
+        self.setWindowTitle("작업 폴더 설정")
+        self.resize(620, 260)
+        self.setStyleSheet("""
+            QDialog, QWidget { background-color: #1f1f22; color: #f2f2f2; }
+            QLabel { color: #f2f2f2; }
+            QLineEdit { background-color: #2a2d33; color: #f2f2f2; border: 1px solid #555b66; padding: 4px; }
+            QPushButton { background-color: #343841; color: #f2f2f2; border: 1px solid #555b66; padding: 5px 12px; }
+            QPushButton:hover { background-color: #434957; }
+            QCheckBox { color: #f2f2f2; }
+        """)
+        self.saved_workspace_root = None
+        # 체크박스 초기값은 "현재 EXE와 완전히 일치"가 아니라
+        # ".ysbt가 이 프로그램 계열에 등록되어 있는가"를 기준으로 한다.
+        # 그래야 구버전/다른 위치 EXE로 등록된 상태에서도 체크 해제 후 저장하면 해제된다.
+        self.extension_registered_before = is_ysbt_file_association_ours()
+
+        cfg = load_workspace_config()
+        default_path = Path(cfg.get("pending_workspace_root") or cfg.get("workspace_root") or default_workspace_root())
+
+        layout = QVBoxLayout(self)
+
+        title = QLabel("역식붕이 툴 작업 폴더 설정")
+        title.setStyleSheet("font-size: 16px; font-weight: bold;")
+        layout.addWidget(title)
+
+        if self.reason_text:
+            reason = QLabel(self.reason_text)
+            reason.setWordWrap(True)
+            if self.reason_kind == "warning":
+                reason.setStyleSheet("color: #ffcc66; font-weight: bold;")
+            else:
+                reason.setStyleSheet("color: #d8d8d8;")
+            layout.addWidget(reason)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("작업 폴더 위치"))
+        self.ed_path = QLineEdit(str(default_path))
+        row.addWidget(self.ed_path, 1)
+        self.btn_browse = QPushButton("찾아보기")
+        self.btn_browse.clicked.connect(self.browse_folder)
+        row.addWidget(self.btn_browse)
+        layout.addLayout(row)
+
+        self.chk_association = QCheckBox(".ysbt 확장자 연결 등록")
+        self.chk_association.setChecked(self.extension_registered_before)
+        if not is_windows():
+            self.chk_association.setChecked(False)
+            self.chk_association.setEnabled(False)
+            self.chk_association.setToolTip("확장자 연결은 Windows에서만 지원합니다.")
+        layout.addWidget(self.chk_association)
+
+        desc = QLabel(
+            "작업 폴더는 캐시, 임시 작업, 실제 프로젝트 작업 폴더를 저장하는 기준 위치입니다.\n"
+            "기본값은 문서 폴더 아래의 YSB_Translator 폴더입니다. 선택한 폴더가 YSB_Translator가 아니면 그 안에 YSB_Translator 폴더를 만들어 사용합니다.\n\n"
+            ".ysbt 확장자 연결을 등록하면 .ysbt 프로젝트 파일을 더블클릭했을 때 역식붕이 툴로 바로 열 수 있습니다. 이 설정은 현재 Windows 사용자 계정에만 적용되며, 옵션에서 해제할 수 있습니다.\n"
+            "작업 폴더 위치 설정은 Windows 사용자 설정 폴더의 workspace_config.json에 저장됩니다."
+        )
+        desc.setWordWrap(True)
+        desc.setStyleSheet("color: #d8d8d8;")
+        layout.addWidget(desc)
+
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        self.btn_ok = QPushButton("확인")
+        self.btn_close = QPushButton("닫기")
+        self.btn_ok.clicked.connect(self.accept_with_save)
+        self.btn_close.clicked.connect(self.reject)
+        btns.addWidget(self.btn_ok)
+        btns.addWidget(self.btn_close)
+        layout.addLayout(btns)
+
+    def browse_folder(self):
+        current = self.ed_path.text().strip() or str(default_workspace_root())
+        selected = QFileDialog.getExistingDirectory(self, "작업 폴더 위치 선택", current)
+        if selected:
+            target = normalize_workspace_root_from_user(selected)
+            self.ed_path.setText(str(target))
+
+    def _handle_association_choice(self):
+        if not is_windows():
+            return True
+
+        want_registered = self.chk_association.isChecked()
+        current_exe_registered = is_ysbt_file_association_registered()
+        our_association_exists = is_ysbt_file_association_ours()
+
+        if want_registered:
+            # 체크박스가 켜져 있으면 추가 확인 없이 현재 실행 파일 기준으로 등록/갱신한다.
+            # 이미 구버전/다른 위치 EXE로 연결되어 있어도 현재 실행 중인 프로그램으로 덮어쓴다.
+            if not current_exe_registered:
+                try:
+                    register_ysbt_file_association_raw()
+                    self.extension_registered_before = True
+                except Exception as e:
+                    QMessageBox.critical(self, "등록 실패", f".ysbt 확장자 연결 등록에 실패했습니다.\n{e}")
+                    return False
+            return True
+
+        # 체크박스가 꺼져 있고 .ysbt가 이 프로그램 계열에 등록되어 있으면 바로 해제한다.
+        # 확인 버튼을 누른 시점이 사용자의 적용 의사이므로 추가 재확인은 하지 않는다.
+        if our_association_exists:
+            try:
+                unregister_ysbt_file_association_raw(include_legacy=False)
+                self.extension_registered_before = False
+            except Exception as e:
+                QMessageBox.critical(self, "해제 실패", f".ysbt 확장자 연결 해제에 실패했습니다.\n{e}")
+                return False
+            return True
+
+        # 첫 기동이고 아직 우리 확장자 연결이 없는데 체크도 꺼져 있으면, 등록할지 한 번만 물어본다.
+        if self.first_run:
+            ans = styled_question(
+                self,
+                ".ysbt 확장자 연결",
+                ".ysbt 확장자 연결이 등록되어 있지 않습니다.\n등록하지 않아도 프로그램 사용은 가능하지만, .ysbt 파일을 더블클릭해서 바로 열 수는 없습니다.\n\n지금 등록할까요?",
+                default_yes=False,
+            )
+            if ans == QMessageBox.StandardButton.Yes:
+                try:
+                    register_ysbt_file_association_raw()
+                    self.chk_association.setChecked(True)
+                    self.extension_registered_before = True
+                except Exception as e:
+                    QMessageBox.critical(self, "등록 실패", f".ysbt 확장자 연결 등록에 실패했습니다.\n{e}")
+                    return False
+        return True
+
+    def accept_with_save(self):
+        try:
+            target = normalize_workspace_root_from_user(self.ed_path.text())
+        except Exception:
+            QMessageBox.warning(self, "경로 오류", "작업 폴더 경로가 올바르지 않습니다.")
+            return
+
+        if not self._handle_association_choice():
+            return
+
+        try:
+            if self.first_run:
+                set_workspace_root(target)
+                self.saved_workspace_root = str(target)
+                QMessageBox.information(self, "설정 완료", f"작업 폴더를 설정했습니다.\n\n{target}")
+            else:
+                current = Path(get_workspace_root()).resolve()
+                target_resolved = target.resolve()
+                if current != target_resolved:
+                    schedule_workspace_root_change(target)
+                    self.saved_workspace_root = str(target)
+                    QMessageBox.information(
+                        self,
+                        "이동 예약 완료",
+                        f"작업 폴더 위치 변경이 예약되었습니다.\n프로그램을 재실행하면 아래 위치로 이동됩니다.\n\n{target}",
+                    )
+                else:
+                    # 경로가 같으면 구조만 보장한다.
+                    set_workspace_root(target)
+                    self.saved_workspace_root = str(target)
+                    QMessageBox.information(self, "설정 완료", "작업 폴더 설정을 저장했습니다.")
+        except Exception as e:
+            QMessageBox.critical(self, "저장 실패", f"작업 폴더 설정을 저장하지 못했습니다.\n{e}")
+            return
+        self.accept()
+
+
+def run_initial_workspace_setup_if_needed() -> bool:
+    """작업 폴더가 없거나 저장된 폴더를 찾을 수 없으면 설정창을 띄운다."""
+    needs_setup, reason, reason_kind = workspace_root_needs_setup()
+    if not needs_setup:
+        return True
+    dlg = WorkspaceSetupDialog(first_run=True, reason_text=reason, reason_kind=reason_kind)
+    return dlg.exec() == QDialog.DialogCode.Accepted
+
+
+def prompt_update_ysbt_file_association_if_needed(parent=None) -> None:
+    """.ysbt가 다른 위치의 역식붕이 툴에 연결되어 있으면 현재 프로그램으로 갱신할지 묻는다.
+
+    Windows는 EXE의 버전을 자동으로 비교하지 않는다. 따라서 이 검사는
+    "레지스트리에 등록된 열기 명령"과 "현재 실행 중인 프로그램 명령"을 비교한다.
+    둘이 다르면 구버전/다른 위치 포터블 EXE로 등록되어 있을 가능성이 높다.
+    """
+    if not is_windows():
+        return
+    if not is_ysbt_file_association_registered_to_other_ysb():
+        return
+    registered = get_registered_ysbt_file_association_command() or "알 수 없음"
+    current = get_association_command()
+    ans = styled_question(
+        parent,
+        ".ysbt 확장자 연결 갱신",
+        "현재 .ysbt 확장자가 다른 위치의 역식붕이 툴에 연결되어 있습니다.\n"
+        "포터블 EXE를 새 버전으로 교체했거나, 다른 폴더의 EXE로 테스트한 경우에 생길 수 있습니다.\n\n"
+        f"현재 등록된 실행 명령:\n{registered}\n\n"
+        f"현재 실행 중인 프로그램으로 다시 등록할까요?\n{current}\n\n"
+        "[예]를 누르면 .ysbt 파일 연결만 현재 프로그램 경로로 덮어씁니다. 프로젝트 파일은 변경되지 않습니다.",
+        default_yes=True,
+    )
+    if ans == QMessageBox.StandardButton.Yes:
+        try:
+            register_ysbt_file_association_raw()
+        except Exception as e:
+            QMessageBox.critical(parent, "등록 실패", f".ysbt 확장자 연결 갱신에 실패했습니다.\n{e}")
 
 
 class YSBSplashScreen(QSplashScreen):
@@ -481,7 +922,7 @@ class GlossaryDialog(QDialog):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("역식붕이 툴 v1.4")
+        self.setWindowTitle("역식붕이 툴 v1.5")
         self.setWindowIcon(QIcon(resource_path("ysb_icon.ico")))
         self.resize(1600, 950)
 
@@ -496,6 +937,9 @@ class MainWindow(QMainWindow):
 
         self.project_store = ProjectStore()
         self.project_dir = None
+        self.workspace_root = str(get_workspace_root())
+        self.ysbt_package_path = None
+        self.is_temp_project = False
         self.is_loading_project = False
         self.is_autosaving = False
 
@@ -648,6 +1092,9 @@ class MainWindow(QMainWindow):
         make_action("option_api_settings", "API 관리", self.open_api_settings_dialog)
         make_action("option_translation_prompt", "번역 프롬프트 입력", self.open_translation_prompt_dialog)
         make_action("option_glossary", "단어장", self.open_glossary_dialog)
+        make_action("option_workspace_location", "작업 폴더 위치 변경", self.change_workspace_location)
+        make_action("option_register_ysb", ".ysbt 확장자 연결 등록", self.register_ysb_file_association)
+        make_action("option_unregister_ysbt", ".ysbt/.ysb 확장자 연결 해제", self.unregister_ysbt_file_association)
         make_action("option_shortcut_settings", "단축키 통합 관리", self.open_shortcut_settings_dialog)
         make_action("option_macro_settings", "매크로 관리", self.open_macro_settings_dialog)
         make_action("option_text_preset_settings", "페이지 글꼴 프리셋 관리", self.open_text_preset_dialog)
@@ -943,6 +1390,11 @@ class MainWindow(QMainWindow):
         option_menu.addAction(self.actions["option_api_settings"])
         option_menu.addAction(self.actions["option_translation_prompt"])
         option_menu.addAction(self.actions["option_glossary"])
+        option_menu.addSeparator()
+        option_menu.addAction(self.actions["option_workspace_location"])
+        option_menu.addAction(self.actions["option_register_ysb"])
+        option_menu.addAction(self.actions["option_unregister_ysbt"])
+        option_menu.addSeparator()
         option_menu.addAction(self.actions["option_shortcut_settings"])
         option_menu.addAction(self.actions["option_macro_settings"])
         option_menu.addAction(self.actions["option_text_preset_settings"])
@@ -5379,6 +5831,216 @@ class MainWindow(QMainWindow):
     # =========================================================
     # 프로젝트 저장 / 불러오기
     # =========================================================
+    def change_workspace_location(self):
+        """옵션 메뉴에서 작업 폴더 설정 창을 다시 연다.
+
+        첫 실행 설정창과 같은 UI를 쓰되, 닫기를 눌러도 프로그램은 종료하지 않는다.
+        위치가 바뀐 경우에는 다음 실행 시 이동되도록 예약한다.
+        """
+        dlg = WorkspaceSetupDialog(self, first_run=False)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self.workspace_root = str(get_workspace_root())
+            self.log("📁 작업 폴더 설정 확인")
+        else:
+            self.log("📁 작업 폴더 설정 변경 취소")
+
+    def register_ysb_file_association(self):
+        if not is_windows():
+            QMessageBox.information(self, "지원 안내", ".ysbt 확장자 연결 등록은 Windows에서만 지원합니다.")
+            return
+        if is_ysbt_file_association_registered():
+            QMessageBox.information(self, "이미 등록됨", ".ysbt 확장자가 현재 실행 중인 역식붕이 툴에 이미 연결되어 있습니다.")
+            return
+
+        if is_ysbt_file_association_registered_to_other_ysb():
+            registered = get_registered_ysbt_file_association_command() or "알 수 없음"
+            message = (
+                ".ysbt 확장자가 다른 위치의 역식붕이 툴에 연결되어 있습니다.\n"
+                "현재 실행 중인 프로그램으로 연결을 갱신할까요?\n\n"
+                f"현재 등록된 실행 명령:\n{registered}\n\n"
+                f"새로 등록할 실행 명령:\n{get_association_command()}\n\n"
+                "이 작업은 Windows의 확장자 연결 정보만 덮어씁니다. 기존 .ysbt 프로젝트 파일은 변경되지 않습니다."
+            )
+        else:
+            message = (
+                "현재 사용자 계정에 .ysbt 확장자 연결을 등록합니다.\n"
+                "등록 후 .ysbt 파일을 더블클릭하면 역식붕이 툴로 열립니다. 계속할까요?"
+            )
+
+        ans = QMessageBox.question(
+            self,
+            ".ysbt 확장자 연결 등록",
+            message,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            register_ysbt_file_association_raw()
+            QMessageBox.information(self, "등록 완료", ".ysbt 확장자 연결을 현재 실행 중인 역식붕이 툴로 등록했습니다.\n아이콘 표시는 Windows 아이콘 캐시 때문에 조금 늦게 갱신될 수 있습니다.")
+            self.log("🔗 .ysbt 확장자 연결 등록/갱신 완료")
+        except Exception as e:
+            QMessageBox.critical(self, "등록 실패", f".ysbt 확장자 연결 등록에 실패했습니다.\n{e}")
+
+    def unregister_ysbt_file_association(self):
+        """현재 사용자 계정에 등록된 .ysbt 연결을 제거한다.
+
+        이전 테스트 버전에서 이 프로그램이 등록한 .ysb 연결도 함께 정리한다.
+        단, 다른 프로그램에 연결된 .ysb는 변경하지 않는다.
+        """
+        if not is_windows():
+            QMessageBox.information(self, "지원 안내", "확장자 연결 해제는 Windows에서만 지원합니다.")
+            return
+        ans = QMessageBox.question(
+            self,
+            "확장자 연결 해제",
+            "현재 사용자 계정의 .ysbt 연결을 해제합니다.\n"
+            "이전 테스트 버전에서 이 프로그램이 등록한 .ysb 연결도 함께 정리합니다.\n"
+            "다른 프로그램에 연결된 .ysb는 변경하지 않습니다.\n\n"
+            "계속할까요?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            removed = unregister_ysbt_file_association_raw(include_legacy=True)
+            msg = "확장자 연결 해제를 완료했습니다."
+            if removed:
+                msg += "\n\n제거 항목:\n- " + "\n- ".join(removed)
+            else:
+                msg += "\n\n제거할 연결 항목이 없었습니다."
+            QMessageBox.information(self, "해제 완료", msg)
+            self.log("🔗 확장자 연결 해제 완료: " + (", ".join(removed) if removed else "제거 항목 없음"))
+        except Exception as e:
+            QMessageBox.critical(self, "해제 실패", f"확장자 연결 해제에 실패했습니다.\n{e}")
+
+    def workspace_temp_project_dir(self, project_name="unsaved_project"):
+        safe = safe_project_name(project_name)
+        return unique_dir(temp_dir(), f"unsaved_{safe}_{uuid.uuid4().hex[:8]}")
+
+    def workspace_project_dir(self, project_name="ysb_project"):
+        safe = clean_workspace_name(project_name)
+        return unique_dir(workspaces_dir(), safe)
+
+    def normalize_ysb_path(self, path):
+        if not path:
+            return path
+        return path if path.lower().endswith(YSB_EXTENSION) else path + YSB_EXTENSION
+
+    def current_package_default_path(self):
+        base = Path(self.project_dir).name if self.project_dir else "ysb_project"
+        base = clean_workspace_name(base)
+        return str(default_package_dir() / f"{safe_project_name(base)}{YSB_EXTENSION}")
+
+    def delete_temp_project_if_needed(self):
+        if self.is_temp_project and self.project_dir and os.path.exists(self.project_dir):
+            try:
+                tmp_root = os.path.abspath(str(temp_dir()))
+                proj = os.path.abspath(self.project_dir)
+                if proj.startswith(tmp_root):
+                    shutil.rmtree(self.project_dir, ignore_errors=True)
+                    self.log(f"🧹 임시 프로젝트 삭제: {self.project_dir}")
+            except Exception:
+                pass
+        self.is_temp_project = False
+
+    def promote_temp_project_to_workspace(self, project_name=None):
+        if not self.is_temp_project:
+            return True
+        if not self.project_dir or not os.path.exists(self.project_dir):
+            return False
+
+        name = clean_workspace_name(project_name or Path(self.project_dir).name)
+        dst = self.workspace_project_dir(name)
+        old_dir = self.project_dir
+        try:
+            # 현재 temp 프로젝트 저장 후, 새 폴더를 만들지 않고 temp 폴더 자체를 정식 작업 폴더로 승격한다.
+            self.project_store.save(self.paths, self.data, self.idx)
+            if os.path.abspath(old_dir) != os.path.abspath(dst):
+                shutil.move(old_dir, dst)
+            self.project_dir = dst
+            self.project_store = ProjectStore(dst)
+            # UUID는 manifest 내부에 유지하고, 폴더명/프로젝트명은 깔끔한 이름으로 갱신한다.
+            self.project_store.write_manifest(project_name=name)
+            self.is_temp_project = False
+
+            # 혹시 이전 버전에서 workspaces 안에 unsaved_* 찌꺼기가 생겼다면,
+            # 현재 승격한 폴더와 다른 빈/동일 임시 폴더만 안전하게 제거한다.
+            try:
+                ws_root = os.path.abspath(str(workspaces_dir()))
+                old_abs = os.path.abspath(old_dir)
+                dst_abs = os.path.abspath(dst)
+                if old_abs.startswith(ws_root) and os.path.basename(old_abs).startswith("unsaved_") and old_abs != dst_abs and os.path.exists(old_abs):
+                    shutil.rmtree(old_abs, ignore_errors=True)
+            except Exception:
+                pass
+
+            self.reload_saved_project_from_disk(refresh_view=False)
+            self.log(f"📦 임시 프로젝트를 작업 폴더로 승격: {dst}")
+            return True
+        except Exception as e:
+            QMessageBox.critical(self, "프로젝트 이동 실패", f"임시 프로젝트를 작업 폴더로 옮기지 못했습니다.\n{e}")
+            return False
+
+    def open_project_path(self, path):
+        """파일 연결/명령행 인자로 받은 .ysbt 또는 project.json을 연다."""
+        if not path:
+            return
+        path = os.path.abspath(path)
+        if not self.confirm_unsaved_before_switch():
+            return
+        if path.lower().endswith(YSB_EXTENSION):
+            self.open_ysb_package(path)
+            return
+        if os.path.isdir(path):
+            project_file = os.path.join(path, PROJECT_FILENAME)
+        else:
+            project_file = path
+        if os.path.basename(project_file) != PROJECT_FILENAME or not os.path.exists(project_file):
+            QMessageBox.warning(self, "프로젝트 없음", f"열 수 있는 프로젝트 파일이 아닙니다.\n{path}")
+            return
+        self.load_project_json(project_file)
+
+    def load_project_json(self, project_file, package_path=None, temp_project=False):
+        self.is_loading_project = True
+        try:
+            self.commit_current_page_ui_to_data()
+            self.project_store = ProjectStore()
+            self.paths, self.data, self.idx = self.project_store.load(project_file)
+            self.project_dir = self.project_store.project_dir
+            self.ysbt_package_path = package_path
+            self.is_temp_project = bool(temp_project)
+            self.mark_saved_state()
+            if not self.auto_save_enabled:
+                self.start_work_cache_from_current(mark_dirty=False)
+            self.log(f"📂 프로젝트 열림: {self.project_dir}")
+            if package_path:
+                self.log(f"📦 연결된 YSBT 파일: {package_path}")
+            self.reset_mode_to_original()
+            self.load()
+        finally:
+            self.is_loading_project = False
+
+    def open_ysb_package(self, package_path):
+        try:
+            manifest = read_ysb_manifest(package_path)
+            target_dir, manifest, reused = extract_ysb_package(package_path, workspaces_dir(), reuse_existing=True)
+            if reused:
+                ans = QMessageBox.question(
+                    self,
+                    "이미 가져온 프로젝트",
+                    "이 YSBT 파일은 이미 작업 폴더로 가져온 적이 있습니다.\n기존 작업 폴더를 열까요?\n\n[아니오]를 누르면 새 복사본으로 다시 가져옵니다.",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.Yes,
+                )
+                if ans == QMessageBox.StandardButton.No:
+                    target_dir, manifest, reused = extract_ysb_package(package_path, workspaces_dir(), reuse_existing=False)
+            self.load_project_json(os.path.join(target_dir, PROJECT_FILENAME), package_path=package_path, temp_project=False)
+        except Exception as e:
+            QMessageBox.critical(self, "YSBT 열기 실패", f"YSBT 프로젝트를 열지 못했습니다.\n{package_path}\n\n{e}")
+
     def project_cache_root(self):
         root = get_cache_dir() / "work_sessions"
         root.mkdir(parents=True, exist_ok=True)
@@ -5543,6 +6205,7 @@ class MainWindow(QMainWindow):
             return not self.has_unsaved_changes
         if clicked == btn_discard:
             self.cleanup_work_cache()
+            self.delete_temp_project_if_needed()
             self.has_unsaved_changes = False
             return True
         return False
@@ -5575,6 +6238,7 @@ class MainWindow(QMainWindow):
                     return
             elif clicked == btn_discard:
                 self.cleanup_work_cache()
+                self.delete_temp_project_if_needed()
                 self.has_unsaved_changes = False
         else:
             # 정상 종료 시 남은 작업 캐시는 삭제한다.
@@ -5596,38 +6260,29 @@ class MainWindow(QMainWindow):
         if not source_paths:
             return
 
-        parent_dir = QFileDialog.getExistingDirectory(self, "프로젝트를 만들 상위 폴더 선택")
-        if not parent_dir:
-            return
-
         default_name = Path(source_paths[0]).stem + "_project"
-        project_name, ok = QInputDialog.getText(self, "새 프로젝트 이름", "프로젝트 폴더 이름:", text=default_name)
+        project_name, ok = QInputDialog.getText(self, "새 프로젝트 이름", "프로젝트 이름:", text=default_name)
         if not ok or not project_name.strip():
             return
 
-        safe_name = project_name.strip().replace("/", "_").replace("\\", "_")
-        project_dir = os.path.join(parent_dir, safe_name)
-
-        if os.path.exists(os.path.join(project_dir, PROJECT_FILENAME)):
-            ans = QMessageBox.question(
-                self,
-                "기존 프로젝트 발견",
-                f"이미 project.json이 있는 폴더입니다.\n{project_dir}\n\n덮어쓰고 새 프로젝트로 만들까요?",
-            )
-            if ans != QMessageBox.StandardButton.Yes:
-                return
+        safe_name = safe_project_name(project_name.strip())
+        project_dir = self.workspace_temp_project_dir(safe_name)
 
         self.commit_current_page_ui_to_data()
 
         self.project_store = ProjectStore(project_dir)
         self.paths, self.data = self.project_store.create_from_images(project_dir, source_paths)
+        self.project_store.write_manifest(project_name=safe_name)
         self.project_dir = project_dir
+        self.ysbt_package_path = None
+        self.is_temp_project = True
         self.idx = 0
         self.is_loading_project = False
-        self.log(f"📁 새 프로젝트 생성: {project_dir}")
-        self.mark_saved_state()
+        self.log(f"📁 새 임시 프로젝트 생성: {project_dir}")
+        self.log("💾 아직 YSBT 파일로 저장되지 않았습니다. [프로젝트 저장] 또는 [다른 이름으로 저장]을 눌러 .ysbt로 저장하세요.")
+        self.has_unsaved_changes = True
         if not self.auto_save_enabled:
-            self.start_work_cache_from_current(mark_dirty=False)
+            self.start_work_cache_from_current(mark_dirty=True)
         self.reset_mode_to_original()
         self.load()
 
@@ -5635,43 +6290,39 @@ class MainWindow(QMainWindow):
         if not self.confirm_unsaved_before_switch():
             return
 
-        project_dir = QFileDialog.getExistingDirectory(self, "프로젝트 폴더 선택")
-        if not project_dir:
-            return
-
-        project_file = os.path.join(project_dir, PROJECT_FILENAME)
-        if not os.path.exists(project_file):
-            QMessageBox.warning(
-                self,
-                "프로젝트 없음",
-                f"선택한 폴더에 {PROJECT_FILENAME}이 없어.\n새 프로젝트는 [프로젝트 > 새 프로젝트 만들기]로 생성해야 합니다."
-            )
-            return
-
-        self.is_loading_project = True
-        try:
-            self.commit_current_page_ui_to_data()
-            self.project_store = ProjectStore()
-            self.paths, self.data, self.idx = self.project_store.load(project_file)
-            self.project_dir = self.project_store.project_dir
-            self.mark_saved_state()
-            if not self.auto_save_enabled:
-                self.start_work_cache_from_current(mark_dirty=False)
-            self.log(f"📂 프로젝트 열림: {project_dir}")
-            self.reset_mode_to_original()
-            self.load()
-        finally:
-            self.is_loading_project = False
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "YSBT 프로젝트 열기",
+            str(default_package_dir()),
+            "YSBT Project (*.ysbt);;Project JSON (project.json);;All Files (*.*)"
+        )
+        if not path:
+            # 구버전 폴더 프로젝트도 열 수 있게 보조 경로를 제공한다.
+            project_dir = QFileDialog.getExistingDirectory(self, "구버전 프로젝트 폴더 선택", str(workspaces_dir()))
+            if not project_dir:
+                return
+            path = os.path.join(project_dir, PROJECT_FILENAME)
+        self.open_project_path(path)
 
     def save_project(self):
         if not self.project_dir:
-            self.log("⚠️ 프로젝트 폴더가 없습니다. 새 프로젝트를 먼저 만들어주세요.")
+            self.log("⚠️ 프로젝트가 없습니다. 새 프로젝트를 먼저 만들어주세요.")
+            return
+        if not self.ysbt_package_path:
+            # 새 프로젝트/구버전 폴더 프로젝트는 첫 저장 때 .ysbt 위치를 정한다.
+            self.save_project_as()
             return
 
         self.commit_current_page_ui_to_data()
         self.project_store.save(self.paths, self.data, self.idx)
+        try:
+            package_project(self.project_dir, self.ysbt_package_path)
+        except Exception as e:
+            QMessageBox.critical(self, "YSBT 저장 실패", f"프로젝트는 작업 폴더에 저장했지만, YSBT 파일 저장에 실패했습니다.\n\n{e}")
+            self.has_unsaved_changes = True
+            return
         self.mark_saved_state()
-        self.log("💾 프로젝트 저장 완료")
+        self.log(f"💾 프로젝트 저장 완료: {self.ysbt_package_path}")
 
         # 자동저장 OFF에서는 저장본을 다시 로드한 뒤, 새 작업 캐시를 기준으로 이어간다.
         if not self.auto_save_enabled:
@@ -5685,34 +6336,36 @@ class MainWindow(QMainWindow):
             self.log("⚠️ 저장할 이미지/프로젝트가 없습니다.")
             return
 
-        parent_dir = QFileDialog.getExistingDirectory(self, "새 프로젝트를 저장할 상위 폴더 선택")
-        if not parent_dir:
+        default_path = self.ysbt_package_path or self.current_package_default_path()
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "다른 이름으로 YSBT 저장",
+            default_path,
+            "YSBT Project (*.ysbt)"
+        )
+        if not path:
             return
-
-        default_name = Path(self.project_dir).name + "_copy" if self.project_dir else "ysik_project_copy"
-        project_name, ok = QInputDialog.getText(self, "다른 이름으로 저장", "새 프로젝트 폴더 이름:", text=default_name)
-        if not ok or not project_name.strip():
-            return
-
-        safe_name = project_name.strip().replace("/", "_").replace("\\", "_")
-        project_dir = os.path.join(parent_dir, safe_name)
-
-        if os.path.exists(os.path.join(project_dir, PROJECT_FILENAME)):
-            ans = QMessageBox.question(
-                self,
-                "기존 프로젝트 발견",
-                f"이미 project.json이 있는 폴더입니다.\n{project_dir}\n\n덮어쓰고 저장할까요?",
-            )
-            if ans != QMessageBox.StandardButton.Yes:
-                return
+        path = self.normalize_ysb_path(path)
 
         self.commit_current_page_ui_to_data()
 
-        self.project_store = ProjectStore(project_dir)
-        self.project_dir = project_dir
+        # 새 프로젝트는 첫 저장 시 temp에서 workspaces로 승격한다.
+        if self.is_temp_project:
+            project_name = Path(path).stem
+            if not self.promote_temp_project_to_workspace(project_name):
+                return
+
+        self.project_store = ProjectStore(self.project_dir)
         self.project_store.save(self.paths, self.data, self.idx)
+        try:
+            self.ysbt_package_path = package_project(self.project_dir, path)
+        except Exception as e:
+            QMessageBox.critical(self, "YSBT 저장 실패", f"YSBT 파일을 저장하지 못했습니다.\n{path}\n\n{e}")
+            self.has_unsaved_changes = True
+            return
+
         self.mark_saved_state()
-        self.log(f"💾 다른 이름으로 저장 완료: {project_dir}")
+        self.log(f"💾 다른 이름으로 저장 완료: {self.ysbt_package_path}")
         self.reload_saved_project_from_disk(refresh_view=False)
         if not self.auto_save_enabled:
             self.start_work_cache_from_current(mark_dirty=False)
@@ -5727,7 +6380,8 @@ class MainWindow(QMainWindow):
         try:
             if self.auto_save_enabled:
                 self.project_store.save(self.paths, self.data, self.idx)
-                self.has_unsaved_changes = False
+                # 새 임시 프로젝트는 폴더에는 저장되어도 아직 .ysbt 패키지가 없으므로 저장 필요 상태를 유지한다.
+                self.has_unsaved_changes = bool(self.is_temp_project or not self.ysbt_package_path)
             else:
                 self.save_to_work_cache()
         finally:
@@ -7917,9 +8571,16 @@ if __name__ == "__main__":
     app.setWindowIcon(QIcon(resource_path("ysb_icon.ico")))
 
     # 여기까지 오면 PyInstaller onefile 압축 해제는 끝난 상태다.
-    # 부트로더 스플래시를 닫고, 이제부터는 Qt 진행바 스플래시로 앱 초기화를 보여준다.
+    # 부트로더 스플래시를 닫고, 첫 실행 작업 폴더 설정을 먼저 확인한다.
     close_pyinstaller_boot_splash()
 
+    if not run_initial_workspace_setup_if_needed():
+        sys.exit(0)
+
+    # 작업 폴더 설정이 끝난 뒤, .ysbt가 구버전/다른 위치 EXE에 연결되어 있으면 갱신 여부를 묻는다.
+    prompt_update_ysbt_file_association_if_needed(None)
+
+    # 작업 폴더 설정이 끝난 뒤 Qt 진행바 스플래시로 앱 초기화를 보여준다.
     splash = make_splash_screen()
     if splash is not None:
         splash.set_progress(45, "환경 준비 중...")
@@ -7934,6 +8595,14 @@ if __name__ == "__main__":
 
     w.setWindowIcon(QIcon(resource_path("ysb_icon.ico")))
     w.show()
+
+    # .ysbt 파일 연결/명령행 인자 열기 지원
+    try:
+        if len(sys.argv) > 1:
+            open_arg = sys.argv[1]
+            QTimer.singleShot(250, lambda p=open_arg: w.open_project_path(p))
+    except Exception:
+        pass
 
     if splash is not None:
         splash.set_progress(100, "시작 완료")

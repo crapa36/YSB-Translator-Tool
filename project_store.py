@@ -1,6 +1,9 @@
 import os
 import json
 import shutil
+import zipfile
+import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple, Any
 
@@ -10,6 +13,10 @@ import numpy as np
 
 PROJECT_VERSION = 1
 PROJECT_FILENAME = "project.json"
+MANIFEST_FILENAME = "manifest.json"
+YSB_EXTENSION = ".ysbt"
+YSBT_SIGNATURE = b"YSBT-PROJECT\x00\r\n\x1a\n"
+SIGNATURE_FILENAME = ".ysbt_signature"
 
 
 def imread_unicode(path: str):
@@ -55,10 +62,17 @@ class ProjectStore:
     폴더 구조:
     project_dir/
       project.json
+      manifest.json
       images/
-      masks/
+      masks/text_mask/
+      masks/paint_mask/
       clean/
+      working_source/
+      final_paint/
+      final_paint_above/
       scripts/
+      Result/
+      Txt/
     """
 
     def __init__(self, project_dir: str | None = None):
@@ -76,7 +90,14 @@ class ProjectStore:
         ensure_dir(self.project_dir)
         ensure_dir(os.path.join(self.project_dir, "images"))
         ensure_dir(os.path.join(self.project_dir, "masks"))
+        ensure_dir(os.path.join(self.project_dir, "masks", "text_mask"))
+        ensure_dir(os.path.join(self.project_dir, "masks", "paint_mask"))
+        ensure_dir(os.path.join(self.project_dir, "masks", "text_mask_off"))
+        ensure_dir(os.path.join(self.project_dir, "masks", "paint_mask_off"))
         ensure_dir(os.path.join(self.project_dir, "clean"))
+        ensure_dir(os.path.join(self.project_dir, "working_source"))
+        ensure_dir(os.path.join(self.project_dir, "final_paint"))
+        ensure_dir(os.path.join(self.project_dir, "final_paint_above"))
         ensure_dir(os.path.join(self.project_dir, "scripts"))
         ensure_dir(os.path.join(self.project_dir, "Result"))
         ensure_dir(os.path.join(self.project_dir, "Txt"))
@@ -116,6 +137,60 @@ class ProjectStore:
         self.save(paths, data, current_index=0)
         return paths, data
 
+
+    def project_uuid(self) -> str:
+        if not self.project_dir:
+            return uuid.uuid4().hex
+        manifest_path = os.path.join(self.project_dir, MANIFEST_FILENAME)
+        try:
+            if os.path.exists(manifest_path):
+                with open(manifest_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if data.get("project_uuid"):
+                    return str(data["project_uuid"])
+        except Exception:
+            pass
+        return uuid.uuid4().hex
+
+    def write_manifest(self, package_source: str | None = None, project_name: str | None = None):
+        if not self.project_dir:
+            return
+        manifest_path = os.path.join(self.project_dir, MANIFEST_FILENAME)
+        old = {}
+        try:
+            if os.path.exists(manifest_path):
+                with open(manifest_path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    old = loaded
+        except Exception:
+            old = {}
+        now = datetime.now().isoformat(timespec="seconds")
+
+        folder_name = clean_workspace_name(Path(self.project_dir).name)
+        old_name = str(old.get("project_name") or "")
+        if project_name:
+            final_name = clean_workspace_name(project_name)
+        elif old_name.startswith("unsaved_") or not old_name:
+            final_name = folder_name
+        else:
+            final_name = clean_workspace_name(old_name)
+
+        payload = {
+            "format": "YSBT_PROJECT",
+            "signature": "YSBT-PROJECT",
+            "format_version": "1.0",
+            "project_uuid": old.get("project_uuid") or uuid.uuid4().hex,
+            "project_name": final_name,
+            "project_version": PROJECT_VERSION,
+            "created_at": old.get("created_at") or now,
+            "last_saved_at": now,
+        }
+        if package_source:
+            payload["package_source"] = package_source
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+
     def save(self, paths: List[str], data: Dict[int, dict], current_index: int = 0):
         if not self.project_dir:
             return
@@ -145,25 +220,25 @@ class ProjectStore:
 
             mask_merge = curr.get("mask_merge")
             if mask_merge is not None:
-                mask_path = os.path.join(self.project_dir, "masks", f"mask_merge_{i + 1:04d}.npy")
+                mask_path = os.path.join(self.project_dir, "masks", "text_mask", f"mask_merge_{i + 1:04d}.npy")
                 np.save(mask_path, np.array(mask_merge, dtype=np.uint8).copy())
                 page["mask_merge"] = relpath(mask_path, self.project_dir)
 
             mask_inpaint = curr.get("mask_inpaint")
             if mask_inpaint is not None:
-                mask_path = os.path.join(self.project_dir, "masks", f"mask_inpaint_{i + 1:04d}.npy")
+                mask_path = os.path.join(self.project_dir, "masks", "paint_mask", f"mask_inpaint_{i + 1:04d}.npy")
                 np.save(mask_path, np.array(mask_inpaint, dtype=np.uint8).copy())
                 page["mask_inpaint"] = relpath(mask_path, self.project_dir)
 
             mask_merge_off = curr.get("mask_merge_off")
             if mask_merge_off is not None:
-                mask_path = os.path.join(self.project_dir, "masks", f"mask_merge_off_{i + 1:04d}.npy")
+                mask_path = os.path.join(self.project_dir, "masks", "text_mask_off", f"mask_merge_off_{i + 1:04d}.npy")
                 np.save(mask_path, np.array(mask_merge_off, dtype=np.uint8).copy())
                 page["mask_merge_off"] = relpath(mask_path, self.project_dir)
 
             mask_inpaint_off = curr.get("mask_inpaint_off")
             if mask_inpaint_off is not None:
-                mask_path = os.path.join(self.project_dir, "masks", f"mask_inpaint_off_{i + 1:04d}.npy")
+                mask_path = os.path.join(self.project_dir, "masks", "paint_mask_off", f"mask_inpaint_off_{i + 1:04d}.npy")
                 np.save(mask_path, np.array(mask_inpaint_off, dtype=np.uint8).copy())
                 page["mask_inpaint_off"] = relpath(mask_path, self.project_dir)
 
@@ -172,7 +247,7 @@ class ProjectStore:
 
             working_source = curr.get("working_source")
             if working_source is not None:
-                source_path = os.path.join(self.project_dir, "clean", f"working_source_{i + 1:04d}.png")
+                source_path = os.path.join(self.project_dir, "working_source", f"working_source_{i + 1:04d}.png")
                 if isinstance(working_source, (bytes, bytearray)):
                     with open(source_path, "wb") as f:
                         f.write(working_source)
@@ -194,7 +269,7 @@ class ProjectStore:
 
             final_paint = curr.get("final_paint")
             if final_paint is not None:
-                paint_path = os.path.join(self.project_dir, "clean", f"final_paint_{i + 1:04d}.png")
+                paint_path = os.path.join(self.project_dir, "final_paint", f"final_paint_{i + 1:04d}.png")
                 if isinstance(final_paint, (bytes, bytearray)):
                     with open(paint_path, "wb") as f:
                         f.write(final_paint)
@@ -205,7 +280,7 @@ class ProjectStore:
 
             final_paint_above = curr.get("final_paint_above")
             if final_paint_above is not None:
-                paint_path = os.path.join(self.project_dir, "clean", f"final_paint_above_{i + 1:04d}.png")
+                paint_path = os.path.join(self.project_dir, "final_paint_above", f"final_paint_above_{i + 1:04d}.png")
                 if isinstance(final_paint_above, (bytes, bytearray)):
                     with open(paint_path, "wb") as f:
                         f.write(final_paint_above)
@@ -222,6 +297,7 @@ class ProjectStore:
             "pages": pages,
         }
 
+        self.write_manifest()
         with open(self.project_file, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
 
@@ -316,3 +392,162 @@ class ProjectStore:
             current_index = 0
 
         return paths, data, current_index
+
+
+
+def has_ysbt_signature(path: str) -> bool:
+    """YSBT 전용 파일인지 파일 앞쪽 고유 바이트로 확인한다."""
+    try:
+        with open(path, "rb") as f:
+            return f.read(len(YSBT_SIGNATURE)) == YSBT_SIGNATURE
+    except Exception:
+        return False
+
+
+def assert_ysbt_signature(path: str):
+    """확장자만 바꾼 일반 ZIP/다른 파일을 잘못 여는 것을 막는다."""
+    if not has_ysbt_signature(path):
+        raise ValueError("YSBT 전용 시그니처가 없습니다. 올바른 .ysbt 프로젝트 파일이 아닙니다.")
+
+
+def read_ysb_manifest(ysb_path: str) -> dict:
+    """.ysbt 패키지의 manifest.json을 읽는다.
+
+    파일 앞쪽의 YSBT_SIGNATURE를 먼저 확인해, 확장자만 바뀐 ZIP/다른 파일을
+    프로젝트로 잘못 여는 것을 막는다.
+    """
+    assert_ysbt_signature(ysb_path)
+    with zipfile.ZipFile(ysb_path, "r") as zf:
+        with zf.open(MANIFEST_FILENAME) as f:
+            data = json.loads(f.read().decode("utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("manifest.json 형식이 올바르지 않습니다.")
+        if data.get("format") != "YSBT_PROJECT" and data.get("signature") != "YSBT-PROJECT":
+            raise ValueError("YSBT 프로젝트 manifest가 아닙니다.")
+        return data
+
+def safe_project_name(name: str) -> str:
+    bad = '<>:"/\\|?*'
+    out = "".join("_" if ch in bad else ch for ch in str(name or "ysb_project")).strip()
+    return out or "ysb_project"
+
+
+def clean_workspace_name(name: str) -> str:
+    """임시 프로젝트명/패키지명에서 화면에 보일 작업 폴더명을 정리한다.
+
+    UUID 같은 고유 데이터는 폴더명에 넣지 않고 manifest.json 내부에 둔다.
+    예: unsaved_리우1_5c03f97b -> 리우1
+    """
+    safe = safe_project_name(name or "ysb_project")
+    if safe.startswith("unsaved_"):
+        rest = safe[len("unsaved_"):]
+        parts = rest.rsplit("_", 1)
+        if len(parts) == 2 and len(parts[1]) >= 6 and all(ch in "0123456789abcdefABCDEF" for ch in parts[1]):
+            safe = parts[0] or "ysb_project"
+        else:
+            safe = rest or "ysb_project"
+    return safe_project_name(safe)
+
+
+def _read_manifest_from_dir(project_dir: str | Path) -> dict:
+    try:
+        manifest_path = Path(project_dir) / MANIFEST_FILENAME
+        if manifest_path.exists():
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def unique_dir(parent: str | Path, base_name: str) -> str:
+    parent = Path(parent)
+    parent.mkdir(parents=True, exist_ok=True)
+    safe = safe_project_name(base_name)
+    cand = parent / safe
+    if not cand.exists():
+        return str(cand)
+    for n in range(2, 10000):
+        cand = parent / f"{safe}_{n}"
+        if not cand.exists():
+            return str(cand)
+    return str(parent / f"{safe}_{uuid.uuid4().hex[:8]}")
+
+
+def package_project(project_dir: str, ysb_path: str) -> str:
+    """프로젝트 폴더 전체를 .ysbt 전용 패키지 파일로 묶는다."""
+    project_dir = os.path.abspath(project_dir)
+    ysb_path = os.path.abspath(ysb_path)
+    if not ysb_path.lower().endswith(YSB_EXTENSION):
+        ysb_path += YSB_EXTENSION
+    if not os.path.exists(os.path.join(project_dir, PROJECT_FILENAME)):
+        raise FileNotFoundError(f"{PROJECT_FILENAME}이 없는 프로젝트 폴더입니다: {project_dir}")
+
+    store = ProjectStore(project_dir)
+    store.init_dirs()
+    store.write_manifest(package_source=ysb_path)
+
+    os.makedirs(os.path.dirname(ysb_path), exist_ok=True)
+    tmp_path = ysb_path + ".tmp"
+    if os.path.exists(tmp_path):
+        os.remove(tmp_path)
+
+    with open(tmp_path, "wb") as raw:
+        # ZIP 앞에 전용 고유 바이트를 남긴다. Python zipfile은 앞쪽에 데이터가
+        # 붙은 ZIP도 읽을 수 있으므로, 일반 ZIP과 구분하는 안전장치로 사용한다.
+        raw.write(YSBT_SIGNATURE)
+        with zipfile.ZipFile(raw, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+            zf.writestr(SIGNATURE_FILENAME, "YSBT-PROJECT\n")
+            for root, dirs, files in os.walk(project_dir):
+                # __pycache__ 같은 실행 부산물은 제외
+                dirs[:] = [d for d in dirs if d not in {"__pycache__", ".git", ".venv", "venv", "build", "dist"}]
+                for file in files:
+                    if file.endswith((".pyc", ".pyo")):
+                        continue
+                    abs_path = os.path.join(root, file)
+                    rel = os.path.relpath(abs_path, project_dir).replace("\\", "/")
+                    zf.write(abs_path, rel)
+    os.replace(tmp_path, ysb_path)
+    return ysb_path
+
+
+def _safe_extract_zip(zf: zipfile.ZipFile, target_dir: str):
+    target_abs = os.path.abspath(target_dir)
+    for member in zf.infolist():
+        name = member.filename.replace("\\", "/")
+        if name.startswith("/") or ".." in Path(name).parts:
+            raise ValueError(f"안전하지 않은 패키지 경로입니다: {member.filename}")
+        dest = os.path.abspath(os.path.join(target_dir, name))
+        if not dest.startswith(target_abs):
+            raise ValueError(f"패키지 경로가 작업 폴더 밖을 가리킵니다: {member.filename}")
+    zf.extractall(target_dir)
+
+
+def extract_ysb_package(ysb_path: str, workspaces_root: str, reuse_existing: bool = True) -> tuple[str, dict, bool]:
+    """.ysbt를 workspaces_root 안의 작업 폴더로 푼다.
+
+    반환: (project_dir, manifest, reused_existing)
+    """
+    ysb_path = os.path.abspath(ysb_path)
+    manifest = read_ysb_manifest(ysb_path)
+    project_name = clean_workspace_name(manifest.get("project_name") or Path(ysb_path).stem)
+    project_uuid = str(manifest.get("project_uuid") or uuid.uuid4().hex)
+    base = project_name
+    target = os.path.join(str(workspaces_root), base)
+
+    if os.path.exists(os.path.join(target, PROJECT_FILENAME)):
+        existing_manifest = _read_manifest_from_dir(target)
+        existing_uuid = str(existing_manifest.get("project_uuid") or "")
+        if reuse_existing and existing_uuid and existing_uuid == project_uuid:
+            return target, manifest, True
+        target = unique_dir(workspaces_root, base)
+
+    os.makedirs(target, exist_ok=True)
+    with zipfile.ZipFile(ysb_path, "r") as zf:
+        _safe_extract_zip(zf, target)
+
+    if not os.path.exists(os.path.join(target, PROJECT_FILENAME)):
+        raise FileNotFoundError(f"패키지 안에 {PROJECT_FILENAME}이 없습니다: {ysb_path}")
+    return target, manifest, False

@@ -14,7 +14,11 @@ from PyQt6.QtWidgets import QKeySequenceEdit
 
 from cache_utils import get_cache_file
 
-CACHE_FILE = get_cache_file("shortcut_cache.json")
+CACHE_FILE_NAME = "shortcut_cache.json"
+
+
+def cache_file():
+    return get_cache_file(CACHE_FILE_NAME)
 
 TEXT_SYMBOLS = {
     "ellipsis": ("말줄임표(…)", "…"),
@@ -91,6 +95,9 @@ DEFAULT_SHORTCUTS = {
     "option_item_text_preset_settings": "Ctrl+Alt+6",
     "option_translation_prompt": "Ctrl+Alt+7",
     "option_glossary": "Ctrl+Alt+8",
+    "option_workspace_location": "Ctrl+Alt+9",
+    "option_register_ysb": "Ctrl+Alt+0",
+    "option_unregister_ysbt": "Ctrl+Alt+Shift+0",
 
     # 4. 작업 옵션
     "work_tab_cycle": "Tab",
@@ -186,6 +193,9 @@ GROUPS = [
         ("option_api_settings", "API 관리"),
         ("option_translation_prompt", "번역 프롬프트 입력"),
         ("option_glossary", "단어장"),
+        ("option_workspace_location", "작업 폴더 위치 변경"),
+        ("option_register_ysb", ".ysbt 확장자 연결 등록"),
+        ("option_unregister_ysbt", ".ysbt/.ysb 확장자 연결 해제"),
         ("option_shortcut_settings", "단축키 통합 관리"),
         ("option_macro_settings", "매크로 관리"),
         ("option_text_preset_settings", "페이지 글꼴 프리셋 관리"),
@@ -281,10 +291,11 @@ class ShortcutSettings:
 class ShortcutSettingsStore:
     @staticmethod
     def load() -> ShortcutSettings:
-        if not CACHE_FILE.exists():
+        p = cache_file()
+        if not p.exists():
             return ShortcutSettings()
         try:
-            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+            with open(p, "r", encoding="utf-8") as f:
                 data = json.load(f)
 
             merged_shortcuts = dict(DEFAULT_SHORTCUTS)
@@ -344,13 +355,14 @@ class ShortcutSettingsStore:
 
     @staticmethod
     def save(settings: ShortcutSettings):
-        CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+        p = cache_file()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f:
             json.dump(asdict(settings), f, ensure_ascii=False, indent=2)
 
     @staticmethod
     def cache_path() -> str:
-        return str(CACHE_FILE)
+        return str(cache_file())
 
 
 

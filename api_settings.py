@@ -8,7 +8,11 @@ from PyQt6.QtWidgets import (
 
 from cache_utils import get_cache_file
 
-CACHE_FILE = get_cache_file("api_cache.json")
+CACHE_FILE_NAME = "api_cache.json"
+
+
+def cache_file():
+    return get_cache_file(CACHE_FILE_NAME)
 
 
 @dataclass
@@ -28,10 +32,11 @@ class ApiSettings:
 class ApiSettingsStore:
     @staticmethod
     def load() -> ApiSettings:
-        if not CACHE_FILE.exists():
+        p = cache_file()
+        if not p.exists():
             return ApiSettings()
         try:
-            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+            with open(p, "r", encoding="utf-8") as f:
                 data = json.load(f)
             base = asdict(ApiSettings())
             base.update({k: v for k, v in data.items() if k in base})
@@ -41,13 +46,14 @@ class ApiSettingsStore:
 
     @staticmethod
     def save(settings: ApiSettings):
-        CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+        p = cache_file()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f:
             json.dump(asdict(settings), f, ensure_ascii=False, indent=2)
 
     @staticmethod
     def cache_path() -> str:
-        return str(CACHE_FILE)
+        return str(cache_file())
 
 
 def apply_settings_to_config(settings: ApiSettings):
