@@ -1,3 +1,4 @@
+import copy
 import numpy as np
 from PyQt6.QtWidgets import QGraphicsView, QGraphicsScene
 from PyQt6.QtGui import QPainter, QPen, QBrush, QColor, QImage, QPixmap, QFont, QPainterPath
@@ -19,29 +20,106 @@ class MuleImageViewer(QGraphicsView):
         self.draw_mode = None
         self.user_mask_item = None
         self.user_mask_img = None
+        self.final_paint_item = None
+        self.final_paint_above_item = None
+        self.final_paint_img = None
+        self.final_paint_above_img = None
         self.last_pt = None
         self.brush_size = 25
         self.mask_color = QColor(255, 0, 0, 100)
         self.history = []
         self.is_mask_painting = False
         self.magic_preview_items = []
+        self.paste_preview_items = []
+        self._active_transform_item = None
+
+    def _active_transform_item_obj(self):
+        active = self.main.current_transform_data_item() if hasattr(self.main, 'current_transform_data_item') else None
+        if active is None:
+            return None
+        active_id = active.get('id')
+        for item in self.scene.items():
+            if isinstance(item, TypesettingItem) and not getattr(item, "is_paste_preview", False):
+                if item.data is active or item.data.get('id') == active_id:
+                    return item
+        return None
+
+    def _scene_text_item_at(self, scene_pos):
+        active_item = self._active_transform_item_obj()
+        if active_item is not None:
+            try:
+                local = active_item.mapFromScene(scene_pos)
+                if active_item.transform_action_at(local) or active_item.shape().contains(local):
+                    return active_item
+            except Exception:
+                pass
+        for item in self.scene.items(scene_pos):
+            if isinstance(item, TypesettingItem) and not getattr(item, "is_paste_preview", False):
+                return item
+        return None
+
+    def _cursor_for_transform_action(self, action):
+        if action == 'rotate':
+            return Qt.CursorShape.CrossCursor
+        if action == 'move':
+            return Qt.CursorShape.SizeAllCursor
+        if action in ('left', 'right'):
+            return Qt.CursorShape.SizeHorCursor
+        if action in ('top', 'bottom'):
+            return Qt.CursorShape.SizeVerCursor
+        if action in ('top_left', 'bottom_right'):
+            return Qt.CursorShape.SizeFDiagCursor
+        if action in ('top_right', 'bottom_left'):
+            return Qt.CursorShape.SizeBDiagCursor
+        return Qt.CursorShape.ArrowCursor
 
     def undo(self):
         if not self.history:
             self.main.log("⚠️ 실행 취소할 내역이 없습니다.")
             return
 
-        last_pixmap = self.history.pop()
-        self.user_mask_img = last_pixmap.toImage()
-        self.user_mask_item.setPixmap(last_pixmap)
-        self.main.log("↩️ 실행 취소됨")
+        record = self.history.pop()
+        if isinstance(record, tuple) and len(record) == 2:
+            target_item, last_pixmap = record
+        else:
+            target_item = None
+            last_pixmap = record
 
-        self.main.on_view_mask_edited()
+        if getattr(self.main, "cb_mode", None) is not None and self.main.cb_mode.currentIndex() == 4:
+            if target_item is not None:
+                target_item.setPixmap(last_pixmap)
+                if target_item is self.final_paint_above_item:
+                    self.final_paint_above_img = last_pixmap.toImage()
+                elif target_item is self.final_paint_item:
+                    self.final_paint_img = last_pixmap.toImage()
+                self.main.log("↩️ 최종 페인팅 실행 취소됨")
+                self.main.on_final_paint_edited()
+                return
+
+        if target_item is not None:
+            target_item.setPixmap(last_pixmap)
+            if target_item is self.user_mask_item:
+                self.user_mask_img = last_pixmap.toImage()
+                self.main.log("↩️ 실행 취소됨")
+                self.main.on_view_mask_edited()
+            return
+
+        if self.user_mask_item:
+            self.user_mask_img = last_pixmap.toImage()
+            self.user_mask_item.setPixmap(last_pixmap)
+            self.main.log("↩️ 실행 취소됨")
+            self.main.on_view_mask_edited()
+
 
     def set_image(self, img, fit=True):
         self.scene.clear()
         self.user_mask_item = None
+        self.final_paint_item = None
+        self.final_paint_above_item = None
+        self.final_paint_img = None
+        self.final_paint_above_img = None
         self.magic_preview_items = []
+        self.clear_paste_preview()
         self.history.clear()
         if img is None:
             return
@@ -60,6 +138,7 @@ class MuleImageViewer(QGraphicsView):
     def set_overlay(self, bg, mask, color, fit=True):
         self.scene.clear()
         self.magic_preview_items = []
+        self.paste_preview_items = []
         if bg is None:
             return
 
@@ -88,10 +167,92 @@ class MuleImageViewer(QGraphicsView):
         if fit:
             self.fitInView(self.scene.itemsBoundingRect(), Qt.AspectRatioMode.KeepAspectRatio)
 
+    def _paint_qimage_from_data(self, paint_data, w, h):
+        qimg = QImage(w, h, QImage.Format.Format_ARGB32)
+        qimg.fill(Qt.GlobalColor.transparent)
+
+        if paint_data is None:
+            return qimg
+
+        try:
+            if isinstance(paint_data, (bytes, bytearray)):
+                loaded = QImage.fromData(bytes(paint_data))
+                if not loaded.isNull():
+                    qimg = loaded.convertToFormat(QImage.Format.Format_ARGB32)
+            elif isinstance(paint_data, QImage):
+                qimg = paint_data.convertToFormat(QImage.Format.Format_ARGB32)
+            elif isinstance(paint_data, np.ndarray):
+                arr = paint_data
+                if arr.ndim == 3 and arr.shape[2] == 4:
+                    h2, w2 = arr.shape[:2]
+                    qimg = QImage(arr.data, w2, h2, 4 * w2, QImage.Format.Format_RGBA8888).copy()
+                elif arr.ndim == 3 and arr.shape[2] == 3:
+                    h2, w2 = arr.shape[:2]
+                    qimg = QImage(arr.data, w2, h2, 3 * w2, QImage.Format.Format_RGB888).copy().convertToFormat(QImage.Format.Format_ARGB32)
+            if qimg.width() != w or qimg.height() != h:
+                qimg = qimg.scaled(w, h, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        except Exception:
+            qimg = QImage(w, h, QImage.Format.Format_ARGB32)
+            qimg.fill(Qt.GlobalColor.transparent)
+
+        return qimg
+
+    def set_final_paint_overlay(self, paint_data=None, paint_above_data=None, fit=False):
+        """최종화면용 투명 페인팅 레이어를 만든다.
+        아래 레이어는 텍스트보다 아래, 위 레이어는 텍스트보다 위에 고정된다.
+        토글은 기존 레이어 순서를 바꾸지 않고, 새 붓질이 들어갈 레이어만 선택한다.
+        """
+        rect = self.scene.sceneRect()
+        w = int(rect.width())
+        h = int(rect.height())
+        if w <= 0 or h <= 0:
+            return
+
+        below_qimg = self._paint_qimage_from_data(paint_data, w, h)
+        above_qimg = self._paint_qimage_from_data(paint_above_data, w, h)
+
+        self.final_paint_img = below_qimg
+        self.final_paint_item = self.scene.addPixmap(QPixmap.fromImage(below_qimg))
+        self.final_paint_item.setZValue(8)
+
+        self.final_paint_above_img = above_qimg
+        self.final_paint_above_item = self.scene.addPixmap(QPixmap.fromImage(above_qimg))
+        self.final_paint_above_item.setZValue(80)
+
+    def get_final_paint_layer_png_bytes(self, above=False):
+        item = self.final_paint_above_item if above else self.final_paint_item
+        if not item:
+            return None
+        qimg = item.pixmap().toImage().convertToFormat(QImage.Format.Format_ARGB32)
+        # 완전 투명 레이어면 저장하지 않는다.
+        w, h = qimg.width(), qimg.height()
+        ptr = qimg.bits()
+        ptr.setsize(qimg.sizeInBytes())
+        arr = np.frombuffer(ptr, dtype=np.uint8).reshape((h, qimg.bytesPerLine() // 4, 4))
+        alpha = arr[:, :w, 3]
+        if not np.any(alpha > 0):
+            return None
+
+        from PyQt6.QtCore import QBuffer, QByteArray, QIODevice
+        ba = QByteArray()
+        buf = QBuffer(ba)
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        qimg.save(buf, "PNG")
+        return bytes(ba)
+
+    def get_final_paint_png_bytes(self):
+        return self.get_final_paint_layer_png_bytes(False)
+
+    def get_final_paint_above_png_bytes(self):
+        return self.get_final_paint_layer_png_bytes(True)
+
+
     def draw_static_boxes(self, data):
         font = QFont("Arial", 16, QFont.Weight.Bold)
 
-        for d in data:
+        visible_items = [d for d in data]
+        total_items = len(visible_items)
+        for order_idx, d in enumerate(visible_items):
             is_active = d.get('use_inpaint', True)
             x, y, w, h = d['rect']
 
@@ -152,12 +313,17 @@ class MuleImageViewer(QGraphicsView):
     ):
         if not show_text:
             return
+
+        visible_items = []
         for d in data:
             if not d.get('use_inpaint', True):
                 continue
-            # 번역문이 비어 있으면 최종 화면에는 아무 텍스트도 만들지 않는다.
-            if not str(d.get('translated_text', '') or '').strip():
+            if not str(d.get('translated_text', '') or '').strip() and not d.get('force_show'):
                 continue
+            visible_items.append(d)
+
+        total_items = len(visible_items)
+        for order_idx, d in enumerate(visible_items):
             item = TypesettingItem(
                 d,
                 font,
@@ -169,6 +335,8 @@ class MuleImageViewer(QGraphicsView):
                 align=align,
             )
             item.main_window = self.main
+            # 번호가 빠른 텍스트가 겹칠 때 위에 보이도록 역순 z값을 준다.
+            item.setZValue(30 + (total_items - order_idx))
             self.scene.addItem(item)
 
     def clear_magic_wand_preview(self):
@@ -277,7 +445,180 @@ class MuleImageViewer(QGraphicsView):
             return QPixmap.fromImage(q)
         return QPixmap()
 
+    def clear_paste_preview(self):
+        if not hasattr(self, "paste_preview_items"):
+            self.paste_preview_items = []
+        for item in list(self.paste_preview_items):
+            try:
+                if item.scene() is not None:
+                    self.scene.removeItem(item)
+            except Exception:
+                pass
+        self.paste_preview_items = []
+
+    def show_paste_preview(self, data_items, scene_pos):
+        """Ctrl+V 후 실제 붙여넣기 전, 커서 위치에 반투명 미리보기만 표시한다."""
+        self.clear_paste_preview()
+
+        if not data_items:
+            return
+
+        try:
+            px, py = float(scene_pos.x()), float(scene_pos.y())
+        except Exception:
+            px, py = 0.0, 0.0
+
+        src_items = [copy.deepcopy(d) for d in (data_items or []) if isinstance(d, dict)]
+        if not src_items:
+            return
+
+        first = src_items[0].get('rect') or [0, 0, 1, 1]
+        try:
+            base_x = float(first[0]) + float(src_items[0].get('x_off', 0) or 0)
+            base_y = float(first[1]) + float(src_items[0].get('y_off', 0) or 0)
+        except Exception:
+            base_x, base_y = 0.0, 0.0
+
+        for d in src_items:
+            rect = list(d.get('rect') or [0, 0, 260, 80])
+            while len(rect) < 4:
+                rect.append(1)
+
+            try:
+                old_x = float(rect[0]) + float(d.get('x_off', 0) or 0)
+                old_y = float(rect[1]) + float(d.get('y_off', 0) or 0)
+                dx = old_x - base_x
+                dy = old_y - base_y
+                rect[0] = int(round(px + dx))
+                rect[1] = int(round(py + dy))
+            except Exception:
+                rect[0] = int(round(px))
+                rect[1] = int(round(py))
+
+            d['rect'] = [int(rect[0]), int(rect[1]), max(1, int(rect[2])), max(1, int(rect[3]))]
+            d['x_off'] = 0
+            d['y_off'] = 0
+            d['manual_text_rect'] = True
+            d['_paste_preview'] = True
+
+            item = TypesettingItem(
+                d,
+                self.main.cb_font.currentFont().family(),
+                self.main.sb_font_size.value(),
+                self.main.sb_strk.value(),
+                None,
+                text_color=getattr(self.main, "default_text_color", "#000000"),
+                stroke_color=getattr(self.main, "default_stroke_color", "#FFFFFF"),
+                align=getattr(self.main, "default_align", "center"),
+            )
+            item.main_window = self.main
+            item.is_paste_preview = True
+            item.setOpacity(0.55)
+            item.setZValue(95)
+            item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            try:
+                item.setFlag(item.GraphicsItemFlag.ItemIsSelectable, False)
+                item.setFlag(item.GraphicsItemFlag.ItemIsMovable, False)
+            except Exception:
+                pass
+
+            self.scene.addItem(item)
+            self.paste_preview_items.append(item)
+
+    def contextMenuEvent(self, e):
+        if (
+            getattr(self.main, "cb_mode", None) is not None
+            and self.main.cb_mode.currentIndex() == 4
+        ):
+            scene_pos = self.mapToScene(e.pos())
+            clicked = self.itemAt(e.pos())
+
+            # 위쪽 페인팅 레이어/픽스맵 등이 itemAt으로 잡혀도,
+            # 같은 위치의 텍스트 객체를 우선 찾는다.
+            text_item = clicked if isinstance(clicked, TypesettingItem) and not getattr(clicked, "is_paste_preview", False) else None
+            if text_item is None:
+                for item in self.scene.items(scene_pos):
+                    if isinstance(item, TypesettingItem) and not getattr(item, "is_paste_preview", False):
+                        text_item = item
+                        break
+
+            if text_item is not None:
+                self.main.show_final_text_context_menu(text_item, e.globalPos(), scene_pos)
+            else:
+                self.main.show_final_background_context_menu(e.globalPos(), scene_pos)
+
+            e.accept()
+            return
+
+        super().contextMenuEvent(e)
+
     def mousePressEvent(self, e):
+        if getattr(self.main, "cb_mode", None) is not None and self.main.cb_mode.currentIndex() == 4:
+            active_transform = self.main.current_transform_data_item() if hasattr(self.main, 'current_transform_data_item') else None
+            if active_transform is not None:
+                pt = self.mapToScene(e.pos())
+                active_item = self._active_transform_item_obj()
+                hit_item = self._scene_text_item_at(pt)
+                active_id = active_transform.get('id')
+
+                # 핸들/테두리/회전 핸들이 QGraphicsView 기본 hit-test에 안 잡히는 경우를 직접 처리한다.
+                if active_item is not None and e.button() == Qt.MouseButton.LeftButton:
+                    local = active_item.mapFromScene(pt)
+                    action = active_item.transform_action_at(local)
+
+                    if e.modifiers() & Qt.KeyboardModifier.AltModifier:
+                        if active_item.transform_rect().adjusted(-10, -10, 10, 10).contains(local):
+                            action = 'move'
+
+                    if action:
+                        if active_item.begin_transform_action(action, local, pt):
+                            self._active_transform_item = active_item
+                            self.setCursor(self._cursor_for_transform_action(action))
+                            e.accept()
+                            return
+
+                if (
+                    e.button() == Qt.MouseButton.LeftButton
+                    and not (e.modifiers() & Qt.KeyboardModifier.AltModifier)
+                ):
+                    if hit_item is None or hit_item.data.get('id') != active_id:
+                        self.main.end_active_text_transform(refresh=True)
+                        e.accept()
+                        return
+
+        if (
+            e.button() == Qt.MouseButton.LeftButton
+            and getattr(self.main, "cb_mode", None) is not None
+            and self.main.cb_mode.currentIndex() == 4
+            and e.modifiers() & Qt.KeyboardModifier.AltModifier
+        ):
+            pt = self.mapToScene(e.pos())
+            self.main.pick_final_paint_color_from_scene(int(pt.x()), int(pt.y()))
+            return
+
+        if self.draw_mode == 'paste_text' and e.button() == Qt.MouseButton.LeftButton:
+            if getattr(self.main, "cb_mode", None) is not None and self.main.cb_mode.currentIndex() == 4:
+                pt = self.mapToScene(e.pos())
+                self.main.finish_text_paste_at(pt)
+                return
+
+        if self.draw_mode == 'final_text' and e.button() == Qt.MouseButton.LeftButton:
+            if getattr(self.main, "cb_mode", None) is not None and self.main.cb_mode.currentIndex() == 4:
+                # 텍스트 작성 중에는 새 텍스트 박스를 또 만들지 않는다.
+                # 편집기 내부 클릭은 커서 이동으로 넘기고, 편집기 밖 클릭은 현재 텍스트 작성 완료만 한다.
+                editor = getattr(self.main, "inline_text_editor", None)
+                if editor is not None:
+                    clicked = self.itemAt(e.pos())
+                    if clicked is editor:
+                        super().mousePressEvent(e)
+                    else:
+                        self.main.finish_inline_text_edit(commit=True, refresh=True)
+                    return
+
+                pt = self.mapToScene(e.pos())
+                self.main.create_final_text_at(int(pt.x()), int(pt.y()))
+                return
+
         if self.draw_mode == 'magic_wand' and e.button() == Qt.MouseButton.LeftButton:
             pt = self.mapToScene(e.pos())
             self.main.magic_wand_pick(int(pt.x()), int(pt.y()))
@@ -285,11 +626,22 @@ class MuleImageViewer(QGraphicsView):
 
         if self.draw_mode and e.button() == Qt.MouseButton.LeftButton:
             self.is_mask_painting = True
-            if self.user_mask_item:
-                self.history.append(self.user_mask_item.pixmap().copy())
+            final_mode = (
+                getattr(self.main, "cb_mode", None) is not None
+                and self.main.cb_mode.currentIndex() == 4
+                and self.draw_mode in ('draw', 'erase')
+            )
+            if final_mode:
+                target_item = self.final_paint_above_item if getattr(self.main, "final_paint_above_text", False) else self.final_paint_item
+            else:
+                target_item = self.user_mask_item
+
+            if target_item:
+                self.history.append((target_item, target_item.pixmap().copy()))
                 if len(self.history) > 20:
                     self.history.pop(0)
             self.last_pt = self.mapToScene(e.pos())
+            return
         elif (
             e.button() == Qt.MouseButton.LeftButton
             and getattr(self.main, "cb_mode", None) is not None
@@ -314,32 +666,90 @@ class MuleImageViewer(QGraphicsView):
         super().mousePressEvent(e)
 
     def mouseMoveEvent(self, e):
-        if self.draw_mode in ('draw', 'erase') and self.last_pt and self.user_mask_item:
-            now = self.mapToScene(e.pos())
-            pix = self.user_mask_item.pixmap()
-            p = QPainter(pix)
-            if self.draw_mode == 'draw':
-                p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
-                idx = self.main.cb_mode.currentIndex()
-                color = QColor(0, 0, 255, 150) if idx == 3 else QColor(255, 0, 0, 150)
+        if self._active_transform_item is not None:
+            item = self._active_transform_item
+            pt = self.mapToScene(e.pos())
+            try:
+                item.update_transform_action(item.mapFromScene(pt), pt)
+                self.setCursor(self._cursor_for_transform_action(getattr(item, '_transform_action', None)))
+            except Exception:
+                pass
+            e.accept()
+            return
+
+        if getattr(self.main, "cb_mode", None) is not None and self.main.cb_mode.currentIndex() == 4:
+            active_item = self._active_transform_item_obj()
+            if active_item is not None and active_item.data.get('_transform_mode', False):
+                pt = self.mapToScene(e.pos())
+                local = active_item.mapFromScene(pt)
+                action = active_item.transform_action_at(local)
+                if e.modifiers() & Qt.KeyboardModifier.AltModifier and active_item.transform_rect().adjusted(-10, -10, 10, 10).contains(local):
+                    action = 'move'
+                if action:
+                    self.setCursor(self._cursor_for_transform_action(action))
+                else:
+                    self.unsetCursor()
+
+        if (
+            self.draw_mode == 'paste_text'
+            and getattr(self.main, "cb_mode", None) is not None
+            and self.main.cb_mode.currentIndex() == 4
+        ):
+            self.show_paste_preview(getattr(self.main, "text_clipboard", []), self.mapToScene(e.pos()))
+            return
+
+        if self.draw_mode in ('draw', 'erase') and self.last_pt:
+            final_mode = getattr(self.main, "cb_mode", None) is not None and self.main.cb_mode.currentIndex() == 4
+            if final_mode:
+                target_item = self.final_paint_above_item if getattr(self.main, "final_paint_above_text", False) else self.final_paint_item
             else:
-                p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
-                color = Qt.GlobalColor.transparent
-            p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            p.setPen(QPen(color, self.brush_size, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-            p.drawLine(self.last_pt, now)
-            p.end()
-            self.user_mask_item.setPixmap(pix)
-            self.last_pt = now
+                target_item = self.user_mask_item
+            if target_item:
+                now = self.mapToScene(e.pos())
+                pix = target_item.pixmap()
+                p = QPainter(pix)
+                if self.draw_mode == 'draw':
+                    p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+                    if final_mode:
+                        color = QColor(str(getattr(self.main, "final_paint_color", "#FFFFFF") or "#FFFFFF"))
+                        if not color.isValid():
+                            color = QColor("#FFFFFF")
+                        opacity = max(1, min(100, int(getattr(self.main, "final_paint_opacity", 100) or 100)))
+                        color.setAlpha(int(round(255 * opacity / 100)))
+                    else:
+                        idx = self.main.cb_mode.currentIndex()
+                        color = QColor(0, 0, 255, 150) if idx == 3 else QColor(255, 0, 0, 150)
+                else:
+                    p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+                    color = Qt.GlobalColor.transparent
+                p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                p.setPen(QPen(color, self.brush_size, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                p.drawLine(self.last_pt, now)
+                p.end()
+                target_item.setPixmap(pix)
+                self.last_pt = now
         super().mouseMoveEvent(e)
 
     def mouseReleaseEvent(self, e):
+        if self._active_transform_item is not None:
+            try:
+                self._active_transform_item.finish_transform_action()
+            except Exception:
+                pass
+            self._active_transform_item = None
+            self.unsetCursor()
+            e.accept()
+            return
+
         was_painting = self.is_mask_painting
         self.is_mask_painting = False
         self.last_pt = None
 
-        if was_painting and self.user_mask_item:
-            self.main.on_view_mask_edited()
+        if was_painting:
+            if getattr(self.main, "cb_mode", None) is not None and self.main.cb_mode.currentIndex() == 4:
+                self.main.on_final_paint_edited()
+            elif self.user_mask_item:
+                self.main.on_view_mask_edited()
 
         super().mouseReleaseEvent(e)
         

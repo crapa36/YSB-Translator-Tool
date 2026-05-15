@@ -238,13 +238,14 @@ class UniversalBatchWorker(QThread):
                     payload = {}
 
                 elif self.mode == 'export':
-                    if not curr_data.get('bg_clean'):
-                        continue
                     self.progress.emit(f"{prefix} 출력: {base_name}")
+                    export_bg = curr_data.get('bg_clean')
+                    if export_bg is None:
+                        export_bg = path
                     self.engine.export_project_result(
                         curr_data.get('data', []),
                         path,
-                        curr_data.get('bg_clean'),
+                        export_bg,
                         self.font_family,
                         self.stroke_size,
                         self.font_size,

@@ -107,6 +107,9 @@ class ProjectStore:
                 "mask_toggle_enabled": False,
                 "use_inpainted_as_source": False,
                 "bg_clean": None,
+                "working_source": None,
+                "final_paint": None,
+                "final_paint_above": None,
                 "original_name": src_path.name,
             }
 
@@ -167,6 +170,17 @@ class ProjectStore:
             page["mask_toggle_enabled"] = bool(curr.get("mask_toggle_enabled", False))
             page["use_inpainted_as_source"] = bool(curr.get("use_inpainted_as_source", False))
 
+            working_source = curr.get("working_source")
+            if working_source is not None:
+                source_path = os.path.join(self.project_dir, "clean", f"working_source_{i + 1:04d}.png")
+                if isinstance(working_source, (bytes, bytearray)):
+                    with open(source_path, "wb") as f:
+                        f.write(working_source)
+                    page["working_source"] = relpath(source_path, self.project_dir)
+                elif isinstance(working_source, np.ndarray):
+                    cv2.imwrite(source_path, working_source)
+                    page["working_source"] = relpath(source_path, self.project_dir)
+
             bg_clean = curr.get("bg_clean")
             if bg_clean is not None:
                 clean_path = os.path.join(self.project_dir, "clean", f"clean_{i + 1:04d}.png")
@@ -177,6 +191,28 @@ class ProjectStore:
                 elif isinstance(bg_clean, np.ndarray):
                     cv2.imwrite(clean_path, bg_clean)
                     page["clean"] = relpath(clean_path, self.project_dir)
+
+            final_paint = curr.get("final_paint")
+            if final_paint is not None:
+                paint_path = os.path.join(self.project_dir, "clean", f"final_paint_{i + 1:04d}.png")
+                if isinstance(final_paint, (bytes, bytearray)):
+                    with open(paint_path, "wb") as f:
+                        f.write(final_paint)
+                    page["final_paint"] = relpath(paint_path, self.project_dir)
+                elif isinstance(final_paint, np.ndarray):
+                    cv2.imwrite(paint_path, final_paint)
+                    page["final_paint"] = relpath(paint_path, self.project_dir)
+
+            final_paint_above = curr.get("final_paint_above")
+            if final_paint_above is not None:
+                paint_path = os.path.join(self.project_dir, "clean", f"final_paint_above_{i + 1:04d}.png")
+                if isinstance(final_paint_above, (bytes, bytearray)):
+                    with open(paint_path, "wb") as f:
+                        f.write(final_paint_above)
+                    page["final_paint_above"] = relpath(paint_path, self.project_dir)
+                elif isinstance(final_paint_above, np.ndarray):
+                    cv2.imwrite(paint_path, final_paint_above)
+                    page["final_paint_above"] = relpath(paint_path, self.project_dir)
 
             pages.append(page)
 
@@ -229,12 +265,33 @@ class ProjectStore:
                 if os.path.exists(p):
                     mask_inpaint_off = np.load(p).copy()
 
+            working_source = None
+            if page.get("working_source"):
+                p = abs_from_rel(self.project_dir, page["working_source"])
+                if os.path.exists(p):
+                    with open(p, "rb") as f:
+                        working_source = f.read()
+
             bg_clean = None
             if page.get("clean"):
                 p = abs_from_rel(self.project_dir, page["clean"])
                 if os.path.exists(p):
                     with open(p, "rb") as f:
                         bg_clean = f.read()
+
+            final_paint = None
+            if page.get("final_paint"):
+                p = abs_from_rel(self.project_dir, page["final_paint"])
+                if os.path.exists(p):
+                    with open(p, "rb") as f:
+                        final_paint = f.read()
+
+            final_paint_above = None
+            if page.get("final_paint_above"):
+                p = abs_from_rel(self.project_dir, page["final_paint_above"])
+                if os.path.exists(p):
+                    with open(p, "rb") as f:
+                        final_paint_above = f.read()
 
             data[i] = {
                 "ori": ori,
@@ -246,6 +303,9 @@ class ProjectStore:
                 "mask_toggle_enabled": bool(page.get("mask_toggle_enabled", False)),
                 "use_inpainted_as_source": bool(page.get("use_inpainted_as_source", False)),
                 "bg_clean": bg_clean,
+                "working_source": working_source,
+                "final_paint": final_paint,
+                "final_paint_above": final_paint_above,
                 "original_name": page.get("original_name", os.path.basename(image_path)),
             }
 

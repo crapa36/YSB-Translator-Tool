@@ -600,6 +600,15 @@ class MangaProcessEngine:
 
         provider = (provider or "openai").lower()
 
+        # API 키가 없으면 청크 실패 -> 단일 재시도 -> 원문 반환으로 흘러가면 안 된다.
+        # 이 경우는 즉시 상위 UI로 올려서 경고창을 띄우게 한다.
+        if provider == "deepseek":
+            if self.deepseek_client is None:
+                raise ValueError("DeepSeek API 키가 비어있습니다.")
+        else:
+            if self.openai_client is None:
+                raise ValueError("OpenAI API 키가 비어있습니다.")
+
         # 번역 묶음 수
         # main.py에서 사용자가 지정한 값이 오면 그 값을 우선 사용한다.
         if chunk_size is None:
@@ -625,6 +634,8 @@ class MangaProcessEngine:
 
             except Exception as e:
                 print(f"Chunk Translate Error: {e}")
+                if "API 키가 비어" in str(e):
+                    raise
 
                 # 청크 실패 시 한 줄씩 재시도
                 for offset, one_text in enumerate(chunk):
@@ -633,6 +644,8 @@ class MangaProcessEngine:
                         final_results.extend(one_result)
                     except Exception as e2:
                         print(f"Single Translate Error: {e2}")
+                        if "API 키가 비어" in str(e2):
+                            raise
                         final_results.append(one_text)
 
         # 최종 안전장치
@@ -1074,49 +1087,165 @@ OUTPUT FORMAT RULES:
                 "textColor": item_text_color,
                 "strokeColor": item_stroke_color,
                 "align": item_align,
+                "lineSpacing": int(d.get('line_spacing', 100) or 100),
+                "letterSpacing": int(d.get('letter_spacing', 0) or 0),
+                "charWidth": int(d.get('char_width', 100) or 100),
+                "charHeight": int(d.get('char_height', 100) or 100),
+                "bold": bool(d.get('bold', False)),
+                "italic": bool(d.get('italic', False)),
+                "strike": bool(d.get('strike', False)),
+                "rotation": float(d.get('rotation', 0) or 0),
             })
 
         # Result 폴더용 최종 이미지 렌더링. 포토샵 레이어만큼 정교하진 않아도 검수용 이미지로 바로 쓸 수 있게 저장한다.
+        def _text_bbox_single(draw_obj, text_value, font_obj, stroke_w=0):
+            try:
+                return draw_obj.textbbox((0, 0), text_value, font=font_obj, stroke_width=stroke_w)
+            except Exception:
+                w, h = draw_obj.textsize(text_value, font=font_obj)
+                return (0, 0, w, h)
+
+        def _draw_text_line(draw_obj, pos, line_text, font_obj, fill, stroke_w, stroke_fill, letter_spacing=0, bold=False):
+            x0, y0 = pos
+            if not letter_spacing:
+                offsets = [(0, 0)]
+                if bold:
+                    offsets += [(1, 0), (0, 1), (1, 1)]
+                for ox, oy in offsets:
+                    draw_obj.text((x0 + ox, y0 + oy), line_text, font=font_obj, fill=fill,
+                                  stroke_width=stroke_w, stroke_fill=stroke_fill)
+                try:
+                    box = draw_obj.textbbox((x0, y0), line_text, font=font_obj, stroke_width=stroke_w)
+                    return box[2] - box[0]
+                except Exception:
+                    return draw_obj.textsize(line_text, font=font_obj)[0]
+
+            cursor_x = x0
+            for ch in line_text:
+                offsets = [(0, 0)]
+                if bold:
+                    offsets += [(1, 0), (0, 1), (1, 1)]
+                for ox, oy in offsets:
+                    draw_obj.text((cursor_x + ox, y0 + oy), ch, font=font_obj, fill=fill,
+                                  stroke_width=stroke_w, stroke_fill=stroke_fill)
+                try:
+                    box = draw_obj.textbbox((0, 0), ch, font=font_obj, stroke_width=stroke_w)
+                    char_w = box[2] - box[0]
+                except Exception:
+                    char_w = draw_obj.textsize(ch, font=font_obj)[0]
+                cursor_x += char_w + int(letter_spacing)
+            return cursor_x - x0
+
+        def _measure_line(draw_obj, line_text, font_obj, stroke_w=0, letter_spacing=0):
+            if not line_text:
+                return 0
+            if not letter_spacing:
+                try:
+                    box = draw_obj.textbbox((0, 0), line_text, font=font_obj, stroke_width=stroke_w)
+                    return box[2] - box[0]
+                except Exception:
+                    return draw_obj.textsize(line_text, font=font_obj)[0]
+            total = 0
+            for i, ch in enumerate(line_text):
+                try:
+                    box = draw_obj.textbbox((0, 0), ch, font=font_obj, stroke_width=stroke_w)
+                    total += box[2] - box[0]
+                except Exception:
+                    total += draw_obj.textsize(ch, font=font_obj)[0]
+                if i < len(line_text) - 1:
+                    total += int(letter_spacing)
+            return total
+
         if bg_img is not None:
             result_img = bg_img.copy().convert('RGB')
-            draw = ImageDraw.Draw(result_img)
             for d in layers_list:
                 font = _get_font(d.get('font'), d.get('size', fixed_font_size))
                 text = d.get('plain_text', '')
                 if not text.strip():
                     continue
+
                 x = float(d['x'])
                 y = float(d['y'])
                 w = float(d['w'])
-                h = float(d['h'])
                 align = d.get('align', 'center')
                 stroke_w = int(d.get('stroke', 0) or 0)
                 fill = _hex_to_rgb(d.get('textColor'), (0, 0, 0))
                 stroke_fill = _hex_to_rgb(d.get('strokeColor'), (255, 255, 255))
+                line_spacing_pct = max(50, min(300, int(d.get('lineSpacing', 100) or 100)))
+                letter_spacing = int(d.get('letterSpacing', 0) or 0)
+                char_w_pct = max(10, min(300, int(d.get('charWidth', 100) or 100)))
+                char_h_pct = max(10, min(300, int(d.get('charHeight', 100) or 100)))
+                bold = bool(d.get('bold', False))
+                strike = bool(d.get('strike', False))
+                italic = bool(d.get('italic', False))
+
+                tmp_draw_probe = ImageDraw.Draw(result_img)
+                lines = text.split('\n')
                 try:
-                    bbox = draw.multiline_textbbox((0, 0), text, font=font, spacing=2, stroke_width=stroke_w)
-                    tw = bbox[2] - bbox[0]
-                    th = bbox[3] - bbox[1]
+                    ascent, descent = font.getmetrics()
+                    base_line_h = ascent + descent
                 except Exception:
-                    tw, th = draw.multiline_textsize(text, font=font, spacing=2)
+                    bbox = _text_bbox_single(tmp_draw_probe, "가A", font, stroke_w)
+                    base_line_h = max(1, bbox[3] - bbox[1])
+                    ascent = int(base_line_h * 0.8)
+
+                line_h = max(1, int(base_line_h * (line_spacing_pct / 100.0)))
+                widths = [_measure_line(tmp_draw_probe, line, font, stroke_w, letter_spacing) for line in lines]
+                raw_w = max(widths or [1]) + stroke_w * 4 + 8
+                raw_h = line_h * max(1, len(lines)) + stroke_w * 4 + 8
+
+                layer = Image.new("RGBA", (max(1, int(raw_w)), max(1, int(raw_h))), (0, 0, 0, 0))
+                draw = ImageDraw.Draw(layer)
+                for idx_line, line in enumerate(lines):
+                    line_w = widths[idx_line] if idx_line < len(widths) else 0
+                    if align == 'left':
+                        lx = stroke_w * 2 + 4
+                    elif align == 'right':
+                        lx = raw_w - line_w - stroke_w * 2 - 4
+                    else:
+                        lx = (raw_w - line_w) / 2
+                    ly = stroke_w * 2 + 4 + idx_line * line_h
+                    _draw_text_line(draw, (lx, ly), line, font, fill, stroke_w, stroke_fill, letter_spacing, bold)
+                    if strike:
+                        sy = ly + max(1, int(ascent * 0.45))
+                        draw.line((lx, sy, lx + line_w, sy), fill=fill + (255,), width=max(1, int(d.get('size', fixed_font_size) * 0.06)))
+
+                scaled_w = max(1, int(layer.width * (char_w_pct / 100.0)))
+                scaled_h = max(1, int(layer.height * (char_h_pct / 100.0)))
+                if scaled_w != layer.width or scaled_h != layer.height:
+                    resample = getattr(Image, "Resampling", Image).LANCZOS
+                    layer = layer.resize((scaled_w, scaled_h), resample)
+
+                if italic:
+                    shear = -0.18
+                    new_w = int(layer.width + abs(shear) * layer.height)
+                    resampling = getattr(Image, "Resampling", Image)
+                    layer = layer.transform(
+                        (new_w, layer.height),
+                        Image.Transform.AFFINE,
+                        (1, shear, abs(shear) * layer.height if shear < 0 else 0, 0, 1, 0),
+                        resample=resampling.BICUBIC
+                    )
+
+                rotation = float(d.get('rotation', 0) or 0)
+                if abs(rotation) > 0.001:
+                    resample = getattr(Image, "Resampling", Image).BICUBIC
+                    layer = layer.rotate(-rotation, expand=True, resample=resample)
+
                 if align == 'left':
                     tx = x
                 elif align == 'right':
-                    tx = x + w - tw
+                    tx = x + w - layer.width
                 else:
-                    tx = x + (w - tw) / 2
-                ty = y + (h - th) / 2
-                draw.multiline_text(
-                    (tx, ty),
-                    text,
-                    font=font,
-                    fill=fill,
-                    spacing=2,
-                    align=align,
-                    stroke_width=stroke_w,
-                    stroke_fill=stroke_fill,
-                )
+                    tx = x + (w - layer.width) / 2
+                ty = y
+
+                result_img = result_img.convert("RGBA")
+                result_img.alpha_composite(layer, (int(round(tx)), int(round(ty))))
+                result_img = result_img.convert("RGB")
+
             result_img.save(result_img_path)
+
 
         json_str = json.dumps(layers_list, ensure_ascii=False)
         font_name_json = json.dumps(font_name, ensure_ascii=False)
@@ -1166,6 +1295,12 @@ function create_text_layers(doc) {{
         if (d.align == "right") anchorX = d.x + d.w;
         ti.position = [anchorX, d.y + d.h/2];
         ti.contents = d.text; ti.size = new UnitValue(d.size, "px");
+        try {{ ti.tracking = d.letterSpacing * 20; }} catch(e) {{}}
+        try {{ ti.leading = new UnitValue(d.size * (d.lineSpacing / 100.0), "px"); }} catch(e) {{}}
+        try {{ ti.horizontalScale = d.charWidth; }} catch(e) {{}}
+        try {{ ti.verticalScale = d.charHeight; }} catch(e) {{}}
+        try {{ ti.fauxBold = !!d.bold; }} catch(e) {{}}
+        try {{ ti.fauxItalic = !!d.italic; }} catch(e) {{}}
         try {{
             if (d.align == "left") ti.justification = Justification.LEFT;
             else if (d.align == "right") ti.justification = Justification.RIGHT;
