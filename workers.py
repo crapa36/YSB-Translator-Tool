@@ -22,6 +22,58 @@ def _copy_data_list(data_list):
     return copy.deepcopy(data_list or [])
 
 
+def _clip_mask_to_checked_text_boxes(mask, data):
+    """
+    일괄 인페인팅용 ON 마스크 제한:
+    분석 기반 페인팅 마스크는 체크된 텍스트 박스 내부만 남긴다.
+    """
+    if mask is None:
+        return None
+
+    if mask.ndim == 3:
+        gray = cv2.cvtColor(mask, cv2.COLOR_RGB2GRAY)
+    else:
+        gray = mask.copy()
+
+    h, w = gray.shape[:2]
+    allowed = np.zeros((h, w), dtype=np.uint8)
+
+    for item in data or []:
+        if not item.get('use_inpaint', True):
+            continue
+        rect = item.get('rect')
+        if not rect or len(rect) < 4:
+            continue
+        try:
+            rx, ry, rw, rh = [int(v) for v in rect[:4]]
+        except Exception:
+            continue
+
+        x1 = max(0, rx)
+        y1 = max(0, ry)
+        x2 = min(w, rx + max(0, rw))
+        y2 = min(h, ry + max(0, rh))
+        if x2 > x1 and y2 > y1:
+            allowed[y1:y2, x1:x2] = 255
+
+    return cv2.bitwise_and(gray, allowed)
+
+
+def _build_inpainting_payload(mask_toggle_enabled, curr_data):
+    """
+    - ON: 분석 기반 페인팅 마스크를 체크된 텍스트 박스 영역 안으로 제한.
+    - OFF: 수동 OFF 페인팅 마스크를 그대로 사용하고, 텍스트 박스/체크 상태는 무시.
+    """
+    data = _copy_data_list(curr_data.get('data', []))
+    if mask_toggle_enabled:
+        mask = _copy_mask(curr_data.get('mask_inpaint'))
+        if mask is not None:
+            mask = _clip_mask_to_checked_text_boxes(mask, data)
+        return data, mask
+
+    return [], _copy_mask(curr_data.get('mask_inpaint_off'))
+
+
 class UniversalBatchWorker(QThread):
     progress = pyqtSignal(str)
     # page index, payload dict
@@ -42,6 +94,8 @@ class UniversalBatchWorker(QThread):
         self.font_family = main_window.cb_font.currentFont().family()
         self.stroke_size = main_window.sb_strk.value()
         self.font_size = main_window.sb_font_size.value()
+        self.mask_toggle_enabled = bool(getattr(main_window, "mask_toggle_enabled", False))
+        self.project_dir = getattr(main_window, "project_dir", None)
 
         # 시작 시점의 페이지 데이터를 스냅샷으로 복사한다.
         # 이렇게 해야 일괄 작업 중 화면/현재 페이지 상태가 다른 페이지에 섞이지 않는다.
@@ -54,6 +108,10 @@ class UniversalBatchWorker(QThread):
                     'data': [],
                     'mask_merge': None,
                     'mask_inpaint': None,
+                    'mask_merge_off': None,
+                    'mask_inpaint_off': None,
+                    'mask_toggle_enabled': False,
+                    'use_inpainted_as_source': False,
                     'bg_clean': None,
                 }
             else:
@@ -62,9 +120,35 @@ class UniversalBatchWorker(QThread):
                     'data': _copy_data_list(src.get('data', [])),
                     'mask_merge': _copy_mask(src.get('mask_merge')),
                     'mask_inpaint': _copy_mask(src.get('mask_inpaint')),
+                    'mask_merge_off': _copy_mask(src.get('mask_merge_off')),
+                    'mask_inpaint_off': _copy_mask(src.get('mask_inpaint_off')),
+                    'mask_toggle_enabled': bool(src.get('mask_toggle_enabled', False)),
+                    'use_inpainted_as_source': bool(src.get('use_inpainted_as_source', False)),
                     'bg_clean': src.get('bg_clean'),
                     'original_name': src.get('original_name'),
                 }
+
+    def _write_bg_clean_as_source(self, page_idx, curr_data, fallback_path):
+        if not curr_data.get('use_inpainted_as_source') or not curr_data.get('bg_clean'):
+            return fallback_path
+        root = self.project_dir or os.path.dirname(os.path.abspath(fallback_path))
+        clean_dir = os.path.join(root, "clean")
+        os.makedirs(clean_dir, exist_ok=True)
+        out_path = os.path.join(clean_dir, f"batch_inpaint_source_{page_idx + 1:04d}.png")
+        bg = curr_data.get('bg_clean')
+        try:
+            if isinstance(bg, (bytes, bytearray)):
+                with open(out_path, "wb") as f:
+                    f.write(bg)
+                return out_path
+            if isinstance(bg, np.ndarray):
+                cv2.imwrite(out_path, bg)
+                return out_path
+            if isinstance(bg, str) and os.path.exists(bg):
+                return bg
+        except Exception:
+            return fallback_path
+        return fallback_path
 
     def run(self):
         total = len(self.paths)
@@ -114,15 +198,21 @@ class UniversalBatchWorker(QThread):
                     payload = {'data': new_data}
 
                 elif self.mode == 'inpaint':
-                    if not curr_data.get('data'):
+                    inpaint_data, inpaint_mask = _build_inpainting_payload(self.mask_toggle_enabled, curr_data)
+
+                    if self.mask_toggle_enabled and not inpaint_data and inpaint_mask is None:
+                        continue
+                    if (not self.mask_toggle_enabled) and inpaint_mask is None:
+                        self.progress.emit(f"{prefix} 인페인팅 건너뜀: OFF 페인팅 마스크 없음")
                         continue
 
-                    self.progress.emit(f"{prefix} 리페인팅: {base_name}")
+                    self.progress.emit(f"{prefix} 인페인팅: {base_name}")
 
+                    source_path = self._write_bg_clean_as_source(i, curr_data, path)
                     res_url = self.engine.execute_inpainting(
-                        path,
-                        curr_data.get('data', []),
-                        curr_data.get('mask_inpaint')
+                        source_path,
+                        inpaint_data,
+                        inpaint_mask
                     )
 
                     if res_url:
@@ -133,10 +223,10 @@ class UniversalBatchWorker(QThread):
                         curr_data['bg_clean'] = bg_bytes
                         payload = {'bg_clean': bg_bytes}
 
-                        self.progress.emit(f"{prefix} 리페인팅 완료")
+                        self.progress.emit(f"{prefix} 인페인팅 완료")
                     else:
                         payload = {}
-                        self.progress.emit(f"{prefix} ⚠️ 리페인팅 결과 없음")
+                        self.progress.emit(f"{prefix} ⚠️ 인페인팅 결과 없음")
 
                     # Replicate burst=1 제한 방지.
                     # _call_lama 내부에서도 429 재시도하지만, 장 사이 기본 간격을 둬야 일괄 성공률이 높다.
@@ -213,7 +303,7 @@ class InpaintWorker(QThread):
 
     def run(self):
         try:
-            self.log.emit("🎨 LaMa 리페인팅 시작...")
+            self.log.emit("🎨 LaMa 인페인팅 시작...")
             res = self.engine.execute_inpainting(self.path, self.data, self.mask)
             if res:
                 u = res[0] if isinstance(res, list) else res

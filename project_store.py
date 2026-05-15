@@ -78,6 +78,8 @@ class ProjectStore:
         ensure_dir(os.path.join(self.project_dir, "masks"))
         ensure_dir(os.path.join(self.project_dir, "clean"))
         ensure_dir(os.path.join(self.project_dir, "scripts"))
+        ensure_dir(os.path.join(self.project_dir, "Result"))
+        ensure_dir(os.path.join(self.project_dir, "Txt"))
 
     def create_from_images(self, project_dir: str, source_paths: List[str]) -> Tuple[List[str], Dict[int, dict]]:
         self.project_dir = project_dir
@@ -100,6 +102,10 @@ class ProjectStore:
                 "data": [],
                 "mask_merge": None,
                 "mask_inpaint": None,
+                "mask_merge_off": None,
+                "mask_inpaint_off": None,
+                "mask_toggle_enabled": False,
+                "use_inpainted_as_source": False,
                 "bg_clean": None,
                 "original_name": src_path.name,
             }
@@ -145,6 +151,21 @@ class ProjectStore:
                 mask_path = os.path.join(self.project_dir, "masks", f"mask_inpaint_{i + 1:04d}.npy")
                 np.save(mask_path, np.array(mask_inpaint, dtype=np.uint8).copy())
                 page["mask_inpaint"] = relpath(mask_path, self.project_dir)
+
+            mask_merge_off = curr.get("mask_merge_off")
+            if mask_merge_off is not None:
+                mask_path = os.path.join(self.project_dir, "masks", f"mask_merge_off_{i + 1:04d}.npy")
+                np.save(mask_path, np.array(mask_merge_off, dtype=np.uint8).copy())
+                page["mask_merge_off"] = relpath(mask_path, self.project_dir)
+
+            mask_inpaint_off = curr.get("mask_inpaint_off")
+            if mask_inpaint_off is not None:
+                mask_path = os.path.join(self.project_dir, "masks", f"mask_inpaint_off_{i + 1:04d}.npy")
+                np.save(mask_path, np.array(mask_inpaint_off, dtype=np.uint8).copy())
+                page["mask_inpaint_off"] = relpath(mask_path, self.project_dir)
+
+            page["mask_toggle_enabled"] = bool(curr.get("mask_toggle_enabled", False))
+            page["use_inpainted_as_source"] = bool(curr.get("use_inpainted_as_source", False))
 
             bg_clean = curr.get("bg_clean")
             if bg_clean is not None:
@@ -196,6 +217,18 @@ class ProjectStore:
                 if os.path.exists(p):
                     mask_inpaint = np.load(p).copy()
 
+            mask_merge_off = None
+            if page.get("mask_merge_off"):
+                p = abs_from_rel(self.project_dir, page["mask_merge_off"])
+                if os.path.exists(p):
+                    mask_merge_off = np.load(p).copy()
+
+            mask_inpaint_off = None
+            if page.get("mask_inpaint_off"):
+                p = abs_from_rel(self.project_dir, page["mask_inpaint_off"])
+                if os.path.exists(p):
+                    mask_inpaint_off = np.load(p).copy()
+
             bg_clean = None
             if page.get("clean"):
                 p = abs_from_rel(self.project_dir, page["clean"])
@@ -208,6 +241,10 @@ class ProjectStore:
                 "data": page.get("data", []),
                 "mask_merge": mask_merge,
                 "mask_inpaint": mask_inpaint,
+                "mask_merge_off": mask_merge_off,
+                "mask_inpaint_off": mask_inpaint_off,
+                "mask_toggle_enabled": bool(page.get("mask_toggle_enabled", False)),
+                "use_inpainted_as_source": bool(page.get("use_inpainted_as_source", False)),
                 "bg_clean": bg_clean,
                 "original_name": page.get("original_name", os.path.basename(image_path)),
             }

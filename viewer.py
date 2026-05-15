@@ -1,6 +1,6 @@
 import numpy as np
 from PyQt6.QtWidgets import QGraphicsView, QGraphicsScene
-from PyQt6.QtGui import QPainter, QPen, QBrush, QColor, QImage, QPixmap, QFont
+from PyQt6.QtGui import QPainter, QPen, QBrush, QColor, QImage, QPixmap, QFont, QPainterPath
 from PyQt6.QtCore import Qt, QRectF
 
 from graphics_items import ToggleBoxItem, TypesettingItem
@@ -24,6 +24,7 @@ class MuleImageViewer(QGraphicsView):
         self.mask_color = QColor(255, 0, 0, 100)
         self.history = []
         self.is_mask_painting = False
+        self.magic_preview_items = []
 
     def undo(self):
         if not self.history:
@@ -40,6 +41,7 @@ class MuleImageViewer(QGraphicsView):
     def set_image(self, img):
         self.scene.clear()
         self.user_mask_item = None
+        self.magic_preview_items = []
         self.history.clear()
         if img is None:
             return
@@ -56,6 +58,7 @@ class MuleImageViewer(QGraphicsView):
 
     def set_overlay(self, bg, mask, color):
         self.scene.clear()
+        self.magic_preview_items = []
         if bg is None:
             return
 
@@ -134,12 +137,95 @@ class MuleImageViewer(QGraphicsView):
             t_item.setZValue(22)
             t_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
 
-    def draw_movable_texts(self, data, font, size_px, stroke):
+    def draw_movable_texts(
+        self,
+        data,
+        font,
+        size_px,
+        stroke,
+        show_text=True,
+        text_color="#000000",
+        stroke_color="#FFFFFF",
+        align="center",
+    ):
+        if not show_text:
+            return
         for d in data:
             if not d.get('use_inpaint', True):
                 continue
-            item = TypesettingItem(d, font, size_px, stroke, self.main.on_text_item_moved)
+            # 번역문이 비어 있으면 최종 화면에는 아무 텍스트도 만들지 않는다.
+            if not str(d.get('translated_text', '') or '').strip():
+                continue
+            item = TypesettingItem(
+                d,
+                font,
+                size_px,
+                stroke,
+                self.main.on_text_item_moved,
+                text_color=text_color,
+                stroke_color=stroke_color,
+                align=align,
+            )
             self.scene.addItem(item)
+
+    def clear_magic_wand_preview(self):
+        if not hasattr(self, "magic_preview_items"):
+            self.magic_preview_items = []
+        for item in list(self.magic_preview_items):
+            try:
+                self.scene.removeItem(item)
+            except Exception:
+                pass
+        self.magic_preview_items = []
+
+    def draw_magic_wand_preview(self, mask):
+        self.clear_magic_wand_preview()
+        if mask is None:
+            return
+
+        import cv2
+        _, bin_mask = cv2.threshold(mask, 10, 255, cv2.THRESH_BINARY)
+        contours, _ = cv2.findContours(bin_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        pen = QPen(QColor(255, 230, 0), 2, Qt.PenStyle.SolidLine)
+        brush = QBrush(Qt.BrushStyle.NoBrush)
+
+        for cnt in contours:
+            if cnt is None or len(cnt) < 2:
+                continue
+
+            path = QPainterPath()
+            first = cnt[0][0]
+            path.moveTo(float(first[0]), float(first[1]))
+
+            for p in cnt[1:]:
+                x, y = p[0]
+                path.lineTo(float(x), float(y))
+
+            path.closeSubpath()
+            item = self.scene.addPath(path, pen, brush)
+            item.setZValue(35)
+            item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            self.magic_preview_items.append(item)
+
+    def set_user_mask_np(self, mask, color):
+        if self.user_mask_item is None or mask is None:
+            return
+
+        if mask.ndim == 3:
+            import cv2
+            mask = cv2.cvtColor(mask, cv2.COLOR_RGB2GRAY)
+
+        h, w = mask.shape[:2]
+        color_img = QImage(w, h, QImage.Format.Format_ARGB32)
+        color_img.fill(color)
+
+        qmask = QImage(mask.data, w, h, w, QImage.Format.Format_Grayscale8).copy()
+        color_img.setAlphaChannel(qmask)
+
+        pix = QPixmap.fromImage(color_img)
+        self.user_mask_item.setPixmap(pix)
+        self.user_mask_img = color_img
 
     def get_mask_np(self):
         if not self.user_mask_item:
@@ -189,6 +275,11 @@ class MuleImageViewer(QGraphicsView):
         return QPixmap()
 
     def mousePressEvent(self, e):
+        if self.draw_mode == 'magic_wand' and e.button() == Qt.MouseButton.LeftButton:
+            pt = self.mapToScene(e.pos())
+            self.main.magic_wand_pick(int(pt.x()), int(pt.y()))
+            return
+
         if self.draw_mode and e.button() == Qt.MouseButton.LeftButton:
             self.is_mask_painting = True
             if self.user_mask_item:
@@ -196,10 +287,22 @@ class MuleImageViewer(QGraphicsView):
                 if len(self.history) > 20:
                     self.history.pop(0)
             self.last_pt = self.mapToScene(e.pos())
+        elif (
+            e.button() == Qt.MouseButton.LeftButton
+            and getattr(self.main, "cb_mode", None) is not None
+            and self.main.cb_mode.currentIndex() == 4
+        ):
+            # 최종 화면에서는 배경 클릭으로 기존 선택을 지우지 않는다.
+            # 선택 해제는 ESC로만 한다.
+            clicked = self.itemAt(e.pos())
+            if not isinstance(clicked, TypesettingItem):
+                e.accept()
+                return
+
         super().mousePressEvent(e)
 
     def mouseMoveEvent(self, e):
-        if self.draw_mode and self.last_pt and self.user_mask_item:
+        if self.draw_mode in ('draw', 'erase') and self.last_pt and self.user_mask_item:
             now = self.mapToScene(e.pos())
             pix = self.user_mask_item.pixmap()
             p = QPainter(pix)

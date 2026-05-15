@@ -61,7 +61,8 @@ def apply_settings_to_config(settings: ApiSettings):
         Config.REPLICATE_API_TOKEN = settings.replicate_api_token.strip()
         Config.OPENAI_TRANSLATION_MODEL = settings.openai_model.strip() or "gpt-4o-mini"
         Config.DEEPSEEK_TRANSLATION_MODEL = settings.deepseek_model.strip() or "deepseek-v4-flash"
-        Config.REPAINT_MODEL = settings.repaint_model.strip()
+        Config.INPAINT_MODEL = settings.repaint_model.strip()
+        Config.REPAINT_MODEL = Config.INPAINT_MODEL  # 구버전 호환
 
         if Config.REPLICATE_API_TOKEN:
             _os.environ["REPLICATE_API_TOKEN"] = Config.REPLICATE_API_TOKEN
@@ -99,7 +100,7 @@ class ApiSettingsDialog(QDialog):
             ("Replicate API Token", "replicate_api_token", True),
             ("OpenAI 번역 모델", "openai_model", False),
             ("DeepSeek 번역 모델", "deepseek_model", False),
-            ("리페인팅 모델", "repaint_model", False),
+            ("인페인팅 모델", "repaint_model", False),
         ]
 
         data = asdict(settings)

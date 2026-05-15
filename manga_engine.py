@@ -25,8 +25,9 @@ class Config:
     OPENAI_TRANSLATION_MODEL = ""
     DEEPSEEK_TRANSLATION_MODEL = ""
 
-    # [설정] 리페인팅 모델 - api_settings/main에서 주입됨
-    REPAINT_MODEL = ""
+    # [설정] 인페인팅 모델 - api_settings/main에서 주입됨
+    INPAINT_MODEL = ""
+    REPAINT_MODEL = ""  # 구버전 설정 호환용
 
     # [설정] 마스킹 비율
     INPAINT_RATIO = 0.1
@@ -660,15 +661,15 @@ OUTPUT FORMAT RULES:
         import time
         import re
 
-        model_name = str(getattr(Config, "REPAINT_MODEL", "") or "").strip()
+        model_name = str(getattr(Config, "INPAINT_MODEL", "") or getattr(Config, "REPAINT_MODEL", "") or "").strip()
         if not model_name:
-            raise ValueError("리페인팅 모델명이 비어있습니다. 옵션 > API 관리에서 모델명을 입력해 주세요.")
+            raise ValueError("인페인팅 모델명이 비어있습니다. 옵션 > API 관리에서 모델명을 입력해 주세요.")
 
         temp_mask = f"temp_mask_lama_{uuid.uuid4().hex}.png"
         cv2.imwrite(temp_mask, mask_img)
 
         # Replicate 저크레딧/무료 상태에서는 burst=1 제한이 자주 걸린다.
-        # 개별 리페인팅은 한 번만 보내서 괜찮지만, 일괄은 연속 호출이라 429가 나기 쉽다.
+        # 개별 인페인팅은 한 번만 보내서 괜찮지만, 일괄은 연속 호출이라 429가 나기 쉽다.
         max_retries = 6
         base_wait_seconds = 12
 
@@ -740,12 +741,166 @@ OUTPUT FORMAT RULES:
     def export_project_result(self, data, img_path, bg_data, font_name, stroke_size, fixed_font_size):
         """
         결과 출력:
-        - 프로젝트 구조(images/ clean/ scripts/) 안에서 실행 중이면 프로젝트 폴더에 저장
-          project_dir/clean/Clean_XXXX.png
-          project_dir/scripts/Script_XXXX.jsx
-        - 프로젝트 구조가 아니면 실행 폴더/Project_Result/clean, scripts에 저장
+        - project_dir/clean/Clean_XXXX.png: 인페인팅된 배경
+        - project_dir/Result/Result_XXXX.png: 최종 화면 이미지(텍스트 포함)
+        - project_dir/scripts/Script_XXXX.jsx: 포토샵 텍스트 레이어 생성 스크립트
         - Photoshop 실행 완료 알림(alert)은 띄우지 않음
         """
+        import io
+
+        def _hex_to_rgb(value, fallback=(0, 0, 0)):
+            value = str(value or '').strip()
+            if value.startswith('#'):
+                value = value[1:]
+            try:
+                if len(value) == 6:
+                    return tuple(int(value[i:i+2], 16) for i in (0, 2, 4))
+            except Exception:
+                pass
+            return fallback
+
+        def _load_pil_image(src):
+            if src is None:
+                return None
+            try:
+                if isinstance(src, (bytes, bytearray)):
+                    if len(src) == 0:
+                        return None
+                    return Image.open(io.BytesIO(src)).convert('RGB')
+                if isinstance(src, np.ndarray):
+                    if src.size == 0:
+                        return None
+                    if src.ndim == 2:
+                        return Image.fromarray(src).convert('RGB')
+                    return Image.fromarray(cv2.cvtColor(src, cv2.COLOR_BGR2RGB)).convert('RGB')
+                if isinstance(src, str) and os.path.exists(src):
+                    return Image.open(src).convert('RGB')
+            except Exception:
+                return None
+            return None
+
+        def _font_key(value):
+            return ''.join(ch for ch in str(value or '').lower() if ch.isalnum() or ('가' <= ch <= '힣') or ('ぁ' <= ch <= 'ヿ') or ('一' <= ch <= '龯'))
+
+        def _font_dirs():
+            dirs = []
+            env_keys = ["WINDIR", "SystemRoot", "LOCALAPPDATA", "HOME"]
+            for key in env_keys:
+                base = os.environ.get(key)
+                if not base:
+                    continue
+                if key in ("WINDIR", "SystemRoot"):
+                    dirs.append(os.path.join(base, "Fonts"))
+                elif key == "LOCALAPPDATA":
+                    dirs.append(os.path.join(base, "Microsoft", "Windows", "Fonts"))
+                elif key == "HOME":
+                    dirs.extend([
+                        os.path.join(base, ".fonts"),
+                        os.path.join(base, "Library", "Fonts"),
+                    ])
+            dirs.extend([
+                r"C:\Windows\Fonts",
+                "/System/Library/Fonts",
+                "/Library/Fonts",
+                "/usr/share/fonts",
+                "/usr/local/share/fonts",
+            ])
+            out = []
+            for d in dirs:
+                if d and d not in out and os.path.isdir(d):
+                    out.append(d)
+            return out
+
+        def _iter_font_files():
+            exts = ('.ttf', '.ttc', '.otf')
+            for root in _font_dirs():
+                try:
+                    for dirpath, _dirnames, filenames in os.walk(root):
+                        for fn in filenames:
+                            if fn.lower().endswith(exts):
+                                yield os.path.join(dirpath, fn)
+                except Exception:
+                    continue
+
+        def _find_font_file(name):
+            raw = str(name or '').strip()
+            if raw and os.path.exists(raw):
+                return raw
+
+            wanted = _font_key(raw)
+            alias_files = {
+                # Windows Korean/CJK fonts
+                '맑은고딕': ['malgun.ttf', 'malgunbd.ttf', 'malgunsl.ttf'],
+                'malgungothic': ['malgun.ttf', 'malgunbd.ttf', 'malgunsl.ttf'],
+                'malgun': ['malgun.ttf', 'malgunbd.ttf', 'malgunsl.ttf'],
+                '굴림': ['gulim.ttc'],
+                'gulim': ['gulim.ttc'],
+                'gulimgothic': ['gulim.ttc'],
+                '돋움': ['gulim.ttc'],
+                'dotum': ['gulim.ttc'],
+                '바탕': ['batang.ttc'],
+                'batang': ['batang.ttc'],
+                '궁서': ['batang.ttc'],
+                'gungsuh': ['batang.ttc'],
+                # Windows Japanese fonts
+                'msgothic': ['msgothic.ttc'],
+                'mspgothic': ['msgothic.ttc'],
+                'msuigothic': ['msgothic.ttc'],
+                'meiryo': ['meiryo.ttc', 'meiryob.ttc'],
+                'yugothic': ['YuGothM.ttc', 'YuGothR.ttc', 'YuGothB.ttc', 'YuGothL.ttc'],
+                'yu gothic': ['YuGothM.ttc', 'YuGothR.ttc', 'YuGothB.ttc', 'YuGothL.ttc'],
+                # Common CJK fonts
+                'notosanscjk': ['NotoSansCJK-Regular.ttc', 'NotoSansCJKkr-Regular.otf', 'NotoSansCJKjp-Regular.otf'],
+                'notosanskr': ['NotoSansCJKkr-Regular.otf'],
+                'notosansjp': ['NotoSansCJKjp-Regular.otf'],
+            }
+
+            # 1) Known family aliases → known filenames
+            for key, filenames in alias_files.items():
+                if wanted and (wanted == _font_key(key) or wanted in _font_key(key) or _font_key(key) in wanted):
+                    for root in _font_dirs():
+                        for fn in filenames:
+                            path = os.path.join(root, fn)
+                            if os.path.exists(path):
+                                return path
+
+            # 2) Filename fuzzy search
+            if wanted:
+                for path in _iter_font_files():
+                    stem = _font_key(os.path.splitext(os.path.basename(path))[0])
+                    if wanted == stem or wanted in stem or stem in wanted:
+                        return path
+
+            # 3) CJK-capable fallback fonts. Avoid Arial because it often renders CJK as □.
+            fallback_names = [
+                'malgun.ttf', 'gulim.ttc', 'msgothic.ttc', 'meiryo.ttc',
+                'YuGothM.ttc', 'YuGothR.ttc', 'NotoSansCJK-Regular.ttc',
+                'NotoSansCJKkr-Regular.otf', 'NotoSansCJKjp-Regular.otf',
+                'AppleGothic.ttf', 'Hiragino Sans GB.ttc',
+            ]
+            for root in _font_dirs():
+                for fn in fallback_names:
+                    path = os.path.join(root, fn)
+                    if os.path.exists(path):
+                        return path
+            return raw or None
+
+        def _get_font(name, size):
+            font_path = _find_font_file(name)
+            try:
+                if font_path:
+                    return ImageFont.truetype(str(font_path), int(size))
+            except Exception:
+                pass
+            # 마지막 안전장치: 시스템 폰트 중 CJK 가능성이 높은 파일을 순회한다.
+            for path in _iter_font_files():
+                if _font_key(os.path.basename(path)) in ('malgun', 'gulim', 'msgothic', 'meiryo'):
+                    try:
+                        return ImageFont.truetype(path, int(size))
+                    except Exception:
+                        continue
+            return ImageFont.load_default()
+
         abs_img_path = os.path.abspath(img_path)
         img_dir = os.path.dirname(abs_img_path)
 
@@ -756,55 +911,102 @@ OUTPUT FORMAT RULES:
             project_dir = os.path.abspath(os.path.join(os.getcwd(), "Project_Result"))
 
         clean_dir = os.path.join(project_dir, "clean")
+        result_dir = os.path.join(project_dir, "Result")
         scripts_dir = os.path.join(project_dir, "scripts")
         os.makedirs(clean_dir, exist_ok=True)
+        os.makedirs(result_dir, exist_ok=True)
         os.makedirs(scripts_dir, exist_ok=True)
 
         name_no_ext = os.path.splitext(os.path.basename(img_path))[0]
         clean_img_name = f"Clean_{name_no_ext}.png"
+        result_img_name = f"Result_{name_no_ext}.png"
         clean_img_path = os.path.join(clean_dir, clean_img_name)
+        result_img_path = os.path.join(result_dir, result_img_name)
 
-        # bg_data 저장: bytes / numpy ndarray 모두 대응
-        if bg_data is not None:
-            if isinstance(bg_data, (bytes, bytearray)):
-                if len(bg_data) > 0:
-                    with open(clean_img_path, "wb") as f:
-                        f.write(bg_data)
-            elif isinstance(bg_data, np.ndarray):
-                if bg_data.size > 0:
-                    ext = os.path.splitext(clean_img_path)[1] or ".png"
-                    ok, enc = cv2.imencode(ext, bg_data)
-                    if ok:
-                        enc.tofile(clean_img_path)
-            else:
-                # 혹시 파일 경로 문자열 등이 들어온 경우를 대비
-                try:
-                    with open(clean_img_path, "wb") as f:
-                        f.write(bg_data)
-                except Exception:
-                    pass
+        bg_img = _load_pil_image(bg_data)
+        if bg_img is None:
+            bg_img = _load_pil_image(img_path)
+        if bg_img is not None:
+            bg_img.save(clean_img_path)
 
         layers_list = []
         for d in data:
             if not d.get('use_inpaint', True):
                 continue
-            text = d.get('translated_text', d.get('text', ''))
-            if not text:
+            # 번역문이 비어 있으면 최종 화면/스크립트 모두 텍스트를 만들지 않는다.
+            text = str(d.get('translated_text', '') or '')
+            if not text.strip():
                 continue
-            wrapped = str(text).replace('\n', '\r')
+            item_font = d.get('font_family') or font_name
+            item_size = int(d.get('font_size', fixed_font_size) or fixed_font_size)
+            item_stroke = int(d.get('stroke_width', stroke_size) or 0)
+            item_text_color = d.get('text_color') or '#000000'
+            item_stroke_color = d.get('stroke_color') or '#FFFFFF'
+            item_align = str(d.get('align') or 'center').lower()
+            if item_align not in ('left', 'center', 'right'):
+                item_align = 'center'
+            wrapped = text.replace('\n', '\r')
             layers_list.append({
                 "text": wrapped,
+                "plain_text": text,
                 "x": d['rect'][0] + d.get('x_off', 0),
                 "y": d['rect'][1] + d.get('y_off', 0),
                 "w": d['rect'][2],
                 "h": d['rect'][3],
-                "size": fixed_font_size,
+                "size": item_size,
+                "font": item_font,
+                "stroke": item_stroke,
+                "textColor": item_text_color,
+                "strokeColor": item_stroke_color,
+                "align": item_align,
             })
 
+        # Result 폴더용 최종 이미지 렌더링. 포토샵 레이어만큼 정교하진 않아도 검수용 이미지로 바로 쓸 수 있게 저장한다.
+        if bg_img is not None:
+            result_img = bg_img.copy().convert('RGB')
+            draw = ImageDraw.Draw(result_img)
+            for d in layers_list:
+                font = _get_font(d.get('font'), d.get('size', fixed_font_size))
+                text = d.get('plain_text', '')
+                if not text.strip():
+                    continue
+                x = float(d['x'])
+                y = float(d['y'])
+                w = float(d['w'])
+                h = float(d['h'])
+                align = d.get('align', 'center')
+                stroke_w = int(d.get('stroke', 0) or 0)
+                fill = _hex_to_rgb(d.get('textColor'), (0, 0, 0))
+                stroke_fill = _hex_to_rgb(d.get('strokeColor'), (255, 255, 255))
+                try:
+                    bbox = draw.multiline_textbbox((0, 0), text, font=font, spacing=2, stroke_width=stroke_w)
+                    tw = bbox[2] - bbox[0]
+                    th = bbox[3] - bbox[1]
+                except Exception:
+                    tw, th = draw.multiline_textsize(text, font=font, spacing=2)
+                if align == 'left':
+                    tx = x
+                elif align == 'right':
+                    tx = x + w - tw
+                else:
+                    tx = x + (w - tw) / 2
+                ty = y + (h - th) / 2
+                draw.multiline_text(
+                    (tx, ty),
+                    text,
+                    font=font,
+                    fill=fill,
+                    spacing=2,
+                    align=align,
+                    stroke_width=stroke_w,
+                    stroke_fill=stroke_fill,
+                )
+            result_img.save(result_img_path)
+
         json_str = json.dumps(layers_list, ensure_ascii=False)
+        font_name_json = json.dumps(font_name, ensure_ascii=False)
 
         # scripts/Script_XXXX.jsx에서 project_dir/clean/Clean_XXXX.png를 상대경로로 찾음
-        # 완료 alert 제거: create_text_layers 후 조용히 종료
         jsx_content = f"""
 #target photoshop
 app.bringToFront(); var originalUnit = preferences.rulerUnits; preferences.rulerUnits = Units.PIXELS;
@@ -814,18 +1016,53 @@ try {{
     else {{ alert("이미지를 찾을 수 없습니다: " + imageFile.fsName); }}
 }} catch (e) {{ alert("오류: " + e); }}
 preferences.rulerUnits = originalUnit;
+function resolveFont(fontName) {{
+    try {{
+        for (var i = 0; i < app.fonts.length; i++) {{
+            var f = app.fonts[i];
+            if (f.postScriptName == fontName || f.name == fontName || f.family == fontName) {{
+                return f.postScriptName;
+            }}
+        }}
+    }} catch(e) {{}}
+    return fontName;
+}}
+function hexToRgb(hex, fallback) {{
+    try {{
+        if (!hex) return fallback;
+        hex = String(hex).replace("#", "");
+        if (hex.length != 6) return fallback;
+        return [parseInt(hex.substr(0,2),16), parseInt(hex.substr(2,2),16), parseInt(hex.substr(4,2),16)];
+    }} catch(e) {{ return fallback; }}
+}}
+function setTextColor(ti, hex) {{
+    var rgb = hexToRgb(hex, [0,0,0]);
+    var c = new SolidColor();
+    c.rgb.red = rgb[0]; c.rgb.green = rgb[1]; c.rgb.blue = rgb[2];
+    try {{ ti.color = c; }} catch(e) {{}}
+}}
 function create_text_layers(doc) {{
-    var layers = {json_str}; var fontName = "{font_name}"; var strokeSize = {stroke_size};
+    var layers = {json_str}; var defaultFontName = {font_name_json};
     for (var i = 0; i < layers.length; i++) {{
         var d = layers[i]; var ly = doc.artLayers.add(); ly.kind = LayerKind.TEXT; ly.name = "Txt_" + (i+1);
-        var ti = ly.textItem; ti.kind = TextType.POINTTEXT; ti.position = [d.x + d.w/2, d.y];
+        var ti = ly.textItem; ti.kind = TextType.POINTTEXT;
+        var anchorX = d.x + d.w/2;
+        if (d.align == "left") anchorX = d.x;
+        if (d.align == "right") anchorX = d.x + d.w;
+        ti.position = [anchorX, d.y + d.h/2];
         ti.contents = d.text; ti.size = new UnitValue(d.size, "px");
-        try {{ ti.justification = Justification.CENTER; }} catch(e) {{}}
-        try {{ ti.font = fontName; }} catch(e) {{}}
-        if (strokeSize > 0) {{ applyStroke(strokeSize); }}
+        try {{
+            if (d.align == "left") ti.justification = Justification.LEFT;
+            else if (d.align == "right") ti.justification = Justification.RIGHT;
+            else ti.justification = Justification.CENTER;
+        }} catch(e) {{}}
+        try {{ ti.font = resolveFont(d.font || defaultFontName); }} catch(e) {{}}
+        setTextColor(ti, d.textColor);
+        if (d.stroke > 0) {{ applyStroke(d.stroke, d.strokeColor); }}
     }}
 }}
-function applyStroke(size) {{
+function applyStroke(size, colorHex) {{
+    var rgb = hexToRgb(colorHex, [255,255,255]);
     var desc1 = new ActionDescriptor(); var ref1 = new ActionReference();
     ref1.putProperty(charIDToTypeID("Prpr"), charIDToTypeID("Lefx"));
     ref1.putEnumerated(charIDToTypeID("Lyr "), charIDToTypeID("Ordn"), charIDToTypeID("Trgt"));
@@ -837,7 +1074,7 @@ function applyStroke(size) {{
     desc3.putUnitDouble(charIDToTypeID("Sz  "), charIDToTypeID("Pxlt"), size);
     desc3.putDouble(charIDToTypeID("Opct"), 100.0);
     var c = new ActionDescriptor();
-    c.putDouble(charIDToTypeID("Rd  "), 255); c.putDouble(charIDToTypeID("Grn "), 255); c.putDouble(charIDToTypeID("Bl  "), 255);
+    c.putDouble(charIDToTypeID("Rd  "), rgb[0]); c.putDouble(charIDToTypeID("Grn "), rgb[1]); c.putDouble(charIDToTypeID("Bl  "), rgb[2]);
     desc3.putObject(charIDToTypeID("Clr "), charIDToTypeID("RGBC"), c);
     desc2.putObject(charIDToTypeID("FrFX"), charIDToTypeID("FrFX"), desc3);
     desc1.putObject(charIDToTypeID("T   "), charIDToTypeID("Lefx"), desc2);
