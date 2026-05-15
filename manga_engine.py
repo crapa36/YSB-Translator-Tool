@@ -19,11 +19,18 @@ class Config:
     # [설정] OpenAI & Replicate
     OPENAI_API_KEY = ""
     DEEPSEEK_API_KEY = ""
+    GOOGLE_TRANSLATE_API_KEY = ""
     REPLICATE_API_TOKEN = ""
     
     # [설정] 번역 모델 선택
     OPENAI_TRANSLATION_MODEL = ""
     DEEPSEEK_TRANSLATION_MODEL = ""
+    GOOGLE_TRANSLATE_MODEL = "google_translate_basic_v2"
+
+    # [설정] 옵션 캐시에서 주입되는 AI 번역 프롬프트 / 단어장
+    # 기본값은 비어 있다. 프로그램이 깨지지 않도록 JSON 출력 규칙만 내부에서 별도로 붙인다.
+    TRANSLATION_PROMPT = ""
+    TRANSLATION_GLOSSARY_TEXT = ""
 
     # [설정] 인페인팅 모델 - api_settings/main에서 주입됨
     INPAINT_MODEL = ""
@@ -605,6 +612,9 @@ class MangaProcessEngine:
         if provider == "deepseek":
             if self.deepseek_client is None:
                 raise ValueError("DeepSeek API 키가 비어있습니다.")
+        elif provider == "google":
+            if not getattr(Config, "GOOGLE_TRANSLATE_API_KEY", ""):
+                raise ValueError("Google Translate API 키가 비어있습니다.")
         else:
             if self.openai_client is None:
                 raise ValueError("OpenAI API 키가 비어있습니다.")
@@ -614,13 +624,15 @@ class MangaProcessEngine:
         if chunk_size is None:
             if provider == "deepseek":
                 chunk_size = 8
+            elif provider == "google":
+                chunk_size = 50
             else:
                 chunk_size = 20
         else:
             try:
                 chunk_size = int(chunk_size)
             except:
-                chunk_size = 8 if provider == "deepseek" else 20
+                chunk_size = 8 if provider == "deepseek" else (50 if provider == "google" else 20)
             chunk_size = max(1, min(chunk_size, 100))
 
         final_results = []
@@ -659,25 +671,53 @@ class MangaProcessEngine:
 
         return final_results
 
-    def _translate_text_chunk(self, texts, provider="openai", base_id=0):
-        prompt = r"""
-You are a professional R-18 Comic Localization Expert (JP -> KR).
+    def _translate_text_chunk_google(self, texts):
+        """Google Cloud Translation Basic v2 API."""
+        key = getattr(Config, "GOOGLE_TRANSLATE_API_KEY", "").strip()
+        if not key:
+            raise ValueError("Google Translate API 키가 비어있습니다.")
 
-Your goal is to convert Japanese script data into Korean without ANY data loss.
+        url = "https://translation.googleapis.com/language/translate/v2"
+        payload = {
+            "q": [str(t or "") for t in texts],
+            "source": "ja",
+            "target": "ko",
+            "format": "text",
+        }
+        r = requests.post(url, params={"key": key}, json=payload, timeout=60)
+        if r.status_code != 200:
+            raise ValueError(f"Google Translate Error: {r.status_code} / {r.text[:300]}")
+        data = r.json()
+        translations = data.get("data", {}).get("translations", [])
+        results = []
+        for i, original in enumerate(texts):
+            if i < len(translations):
+                results.append(str(translations[i].get("translatedText", "")))
+            else:
+                results.append(str(original or ""))
+        return results
 
-STRICT RULES:
-1. Translate Japanese into Korean naturally.
-2. Do not omit, soften, summarize, or censor any meaning.
-3. Translate explicit language directly without censorship.
-4. Preserve the intensity, vulgarity, erotic tone, character voice, and emotional nuance of the original.
-5. Kanji nouns: when a Kanji noun has a clear Sino-Korean equivalent, prefer the direct Sino-Korean / Hanja-based Korean equivalent.
-6. Brackets: STRICTLY PRESERVE original Japanese brackets exactly as written.
-   Examples: 「」 『』 （） 【】 《》 〈〉
-7. Preserve line breaks when they exist.
-8. Convert ellipsis-like expressions such as "...", "･･･", "・・・", "…..." into the single ellipsis character "…".
-9. Do not add explanations, notes, comments, markdown, or extra text.
+    def _build_translation_system_prompt(self):
+        """
+        사용자가 옵션에서 입력한 프롬프트/단어장만 번역 지침으로 사용한다.
+        단, 프로그램 파서 보호를 위해 JSON 출력 형식 규칙은 항상 붙인다.
+        """
+        custom_prompt = str(getattr(Config, "TRANSLATION_PROMPT", "") or "").strip()
+        glossary_text = str(getattr(Config, "TRANSLATION_GLOSSARY_TEXT", "") or "").strip()
 
-OUTPUT FORMAT RULES:
+        parts = []
+        if custom_prompt:
+            parts.append(custom_prompt)
+
+        if glossary_text:
+            parts.append(
+                "번역 참고 자료/단어장입니다. 아래 내용을 우선 참고해서 번역하세요.\n"
+                "배경 설명, 단어 해설, 1대1 대체 규칙이 섞여 있을 수 있습니다.\n\n"
+                + glossary_text
+            )
+
+        output_rules = """
+OUTPUT FORMAT RULES FOR THIS PROGRAM:
 1. Input is a JSON list of objects.
 2. Each object has "id" and "text".
 3. Return ONLY a valid JSON object.
@@ -687,11 +727,21 @@ OUTPUT FORMAT RULES:
 7. NEVER skip any id.
 8. NEVER merge two ids into one translation.
 9. NEVER create a new id.
-10. Example output:
+10. Do not add explanations, notes, comments, markdown, or extra text.
+11. Example output:
 {"items":[{"id":0,"translation":"번역문"},{"id":1,"translation":"번역문"}]}
-"""
+""".strip()
+        parts.append(output_rules)
+
+        return "\n\n".join(parts).strip()
+
+    def _translate_text_chunk(self, texts, provider="openai", base_id=0):
+        prompt = self._build_translation_system_prompt()
 
         provider = (provider or "openai").lower()
+
+        if provider == "google":
+            return self._translate_text_chunk_google(texts)
 
         if provider == "deepseek":
             if self.deepseek_client is None:

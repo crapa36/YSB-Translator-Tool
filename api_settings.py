@@ -17,9 +17,11 @@ class ApiSettings:
     clova_secret_key: str = ""
     openai_api_key: str = ""
     deepseek_api_key: str = ""
+    google_translate_api_key: str = ""
     replicate_api_token: str = ""
     openai_model: str = "gpt-4o-mini"
     deepseek_model: str = "deepseek-v4-flash"
+    google_translate_model: str = "google_translate_basic_v2"
     repaint_model: str = "allenhooo/lama:cdac78a1bec5b23c07fd29692fb70baa513ea403a39e643c48ec5edadb15fe72"
 
 
@@ -58,9 +60,11 @@ def apply_settings_to_config(settings: ApiSettings):
         Config.CLOVA_SECRET_KEY = settings.clova_secret_key.strip()
         Config.OPENAI_API_KEY = settings.openai_api_key.strip()
         Config.DEEPSEEK_API_KEY = settings.deepseek_api_key.strip()
+        Config.GOOGLE_TRANSLATE_API_KEY = settings.google_translate_api_key.strip()
         Config.REPLICATE_API_TOKEN = settings.replicate_api_token.strip()
         Config.OPENAI_TRANSLATION_MODEL = settings.openai_model.strip() or "gpt-4o-mini"
         Config.DEEPSEEK_TRANSLATION_MODEL = settings.deepseek_model.strip() or "deepseek-v4-flash"
+        Config.GOOGLE_TRANSLATE_MODEL = settings.google_translate_model.strip() or "google_translate_basic_v2"
         Config.INPAINT_MODEL = settings.repaint_model.strip()
         Config.REPAINT_MODEL = Config.INPAINT_MODEL  # 구버전 호환
 
@@ -97,9 +101,11 @@ class ApiSettingsDialog(QDialog):
             ("CLOVA SECRET KEY", "clova_secret_key", True),
             ("OpenAI API Key", "openai_api_key", True),
             ("DeepSeek API Key", "deepseek_api_key", True),
+            ("Google Translate API Key", "google_translate_api_key", True),
             ("Replicate API Token", "replicate_api_token", True),
             ("OpenAI 번역 모델", "openai_model", False),
             ("DeepSeek 번역 모델", "deepseek_model", False),
+            ("Google Translate 모델", "google_translate_model", False),
             ("인페인팅 모델", "repaint_model", False),
         ]
 
@@ -110,6 +116,8 @@ class ApiSettingsDialog(QDialog):
             edit.setText(str(data.get(key, "")))
             if key == "repaint_model":
                 edit.setPlaceholderText("owner/model:version 형식의 Replicate 모델명")
+            elif key == "google_translate_model":
+                edit.setPlaceholderText("기본값: google_translate_basic_v2")
             elif key in ("openai_model", "deepseek_model"):
                 edit.setPlaceholderText("사용할 모델명을 입력")
             if secret:
@@ -136,7 +144,7 @@ class ApiSettingsDialog(QDialog):
         layout.addWidget(buttons)
 
     def toggle_key_visibility(self, checked: bool):
-        secret_keys = ["clova_secret_key", "openai_api_key", "deepseek_api_key", "replicate_api_token"]
+        secret_keys = ["clova_secret_key", "openai_api_key", "deepseek_api_key", "google_translate_api_key", "replicate_api_token"]
         for key in secret_keys:
             self.edits[key].setEchoMode(
                 QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password

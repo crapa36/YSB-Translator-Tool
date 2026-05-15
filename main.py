@@ -1,5 +1,7 @@
 import sys
 import os
+import shutil
+import uuid
 from pathlib import Path
 
 import copy
@@ -19,7 +21,7 @@ from viewer import MuleImageViewer
 from graphics_items import TypesettingItem
 from delegates import MultilineDelegate
 from workers import UniversalBatchWorker, AnalysisWorker, InpaintWorker
-from cache_utils import get_cache_dir
+from cache_utils import get_cache_dir, get_cache_file
 
 
 def resource_path(relative_path):
@@ -44,6 +46,56 @@ def close_pyinstaller_boot_splash():
         pyi_splash.close()
     except Exception:
         pass
+
+
+APP_OPTIONS_FILE = get_cache_file("app_options.json")
+TRANSLATION_PROMPT_KEY = "translation_prompt"
+TRANSLATION_GLOSSARY_TEXT_KEY = "translation_glossary_text"
+TRANSLATION_GLOSSARY_PATH_KEY = "translation_glossary_path"
+
+
+def read_text_file_for_cache(path):
+    """TXT 단어장/참고자료를 가능한 한 안전하게 읽는다."""
+    encodings = ("utf-8-sig", "utf-8", "cp949", "euc-kr")
+    last_error = None
+    for enc in encodings:
+        try:
+            with open(path, "r", encoding=enc) as f:
+                return f.read()
+        except UnicodeDecodeError as e:
+            last_error = e
+        except Exception:
+            raise
+    # 그래도 실패하면 치환 문자로라도 읽는다.
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            return f.read()
+    except Exception:
+        if last_error:
+            raise last_error
+        raise
+
+
+def load_app_options():
+    try:
+        if APP_OPTIONS_FILE.exists():
+            with open(APP_OPTIONS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def save_app_options(options):
+    try:
+        APP_OPTIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(APP_OPTIONS_FILE, "w", encoding="utf-8") as f:
+            json.dump(dict(options or {}), f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
 
 
 class YSBSplashScreen(QSplashScreen):
@@ -275,6 +327,156 @@ class TextTableWidget(QTableWidget):
         self.rowsReordered.emit()
 
 
+class TranslationPromptDialog(QDialog):
+    """AI 번역 프롬프트 입력/수정 창."""
+
+    def __init__(self, prompt_text="", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("번역 프롬프트 입력")
+        self.resize(760, 520)
+
+        layout = QVBoxLayout(self)
+
+        info = QLabel(
+            "AI 번역 API에 함께 전달할 프롬프트를 입력합니다.\n"
+            "확인을 누르면 옵션 캐시에 저장되고, 닫기를 누르면 저장하지 않고 나갑니다."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        self.text_edit = QTextEdit()
+        self.text_edit.setPlainText(str(prompt_text or ""))
+        self.text_edit.setPlaceholderText("예: 일본어를 한국어로 자연스럽게 번역해줘. 캐릭터 말투와 줄바꿈을 유지해줘.")
+        layout.addWidget(self.text_edit, 1)
+
+        buttons = QDialogButtonBox()
+        buttons.addButton("확인", QDialogButtonBox.ButtonRole.AcceptRole)
+        buttons.addButton("닫기", QDialogButtonBox.ButtonRole.RejectRole)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def get_prompt_text(self):
+        return self.text_edit.toPlainText()
+
+
+class GlossaryDialog(QDialog):
+    """번역 참고용 TXT 단어장 캐시 관리 창."""
+
+    def __init__(self, glossary_text="", glossary_path="", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("단어장")
+        self.resize(760, 520)
+
+        self.glossary_text = str(glossary_text or "")
+        self.glossary_path = str(glossary_path or "")
+        self.changed = False
+
+        layout = QVBoxLayout(self)
+
+        info = QLabel(
+            "번역 참고 자료로 사용할 TXT 파일을 캐시에 저장합니다.\n"
+            "배경 설명, 단어 해설, 1대1 대체 규칙 등을 넣어둘 수 있습니다."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        self.status_label = QLabel()
+        self.status_label.setWordWrap(True)
+        layout.addWidget(self.status_label)
+
+        self.preview = QTextEdit()
+        self.preview.setReadOnly(True)
+        self.preview.setPlaceholderText("아직 불러온 단어장이 없습니다.")
+        layout.addWidget(self.preview, 1)
+
+        top_buttons = QHBoxLayout()
+        self.btn_load = QPushButton("불러오기")
+        self.btn_refresh = QPushButton("갱신")
+        self.btn_reset = QPushButton("초기화")
+        top_buttons.addWidget(self.btn_load)
+        top_buttons.addWidget(self.btn_refresh)
+        top_buttons.addWidget(self.btn_reset)
+        top_buttons.addStretch()
+        layout.addLayout(top_buttons)
+
+        bottom_buttons = QDialogButtonBox()
+        bottom_buttons.addButton("닫기", QDialogButtonBox.ButtonRole.RejectRole)
+        bottom_buttons.rejected.connect(self.reject)
+        layout.addWidget(bottom_buttons)
+
+        self.btn_load.clicked.connect(self.load_glossary_file)
+        self.btn_refresh.clicked.connect(self.refresh_glossary_file)
+        self.btn_reset.clicked.connect(self.reset_glossary)
+
+        self.refresh_preview()
+
+    def refresh_preview(self):
+        text = self.glossary_text or ""
+        path = self.glossary_path or ""
+        if text:
+            path_text = path if path else "캐시에만 저장됨"
+            self.status_label.setText(f"현재 단어장: {path_text}\n글자 수: {len(text):,}자")
+            self.preview.setPlainText(text)
+        else:
+            self.status_label.setText("현재 단어장: 없음")
+            self.preview.clear()
+
+    def load_glossary_file(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "단어장 TXT 불러오기",
+            self.glossary_path or "",
+            "Text Files (*.txt);;All Files (*)"
+        )
+        if not path:
+            return
+        try:
+            text = read_text_file_for_cache(path)
+        except Exception as e:
+            QMessageBox.critical(self, "불러오기 실패", f"TXT 파일을 읽지 못했습니다:\n{e}")
+            return
+        self.glossary_path = path
+        self.glossary_text = text
+        self.changed = True
+        self.refresh_preview()
+        QMessageBox.information(self, "불러오기 완료", "단어장을 캐시에 반영했습니다. 닫기를 누르면 유지됩니다.")
+
+    def refresh_glossary_file(self):
+        if not self.glossary_path:
+            QMessageBox.information(self, "갱신할 파일 없음", "먼저 불러오기로 TXT 파일을 선택해주세요.")
+            return
+        if not os.path.exists(self.glossary_path):
+            QMessageBox.warning(self, "파일 없음", "기존 TXT 파일 경로를 찾을 수 없습니다. 다시 불러오기를 해주세요.")
+            return
+        try:
+            text = read_text_file_for_cache(self.glossary_path)
+        except Exception as e:
+            QMessageBox.critical(self, "갱신 실패", f"TXT 파일을 다시 읽지 못했습니다:\n{e}")
+            return
+        self.glossary_text = text
+        self.changed = True
+        self.refresh_preview()
+        QMessageBox.information(self, "갱신 완료", "기존 TXT 파일 내용으로 단어장 캐시를 갱신했습니다.")
+
+    def reset_glossary(self):
+        ans = QMessageBox.question(
+            self,
+            "단어장 초기화",
+            "저장된 단어장 캐시를 지울까요?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        self.glossary_text = ""
+        self.glossary_path = ""
+        self.changed = True
+        self.refresh_preview()
+
+    def get_glossary_state(self):
+        return self.glossary_text, self.glossary_path, self.changed
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -296,6 +498,19 @@ class MainWindow(QMainWindow):
         self.project_dir = None
         self.is_loading_project = False
         self.is_autosaving = False
+
+        self.app_options = load_app_options()
+        self.sync_translation_option_cache_to_config()
+
+        # 저장본/작업 캐시 분리
+        # auto_save_enabled=True  : 변경 즉시 실제 project.json에 저장
+        # auto_save_enabled=False : 변경은 작업 캐시에만 저장하고, 프로젝트 저장 버튼으로만 확정
+        self.auto_save_enabled = bool(self.app_options.get("auto_save_enabled", False))
+        self.analysis_number_box_width = int(self.app_options.get("analysis_number_box_width", 40) or 40)
+        self.work_project_store = None
+        self.work_project_dir = None
+        self.has_unsaved_changes = False
+        self._closing_confirmed = False
 
         # 일괄 작업/페이지 로딩 중에는 화면에 남아 있는 마스크를
         # 현재 페이지 데이터에 자동 저장하면 안 된다.
@@ -399,11 +614,11 @@ class MainWindow(QMainWindow):
         make_action("work_page_prev", "이전 페이지", self.prev)
         make_action("work_page_next", "다음 페이지", self.next)
         make_action("work_analyze", "개별 분석", self.anal)
+        make_action("work_text_number_width", "텍스트 넘버 크기 변경", self.open_text_number_width_dialog)
         make_action("work_translate", "개별 번역", self.trans)
         make_action("work_inpaint", "개별 인페인팅", self.run_inpainting)
         make_action("work_inpaint_source", "인페인팅을 원본으로", self.use_inpainted_as_source)
         make_action("work_restore_original_source", "원본으로 돌아가기", self.restore_original_source)
-        make_action("work_refresh_text", "텍스트 강제 갱신", self.refresh_text_only)
         make_action("work_extract_text", "개별 지문 추출", self.extract_text_current)
         make_action("work_import_translation", "개별 번역문 불러오기", self.import_translation_current)
         make_action("work_clear_translation", "번역문 내용 지우기", self.clear_translation_current)
@@ -425,6 +640,18 @@ class MainWindow(QMainWindow):
         make_action("batch_clear_translation", "일괄 번역문 내용 지우기", self.clear_translation_batch)
         make_action("batch_clean_text", "일괄 텍스트 정리", self.clean_text_batch)
         make_action("batch_export", "일괄 출력", lambda: self.run_batch('export'))
+
+        # 옵션
+        self.act_auto_save_mode = make_action("option_auto_save_mode", "자동저장 모드", self.toggle_auto_save_mode)
+        self.act_auto_save_mode.setCheckable(True)
+        self.act_auto_save_mode.setChecked(self.auto_save_enabled)
+        make_action("option_api_settings", "API 관리", self.open_api_settings_dialog)
+        make_action("option_translation_prompt", "번역 프롬프트 입력", self.open_translation_prompt_dialog)
+        make_action("option_glossary", "단어장", self.open_glossary_dialog)
+        make_action("option_shortcut_settings", "단축키 통합 관리", self.open_shortcut_settings_dialog)
+        make_action("option_macro_settings", "매크로 관리", self.open_macro_settings_dialog)
+        make_action("option_text_preset_settings", "페이지 글꼴 프리셋 관리", self.open_text_preset_dialog)
+        make_action("option_item_text_preset_settings", "개별 글꼴 프리셋 관리", self.open_item_text_preset_dialog)
 
         # 토글/보조 작업
         make_action("paint_magic_fill", "마스킹 칠하기", self.fill_magic_wand_mask)
@@ -681,6 +908,7 @@ class MainWindow(QMainWindow):
         work_menu.addAction(self.actions["work_page_next"])
         work_menu.addSeparator()
         work_menu.addAction(self.actions["work_analyze"])
+        work_menu.addAction(self.actions["work_text_number_width"])
         work_menu.addAction(self.actions["work_translate"])
         work_menu.addAction(self.actions["work_inpaint"])
         work_menu.addAction(self.actions["work_inpaint_source"])
@@ -710,25 +938,15 @@ class MainWindow(QMainWindow):
 
         option_menu = menubar.addMenu("옵션")
 
-        act_api_settings = QAction("API 관리", self)
-        act_api_settings.triggered.connect(self.open_api_settings_dialog)
-        option_menu.addAction(act_api_settings)
-
-        act_shortcut_settings = QAction("단축키 통합 관리", self)
-        act_shortcut_settings.triggered.connect(self.open_shortcut_settings_dialog)
-        option_menu.addAction(act_shortcut_settings)
-
-        act_macro_settings = QAction("매크로 관리", self)
-        act_macro_settings.triggered.connect(self.open_macro_settings_dialog)
-        option_menu.addAction(act_macro_settings)
-
-        act_text_preset_settings = QAction("페이지 글꼴 프리셋 관리", self)
-        act_text_preset_settings.triggered.connect(self.open_text_preset_dialog)
-        option_menu.addAction(act_text_preset_settings)
-
-        act_item_text_preset_settings = QAction("개별 글꼴 프리셋 관리", self)
-        act_item_text_preset_settings.triggered.connect(self.open_item_text_preset_dialog)
-        option_menu.addAction(act_item_text_preset_settings)
+        option_menu.addAction(self.actions["option_auto_save_mode"])
+        option_menu.addSeparator()
+        option_menu.addAction(self.actions["option_api_settings"])
+        option_menu.addAction(self.actions["option_translation_prompt"])
+        option_menu.addAction(self.actions["option_glossary"])
+        option_menu.addAction(self.actions["option_shortcut_settings"])
+        option_menu.addAction(self.actions["option_macro_settings"])
+        option_menu.addAction(self.actions["option_text_preset_settings"])
+        option_menu.addAction(self.actions["option_item_text_preset_settings"])
 
     def setup_ui(self):
         w = QWidget()
@@ -916,10 +1134,23 @@ class MainWindow(QMainWindow):
 
         # Right Panel
         rp = QWidget()
+        rp.setMinimumWidth(720)
         rl = QVBoxLayout(rp)
         rl.setContentsMargins(6, 6, 6, 6)
         rl.setSpacing(4)
-        split.addWidget(rp)
+
+        self.right_panel = rp
+        self.right_scroll = QScrollArea()
+        self.right_scroll.setWidgetResizable(True)
+        self.right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.right_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.right_scroll.setMinimumWidth(260)
+        self.right_scroll.setWidget(rp)
+        split.addWidget(self.right_scroll)
+        split.setChildrenCollapsible(False)
+        split.setStretchFactor(0, 3)
+        split.setStretchFactor(1, 2)
+        split.setSizes([980, 620])
 
         # 글꼴 프리셋은 옵션 메뉴의 "글꼴 프리셋 관리"에서 다룬다.
         # 캐시/자동저장 로직 호환을 위해 컨트롤 객체는 숨겨 둔다.
@@ -1060,6 +1291,7 @@ class MainWindow(QMainWindow):
         self.cb_trans_provider = QComboBox()
         self.cb_trans_provider.addItem("OpenAI", "openai")
         self.cb_trans_provider.addItem("DeepSeek", "deepseek")
+        self.cb_trans_provider.addItem("Google", "google")
         self.cb_trans_provider.currentIndexChanged.connect(self.on_translation_provider_changed)
 
         self.sb_trans_chunk = QSpinBox()
@@ -5147,7 +5379,214 @@ class MainWindow(QMainWindow):
     # =========================================================
     # 프로젝트 저장 / 불러오기
     # =========================================================
+    def project_cache_root(self):
+        root = get_cache_dir() / "work_sessions"
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
+    def cleanup_work_cache(self):
+        if self.work_project_dir and os.path.exists(self.work_project_dir):
+            try:
+                shutil.rmtree(self.work_project_dir, ignore_errors=True)
+            except Exception:
+                pass
+        self.work_project_dir = None
+        self.work_project_store = None
+
+    def make_work_cache_dir(self):
+        if self.project_dir:
+            base = Path(self.project_dir).name
+        else:
+            base = "unsaved_project"
+        safe_base = "".join(c if c.isalnum() or c in ("_", "-", ".") else "_" for c in base)
+        return str(self.project_cache_root() / f"{safe_base}_{uuid.uuid4().hex[:10]}")
+
+    def start_work_cache_from_current(self, mark_dirty=False):
+        """현재 메모리 상태를 기준으로 새 작업 캐시를 만든다."""
+        if not self.project_dir or not self.paths:
+            return
+        old_cache = self.work_project_dir
+        cache_dir = self.make_work_cache_dir()
+
+        store = ProjectStore(cache_dir)
+        store.save(self.paths, self.data, self.idx)
+
+        # store.save()가 paths를 cache 내부 이미지 경로로 고정할 수 있으므로 이후 작업은 캐시 기준으로 돌아간다.
+        self.work_project_store = store
+        self.work_project_dir = cache_dir
+        self.has_unsaved_changes = bool(mark_dirty)
+
+        if old_cache and old_cache != cache_dir and os.path.exists(old_cache):
+            try:
+                shutil.rmtree(old_cache, ignore_errors=True)
+            except Exception:
+                pass
+
+        self.log(f"🧪 작업 캐시 시작: {cache_dir}")
+
+    def save_to_work_cache(self):
+        if not self.project_dir or not self.paths:
+            return
+        if self.work_project_store is None or not self.work_project_dir:
+            self.start_work_cache_from_current(mark_dirty=False)
+        if self.work_project_store is None:
+            return
+        self.work_project_store.save(self.paths, self.data, self.idx)
+        self.has_unsaved_changes = True
+
+    def mark_saved_state(self):
+        self.has_unsaved_changes = False
+
+    def save_app_options_cache(self):
+        self.app_options["auto_save_enabled"] = bool(self.auto_save_enabled)
+        self.app_options["analysis_number_box_width"] = int(getattr(self, "analysis_number_box_width", 40))
+        self.app_options.setdefault(TRANSLATION_PROMPT_KEY, "")
+        self.app_options.setdefault(TRANSLATION_GLOSSARY_TEXT_KEY, "")
+        self.app_options.setdefault(TRANSLATION_GLOSSARY_PATH_KEY, "")
+        save_app_options(self.app_options)
+
+    def sync_translation_option_cache_to_config(self):
+        """옵션 캐시에 저장된 번역 프롬프트/단어장을 번역 엔진 Config에 반영한다."""
+        try:
+            Config.TRANSLATION_PROMPT = str(self.app_options.get(TRANSLATION_PROMPT_KEY, "") or "")
+            Config.TRANSLATION_GLOSSARY_TEXT = str(self.app_options.get(TRANSLATION_GLOSSARY_TEXT_KEY, "") or "")
+        except Exception:
+            pass
+
+    def reload_saved_project_from_disk(self, refresh_view=True):
+        """실제 프로젝트 저장본을 다시 로드해서 paths를 프로젝트 폴더 기준으로 되돌린다."""
+        if not self.project_dir:
+            return False
+        project_file = os.path.join(self.project_dir, PROJECT_FILENAME)
+        if not os.path.exists(project_file):
+            return False
+
+        self.is_loading_project = True
+        try:
+            store = ProjectStore()
+            self.paths, self.data, self.idx = store.load(project_file)
+            self.project_store = store
+            self.project_dir = store.project_dir
+            if refresh_view:
+                self.reset_mode_to_original()
+                self.load()
+            return True
+        finally:
+            self.is_loading_project = False
+
+    def commit_to_real_project_only(self):
+        """작업 캐시 상태를 실제 프로젝트에 저장하되, 새 작업 캐시는 만들지 않는다."""
+        if not self.project_dir or not self.paths:
+            return False
+        self.commit_current_page_ui_to_data()
+        self.project_store.save(self.paths, self.data, self.idx)
+        self.mark_saved_state()
+        return True
+
+    def toggle_auto_save_mode(self, checked):
+        checked = bool(checked)
+
+        if checked:
+            if self.has_unsaved_changes:
+                ans = QMessageBox.question(
+                    self,
+                    "자동저장 전환",
+                    "저장하지 않은 작업이 있습니다.\n현재 작업 캐시를 프로젝트에 저장하고 자동저장 모드로 전환할까요?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if ans != QMessageBox.StandardButton.Yes:
+                    self.act_auto_save_mode.blockSignals(True)
+                    self.act_auto_save_mode.setChecked(False)
+                    self.act_auto_save_mode.blockSignals(False)
+                    return
+                if not self.commit_to_real_project_only():
+                    self.act_auto_save_mode.blockSignals(True)
+                    self.act_auto_save_mode.setChecked(False)
+                    self.act_auto_save_mode.blockSignals(False)
+                    return
+
+            # 핵심: 자동저장 ON에서는 paths가 실제 프로젝트 폴더를 가리켜야 한다.
+            # OFF 캐시를 삭제하기 전에 저장본을 다시 로드해서 캐시 경로 의존을 끊는다.
+            self.auto_save_enabled = True
+            self.save_app_options_cache()
+            self.reload_saved_project_from_disk(refresh_view=True)
+            self.cleanup_work_cache()
+            self.mark_saved_state()
+            self.log("💾 자동저장 모드 ON: 변경 사항이 실제 프로젝트에 바로 저장됩니다.")
+        else:
+            self.auto_save_enabled = False
+            self.save_app_options_cache()
+            # 이후 변경은 작업 캐시에만 저장한다.
+            if self.project_dir and self.paths:
+                self.start_work_cache_from_current(mark_dirty=False)
+            self.log("🧪 자동저장 모드 OFF: 변경 사항은 작업 캐시에만 저장됩니다.")
+
+    def confirm_unsaved_before_switch(self):
+        if not self.has_unsaved_changes:
+            return True
+
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Icon.Warning)
+        msg.setWindowTitle("저장하지 않은 작업")
+        msg.setText("저장하지 않은 작업이 있습니다.")
+        msg.setInformativeText("현재 프로젝트를 닫기 전에 저장할까요?")
+        btn_save = msg.addButton("저장", QMessageBox.ButtonRole.AcceptRole)
+        btn_discard = msg.addButton("저장 안 함", QMessageBox.ButtonRole.DestructiveRole)
+        btn_cancel = msg.addButton("취소", QMessageBox.ButtonRole.RejectRole)
+        msg.setDefaultButton(btn_save)
+        msg.exec()
+
+        clicked = msg.clickedButton()
+        if clicked == btn_save:
+            self.save_project()
+            return not self.has_unsaved_changes
+        if clicked == btn_discard:
+            self.cleanup_work_cache()
+            self.has_unsaved_changes = False
+            return True
+        return False
+
+    def closeEvent(self, event):
+        if self._closing_confirmed:
+            event.accept()
+            return
+
+        if self.has_unsaved_changes:
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Icon.Warning)
+            msg.setWindowTitle("저장하지 않은 작업")
+            msg.setText("저장하지 않은 작업이 있습니다.")
+            msg.setInformativeText("종료하기 전에 프로젝트를 저장할까요?")
+            btn_save = msg.addButton("저장", QMessageBox.ButtonRole.AcceptRole)
+            btn_discard = msg.addButton("저장 안 함", QMessageBox.ButtonRole.DestructiveRole)
+            btn_cancel = msg.addButton("취소", QMessageBox.ButtonRole.RejectRole)
+            msg.setDefaultButton(btn_save)
+            msg.exec()
+
+            clicked = msg.clickedButton()
+            if clicked == btn_cancel:
+                event.ignore()
+                return
+            if clicked == btn_save:
+                self.save_project()
+                if self.has_unsaved_changes:
+                    event.ignore()
+                    return
+            elif clicked == btn_discard:
+                self.cleanup_work_cache()
+                self.has_unsaved_changes = False
+        else:
+            # 정상 종료 시 남은 작업 캐시는 삭제한다.
+            self.cleanup_work_cache()
+
+        self._closing_confirmed = True
+        event.accept()
+
     def new_project_from_images(self):
+        if not self.confirm_unsaved_before_switch():
+            return
+
         source_paths, _ = QFileDialog.getOpenFileNames(
             self,
             "프로젝트에 넣을 이미지 선택",
@@ -5186,10 +5625,16 @@ class MainWindow(QMainWindow):
         self.idx = 0
         self.is_loading_project = False
         self.log(f"📁 새 프로젝트 생성: {project_dir}")
+        self.mark_saved_state()
+        if not self.auto_save_enabled:
+            self.start_work_cache_from_current(mark_dirty=False)
         self.reset_mode_to_original()
         self.load()
 
     def open_project(self):
+        if not self.confirm_unsaved_before_switch():
+            return
+
         project_dir = QFileDialog.getExistingDirectory(self, "프로젝트 폴더 선택")
         if not project_dir:
             return
@@ -5209,6 +5654,9 @@ class MainWindow(QMainWindow):
             self.project_store = ProjectStore()
             self.paths, self.data, self.idx = self.project_store.load(project_file)
             self.project_dir = self.project_store.project_dir
+            self.mark_saved_state()
+            if not self.auto_save_enabled:
+                self.start_work_cache_from_current(mark_dirty=False)
             self.log(f"📂 프로젝트 열림: {project_dir}")
             self.reset_mode_to_original()
             self.load()
@@ -5222,7 +5670,15 @@ class MainWindow(QMainWindow):
 
         self.commit_current_page_ui_to_data()
         self.project_store.save(self.paths, self.data, self.idx)
+        self.mark_saved_state()
         self.log("💾 프로젝트 저장 완료")
+
+        # 자동저장 OFF에서는 저장본을 다시 로드한 뒤, 새 작업 캐시를 기준으로 이어간다.
+        if not self.auto_save_enabled:
+            self.reload_saved_project_from_disk(refresh_view=False)
+            self.start_work_cache_from_current(mark_dirty=False)
+            if self.cb_mode.currentIndex() >= 0:
+                self.load()
 
     def save_project_as(self):
         if not self.paths:
@@ -5255,7 +5711,11 @@ class MainWindow(QMainWindow):
         self.project_store = ProjectStore(project_dir)
         self.project_dir = project_dir
         self.project_store.save(self.paths, self.data, self.idx)
+        self.mark_saved_state()
         self.log(f"💾 다른 이름으로 저장 완료: {project_dir}")
+        self.reload_saved_project_from_disk(refresh_view=False)
+        if not self.auto_save_enabled:
+            self.start_work_cache_from_current(mark_dirty=False)
         self.load()
 
     def auto_save_project(self):
@@ -5265,7 +5725,11 @@ class MainWindow(QMainWindow):
             return
         self.is_autosaving = True
         try:
-            self.project_store.save(self.paths, self.data, self.idx)
+            if self.auto_save_enabled:
+                self.project_store.save(self.paths, self.data, self.idx)
+                self.has_unsaved_changes = False
+            else:
+                self.save_to_work_cache()
         finally:
             self.is_autosaving = False
 
@@ -5572,7 +6036,8 @@ class MainWindow(QMainWindow):
 
     def on_translation_provider_changed(self):
         provider = self.cb_trans_provider.currentData() or "openai"
-        value = self.trans_chunk_sizes.get(provider, 8 if provider == "deepseek" else 20)
+        default_value = 8 if provider == "deepseek" else (50 if provider == "google" else 20)
+        value = self.trans_chunk_sizes.get(provider, default_value)
 
         self.sb_trans_chunk.blockSignals(True)
         try:
@@ -5587,6 +6052,56 @@ class MainWindow(QMainWindow):
     def get_current_translation_chunk_size(self):
         provider = self.cb_trans_provider.currentData() or "openai"
         return int(self.trans_chunk_sizes.get(provider, self.sb_trans_chunk.value()))
+
+    def open_text_number_width_dialog(self):
+        """분석도 노란 텍스트 번호 박스 너비를 즉시 조정한다."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("텍스트 넘버 크기 변경")
+        dlg.resize(360, 120)
+
+        layout = QVBoxLayout(dlg)
+        info = QLabel("분석도에 표시되는 노란 텍스트 번호 박스의 너비값을 조정합니다.")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        line = QHBoxLayout()
+        line.addWidget(QLabel("너비값"))
+        spin = QSpinBox()
+        spin.setRange(20, 300)
+        spin.setValue(int(getattr(self, "analysis_number_box_width", 40)))
+        spin.setSuffix(" px")
+        spin.setKeyboardTracking(True)
+        spin.selectAll()
+        line.addWidget(spin, 1)
+        layout.addLayout(line)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        layout.addWidget(buttons)
+
+        old_value = int(getattr(self, "analysis_number_box_width", 40))
+
+        def apply_value(value):
+            self.analysis_number_box_width = int(value)
+            self.save_app_options_cache()
+            if self.cb_mode.currentIndex() == 1:
+                self.mode_chg(1)
+
+        spin.valueChanged.connect(apply_value)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+
+        spin.setFocus()
+        spin.selectAll()
+
+        result = dlg.exec()
+        if result != QDialog.DialogCode.Accepted:
+            self.analysis_number_box_width = old_value
+            self.save_app_options_cache()
+            if self.cb_mode.currentIndex() == 1:
+                self.mode_chg(1)
+        else:
+            apply_value(spin.value())
+            self.log(f"🔢 텍스트 넘버 박스 너비 변경: {spin.value()}px")
 
     def open_shortcut_settings_dialog(self):
         dlg = ShortcutSettingsDialog(self.shortcut_settings, self)
@@ -5829,8 +6344,42 @@ class MainWindow(QMainWindow):
         self.api_settings = dlg.get_settings()
         ApiSettingsStore.save(self.api_settings)
         apply_settings_to_config(self.api_settings)
+        self.sync_translation_option_cache_to_config()
         self.restart_engine(show_error=True)
         self.log("🔑 API 설정 캐시 저장 완료")
+
+    def open_translation_prompt_dialog(self):
+        old_prompt = str(self.app_options.get(TRANSLATION_PROMPT_KEY, "") or "")
+        dlg = TranslationPromptDialog(old_prompt, self)
+        if not dlg.exec():
+            self.log("↩️ 번역 프롬프트 저장 취소")
+            return
+
+        new_prompt = dlg.get_prompt_text()
+        self.app_options[TRANSLATION_PROMPT_KEY] = new_prompt
+        self.save_app_options_cache()
+        self.sync_translation_option_cache_to_config()
+        self.log(f"📝 번역 프롬프트 캐시 저장 완료 ({len(new_prompt):,}자)")
+
+    def open_glossary_dialog(self):
+        old_text = str(self.app_options.get(TRANSLATION_GLOSSARY_TEXT_KEY, "") or "")
+        old_path = str(self.app_options.get(TRANSLATION_GLOSSARY_PATH_KEY, "") or "")
+        dlg = GlossaryDialog(old_text, old_path, self)
+        dlg.exec()
+
+        new_text, new_path, changed = dlg.get_glossary_state()
+        if not changed:
+            return
+
+        self.app_options[TRANSLATION_GLOSSARY_TEXT_KEY] = new_text
+        self.app_options[TRANSLATION_GLOSSARY_PATH_KEY] = new_path
+        self.save_app_options_cache()
+        self.sync_translation_option_cache_to_config()
+
+        if new_text:
+            self.log(f"📚 단어장 캐시 저장 완료 ({len(new_text):,}자)")
+        else:
+            self.log("📚 단어장 캐시 초기화 완료")
 
     def push_magic_wand_history(self):
         mask = self.magic_wand_mask.copy() if isinstance(self.magic_wand_mask, np.ndarray) else None
@@ -6439,6 +6988,17 @@ class MainWindow(QMainWindow):
             if not self.engine or self.engine.deepseek_client is None:
                 msg = "DeepSeek API 키가 비어있습니다.\n옵션 > API 관리에서 DeepSeek API Key를 입력해주세요."
                 self.log("❌ DeepSeek API 키가 비어있습니다.")
+                QMessageBox.critical(self, "API 키 없음", msg)
+                return False
+        elif provider == "google":
+            try:
+                from manga_engine import Config
+                ok = bool(getattr(Config, "GOOGLE_TRANSLATE_API_KEY", "").strip())
+            except Exception:
+                ok = False
+            if not ok:
+                msg = "Google Translate API 키가 비어있습니다.\n옵션 > API 관리에서 Google Translate API Key를 입력해주세요."
+                self.log("❌ Google Translate API 키가 비어있습니다.")
                 QMessageBox.critical(self, "API 키 없음", msg)
                 return False
         else:

@@ -248,7 +248,9 @@ class MuleImageViewer(QGraphicsView):
 
 
     def draw_static_boxes(self, data):
-        font = QFont("Arial", 16, QFont.Weight.Bold)
+        base_w = int(getattr(self.main, "analysis_number_box_width", 40) or 40)
+        font_size = max(8, int(base_w * 0.40))
+        font = QFont("Arial", font_size, QFont.Weight.Bold)
 
         visible_items = [d for d in data]
         total_items = len(visible_items)
@@ -269,8 +271,9 @@ class MuleImageViewer(QGraphicsView):
             self.scene.addItem(rect_item)
 
             id_str = str(d.get('id', ''))
-            bg_w = 40 + (len(id_str) - 1) * 16
-            bg_h = 36
+            base_w = int(getattr(self.main, "analysis_number_box_width", 40) or 40)
+            bg_w = max(20, base_w + (len(id_str) - 1) * max(8, int(base_w * 0.4)))
+            bg_h = max(18, int(base_w * 0.9))
 
             bx, by = x, y - bg_h
             if by < 0:
