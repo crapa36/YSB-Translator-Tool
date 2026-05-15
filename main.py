@@ -22,10 +22,255 @@ from workers import UniversalBatchWorker, AnalysisWorker, InpaintWorker
 from cache_utils import get_cache_dir
 
 
+def resource_path(relative_path):
+    """
+    일반 실행 / PyInstaller --onedir / PyInstaller --onefile 모두에서
+    포함 리소스 파일 경로를 안정적으로 찾는다.
+    """
+    if hasattr(sys, "_MEIPASS"):
+        return str(Path(sys._MEIPASS) / relative_path)
+    return str(Path(__file__).parent / relative_path)
+
+
+def close_pyinstaller_boot_splash():
+    """
+    PyInstaller --splash로 뜬 부트로더 스플래시를 닫는다.
+    이 화면은 EXE 압축 해제 중에 먼저 뜨고,
+    파이썬 코드가 시작되면 여기서 닫은 뒤 Qt 진행바 스플래시로 넘긴다.
+    """
+    try:
+        import pyi_splash
+        pyi_splash.update_text("인터페이스 로딩 중...")
+        pyi_splash.close()
+    except Exception:
+        pass
+
+
+class YSBSplashScreen(QSplashScreen):
+    """
+    로고 하단에 진행바를 직접 그리는 스플래시 화면.
+    실제 로딩 퍼센트라기보다 앱 초기화 단계에 맞춘 stage progress 개념이다.
+    """
+    def __init__(self, pixmap):
+        super().__init__(pixmap, Qt.WindowType.WindowStaysOnTopHint)
+        self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        self._progress = 0
+        self._message = "로딩 중..."
+        self._timer = QTimer(self)
+        self._timer.setInterval(90)
+        self._timer.timeout.connect(self._tick_progress)
+
+    def start(self):
+        self._timer.start()
+
+    def stop(self):
+        self._timer.stop()
+
+    def _tick_progress(self):
+        # 실제 로딩이 끝나기 전엔 90%까지만 자동 진행
+        if self._progress < 90:
+            self._progress += 1
+            self.update()
+
+    def set_progress(self, value, message=None):
+        self._progress = max(0, min(100, int(value)))
+        if message is not None:
+            self._message = str(message)
+        self.update()
+        QApplication.processEvents()
+
+    def drawContents(self, painter):
+        # 바닥 진행바 영역
+        margin_x = 36
+        bar_h = 18
+        y = self.pixmap().height() - 42
+        bar_rect = QRect(margin_x, y, self.pixmap().width() - margin_x * 2, bar_h)
+
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        # 배경 바
+        painter.setPen(QPen(QColor(30, 30, 30, 210), 1))
+        painter.setBrush(QColor(20, 20, 20, 200))
+        painter.drawRoundedRect(bar_rect, 8, 8)
+
+        # 진행 채움
+        fill_w = int((bar_rect.width() - 4) * (self._progress / 100.0))
+        if fill_w > 0:
+            fill_rect = QRect(bar_rect.x() + 2, bar_rect.y() + 2, fill_w, bar_rect.height() - 4)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(255, 40, 40, 235))
+            painter.drawRoundedRect(fill_rect, 6, 6)
+
+        # 메시지 / 퍼센트
+        text_rect = QRect(margin_x, y - 24, self.pixmap().width() - margin_x * 2, 20)
+        painter.setPen(QColor(245, 245, 245))
+        font = QFont("맑은 고딕", 10)
+        painter.setFont(font)
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, self._message)
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, f"{self._progress}%")
+
+def make_splash_screen():
+    """
+    앱 초기화 중 표시할 500x500 스플래시 화면.
+    PyInstaller --onefile 압축 해제 시간은 파이썬 코드 실행 전이라 표시되지 않고,
+    QApplication 생성 이후 초기화 구간부터 표시된다.
+    """
+    pix = QPixmap(resource_path("ysb_splash.png"))
+    if pix.isNull():
+        return None
+
+    pix = pix.scaled(
+        500,
+        500,
+        Qt.AspectRatioMode.KeepAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+
+    splash = YSBSplashScreen(pix)
+    splash.resize(pix.size())
+
+    screen = QApplication.primaryScreen()
+    if screen:
+        geo = screen.availableGeometry()
+        splash.move(geo.center() - splash.rect().center())
+
+    splash.show()
+    splash.start()
+    splash.set_progress(35, "압축 해제 완료 · 인터페이스 로딩 중...")
+    return splash
+
+
+class InlineTextEditItem(QGraphicsTextItem):
+    """최종 화면에서 더블클릭으로 직접 수정하는 임시 텍스트 편집기."""
+
+    def __init__(self, main_window, target_item, scene_rect):
+        super().__init__()
+        self.main_window = main_window
+        self.target_item = target_item
+        self._closing = False
+        self._adjusting = False
+
+        d = target_item.data
+        self.original_text = str(d.get('translated_text', '') or '')
+        self.align = (d.get('align') or 'center').lower()
+        if self.align not in ('left', 'center', 'right'):
+            self.align = 'center'
+
+        self.anchor_y = float(scene_rect.y())
+        if self.align == 'right':
+            self.anchor_x = float(scene_rect.right())
+        elif self.align == 'center':
+            self.anchor_x = float(scene_rect.center().x())
+        else:
+            self.anchor_x = float(scene_rect.x())
+
+        self.document().setDocumentMargin(0)
+        self.setZValue(5000)
+
+        font = QFont(d.get('font_family') or main_window.cb_font.currentFont().family())
+        font.setPixelSize(int(d.get('font_size', main_window.sb_font_size.value()) or main_window.sb_font_size.value()))
+        self.setFont(font)
+
+        color = QColor(str(d.get('text_color') or '#000000'))
+        if not color.isValid():
+            color = QColor('#000000')
+        self.setDefaultTextColor(color)
+
+        # 자동 줄내림으로 들어간 명시적 개행을 그대로 보존한다.
+        self.setPlainText(self.original_text)
+        self.apply_text_alignment()
+
+        self.document().contentsChanged.connect(self.adjust_to_contents)
+        self.adjust_to_contents()
+
+        self.setTextInteractionFlags(Qt.TextInteractionFlag.TextEditorInteraction)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsFocusable, True)
+        self.setFocus(Qt.FocusReason.MouseFocusReason)
+
+    def apply_text_alignment(self):
+        try:
+            cursor = QTextCursor(self.document())
+            cursor.select(QTextCursor.SelectionType.Document)
+            block_format = QTextBlockFormat()
+            if self.align == 'right':
+                block_format.setAlignment(Qt.AlignmentFlag.AlignRight)
+            elif self.align == 'center':
+                block_format.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            else:
+                block_format.setAlignment(Qt.AlignmentFlag.AlignLeft)
+            cursor.mergeBlockFormat(block_format)
+        except Exception:
+            pass
+
+    def adjusted_scene_rect(self):
+        br = self.boundingRect()
+        return self.mapToScene(br).boundingRect()
+
+    def adjust_to_contents(self):
+        if self._adjusting:
+            return
+        self._adjusting = True
+        try:
+            text = self.toPlainText()
+            lines = text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
+            if not lines:
+                lines = ['']
+
+            fm = QFontMetrics(self.font())
+            max_w = 30.0
+            for line in lines:
+                max_w = max(max_w, float(fm.horizontalAdvance(line)))
+
+            # 편집 중에는 실제 텍스트 자체의 가장 긴 줄 기준으로 영역이 실시간 확장된다.
+            width = max_w + 8.0
+            self.setTextWidth(width)
+
+            if self.align == 'right':
+                x = self.anchor_x - width
+            elif self.align == 'center':
+                x = self.anchor_x - width / 2.0
+            else:
+                x = self.anchor_x
+
+            self.setPos(x, self.anchor_y)
+            self.apply_text_alignment()
+            self.update()
+        finally:
+            self._adjusting = False
+
+    def paint(self, painter, option, widget=None):
+        super().paint(painter, option, widget)
+        pen = QPen(QColor(80, 160, 255), 1, Qt.PenStyle.DashLine)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(self.boundingRect())
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.main_window.finish_inline_text_edit(commit=False)
+            event.accept()
+            return
+        if (
+            event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+            and event.modifiers() & Qt.KeyboardModifier.ControlModifier
+        ):
+            self.main_window.finish_inline_text_edit(commit=True)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def focusOutEvent(self, event):
+        super().focusOutEvent(event)
+        if not self._closing:
+            self.main_window.finish_inline_text_edit(commit=True)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("역식붕이 툴")
+        self.setWindowIcon(QIcon(resource_path("ysb_icon.ico")))
         self.resize(1600, 950)
 
         self.api_settings = ApiSettingsStore.load()
@@ -47,6 +292,9 @@ class MainWindow(QMainWindow):
         self.is_batch_running = False
         self.is_page_loading = False
         self.current_batch_mode = None
+
+        self.inline_text_editor = None
+        self.inline_text_target = None
 
         self.last_mode = 0
 
@@ -118,6 +366,12 @@ class MainWindow(QMainWindow):
         make_action("work_clear_translation", "번역문 내용 지우기", self.clear_translation_current)
         make_action("work_clean_text", "개별 텍스트 정리", self.clean_text_current)
         make_action("work_export", "개별 출력", self.export_result)
+
+        # 자동화 작업
+        make_action("auto_text_size_current", "자동 텍스트 크기 조정", self.auto_text_size_current)
+        make_action("auto_text_size_batch", "일괄 자동 텍스트 크기 조정", self.auto_text_size_batch)
+        make_action("auto_linebreak_current", "자동 줄 내림", self.auto_linebreak_current)
+        make_action("auto_linebreak_batch", "일괄 자동 줄 내림", self.auto_linebreak_batch)
 
         # 일괄 작업
         make_action("batch_analyze", "일괄 분석", lambda: self.run_batch('analyze'))
@@ -290,6 +544,13 @@ class MainWindow(QMainWindow):
         batch_menu.addAction(self.actions["batch_clean_text"])
         batch_menu.addAction(self.actions["batch_export"])
 
+        auto_menu = menubar.addMenu("자동화 작업")
+        auto_menu.addAction(self.actions["auto_text_size_current"])
+        auto_menu.addAction(self.actions["auto_text_size_batch"])
+        auto_menu.addSeparator()
+        auto_menu.addAction(self.actions["auto_linebreak_current"])
+        auto_menu.addAction(self.actions["auto_linebreak_batch"])
+
         option_menu = menubar.addMenu("옵션")
 
         act_api_settings = QAction("API 관리", self)
@@ -357,7 +618,9 @@ class MainWindow(QMainWindow):
         tb.addWidget(mask_toggle_wrap)
 
         self.tb = tb
-        self.tb.hide()
+        self.tb.setFixedWidth(42)
+        self.tb.setVisible(True)
+        self.tb.setEnabled(False)
         ll.addWidget(tb)
 
         vc = QWidget()
@@ -931,13 +1194,14 @@ class MainWindow(QMainWindow):
     def open_text_preset_dialog(self):
         """옵션 메뉴에서 여는 글꼴 프리셋 관리창.
 
-        프리셋 콤보에서 선택하면 즉시 현재 스타일 컨트롤에 반영된다.
-        '불러오기'는 외부 JSON 프리셋을 목록에 추가하는 기능으로만 사용한다.
-        '확인'은 현재 창에 보이는 스타일을 전체 페이지 텍스트에 적용하고 닫는다.
+        - 조정 중에는 현재 페이지에만 임시 미리보기로 보인다.
+        - 현재 페이지에 적용 / 전체 페이지에 적용을 누를 때만 실제 데이터에 저장된다.
+        - 확인은 마지막 프리셋 상태 저장만 수행한다.
+        - 닫기는 프리셋 수정 전 상태로 되돌린다.
         """
         dialog = QDialog(self)
         dialog.setWindowTitle("글꼴 프리셋 관리")
-        dialog.resize(620, 240)
+        dialog.resize(780, 260)
 
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -947,13 +1211,21 @@ class MainWindow(QMainWindow):
         info.setWordWrap(True)
         layout.addWidget(info)
 
+        original_idx = self.idx
+        original_page_snapshot = copy.deepcopy(self.data.get(self.idx)) if self.idx in self.data else None
+        original_style_snapshot = self.current_style_snapshot()
+        original_active_key = self.cb_text_preset.currentData() if hasattr(self, "cb_text_preset") else "__last__"
+        dialog_state = {
+            "applied": False,
+            "restored": False,
+        }
+
         dialog_lock = {"value": False}
         dialog_text_color = {"value": self.default_text_color or "#000000"}
         dialog_stroke_color = {"value": self.default_stroke_color or "#FFFFFF"}
         dialog_align = {"value": self.default_align or "center"}
         dialog_dirty = {"value": False}
 
-        # 프리셋 스타일 지정 옵션: 우측 인터페이스와 같은 순서로 배치한다.
         style_line = QHBoxLayout()
         style_line.setContentsMargins(0, 0, 0, 0)
         style_line.setSpacing(6)
@@ -975,6 +1247,7 @@ class MainWindow(QMainWindow):
         dlg_align_left = QPushButton("≡◁", dialog)
         dlg_align_center = QPushButton("≡◇", dialog)
         dlg_align_right = QPushButton("▷≡", dialog)
+
         for b in (dlg_text_color_btn, dlg_stroke_color_btn):
             b.setFixedSize(28, 28)
         for b in (dlg_align_left, dlg_align_center, dlg_align_right):
@@ -1009,10 +1282,30 @@ class MainWindow(QMainWindow):
         btn_line.setContentsMargins(0, 0, 0, 0)
         btn_line.setSpacing(6)
         btn_save = QPushButton("현재 스타일 저장", dialog)
+        btn_apply_page = QPushButton("현재 페이지에 적용", dialog)
+        btn_apply_all = QPushButton("전체 페이지에 적용", dialog)
         btn_ok = QPushButton("확인", dialog)
         btn_close = QPushButton("닫기", dialog)
+
+        btn_apply_page.setToolTip("현재 페이지의 체크된 텍스트에 적용하고 창을 닫습니다.")
+        btn_apply_all.setToolTip("전체 페이지의 체크된 텍스트에 적용하고 창을 닫습니다.")
+        btn_ok.setToolTip("페이지에는 적용하지 않고 마지막 프리셋 상태만 저장합니다.")
+        btn_close.setToolTip("저장하지 않고 닫습니다. 임시 미리보기는 취소됩니다.")
+
+        has_current_page_data = self.idx in self.data
+        has_any_page_data = any(bool(self.data.get(i)) for i in range(len(self.paths)))
+
+        if not has_current_page_data:
+            btn_apply_page.setEnabled(False)
+            btn_apply_page.setToolTip("현재 불러온 이미지/분석 데이터가 없어 적용할 수 없습니다.")
+        if not has_any_page_data:
+            btn_apply_all.setEnabled(False)
+            btn_apply_all.setToolTip("불러온 이미지/분석 데이터가 없어 적용할 수 없습니다.")
+
         btn_line.addWidget(btn_save)
         btn_line.addStretch()
+        btn_line.addWidget(btn_apply_page)
+        btn_line.addWidget(btn_apply_all)
         btn_line.addWidget(btn_ok)
         btn_line.addWidget(btn_close)
         layout.addLayout(btn_line)
@@ -1026,6 +1319,7 @@ class MainWindow(QMainWindow):
             )
             dlg_text_color_btn.setToolTip(f"문자 색상: {dialog_text_color['value']}")
             dlg_stroke_color_btn.setToolTip(f"획 색상: {dialog_stroke_color['value']}")
+
             for align, btn in (("left", dlg_align_left), ("center", dlg_align_center), ("right", dlg_align_right)):
                 if dialog_align["value"] == align:
                     btn.setStyleSheet("background:#dfefff; border:1px solid #448aff;")
@@ -1056,48 +1350,28 @@ class MainWindow(QMainWindow):
             finally:
                 dialog_lock["value"] = False
 
-        def commit_dialog_style(active_key="__last__"):
-            style = dialog_style_snapshot()
-            self.apply_style_to_controls(style)
-            self.save_last_text_preset(str(active_key or "__last__"))
-            return style
-
-        def preview_style_on_current_page(style, active_key="__last__"):
-            """프리셋 창에서 바꾼 값을 현재 페이지에 즉시 미리보기 적용한다.
-
-            텍스트가 없는 페이지에서도 안전하게 빠져나가도록 구성한다.
-            확인 버튼을 누르기 전까지는 현재 페이지에만 반영되고,
-            확인 버튼에서 전체 페이지 적용이 수행된다.
-            """
-            style = self.normalize_style_dict(style)
-            self.apply_style_to_controls(style)
-            self.save_last_text_preset(str(active_key or "__last__"))
-
-            curr = self.data.get(self.idx) if getattr(self, "paths", None) else None
-            if not curr:
-                return 0
-
-            targets = [x for x in curr.get('data', []) if x.get('use_inpaint', True)]
-            self.apply_style_dict_to_data_items(targets, style)
-
-            if self.cb_mode.currentIndex() == 4:
-                self.mode_chg(4)
-            self.auto_save_project()
-            return len(targets)
+        def reload_text_preset_list_only():
+            self.text_presets = {}
+            preset_dir = self.text_preset_dir()
+            preset_dir.mkdir(parents=True, exist_ok=True)
+            for path in sorted(preset_dir.glob("*.json")):
+                if path.name.startswith("_"):
+                    continue
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        self.text_presets[path.stem] = self.normalize_style_dict(json.load(f))
+                except Exception:
+                    continue
 
         def refill_combo(select_key=None):
-            self.load_text_preset_cache()
+            reload_text_preset_list_only()
             preset_combo.blockSignals(True)
             try:
                 preset_combo.clear()
                 preset_combo.addItem("마지막 설정", "__last__")
-                for i in range(self.cb_text_preset.count()):
-                    key = self.cb_text_preset.itemData(i)
-                    text = self.cb_text_preset.itemText(i)
-                    if key == "__last__":
-                        continue
-                    preset_combo.addItem(text, key)
-                key = select_key if select_key is not None else (self.cb_text_preset.currentData() or "__last__")
+                for name in sorted(self.text_presets.keys()):
+                    preset_combo.addItem(name, name)
+                key = select_key if select_key is not None else (original_active_key or "__last__")
                 idx = preset_combo.findData(key)
                 preset_combo.setCurrentIndex(idx if idx >= 0 else 0)
             finally:
@@ -1113,26 +1387,80 @@ class MainWindow(QMainWindow):
                     return self.current_style_snapshot()
             return self.text_presets.get(str(key)) or self.current_style_snapshot()
 
-        def on_preset_combo_changed(*args):
-            key = preset_combo.currentData() or "__last__"
-            style = preset_style_for_key(key)
-            apply_style_to_dialog(style)
-            idx = self.cb_text_preset.findData(key)
+        def refresh_current_page_after_preview():
+            if self.idx != original_idx:
+                return
+            self.ref_tab()
+            if self.cb_mode.currentIndex() == 4:
+                self.mode_chg(4)
+
+        def restore_page_snapshot():
+            if original_page_snapshot is not None and original_idx in self.data:
+                self.data[original_idx] = copy.deepcopy(original_page_snapshot)
+            if self.idx == original_idx:
+                refresh_current_page_after_preview()
+
+        def restore_full_original_state():
+            if dialog_state["restored"]:
+                return
+            restore_page_snapshot()
+            self.apply_style_to_controls(original_style_snapshot)
+            if hasattr(self, "cb_text_preset"):
+                idx = self.cb_text_preset.findData(original_active_key)
+                if idx >= 0:
+                    self.cb_text_preset.blockSignals(True)
+                    try:
+                        self.cb_text_preset.setCurrentIndex(idx)
+                    finally:
+                        self.cb_text_preset.blockSignals(False)
+            dialog_state["restored"] = True
+
+        def preview_style_on_current_page(style, active_key="__last__"):
+            """현재 페이지에만 임시 미리보기. 저장/적용은 하지 않는다."""
+            if original_page_snapshot is None or original_idx not in self.data:
+                self.apply_style_to_controls(style)
+                return 0
+
+            # 매번 원래 상태에서 다시 프리뷰를 입힌다.
+            self.data[original_idx] = copy.deepcopy(original_page_snapshot)
+            style = self.normalize_style_dict(style)
+            self.apply_style_to_controls(style)
+
+            curr = self.data.get(original_idx)
+            targets = [x for x in curr.get('data', []) if x.get('use_inpaint', True)]
+            self.apply_style_dict_to_data_items(targets, style)
+
+            if self.idx == original_idx:
+                refresh_current_page_after_preview()
+            return len(targets)
+
+        def commit_dialog_style(active_key="__last__"):
+            style = dialog_style_snapshot()
+            active_key = str(active_key or "__last__")
+            self.apply_style_to_controls(style)
+            self.save_last_text_preset(active_key)
+            self.load_text_preset_cache()
+            idx = self.cb_text_preset.findData(active_key)
             if idx >= 0:
                 self.cb_text_preset.blockSignals(True)
                 try:
                     self.cb_text_preset.setCurrentIndex(idx)
                 finally:
                     self.cb_text_preset.blockSignals(False)
+            return style
+
+        def on_preset_combo_changed(*args):
+            key = preset_combo.currentData() or "__last__"
+            style = preset_style_for_key(key)
+            apply_style_to_dialog(style)
             preview_style_on_current_page(style, str(key))
             dialog_dirty["value"] = False
-            self.log(f"🎛️ 글꼴 프리셋 로딩: {preset_combo.currentText()}")
+            self.log(f"🎛️ 글꼴 프리셋 미리보기: {preset_combo.currentText()}")
 
         def on_dialog_style_changed(*args):
             if dialog_lock["value"]:
                 return
             refresh_color_buttons()
-            # 창에서 직접 수정한 값은 '마지막 설정'으로 자동저장한다.
             dialog_dirty["value"] = True
             preview_style_on_current_page(dialog_style_snapshot(), "__last__")
 
@@ -1159,10 +1487,6 @@ class MainWindow(QMainWindow):
             with open(self.text_preset_path(safe), "w", encoding="utf-8") as f:
                 json.dump(dialog_style_snapshot(), f, ensure_ascii=False, indent=2)
             refill_combo(safe)
-            idx = self.cb_text_preset.findData(safe)
-            if idx >= 0:
-                self.cb_text_preset.setCurrentIndex(idx)
-            commit_dialog_style(safe)
             dialog_dirty["value"] = False
             self.log(f"💾 글꼴 프리셋 저장: {safe}")
 
@@ -1194,10 +1518,35 @@ class MainWindow(QMainWindow):
             dialog_dirty["value"] = False
             self.log(f"📥 글꼴 프리셋 불러오기 완료: {safe}")
 
-        def confirm_apply_all():
-            active_key = "__last__" if dialog_dirty["value"] else (preset_combo.currentData() or "__last__")
-            commit_dialog_style(active_key)
-            self.apply_current_preset_to_all_pages()
+        def active_dialog_key():
+            return "__last__" if dialog_dirty["value"] else (preset_combo.currentData() or "__last__")
+
+        def apply_to_current_page_and_close():
+            commit_dialog_style(active_dialog_key())
+            if self.idx in self.data:
+                self.apply_current_preset_to_page(self.idx, refresh=True)
+                self.auto_save_project()
+            else:
+                self.log("⚠️ 현재 페이지가 없어 프리셋은 저장만 하고 페이지 적용은 생략합니다.")
+            dialog_state["applied"] = True
+            dialog.accept()
+
+        def apply_to_all_pages_and_close():
+            commit_dialog_style(active_dialog_key())
+            if any(bool(self.data.get(i)) for i in range(len(self.paths))):
+                self.apply_current_preset_to_all_pages()
+                self.auto_save_project()
+            else:
+                self.log("⚠️ 전체 페이지 데이터가 없어 프리셋은 저장만 하고 전체 적용은 생략합니다.")
+            dialog_state["applied"] = True
+            dialog.accept()
+
+        def confirm_save_last_only():
+            # 프리뷰는 취소하고, 마지막 프리셋 상태만 저장한다.
+            restore_page_snapshot()
+            commit_dialog_style(active_dialog_key())
+            dialog_state["restored"] = True
+            self.log("💾 마지막 프리셋 상태 저장 완료")
             dialog.accept()
 
         dlg_font.currentFontChanged.connect(on_dialog_style_changed)
@@ -1211,14 +1560,19 @@ class MainWindow(QMainWindow):
         preset_combo.currentIndexChanged.connect(on_preset_combo_changed)
         btn_import.clicked.connect(import_preset_to_list)
         btn_save.clicked.connect(save_dialog_style_named)
-        btn_ok.clicked.connect(confirm_apply_all)
+        btn_apply_page.clicked.connect(apply_to_current_page_and_close)
+        btn_apply_all.clicked.connect(apply_to_all_pages_and_close)
+        btn_ok.clicked.connect(confirm_save_last_only)
         btn_close.clicked.connect(dialog.reject)
 
-        refill_combo(self.cb_text_preset.currentData())
-        apply_style_to_dialog(self.current_style_snapshot())
+        refill_combo(original_active_key)
+        apply_style_to_dialog(original_style_snapshot)
         refresh_color_buttons()
-        dialog.exec()
 
+        result = dialog.exec()
+        if not dialog_state["applied"] and not dialog_state["restored"]:
+            # 닫기/X/ESC는 미리보기와 컨트롤 상태까지 원래대로 되돌린다.
+            restore_full_original_state()
     def set_preset_combo_to_last(self):
         if not hasattr(self, "cb_text_preset") or self._preset_loading:
             return
@@ -1259,6 +1613,7 @@ class MainWindow(QMainWindow):
     def apply_current_preset_to_page(self, page_idx, refresh=False):
         curr = self.data.get(page_idx)
         if not curr:
+            self.log("⚠️ 현재 페이지가 없어 프리셋 페이지 적용을 건너뜁니다.")
             return 0
         targets = [x for x in curr.get('data', []) if x.get('use_inpaint', True)]
         self.apply_current_preset_to_data_items(targets)
@@ -1272,6 +1627,8 @@ class MainWindow(QMainWindow):
 
     def apply_current_preset_to_all_pages(self):
         total = 0
+        touched_current = False
+
         for i in range(len(self.paths)):
             curr = self.data.get(i)
             if not curr:
@@ -1279,16 +1636,712 @@ class MainWindow(QMainWindow):
             targets = [x for x in curr.get('data', []) if x.get('use_inpaint', True)]
             self.apply_current_preset_to_data_items(targets)
             total += len(targets)
+            if i == self.idx:
+                touched_current = True
+
+        if touched_current and self.idx in self.data:
+            self.ref_tab()
+            if self.cb_mode.currentIndex() == 4:
+                self.mode_chg(4)
+
+        self.auto_save_project()
+        if total:
+            self.log(f"🎛️ 전체 페이지 프리셋 적용: {total}개")
+        else:
+            self.log("⚠️ 적용할 페이지/텍스트가 없어 전체 프리셋 적용을 건너뜁니다.")
+
+    # =========================================================
+    # 1.2 자동화 작업
+    # =========================================================
+    def auto_target_items_for_page(self, page_idx):
+        curr = self.data.get(page_idx)
+        if not curr:
+            return []
+        return [x for x in curr.get('data', []) if x.get('use_inpaint', True)]
+
+    def item_layout_text(self, item):
+        text = str(item.get('translated_text', '') or '')
+        if not text.strip():
+            text = str(item.get('text', '') or '')
+        return text
+
+    def ensure_item_style_for_auto(self, item):
+        style = self.current_style_snapshot()
+        item.setdefault('font_family', style['font_family'])
+        item.setdefault('font_size', style['font_size'])
+        item.setdefault('stroke_width', style['stroke_width'])
+        item.setdefault('text_color', style['text_color'])
+        item.setdefault('stroke_color', style['stroke_color'])
+        item.setdefault('align', style['align'])
+
+    def auto_wrap_lines_for_metrics(self, text, fm, max_w, protect_short_tokens=True):
+        """
+        QFontMetrics 기준으로 줄바꿈 결과를 계산한다.
+
+        1.2 조건:
+        - 전체 텍스트가 5글자 이하라면 영역을 넘어도 줄내림하지 않는다.
+        - 단어/덩어리가 5글자 이하라면 그 덩어리 내부는 끊지 않는다.
+        - 6글자 이상 덩어리는 영역을 넘으면 글자 단위로 끊어 내린다.
+        """
+        text = str(text or '').replace('\r\n', '\n').replace('\r', '\n')
+        max_w = max(1, int(max_w))
+
+        # 공백 없는 단일 덩어리가 5글자 이하일 때만 한 줄 보호.
+        # "저게 뭐야?"처럼 띄어쓰기가 있는 짧은 문장은 단어 사이에서 줄내림할 수 있어야 한다.
+        compact_len = len(''.join(ch for ch in text if not ch.isspace()))
+        has_spacing = any(ch.isspace() for ch in text.strip())
+        if protect_short_tokens and compact_len <= 5 and not has_spacing:
+            return [text.replace('\n', '').strip()]
+
+        def split_units(paragraph):
+            units = []
+            buf = ''
+            for ch in paragraph:
+                if ch.isspace():
+                    if buf:
+                        units.append(buf)
+                        buf = ''
+                    if ch == ' ':
+                        units.append(' ')
+                else:
+                    buf += ch
+            if buf:
+                units.append(buf)
+            return units
+
+        def append_line(lines, current):
+            if current or not lines:
+                lines.append(current.rstrip())
+
+        def break_long_unit(unit, current, lines):
+            # 6글자 이상 덩어리는 필요하면 글자 단위로 끊는다.
+            for ch in unit:
+                trial = current + ch
+                if current and fm.horizontalAdvance(trial) > max_w:
+                    append_line(lines, current)
+                    current = ch
+                else:
+                    current = trial
+            return current
+
+        result = []
+        for para in text.split('\n'):
+            if para == '':
+                result.append('')
+                continue
+
+            lines = []
+            current = ''
+            for unit in split_units(para):
+                if unit == ' ':
+                    # 줄 첫머리 공백은 버린다.
+                    if current:
+                        trial = current + unit
+                        if fm.horizontalAdvance(trial) <= max_w:
+                            current = trial
+                    continue
+
+                unit_len = len(unit)
+                trial = current + unit
+
+                if fm.horizontalAdvance(trial) <= max_w:
+                    current = trial
+                    continue
+
+                if unit_len <= 5:
+                    # 짧은 단어는 내부에서 끊지 않는다.
+                    if current:
+                        append_line(lines, current)
+                    current = unit
+                else:
+                    # 긴 덩어리는 현재 줄에 들어갈 만큼 넣고, 넘치면 글자 단위로 끊는다.
+                    current = break_long_unit(unit, current, lines)
+
+            append_line(lines, current)
+            result.extend(lines)
+
+        return result or ['']
+
+    def auto_measure_text_block(self, text, family, size, max_w, stroke=0):
+        font = QFont(family)
+        font.setPixelSize(int(size))
+        fm = QFontMetrics(font)
+        lines = self.auto_wrap_lines_for_metrics(text, fm, max_w)
+
+        max_line_w = 0
+        for line in lines:
+            max_line_w = max(max_line_w, fm.horizontalAdvance(line))
+
+        # lineSpacing이 실제 줄 간격에 더 가까워서 height()보다 안정적이다.
+        total_h = fm.lineSpacing() * max(1, len(lines)) + int(stroke) * 2
+        total_w = max_line_w + int(stroke) * 2
+        return total_w, total_h, lines
+
+    def _rect_from_vertices_like(self, vertices):
+        try:
+            pts = []
+            for v in vertices or []:
+                if isinstance(v, dict):
+                    x = int(round(float(v.get('x', 0))))
+                    y = int(round(float(v.get('y', 0))))
+                else:
+                    x = int(round(float(v[0])))
+                    y = int(round(float(v[1])))
+                pts.append((x, y))
+            if not pts:
+                return None
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+            x1, x2 = min(xs), max(xs)
+            y1, y2 = min(ys), max(ys)
+            return [x1, y1, max(1, x2 - x1), max(1, y2 - y1)]
+        except Exception:
+            return None
+
+    def _normalize_ocr_piece(self, piece):
+        if not isinstance(piece, dict):
+            return None
+
+        text = str(piece.get('text') or piece.get('inferText') or piece.get('label') or '').strip()
+        rect = None
+        if piece.get('rect') is not None:
+            try:
+                r = piece.get('rect')
+                rect = [int(round(float(r[0]))), int(round(float(r[1]))), int(round(float(r[2]))), int(round(float(r[3])))]
+            except Exception:
+                rect = None
+        if rect is None:
+            if isinstance(piece.get('boundingPoly'), dict):
+                rect = self._rect_from_vertices_like(piece.get('boundingPoly', {}).get('vertices'))
+            elif piece.get('vertices') is not None:
+                rect = self._rect_from_vertices_like(piece.get('vertices'))
+
+        if not rect:
+            return None
+
+        x, y, w, h = rect
+        compact_text = ''.join(ch for ch in text if not ch.isspace())
+        char_count = max(1, len(compact_text))
+        return {
+            'text': text,
+            'char_count': char_count,
+            'rect': [x, y, w, h],
+            'cx': x + w / 2.0,
+            'cy': y + h / 2.0,
+            'w': w,
+            'h': h,
+            'area': max(1, w * h),
+        }
+
+    def _collect_item_ocr_pieces(self, item):
+        """분석 결과에 포함돼 있을 수 있는 OCR 조각들을 최대한 수집한다."""
+        pieces = []
+        for key in ['ocr_items', 'raw_items', 'source_items', 'children', 'segments', 'parts', 'items', 'fragments']:
+            val = item.get(key)
+            if isinstance(val, list):
+                for p in val:
+                    npiece = self._normalize_ocr_piece(p)
+                    if npiece:
+                        pieces.append(npiece)
+        dedup = []
+        seen = set()
+        for p in pieces:
+            sig = (tuple(p['rect']), p['text'])
+            if sig in seen:
+                continue
+            seen.add(sig)
+            dedup.append(p)
+        return dedup
+
+    def estimate_source_font_size_from_ocr_coords(self, item):
+        """CLOVA OCR 조각 좌표를 이용해 원문 글자 크기를 추정한다.
+
+        이전 방식의 문제:
+        - 그룹 전체 rect 높이 / 전체 글자 수로 상한을 걸면,
+          여러 세로열이 한 말풍선에 들어간 경우 글자 크기가 과하게 작아진다.
+        - fallback/mask가 작은 값으로 나오면 OCR 좌표 추정값까지 같이 깎였다.
+
+        새 방식:
+        - OCR 조각 자체의 긴 방향/글자수 + 짧은 방향 폭을 우선 사용한다.
+        - 글자 단위 OCR 조각이 있을 때만 중심 간격을 보조로 사용한다.
+        - 그룹 전체 글자수 기반 전역 cap은 사용하지 않는다.
+        """
+        pieces = self._collect_item_ocr_pieces(item)
+        if not pieces:
+            return None
+
+        rect = item.get('rect') or [0, 0, 1, 1]
+        try:
+            box_w = max(1, int(rect[2]))
+            box_h = max(1, int(rect[3]))
+        except Exception:
+            box_w, box_h = 1, 1
+
+        vertical = box_h >= box_w
+
+        size_vals = [p['h'] if vertical else p['w'] for p in pieces]
+        area_vals = [p['area'] for p in pieces]
+        med_size = float(np.median(size_vals)) if size_vals else 0.0
+        med_area = float(np.median(area_vals)) if area_vals else 0.0
+
+        # 후리가나/첨자 후보는 이미 엔진에서 분리하지만,
+        # 기존 프로젝트나 예외 케이스를 위해 한 번 더 방어한다.
+        main_pieces = [
+            p for p in pieces
+            if (p['h'] if vertical else p['w']) >= max(3.0, med_size * 0.55)
+            and p['area'] >= max(4.0, med_area * 0.30)
+        ] or pieces
+
+        piece_sizes = []
+        for p in main_pieces:
+            axis_len = float(p['h'] if vertical else p['w'])
+            cross_len = float(p['w'] if vertical else p['h'])
+            char_count = max(1, int(p['char_count']))
+
+            if char_count <= 1:
+                # 글자 단위로 잡힌 경우: 짧은 방향 폭이 글자 크기에 가깝다.
+                score = max(cross_len * 0.95, axis_len * 0.85)
+            else:
+                # 단어/문장 덩어리로 잡힌 경우:
+                # 긴 방향/글자수는 글자 피치, 짧은 방향은 실제 획 폭에 가깝다.
+                pitch = axis_len / char_count
+                score = max(pitch * 1.08, cross_len * 0.88)
+
+            piece_sizes.append(score)
+
+        if not piece_sizes:
+            return None
+
+        piece_est = float(np.median(piece_sizes))
+
+        # 글자 단위 OCR 조각이 여러 개 있을 때만 중심 간격을 보조로 사용한다.
+        gap_est = None
+        single_pieces = [p for p in main_pieces if int(p.get('char_count', 1)) == 1]
+        if len(single_pieces) >= 2:
+            if vertical:
+                base_axis = float(np.median([p['cx'] for p in single_pieces]))
+                aligned = [p for p in single_pieces if abs(p['cx'] - base_axis) <= max(8.0, piece_est * 0.75)]
+                aligned = aligned if len(aligned) >= 2 else single_pieces
+                ordered = sorted(aligned, key=lambda p: p['cy'])
+                gaps = [b['cy'] - a['cy'] for a, b in zip(ordered, ordered[1:]) if (b['cy'] - a['cy']) > 2]
+            else:
+                base_axis = float(np.median([p['cy'] for p in single_pieces]))
+                aligned = [p for p in single_pieces if abs(p['cy'] - base_axis) <= max(8.0, piece_est * 0.75)]
+                aligned = aligned if len(aligned) >= 2 else single_pieces
+                ordered = sorted(aligned, key=lambda p: p['cx'])
+                gaps = [b['cx'] - a['cx'] for a, b in zip(ordered, ordered[1:]) if (b['cx'] - a['cx']) > 2]
+
+            if gaps:
+                candidate = float(np.median(gaps)) * 0.96
+                # 중심 간격이 조각 추정값과 너무 다르면, 줄/열 간격을 잘못 잡은 것으로 보고 버린다.
+                if piece_est * 0.55 <= candidate <= piece_est * 1.80:
+                    gap_est = candidate
+
+        if gap_est is not None:
+            est = (piece_est + gap_est) / 2.0
+        else:
+            est = piece_est
+
+        # 아주 극단적인 값만 말풍선 크기로 제한한다.
+        est = min(est, max(8.0, box_h * 0.90, box_w * 0.90))
+        return max(5, int(round(est)))
+
+    def estimate_source_font_size_from_mask(self, item, page_idx=None):
+        """텍스트 마스크 연결요소로 폰트 크기 보정값을 얻는다."""
+        if page_idx is None:
+            page_idx = self.idx
+
+        curr = self.data.get(page_idx)
+        if not curr:
+            return None
+
+        mask = curr.get('mask_merge')
+        if mask is None or not isinstance(mask, np.ndarray):
+            return None
+
+        rect = item.get('rect')
+        if not rect or len(rect) < 4:
+            return None
+
+        try:
+            x, y, w, h = [int(v) for v in rect[:4]]
+        except Exception:
+            return None
+
+        if mask.ndim == 3:
+            gray = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = mask.copy()
+
+        mh, mw = gray.shape[:2]
+        x1 = max(0, x)
+        y1 = max(0, y)
+        x2 = min(mw, x + max(1, w))
+        y2 = min(mh, y + max(1, h))
+        if x2 <= x1 or y2 <= y1:
+            return None
+
+        crop = gray[y1:y2, x1:x2]
+        if crop.size == 0:
+            return None
+
+        _, bw = cv2.threshold(crop, 0, 255, cv2.THRESH_BINARY)
+        if int(np.count_nonzero(bw)) <= 0:
+            return None
+
+        num, labels, stats, cent = cv2.connectedComponentsWithStats(bw, 8)
+        heights = []
+        crop_area = max(1, crop.shape[0] * crop.shape[1])
+        min_area = max(3, int(crop_area * 0.0003))
+
+        for i in range(1, num):
+            ww = int(stats[i, cv2.CC_STAT_WIDTH])
+            hh = int(stats[i, cv2.CC_STAT_HEIGHT])
+            aa = int(stats[i, cv2.CC_STAT_AREA])
+            if aa < min_area or hh < 3 or ww < 1:
+                continue
+            heights.append(hh)
+
+        if not heights:
+            return None
+
+        est = float(np.median(heights)) * 1.04
+        try:
+            box_h = max(1, int(rect[3]))
+            est = min(est, box_h * 0.75)
+        except Exception:
+            pass
+        return max(5, int(round(est)))
+
+    def estimate_source_font_size_fallback(self, item):
+        """OCR 박스와 원문 글자 수로 최후 보정값을 추정한다."""
+        rect = item.get('rect')
+        if not rect or len(rect) < 4:
+            return None
+
+        source_text = str(item.get('text', '') or '')
+        if not source_text.strip():
+            return None
+
+        try:
+            box_w = max(1, int(rect[2]))
+            box_h = max(1, int(rect[3]))
+        except Exception:
+            return None
+
+        compact_len = max(1, len(''.join(ch for ch in source_text if not ch.isspace())))
+        lines = [line.strip() for line in source_text.replace('\r\n', '\n').replace('\r', '\n').split('\n') if line.strip()]
+        line_count = max(1, len(lines))
+        vertical = box_h >= box_w
+
+        height_based = (box_h / line_count) * 0.64
+        density_based = ((box_w * box_h) / compact_len) ** 0.5 * 0.88
+
+        if compact_len <= 5:
+            density_based *= 0.85
+
+        # 여러 세로열이 한 그룹에 들어간 경우 box_h / 전체 글자 수는 너무 작아진다.
+        # fallback에서는 높이/밀도만 사용하고, 전체 글자 수 기반 긴축 cap은 걸지 않는다.
+        est = min(height_based, density_based)
+        return max(5, int(round(est)))
+
+    def auto_text_size_item(self, item, page_idx=None):
+        """원문 기준으로 font_size만 조정한다.
+
+        우선순위:
+        1) CLOVA OCR 조각 좌표 추정
+        2) 텍스트 마스크 추정
+        3) OCR 박스/글자수 fallback
+        """
+        rect = item.get('rect')
+        if not rect or len(rect) < 4:
+            return False
+
+        source_text = str(item.get('text', '') or '')
+        if not source_text.strip():
+            return False
+
+        self.ensure_item_style_for_auto(item)
+
+        ocr_est = self.estimate_source_font_size_from_ocr_coords(item)
+        mask_est = self.estimate_source_font_size_from_mask(item, page_idx)
+        fallback_est = self.estimate_source_font_size_fallback(item)
+
+        candidates = []
+        if ocr_est is not None:
+            candidates.append(float(ocr_est))
+        if mask_est is not None:
+            candidates.append(float(mask_est))
+        if fallback_est is not None:
+            candidates.append(float(fallback_est))
+        if not candidates:
+            return False
+
+        if ocr_est is not None:
+            # OCR 조각 좌표가 있으면 그 값을 최우선으로 쓴다.
+            # fallback/mask는 예전처럼 작은 값으로 OCR 추정치를 깎지 않는다.
+            best = float(ocr_est)
+        else:
+            best = min(candidates)
+
+        best = max(5, min(260, int(round(best))))
+        old_value = int(item.get('font_size', self.sb_font_size.value()) or self.sb_font_size.value())
+        item['font_size'] = best
+        return old_value != best
+
+    def normalize_auto_wrap_source_text(self, text):
+        """
+        자동 줄 내림은 매번 기존 줄바꿈을 기준으로 이어 붙인 뒤 다시 계산한다.
+
+        기존 줄바꿈을 그대로 보존하면,
+        글자를 크게 키운 상태에서 자동 줄내림 → 한 글자씩 잘림 → 다시 실행해도 안 붙음
+        같은 고착 현상이 생긴다.
+        """
+        parts = [p.strip() for p in str(text or '').replace('\r\n', '\n').replace('\r', '\n').split('\n')]
+        parts = [p for p in parts if p]
+        if not parts:
+            return ""
+
+        result = parts[0]
+        for part in parts[1:]:
+            prev = result[-1] if result else ''
+            nxt = part[0] if part else ''
+
+            # 영어/숫자 단어 사이만 공백을 보존하고,
+            # 한글/일본어/기호는 기존 자동 줄바꿈을 없앤다는 느낌으로 붙인다.
+            if prev.isascii() and nxt.isascii() and prev.isalnum() and nxt.isalnum():
+                result += " " + part
+            else:
+                result += part
+
+        return result
+
+    def auto_wrap_text_for_item(self, item):
+        """현재 번역문을 텍스트 박스 폭에 맞춰 자동 줄내림한다."""
+        rect = item.get('rect')
+        if not rect or len(rect) < 4:
+            return False
+
+        original = str(item.get('translated_text', '') or '')
+        if not original.strip():
+            return False
+
+        source_text = self.normalize_auto_wrap_source_text(original)
+        if not source_text.strip():
+            return False
+
+        self.ensure_item_style_for_auto(item)
+
+        try:
+            box_w = max(1, int(rect[2]))
+        except Exception:
+            return False
+
+        family = item.get('font_family') or self.cb_font.currentFont().family()
+        size = int(item.get('font_size', self.sb_font_size.value()) or self.sb_font_size.value())
+        stroke = int(item.get('stroke_width', 0) or 0)
+        max_w = max(1, int(box_w * 1.00) - stroke * 2)
+
+        font = QFont(family)
+        font.setPixelSize(size)
+        fm = QFontMetrics(font)
+
+        out_lines = self.auto_wrap_lines_for_metrics(source_text, fm, max_w, protect_short_tokens=True)
+        wrapped = '\n'.join(out_lines).strip()
+        if wrapped and wrapped != original:
+            item['translated_text'] = wrapped
+            return True
+        return False
+
+    def auto_text_size_for_page(self, page_idx, refresh=False):
+        changed = 0
+        for item in self.auto_target_items_for_page(page_idx):
+            if self.auto_text_size_item(item, page_idx=page_idx):
+                changed += 1
+        if refresh and page_idx == self.idx:
+            self.ref_tab()
+            if self.cb_mode.currentIndex() == 4:
+                self.mode_chg(4)
+        return changed
+
+    def auto_linebreak_for_page(self, page_idx, refresh=False):
+        changed = 0
+        for item in self.auto_target_items_for_page(page_idx):
+            if self.auto_wrap_text_for_item(item):
+                changed += 1
+        if refresh and page_idx == self.idx:
+            self.ref_tab()
+            if self.cb_mode.currentIndex() == 4:
+                self.mode_chg(4)
+        return changed
+
+    def auto_text_size_current(self):
+        if not self.paths:
+            return
+        self.commit_current_page_ui_to_data()
+        changed = self.auto_text_size_for_page(self.idx, refresh=True)
+        self.auto_save_project()
+        self.log(f"🤖 자동 텍스트 크기 조정 완료: 현재 페이지 {changed}개")
+
+    def auto_text_size_batch(self):
+        if not self.paths:
+            return
+        self.commit_current_page_ui_to_data()
+        total = 0
+        pages = 0
+        for i in range(len(self.paths)):
+            changed = self.auto_text_size_for_page(i, refresh=False)
+            if changed:
+                pages += 1
+                total += changed
         self.ref_tab()
         if self.cb_mode.currentIndex() == 4:
             self.mode_chg(4)
         self.auto_save_project()
-        self.log(f"🎛️ 전체 페이지 프리셋 적용: {total}개")
+        self.log(f"🤖 일괄 자동 텍스트 크기 조정 완료: {pages}페이지 / {total}개")
+
+    def auto_linebreak_current(self):
+        if not self.paths:
+            return
+        self.commit_current_page_ui_to_data()
+        changed = self.auto_linebreak_for_page(self.idx, refresh=True)
+        self.auto_save_project()
+        self.log(f"🤖 자동 줄 내림 완료: 현재 페이지 {changed}개")
+
+    def auto_linebreak_batch(self):
+        if not self.paths:
+            return
+        self.commit_current_page_ui_to_data()
+        total = 0
+        pages = 0
+        for i in range(len(self.paths)):
+            changed = self.auto_linebreak_for_page(i, refresh=False)
+            if changed:
+                pages += 1
+                total += changed
+        self.ref_tab()
+        if self.cb_mode.currentIndex() == 4:
+            self.mode_chg(4)
+        self.auto_save_project()
+        self.log(f"🤖 일괄 자동 줄 내림 완료: {pages}페이지 / {total}개")
 
     def selected_text_items(self):
         if not hasattr(self, "view"):
             return []
         return [item for item in self.view.scene.selectedItems() if isinstance(item, TypesettingItem)]
+
+    def start_inline_text_edit(self, text_item):
+        """최종 화면 텍스트를 더블클릭했을 때 그 자리에서 직접 편집한다."""
+        if self.cb_mode.currentIndex() != 4:
+            return
+
+        if self.inline_text_editor is not None:
+            self.finish_inline_text_edit(commit=True, refresh=False)
+
+        if text_item is None:
+            return
+
+        self.inline_text_target = text_item
+        text_item.setSelected(True)
+
+        # 마지막 식자 단계의 직접 수정이므로, 기존 OCR 박스가 아니라 현재 실제 텍스트를 기준으로 편집을 시작한다.
+        if hasattr(text_item, 'text_content_scene_rect'):
+            scene_rect = text_item.text_content_scene_rect()
+        else:
+            local_rect = text_item.text_area_rect()
+            scene_rect = text_item.mapToScene(local_rect).boundingRect()
+
+        editor = InlineTextEditItem(self, text_item, scene_rect)
+        self.inline_text_editor = editor
+
+        text_item.setVisible(False)
+        self.view.scene.addItem(editor)
+        editor.setFocus(Qt.FocusReason.MouseFocusReason)
+
+        cursor = editor.textCursor()
+        cursor.clearSelection()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        editor.setTextCursor(cursor)
+
+        self.log(f"✏️ 텍스트 직접 편집 시작 (ID: {text_item.data.get('id')})")
+
+    def finish_inline_text_edit(self, commit=True, refresh=True):
+        editor = self.inline_text_editor
+        target = self.inline_text_target
+        if editor is None:
+            return
+
+        editor._closing = True
+
+        selected_id = target.data.get('id') if target is not None else None
+
+        changed = False
+
+        if commit and target is not None:
+            new_text = editor.toPlainText()
+            changed = (new_text != getattr(editor, 'original_text', ''))
+
+            if changed:
+                target.data['translated_text'] = new_text
+
+                # 직접 수정한 경우에는 기존 OCR 박스가 아니라 현재 편집 텍스트 자체를 기준으로
+                # 텍스트 영역을 다시 잡는다.
+                try:
+                    edit_rect = editor.adjusted_scene_rect()
+                    if edit_rect.width() > 1 and edit_rect.height() > 1:
+                        target.data['rect'] = [
+                            int(round(edit_rect.x())),
+                            int(round(edit_rect.y())),
+                            max(1, int(round(edit_rect.width()))),
+                            max(1, int(round(edit_rect.height()))),
+                        ]
+                        target.data['x_off'] = 0
+                        target.data['y_off'] = 0
+                        target.data['manual_text_rect'] = True
+                except Exception:
+                    pass
+
+            target_id = str(target.data.get('id'))
+            self.tab.blockSignals(True)
+            try:
+                for row in range(1, self.tab.rowCount()):
+                    id_item = self.tab.item(row, 0)
+                    if id_item and id_item.text().strip() == target_id:
+                        self.tab.setItem(row, 3, QTableWidgetItem(new_text))
+                        break
+            finally:
+                self.tab.blockSignals(False)
+
+            if changed:
+                self.tab.resizeRowsToContents()
+                self.auto_save_project()
+                self.log(f"✅ 텍스트 직접 수정 완료 (ID: {target.data.get('id')})")
+            else:
+                self.log(f"↩️ 텍스트 직접 수정 변화 없음 (ID: {target.data.get('id')})")
+        elif target is not None:
+            self.log(f"↩️ 텍스트 직접 수정 취소 (ID: {target.data.get('id')})")
+
+        try:
+            if editor.scene() is not None:
+                editor.scene().removeItem(editor)
+        except Exception:
+            pass
+
+        if target is not None:
+            try:
+                target.setVisible(True)
+            except Exception:
+                pass
+
+        self.inline_text_editor = None
+        self.inline_text_target = None
+
+        if commit and changed and refresh and self.cb_mode.currentIndex() == 4:
+            self.mode_chg(4)
+            if selected_id is not None:
+                self.reselect_text_items([selected_id])
+        elif selected_id is not None:
+            self.reselect_text_items([selected_id])
 
     def on_scene_selection_changed(self):
         # 개별 텍스트 스타일 작업은 우측 패널의 "선택 텍스트 스타일"에서만 한다.
@@ -2689,7 +3742,46 @@ class MainWindow(QMainWindow):
         self.auto_save_project()
 
     def ref_tab(self):
-        d = self.data[self.idx]['data']
+        curr = self.data.get(self.idx)
+        if not curr:
+            self._table_check_lock = True
+            self.tab.blockSignals(True)
+            try:
+                self.tab.clearContents()
+                self.tab.setRowCount(1)
+
+                all_id_item = QTableWidgetItem("ALL")
+                all_id_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.tab.setItem(0, 0, all_id_item)
+
+                all_check_item = QTableWidgetItem("")
+                all_check_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                self.tab.setItem(0, 1, all_check_item)
+                self.tab.setCellWidget(0, 1, self.make_center_check_widget(0, False))
+
+                self.tab.setItem(0, 2, QTableWidgetItem("전체 선택"))
+                self.tab.setItem(0, 3, QTableWidgetItem(""))
+
+                for c in range(4):
+                    item = self.tab.item(0, c)
+                    if item:
+                        item.setBackground(QColor("#31343a"))
+                        item.setForeground(QColor("#f2f2f2"))
+                        font = item.font()
+                        font.setBold(True)
+                        item.setFont(font)
+
+                widget = self.tab.cellWidget(0, 1)
+                if widget:
+                    widget.setStyleSheet("background:#31343a;")
+            finally:
+                self.tab.blockSignals(False)
+                self._table_check_lock = False
+
+            self.tab.resizeRowsToContents()
+            return
+
+        d = curr.get('data', [])
 
         self._table_check_lock = True
         self.tab.blockSignals(True)
@@ -2925,6 +4017,11 @@ class MainWindow(QMainWindow):
                 self.tab.blockSignals(False)
 
             self.tab.resizeRowsToContents()
+
+            # 최종 화면에서 번역을 실행한 경우, 번역문 갱신 후 화면도 한 번 갱신한다.
+            if self.cb_mode.currentIndex() == 4:
+                self.mode_chg(4)
+
             self.log("✅ 번역 완료")
             self.auto_save_project()
 
@@ -3158,6 +4255,9 @@ class MainWindow(QMainWindow):
     # 화면 모드 / 페이지 이동 / 출력 / 배치
     # =========================================================
     def mode_chg(self, i):
+        if getattr(self, "inline_text_editor", None) is not None:
+            self.finish_inline_text_edit(commit=True, refresh=False)
+
         # 이전 마스크 탭에서 벗어나기 전에 자동 반영.
         # 단, 페이지 로딩/일괄 작업 중에는 절대 화면 마스크를 저장하지 않는다.
         if (
@@ -3172,18 +4272,40 @@ class MainWindow(QMainWindow):
                 curr['mask_toggle_enabled'] = self.mask_toggle_enabled
                 self.auto_save_project()
 
-        old_mode = self.last_mode
-        keep_view_state = (old_mode == i and i == 4)
-        saved_transform = self.view.transform() if keep_view_state else None
-        saved_h_scroll = self.view.horizontalScrollBar().value() if keep_view_state else None
-        saved_v_scroll = self.view.verticalScrollBar().value() if keep_view_state else None
+        preserve_view_state = (not self.is_page_loading) and bool(self.view.scene.items())
+        saved_transform = self.view.transform() if preserve_view_state else None
+        saved_h_scroll = self.view.horizontalScrollBar().value() if preserve_view_state else None
+        saved_v_scroll = self.view.verticalScrollBar().value() if preserve_view_state else None
+
+        def restore_view_state_later():
+            if not preserve_view_state or saved_transform is None:
+                return
+
+            def _restore():
+                try:
+                    self.view.setTransform(saved_transform)
+                    if saved_h_scroll is not None:
+                        self.view.horizontalScrollBar().setValue(saved_h_scroll)
+                    if saved_v_scroll is not None:
+                        self.view.verticalScrollBar().setValue(saved_v_scroll)
+                except Exception:
+                    pass
+
+            # centerOn은 스크롤바 정수 반올림 때문에 반복 탭 이동 시 좌우로 누적 오차가 생길 수 있다.
+            # 그래서 저장된 스크롤바 값을 직접 복원한다.
+            QTimer.singleShot(0, _restore)
+            QTimer.singleShot(30, _restore)
+            QTimer.singleShot(80, _restore)
 
         self.last_mode = i
         curr = self.data.get(self.idx)
         if not curr:
             return
 
-        self.tb.setVisible(i in [2, 3])
+        # 좌측 그림판 도구 영역은 항상 같은 폭을 차지하게 둔다.
+        # 마스크 탭에서만 활성화하고, 다른 탭에서는 비활성화해서 탭 이동 시 화면이 좌우로 튀지 않게 한다.
+        self.tb.setVisible(True)
+        self.tb.setEnabled(i in [2, 3])
         if hasattr(self, "cb_mask_toggle"):
             self.cb_mask_toggle.setVisible(i == 3)
             if i != 3:
@@ -3197,29 +4319,32 @@ class MainWindow(QMainWindow):
         source_img = self.get_source_display_image(self.idx)
 
         if i == 0:
-            self.view.set_image(source_img)
+            self.view.set_image(source_img, fit=not preserve_view_state)
         elif i == 1:
-            self.view.set_image(source_img)
+            self.view.set_image(source_img, fit=not preserve_view_state)
             self.view.draw_static_boxes(curr['data'])
         elif i == 2:
-            self.view.set_overlay(source_img, self.get_active_mask(curr, 2), QColor(255, 0, 0, 100))
+            self.view.set_overlay(source_img, self.get_active_mask(curr, 2), QColor(255, 0, 0, 100), fit=not preserve_view_state)
             self.view.draw_static_boxes(curr['data'])
         elif i == 3:
-            self.view.set_overlay(source_img, self.get_active_mask(curr, 3), QColor(0, 0, 255, 100))
+            self.view.set_overlay(source_img, self.get_active_mask(curr, 3), QColor(0, 0, 255, 100), fit=not preserve_view_state)
             self.view.draw_static_boxes(curr['data'])
         elif i == 4:
             self.ensure_item_style_defaults_for_page(self.idx)
-            self.view.set_image(curr.get('bg_clean', source_img))
-            self.view.draw_movable_texts(curr['data'], self.cb_font.currentFont().family(), self.sb_font_size.value(), self.sb_strk.value(), show_text=self.cb_show_final_text.isChecked(), text_color=self.default_text_color, stroke_color=self.default_stroke_color, align=self.default_align)
+            final_base = curr.get('bg_clean') or source_img
+            self.view.set_image(final_base, fit=not preserve_view_state)
+            self.view.draw_movable_texts(
+                curr['data'],
+                self.cb_font.currentFont().family(),
+                self.sb_font_size.value(),
+                self.sb_strk.value(),
+                show_text=self.cb_show_final_text.isChecked(),
+                text_color=self.default_text_color,
+                stroke_color=self.default_stroke_color,
+                align=self.default_align,
+            )
 
-            # 같은 최종 화면 안에서 텍스트만 갱신되는 경우에는
-            # 사용자가 보고 있던 확대비율/스크롤 위치를 유지한다.
-            if keep_view_state and saved_transform is not None:
-                self.view.setTransform(saved_transform)
-                if saved_h_scroll is not None:
-                    self.view.horizontalScrollBar().setValue(saved_h_scroll)
-                if saved_v_scroll is not None:
-                    self.view.verticalScrollBar().setValue(saved_v_scroll)
+        restore_view_state_later()
 
     def prev(self):
         if not self.paths:
@@ -3515,7 +4640,40 @@ def exception_hook(exctype, value, traceback):
 
 if __name__ == "__main__":
     sys.excepthook = exception_hook
+
+    # Windows 작업표시줄이 PyQt 기본 아이콘 대신 앱 아이콘을 잡도록 지정한다.
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("YSB.YeoksikBoongi.Tool")
+    except Exception:
+        pass
+
     app = QApplication(sys.argv)
+    app.setWindowIcon(QIcon(resource_path("ysb_icon.ico")))
+
+    # 여기까지 오면 PyInstaller onefile 압축 해제는 끝난 상태다.
+    # 부트로더 스플래시를 닫고, 이제부터는 Qt 진행바 스플래시로 앱 초기화를 보여준다.
+    close_pyinstaller_boot_splash()
+
+    splash = make_splash_screen()
+    if splash is not None:
+        splash.set_progress(45, "환경 준비 중...")
+
+    if splash is not None:
+        splash.set_progress(62, "인터페이스 로딩 중...")
+
     w = MainWindow()
+
+    if splash is not None:
+        splash.set_progress(88, "화면 구성 마무리 중...")
+
+    w.setWindowIcon(QIcon(resource_path("ysb_icon.ico")))
     w.show()
+
+    if splash is not None:
+        splash.set_progress(100, "시작 완료")
+        splash.stop()
+        QApplication.processEvents()
+        QTimer.singleShot(120, lambda: splash.finish(w))
+
     sys.exit(app.exec())

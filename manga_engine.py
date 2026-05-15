@@ -103,6 +103,104 @@ class MangaProcessEngine:
 
         return "".join([it['text'] for it in items])
 
+    def _make_ocr_item_payload(self, item):
+        """
+        그룹 데이터 안에 보존할 CLOVA OCR 조각 정보.
+
+        main.py의 자동 텍스트 크기 조정은 이 ocr_items를 읽어서
+        원문 글자 간 좌표 차이 / 단일 조각 길이 ÷ 글자 수로 font_size를 추정한다.
+        """
+        try:
+            rect = item.get('rect', [0, 0, 1, 1])
+            rect = [int(rect[0]), int(rect[1]), int(rect[2]), int(rect[3])]
+        except Exception:
+            rect = [0, 0, 1, 1]
+
+        vertices = []
+        for p in item.get('vertices', []) or []:
+            try:
+                vertices.append([int(p[0]), int(p[1])])
+            except Exception:
+                try:
+                    vertices.append([int(p.get('x', 0)), int(p.get('y', 0))])
+                except Exception:
+                    pass
+
+        return {
+            'text': str(item.get('text', '') or ''),
+            'vertices': vertices,
+            'rect': rect,
+            'cx': float(item.get('cx', rect[0] + rect[2] / 2)),
+            'cy': float(item.get('cy', rect[1] + rect[3] / 2)),
+            'stroke_size': float(item.get('stroke_size', 0) or 0),
+        }
+
+    def _make_ocr_items_payload(self, items):
+        """그룹에 포함된 OCR 조각들을 읽기 순서 기준으로 보존한다."""
+        return [self._make_ocr_item_payload(it) for it in (items or [])]
+
+    def _ocr_item_size_score(self, item):
+        """OCR 조각의 대략적인 글자 크기 점수."""
+        try:
+            x, y, w, h = item.get('rect', [0, 0, 1, 1])
+            w = max(1.0, float(w))
+            h = max(1.0, float(h))
+            text = str(item.get('text', '') or '')
+            char_count = max(1, len(''.join(ch for ch in text if not ch.isspace())))
+            per_char_area = (w * h / char_count) ** 0.5
+            stroke = float(item.get('stroke_size', 0) or 0)
+            minor = min(w, h)
+            return max(per_char_area, stroke, minor)
+        except Exception:
+            return 1.0
+
+    def _split_main_and_ruby_items(self, items):
+        """
+        OCR 조각 중 후리가나/첨자처럼 작은 조각을 본문 조각에서 제외한다.
+
+        - 마스크/인페인팅용 vertices_list는 전체 OCR 조각을 유지한다.
+        - 번역 원문 text와 자동 크기 조정용 ocr_items는 본문 조각만 사용한다.
+        """
+        items = list(items or [])
+        if len(items) <= 1:
+            return items, []
+
+        scores = [self._ocr_item_size_score(it) for it in items]
+        if not scores:
+            return items, []
+
+        sorted_scores = sorted(scores)
+        q75 = sorted_scores[int((len(sorted_scores) - 1) * 0.75)]
+        med = sorted_scores[len(sorted_scores) // 2]
+        ref = max(q75, med, 1.0)
+
+        main_items = []
+        ruby_items = []
+
+        for item, score in zip(items, scores):
+            text = str(item.get('text', '') or '')
+            compact_len = max(1, len(''.join(ch for ch in text if not ch.isspace())))
+
+            is_small = score < ref * 0.65
+            if compact_len >= 2 and score < ref * 0.72:
+                is_small = True
+
+            if is_small:
+                ruby_items.append(item)
+            else:
+                main_items.append(item)
+
+        if not main_items:
+            return items, []
+
+        if len(main_items) == 1 and len(items) >= 3:
+            main_score = self._ocr_item_size_score(main_items[0])
+            if main_score < ref * 0.95:
+                return items, []
+
+        return main_items, ruby_items
+
+
     # ---------------------------------------------------------
     # [LOGIC] 2. 전체 블록 ID 순서 (우상단 -> 좌하단)
     # ---------------------------------------------------------
@@ -343,16 +441,24 @@ class MangaProcessEngine:
             if not included_items: continue
             
             # 만화 정렬 적용
-            combined_text = self._manga_sort(included_items)
-            
+            # 마스크는 전체 OCR 조각을 유지하되, 번역/크기 추정용 텍스트는 본문 조각만 사용한다.
+            main_text_items, ruby_items = self._split_main_and_ruby_items(included_items)
+            combined_text = self._manga_sort(main_text_items)
+
             all_sub_vertices = [it['vertices'] for it in included_items]
             avg_stroke = sum([it['stroke_size'] for it in included_items]) / len(included_items)
+            ocr_items = self._make_ocr_items_payload(main_text_items)
+            ocr_items_all = self._make_ocr_items_payload(included_items)
+            ruby_ocr_items = self._make_ocr_items_payload(ruby_items)
 
             grouped_data.append({
                 'id': 0, 
                 'text': combined_text,
                 'rect': [x, y, rw, rh],
                 'vertices_list': all_sub_vertices,
+                'ocr_items': ocr_items,
+                'ocr_items_all': ocr_items_all,
+                'ruby_ocr_items': ruby_ocr_items,
                 'avg_stroke': avg_stroke,
                 'use_inpaint': True,
                 'x_off': 0, 'y_off': 0
@@ -440,13 +546,22 @@ class MangaProcessEngine:
             rx, ry, rw, rh = cv2.boundingRect(cnt)
             if not items_in_bubble: continue
             
-            combined_text = self._manga_sort(items_in_bubble)
+            # 마스크는 전체 OCR 조각을 유지하되, 번역/크기 추정용 텍스트는 본문 조각만 사용한다.
+            main_text_items, ruby_items = self._split_main_and_ruby_items(items_in_bubble)
+            combined_text = self._manga_sort(main_text_items)
             all_vertices = [it['vertices'] for it in items_in_bubble]
             avg_stroke = sum([it['stroke_size'] for it in items_in_bubble]) / len(items_in_bubble)
-            
+            ocr_items = self._make_ocr_items_payload(main_text_items)
+            ocr_items_all = self._make_ocr_items_payload(items_in_bubble)
+            ruby_ocr_items = self._make_ocr_items_payload(ruby_items)
+
             new_grouped_data.append({
                 'id': 0, 'text': combined_text, 'rect': [rx, ry, rw, rh], 
-                'vertices_list': all_vertices, 'avg_stroke': avg_stroke,
+                'vertices_list': all_vertices,
+                'ocr_items': ocr_items,
+                'ocr_items_all': ocr_items_all,
+                'ruby_ocr_items': ruby_ocr_items,
+                'avg_stroke': avg_stroke,
                 'use_inpaint': True, 'x_off': 0, 'y_off': 0
             })
 

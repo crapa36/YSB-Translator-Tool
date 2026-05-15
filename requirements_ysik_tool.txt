@@ -5,5 +5,3 @@ requests
 openai
 pillow
 replicate
-pyinstaller
-pyinstaller-hooks-contrib

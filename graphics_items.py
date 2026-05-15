@@ -82,8 +82,23 @@ class TypesettingItem(QGraphicsPathItem):
         else:
             anchor_x = final_x + rect[2] / 2
 
-        center_y = final_y + rect[3] / 2 - current_y / 2 + line_height / 2
-        self.setPos(anchor_x, center_y)
+        # 텍스트는 작업 영역의 최상단에 붙인다.
+        # 기존처럼 세로 중앙 배치하면 더블클릭 편집 시 QGraphicsTextItem의 상단 기준과 달라져
+        # 좌표는 그대로인데 화면상 텍스트가 위아래로 움직이는 느낌이 생긴다.
+        path_rect = path.boundingRect()
+        top_y = final_y - path_rect.top()
+        self.setPos(anchor_x, top_y)
+
+        # 작업용 텍스트 영역은 로컬 좌표로 고정한다.
+        # 이동 중에도 빨간 선택 박스가 텍스트와 같이 움직이고, 이전 위치에 잔상이 남지 않는다.
+        scene_rect = QRectF(
+            float(rect[0] + data.get('x_off', 0)),
+            float(rect[1] + data.get('y_off', 0)),
+            float(rect[2]),
+            float(rect[3]),
+        )
+        self._local_text_area_rect = self.mapFromScene(scene_rect).boundingRect()
+        self._text_path_rect = QGraphicsPathItem.boundingRect(self)
 
         self.setFlags(
             self.GraphicsItemFlag.ItemIsMovable
@@ -93,6 +108,8 @@ class TypesettingItem(QGraphicsPathItem):
 
     def text_area_rect(self):
         """최종 화면에서 표시할 작업용 텍스트 영역. 실제 출력에는 포함되지 않는다."""
+        if hasattr(self, '_local_text_area_rect'):
+            return QRectF(self._local_text_area_rect)
         rect = self.data.get('rect', [0, 0, 0, 0])
         x_off = self.data.get('x_off', 0)
         y_off = self.data.get('y_off', 0)
@@ -103,6 +120,13 @@ class TypesettingItem(QGraphicsPathItem):
             float(rect[3]),
         )
         return self.mapFromScene(scene_rect).boundingRect()
+
+    def text_content_scene_rect(self):
+        """실제 글자가 차지하는 영역. 직접 편집 시작 위치/영역 계산에 쓴다."""
+        rect = getattr(self, '_text_path_rect', QGraphicsPathItem.boundingRect(self))
+        if rect.isNull() or rect.width() <= 0 or rect.height() <= 0:
+            rect = self.text_area_rect()
+        return self.mapToScene(rect).boundingRect()
 
     def boundingRect(self):
         base = super().boundingRect()
@@ -162,6 +186,15 @@ class TypesettingItem(QGraphicsPathItem):
 
         super().mousePressEvent(event)
 
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            main = getattr(self, "main_window", None)
+            if main is not None and hasattr(main, "start_inline_text_edit"):
+                main.start_inline_text_edit(self)
+                event.accept()
+                return
+        super().mouseDoubleClickEvent(event)
+
     def mouseReleaseEvent(self, event):
         if getattr(self, '_ctrl_select_press', False):
             self._ctrl_select_press = False
@@ -179,11 +212,18 @@ class TypesettingItem(QGraphicsPathItem):
         else:
             orig_x = rect[0] + rect[2] / 2
 
+        try:
+            self.prepareGeometryChange()
+        except Exception:
+            pass
+
         self.data['x_off'] = int(new_pos.x() - orig_x)
 
         if hasattr(self, 'last_press_y'):
             delta_y = int(new_pos.y() - self.last_press_y)
             self.data['y_off'] = self.data.get('y_off', 0) + delta_y
+
+        self.update()
 
         if self.update_cb:
             self.update_cb(f"📍 텍스트 이동됨 (ID: {self.data.get('id')})")

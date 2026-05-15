@@ -6,13 +6,16 @@ cd /d "%~dp0"
 
 echo ==========================================
 echo  역식붕이 툴 단일 EXE 빌드 시작
-echo  아이콘/스플래시 없는 기본 빌드
 echo ==========================================
 
 set "APP_NAME=역식붕이툴"
 set "ENTRY=main.py"
 set "REQ=requirements_ysik_tool.txt"
 set "LOG=build_log.txt"
+set "ICON_FILE=ysb_icon.ico"
+
+set "SPLASH_FILE=ysb_splash.png"
+set "BOOT_SPLASH_FILE=ysb_splash_boot.png"
 
 echo [0/7] 기존 로그 삭제...
 if exist "%LOG%" del /q "%LOG%"
@@ -29,6 +32,30 @@ if not exist "%REQ%" (
     echo.
     echo ❌ requirements 파일이 없습니다: %REQ%
     echo 이 BAT를 requirements_ysik_tool.txt가 있는 폴더에 넣고 실행하세요.
+    pause
+    exit /b 1
+)
+
+if not exist "%ICON_FILE%" (
+    echo.
+    echo ❌ 아이콘 파일이 없습니다: %ICON_FILE%
+    echo 이 BAT와 같은 폴더에 ysb_icon.ico를 넣어주세요.
+    pause
+    exit /b 1
+)
+
+if not exist "%SPLASH_FILE%" (
+    echo.
+    echo ❌ 스플래시 이미지 파일이 없습니다: %SPLASH_FILE%
+    echo 이 BAT와 같은 폴더에 ysb_splash.png를 넣어주세요.
+    pause
+    exit /b 1
+)
+
+if not exist "%BOOT_SPLASH_FILE%" (
+    echo.
+    echo ❌ 부트 스플래시 이미지 파일이 없습니다: %BOOT_SPLASH_FILE%
+    echo 이 BAT와 같은 폴더에 ysb_splash_boot.png를 넣어주세요.
     pause
     exit /b 1
 )
@@ -99,50 +126,11 @@ if exist "dist" rmdir /s /q "dist"
 if exist "%APP_NAME%.spec" del /q "%APP_NAME%.spec"
 
 echo [7/7] PyInstaller 단일 EXE 빌드 시작...
-echo 아이콘/스플래시 옵션 없이 빌드합니다.
 echo 단일 EXE는 실행 첫 시작이 onedir 방식보다 느릴 수 있습니다.
 echo 로그 파일: %LOG%
 echo.
 
-python -m PyInstaller ^
-  --noconfirm ^
-  --clean ^
-  --onefile ^
-  --windowed ^
-  --name "%APP_NAME%" ^
-  --collect-all cv2 ^
-  --copy-metadata replicate ^
-  --copy-metadata openai ^
-  --copy-metadata pydantic ^
-  --copy-metadata pydantic_core ^
-  --copy-metadata annotated-types ^
-  --copy-metadata typing-extensions ^
-  --copy-metadata httpx ^
-  --copy-metadata httpcore ^
-  --copy-metadata anyio ^
-  --copy-metadata sniffio ^
-  --copy-metadata certifi ^
-  --copy-metadata idna ^
-  --hidden-import=cv2 ^
-  --hidden-import=numpy ^
-  --hidden-import=requests ^
-  --hidden-import=openai ^
-  --hidden-import=replicate ^
-  --hidden-import=PIL ^
-  --exclude-module torch ^
-  --exclude-module torchvision ^
-  --exclude-module torchaudio ^
-  --exclude-module transformers ^
-  --exclude-module onnx ^
-  --exclude-module onnxruntime ^
-  --exclude-module pandas ^
-  --exclude-module scipy ^
-  --exclude-module gradio ^
-  --exclude-module yt_dlp ^
-  --exclude-module IPython ^
-  --exclude-module ipykernel ^
-  --exclude-module jupyter_client ^
-  "%ENTRY%" > "%LOG%" 2>&1
+python -m PyInstaller --noconfirm --clean --onefile --windowed --splash "%BOOT_SPLASH_FILE%" --icon "%ICON_FILE%" --add-data "%ICON_FILE%;." --add-data "%SPLASH_FILE%;." --name "%APP_NAME%" --collect-all cv2 --collect-submodules replicate --copy-metadata replicate --copy-metadata openai --copy-metadata pydantic --copy-metadata pydantic_core --copy-metadata annotated-types --copy-metadata typing-extensions --copy-metadata httpx --copy-metadata httpcore --copy-metadata anyio --copy-metadata sniffio --copy-metadata certifi --copy-metadata idna --hidden-import=cv2 --hidden-import=numpy --hidden-import=requests --hidden-import=openai --hidden-import=replicate --hidden-import=PIL "%ENTRY%" > "%LOG%" 2>&1
 
 if errorlevel 1 (
     echo.
@@ -153,7 +141,7 @@ if errorlevel 1 (
         powershell -NoProfile -Command "Get-Content -LiteralPath '%CD%\%LOG%' -Tail 120"
         echo ------------------------------------------
     ) else (
-        echo build_log.txt 파일이 생성되지 않았습니다.
+        echo build_log.txt가 생성되지 않았습니다.
     )
     pause
     exit /b 1
@@ -161,8 +149,9 @@ if errorlevel 1 (
 
 echo.
 echo ==========================================
-echo  ✅ 빌드 성공!
-echo  결과 파일: dist\%APP_NAME%.exe
+echo  ✅ 빌드 완료
+echo  결과 위치:
+echo  dist\%APP_NAME%.exe
 echo ==========================================
 pause
 exit /b 0

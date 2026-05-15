@@ -38,7 +38,7 @@ class MuleImageViewer(QGraphicsView):
 
         self.main.on_view_mask_edited()
 
-    def set_image(self, img):
+    def set_image(self, img, fit=True):
         self.scene.clear()
         self.user_mask_item = None
         self.magic_preview_items = []
@@ -54,9 +54,10 @@ class MuleImageViewer(QGraphicsView):
         pix = QPixmap.fromImage(q_img)
         self.scene.addPixmap(pix)
         self.scene.setSceneRect(QRectF(pix.rect()))
-        self.fitInView(self.scene.itemsBoundingRect(), Qt.AspectRatioMode.KeepAspectRatio)
+        if fit:
+            self.fitInView(self.scene.itemsBoundingRect(), Qt.AspectRatioMode.KeepAspectRatio)
 
-    def set_overlay(self, bg, mask, color):
+    def set_overlay(self, bg, mask, color, fit=True):
         self.scene.clear()
         self.magic_preview_items = []
         if bg is None:
@@ -84,7 +85,8 @@ class MuleImageViewer(QGraphicsView):
         self.user_mask_item.setZValue(10)
 
         self.scene.setSceneRect(QRectF(bg_pix.rect()))
-        self.fitInView(self.scene.itemsBoundingRect(), Qt.AspectRatioMode.KeepAspectRatio)
+        if fit:
+            self.fitInView(self.scene.itemsBoundingRect(), Qt.AspectRatioMode.KeepAspectRatio)
 
     def draw_static_boxes(self, data):
         font = QFont("Arial", 16, QFont.Weight.Bold)
@@ -166,6 +168,7 @@ class MuleImageViewer(QGraphicsView):
                 stroke_color=stroke_color,
                 align=align,
             )
+            item.main_window = self.main
             self.scene.addItem(item)
 
     def clear_magic_wand_preview(self):
@@ -292,11 +295,20 @@ class MuleImageViewer(QGraphicsView):
             and getattr(self.main, "cb_mode", None) is not None
             and self.main.cb_mode.currentIndex() == 4
         ):
-            # 최종 화면에서는 배경 클릭으로 기존 선택을 지우지 않는다.
-            # 선택 해제는 ESC로만 한다.
+            # 최종 화면에서는 배경 클릭으로 기존 텍스트 선택을 지우지 않는다.
+            # 단, 배경을 누른 채 드래그하면 이미지 이동은 되어야 하므로 super()는 통과시킨다.
             clicked = self.itemAt(e.pos())
             if not isinstance(clicked, TypesettingItem):
-                e.accept()
+                selected = [x for x in self.scene.selectedItems() if isinstance(x, TypesettingItem)]
+                self.scene.blockSignals(True)
+                try:
+                    super().mousePressEvent(e)
+                    for item in selected:
+                        item.setSelected(True)
+                finally:
+                    self.scene.blockSignals(False)
+                if selected:
+                    self.main.on_scene_selection_changed()
                 return
 
         super().mousePressEvent(e)

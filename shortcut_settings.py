@@ -77,19 +77,25 @@ DEFAULT_SHORTCUTS = {
     "work_restore_original_source": "Ctrl+Shift+R",
     "work_refresh_text": "Ctrl+F8",
     "work_extract_text": "Ctrl+L",
-    "work_import_translation": "Ctrl+B",
+    "work_import_translation": "",
     "work_clear_translation": "Ctrl+/",
     "work_clean_text": "Ctrl+Y",
     "work_export": "Ctrl+E",
     "view_text_toggle": "Ctrl+T",
 
-    # 5. 일괄 작업 옵션
+    # 5. 자동화 작업 옵션
+    "auto_text_size_current": "Ctrl+B",
+    "auto_text_size_batch": "Ctrl+Shift+B",
+    "auto_linebreak_current": "Ctrl+,",
+    "auto_linebreak_batch": "Ctrl+Shift+,",
+
+    # 6. 일괄 작업 옵션
     "batch_analyze": "Ctrl+Shift+F5",
     "batch_translate": "Ctrl+Shift+F6",
     "batch_inpaint": "Ctrl+Shift+F7",
     "batch_refresh_text": "Ctrl+Shift+F8",
     "batch_extract_text": "Ctrl+Shift+L",
-    "batch_import_translation": "Ctrl+Shift+B",
+    "batch_import_translation": "",
     "batch_clear_translation": "Ctrl+Shift+/",
     "batch_clean_text": "Ctrl+Shift+Y",
     "batch_export": "Ctrl+Shift+E",
@@ -160,6 +166,12 @@ GROUPS = [
         ("work_clean_text", "개별 텍스트 정리"),
         ("work_export", "개별 출력"),
         ("view_text_toggle", "텍스트 표시 ON/OFF"),
+    ]),
+    ("자동화 작업 옵션", [
+        ("auto_text_size_current", "자동 텍스트 크기 조정"),
+        ("auto_text_size_batch", "일괄 자동 텍스트 크기 조정"),
+        ("auto_linebreak_current", "자동 줄 내림"),
+        ("auto_linebreak_batch", "일괄 자동 줄 내림"),
     ]),
     ("일괄 작업 옵션", [
         ("batch_analyze", "일괄 분석"),
@@ -243,6 +255,13 @@ class ShortcutSettingsStore:
                 merged_shortcuts["item_font_inc"] = "="
             if merged_shortcuts.get("item_stroke_inc") == "Ctrl++":
                 merged_shortcuts["item_stroke_inc"] = "Ctrl+="
+
+            # 1.2 자동화 단축키가 Ctrl+B / Ctrl+Shift+B를 사용하므로,
+            # 예전 기본값으로 남아 있던 번역문 불러오기 단축키는 비워 충돌을 피한다.
+            if merged_shortcuts.get("work_import_translation") == "Ctrl+B":
+                merged_shortcuts["work_import_translation"] = ""
+            if merged_shortcuts.get("batch_import_translation") == "Ctrl+Shift+B":
+                merged_shortcuts["batch_import_translation"] = ""
 
             # 비활성화된 단축키는 입력칸/동작에서 빠진 상태로 유지한다.
             for key in list(merged_shortcuts.keys()):
