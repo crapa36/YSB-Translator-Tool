@@ -152,7 +152,7 @@ class ProjectStore:
             pass
         return uuid.uuid4().hex
 
-    def write_manifest(self, package_source: str | None = None, project_name: str | None = None):
+    def write_manifest(self, package_source: str | None = None, project_name: str | None = None, project_uuid: str | None = None):
         if not self.project_dir:
             return
         manifest_path = os.path.join(self.project_dir, MANIFEST_FILENAME)
@@ -176,11 +176,12 @@ class ProjectStore:
         else:
             final_name = clean_workspace_name(old_name)
 
+        final_uuid = str(project_uuid or old.get("project_uuid") or uuid.uuid4().hex)
         payload = {
             "format": "YSBT_PROJECT",
             "signature": "YSBT-PROJECT",
             "format_version": "1.0",
-            "project_uuid": old.get("project_uuid") or uuid.uuid4().hex,
+            "project_uuid": final_uuid,
             "project_name": final_name,
             "project_version": PROJECT_VERSION,
             "created_at": old.get("created_at") or now,
@@ -433,9 +434,10 @@ def safe_project_name(name: str) -> str:
 
 
 def clean_workspace_name(name: str) -> str:
-    """임시 프로젝트명/패키지명에서 화면에 보일 작업 폴더명을 정리한다.
+    """임시 프로젝트명/패키지명에서 사람이 읽을 기본 이름을 정리한다.
 
-    UUID 같은 고유 데이터는 폴더명에 넣지 않고 manifest.json 내부에 둔다.
+    .ysbt 파일명에는 UUID를 붙이지 않는다.
+    UUID는 manifest.json 내부에 저장하고, 작업 폴더를 만들 때만 이름 뒤에 짧게 붙인다.
     예: unsaved_리우1_5c03f97b -> 리우1
     """
     safe = safe_project_name(name or "ysb_project")
@@ -476,7 +478,32 @@ def unique_dir(parent: str | Path, base_name: str) -> str:
     return str(parent / f"{safe}_{uuid.uuid4().hex[:8]}")
 
 
-def package_project(project_dir: str, ysb_path: str) -> str:
+def unique_dir_with_code_suffix(parent: str | Path, base_name: str, code: str | None = None, *, append_code: bool = True) -> str:
+    """base_name 뒤에 고유 코드를 붙여 충돌 없는 작업 폴더를 만든다.
+
+    예: 작품명_a1b2c3d4, 작품명_a1b2c3d4_2
+    앞쪽에 코드를 붙이지 않아 정렬/가독성이 유지된다.
+    append_code=False이면 base_name 자체에 이미 고유 코드가 들어간 것으로 보고
+    충돌 시 _2, _3만 붙인다.
+    """
+    parent = Path(parent)
+    parent.mkdir(parents=True, exist_ok=True)
+    safe = safe_project_name(base_name)
+    if append_code:
+        code = str(code or uuid.uuid4().hex[:8])[:12]
+        first = parent / f"{safe}_{code}"
+    else:
+        first = parent / safe
+    if not first.exists():
+        return str(first)
+    for n in range(2, 10000):
+        cand = parent / f"{first.name}_{n}"
+        if not cand.exists():
+            return str(cand)
+    return str(parent / f"{first.name}_{uuid.uuid4().hex[:8]}")
+
+
+def package_project(project_dir: str, ysb_path: str, project_name: str | None = None, project_uuid: str | None = None) -> str:
     """프로젝트 폴더 전체를 .ysbt 전용 패키지 파일로 묶는다."""
     project_dir = os.path.abspath(project_dir)
     ysb_path = os.path.abspath(ysb_path)
@@ -487,7 +514,7 @@ def package_project(project_dir: str, ysb_path: str) -> str:
 
     store = ProjectStore(project_dir)
     store.init_dirs()
-    store.write_manifest(package_source=ysb_path)
+    store.write_manifest(package_source=ysb_path, project_name=project_name, project_uuid=project_uuid)
 
     os.makedirs(os.path.dirname(ysb_path), exist_ok=True)
     tmp_path = ysb_path + ".tmp"
@@ -525,29 +552,92 @@ def _safe_extract_zip(zf: zipfile.ZipFile, target_dir: str):
     zf.extractall(target_dir)
 
 
+def _same_package_source(a: str | None, b: str | None) -> bool:
+    try:
+        if not a or not b:
+            return False
+        return os.path.abspath(str(a)).lower() == os.path.abspath(str(b)).lower()
+    except Exception:
+        return False
+
+
+def _find_existing_workspace_by_uuid_and_source(workspaces_root: str | Path, project_uuid: str, package_source: str) -> str | None:
+    """workspaces 안에서 같은 project_uuid + 같은 .ysbt 경로를 가진 작업 폴더를 찾는다.
+
+    .ysbt 파일명이 기준이고, UUID는 내부 manifest/meta에만 저장된다.
+    이미 같은 YSBT를 가져온 상태라면 사용자에게 다시 물어보지 않고 해당 폴더를 조용히 재사용한다.
+    """
+    try:
+        root = Path(workspaces_root)
+        if not root.exists():
+            return None
+        package_source_abs = os.path.abspath(str(package_source)).lower()
+        for child in root.iterdir():
+            if not child.is_dir():
+                continue
+            if not (child / PROJECT_FILENAME).exists():
+                continue
+            m = _read_manifest_from_dir(child)
+            if str(m.get("project_uuid") or "") != str(project_uuid):
+                continue
+            src = str(m.get("package_source") or "")
+            if src and os.path.abspath(src).lower() == package_source_abs:
+                return str(child)
+    except Exception:
+        pass
+    return None
+
+
 def extract_ysb_package(ysb_path: str, workspaces_root: str, reuse_existing: bool = True) -> tuple[str, dict, bool]:
     """.ysbt를 workspaces_root 안의 작업 폴더로 푼다.
 
     반환: (project_dir, manifest, reused_existing)
+
+    v1.6 보정:
+    - .ysbt 파일명에는 고유번호를 붙이지 않는다.
+    - project_uuid는 .ysbt 내부 manifest.json에 저장한다.
+    - 작업 폴더를 만들 때만 파일 제목 뒤에 uuid 짧은값을 붙인다.
+      예: 테스트 파일1.ysbt -> workspaces/테스트 파일1_a1b2c3d4
+    - 같은 project_uuid + 같은 .ysbt 파일이면 재가져오기 질문 없이 기존 작업 폴더를 재사용한다.
     """
     ysb_path = os.path.abspath(ysb_path)
     manifest = read_ysb_manifest(ysb_path)
-    project_name = clean_workspace_name(manifest.get("project_name") or Path(ysb_path).stem)
+    file_title = clean_workspace_name(Path(ysb_path).stem)
     project_uuid = str(manifest.get("project_uuid") or uuid.uuid4().hex)
-    base = project_name
+    code = project_uuid[:8]
+
+    if reuse_existing:
+        existing = _find_existing_workspace_by_uuid_and_source(workspaces_root, project_uuid, ysb_path)
+        if existing:
+            return existing, manifest, True
+
+    # 사용자가 직접 보는 .ysbt 파일명은 깔끔하게 유지하고,
+    # 내부 관리용 작업 폴더에만 uuid 짧은값을 뒤에 붙인다.
+    base = f"{file_title}_{code}"
     target = os.path.join(str(workspaces_root), base)
 
     if os.path.exists(os.path.join(target, PROJECT_FILENAME)):
         existing_manifest = _read_manifest_from_dir(target)
         existing_uuid = str(existing_manifest.get("project_uuid") or "")
-        if reuse_existing and existing_uuid and existing_uuid == project_uuid:
+        existing_source = str(existing_manifest.get("package_source") or "")
+        if reuse_existing and existing_uuid and existing_uuid == project_uuid and _same_package_source(existing_source, ysb_path):
             return target, manifest, True
-        target = unique_dir(workspaces_root, base)
+        # 같은 제목/uuid 앞자리 폴더가 이미 다른 파일에 쓰이고 있으면 뒤에 _2, _3만 붙인다.
+        target = unique_dir_with_code_suffix(workspaces_root, base, None, append_code=False)
+    else:
+        os.makedirs(target, exist_ok=True)
 
+    # target이 새로 정해졌다면 안전하게 생성한다.
     os.makedirs(target, exist_ok=True)
     with zipfile.ZipFile(ysb_path, "r") as zf:
         _safe_extract_zip(zf, target)
 
     if not os.path.exists(os.path.join(target, PROJECT_FILENAME)):
         raise FileNotFoundError(f"패키지 안에 {PROJECT_FILENAME}이 없습니다: {ysb_path}")
+
+    # 압축 해제 후 작업 폴더 manifest에는 실제 패키지 경로와 사람이 읽을 프로젝트명을 기록한다.
+    try:
+        ProjectStore(target).write_manifest(package_source=ysb_path, project_name=file_title, project_uuid=project_uuid)
+    except Exception:
+        pass
     return target, manifest, False

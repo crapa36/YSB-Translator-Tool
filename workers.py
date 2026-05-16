@@ -287,6 +287,7 @@ class UniversalBatchWorker(QThread):
                         self.font_family,
                         self.stroke_size,
                         self.font_size,
+                        output_root=self.project_dir,
                     )
                     payload = {}
 

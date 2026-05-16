@@ -16,7 +16,7 @@ from PyQt6.QtCore import *
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 
 from manga_engine import MangaProcessEngine, Config
-from project_store import ProjectStore, PROJECT_FILENAME, YSB_EXTENSION, package_project, extract_ysb_package, read_ysb_manifest, safe_project_name, clean_workspace_name, unique_dir
+from project_store import ProjectStore, PROJECT_FILENAME, YSB_EXTENSION, package_project, extract_ysb_package, read_ysb_manifest, safe_project_name, clean_workspace_name, unique_dir, unique_dir_with_code_suffix
 from api_settings import ApiSettingsStore, ApiSettingsDialog, apply_settings_to_config
 from shortcut_settings import ShortcutSettingsStore, ShortcutSettingsDialog, MacroSettingsDialog, TEXT_SYMBOLS, shortcut_label_map
 from viewer import MuleImageViewer
@@ -1260,9 +1260,10 @@ class GlossaryDialog(QDialog):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("YSB Tool v1.6" if current_ui_language() == LANG_EN else "역식붕이 툴 v1.6")
+        self.update_window_title()
         self.setWindowIcon(QIcon(resource_path("ysb_icon.ico")))
         self.resize(1600, 950)
+        self.setAcceptDrops(True)
 
         self.api_settings = ApiSettingsStore.load()
         apply_settings_to_config(self.api_settings)
@@ -2241,6 +2242,65 @@ class MainWindow(QMainWindow):
     def tr_msg(self, text):
         return translate_ui_dynamic_text(text, getattr(self, "ui_language", LANG_KO))
 
+    def display_project_name(self):
+        """창 제목에 표시할 현재 파일명.
+        .ysbt 파일명은 사람이 보는 이름 그대로 두고, UUID는 내부 manifest/작업 폴더에서만 관리한다.
+        구버전 이름_고유번호.ysbt 파일을 열었을 때만 표시용으로 뒤쪽 코드를 숨긴다.
+        """
+        name = ""
+        try:
+            if getattr(self, "ysbt_package_path", None):
+                name = Path(self.ysbt_package_path).stem
+            elif getattr(self, "suggested_project_name", None):
+                name = str(self.suggested_project_name)
+        except Exception:
+            name = ""
+        if not name:
+            return ""
+        name = re.sub(r"_[0-9a-fA-F]{8,12}$", "", name)
+        return name
+
+    def update_window_title(self):
+        base = "YSB Tool v1.6" if normalize_ui_language(getattr(self, "ui_language", current_ui_language())) == LANG_EN else "역식붕이 툴 v1.6"
+        project_name = self.display_project_name()
+        try:
+            self.setWindowTitle(f"{base} - {project_name}" if project_name else base)
+        except Exception:
+            pass
+
+    def split_uuid_suffix_from_name(self, name: str):
+        stem = clean_workspace_name(name or "ysb_project")
+        m = re.match(r"^(.*)_([0-9a-fA-F]{8,12})$", stem)
+        if m:
+            return clean_workspace_name(m.group(1) or stem), m.group(2).lower()
+        return stem, None
+
+    def make_ysbt_path_with_uuid_suffix(self, path: str, project_uuid: str | None = None):
+        """사용자가 고른 .ysbt 경로를 확정한다.
+
+        v1.6 정책:
+        - .ysbt 파일명에는 UUID를 붙이지 않는다.
+        - UUID는 패키지 내부 manifest.json에 저장한다.
+        - 작업 폴더를 만들 때만 파일명 뒤에 uuid 짧은값을 붙인다.
+
+        함수명은 기존 호출부 호환을 위해 유지한다.
+        반환: (ysbt_path, display_project_name, project_uuid)
+        """
+        path = self.normalize_ysb_path(path)
+        path_obj = Path(path)
+        display_name, existing_code = self.split_uuid_suffix_from_name(path_obj.stem)
+        if project_uuid:
+            final_uuid = str(project_uuid)
+        elif existing_code:
+            # 구버전 이름_고유번호.ysbt를 저장할 때도 파일명은 정리하되,
+            # 기존 코드 앞자리는 내부 UUID에 이어받는다.
+            random_tail = uuid.uuid4().hex[len(existing_code):]
+            final_uuid = (existing_code + random_tail)[:32]
+        else:
+            final_uuid = uuid.uuid4().hex
+        clean_path = path_obj.with_name(safe_project_name(display_name) + YSB_EXTENSION)
+        return str(clean_path), display_name, final_uuid
+
     def translate_child_widgets(self, root_widget):
         """설정창/프리셋창처럼 나중에 생성되는 창의 고정 문구를 현재 언어로 바꾼다."""
         if root_widget is None:
@@ -2284,7 +2344,7 @@ class MainWindow(QMainWindow):
         lang = normalize_ui_language(language or getattr(self, "ui_language", LANG_KO))
         self.ui_language = lang
         try:
-            self.setWindowTitle("YSB Tool v1.6" if lang == LANG_EN else "역식붕이 툴 v1.6")
+            self.update_window_title()
         except Exception:
             pass
 
@@ -6903,6 +6963,45 @@ class MainWindow(QMainWindow):
             return
         self.open_project_path(path, external_request=True)
 
+    def _dragged_ysbt_path(self, event):
+        try:
+            mime = event.mimeData()
+            if not mime or not mime.hasUrls():
+                return ""
+            for url in mime.urls():
+                path = url.toLocalFile()
+                if path and path.lower().endswith(YSB_EXTENSION):
+                    return os.path.abspath(path)
+        except Exception:
+            return ""
+        return ""
+
+    def dragEnterEvent(self, event):
+        path = self._dragged_ysbt_path(event)
+        if path:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        path = self._dragged_ysbt_path(event)
+        if path:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        path = self._dragged_ysbt_path(event)
+        if not path:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        if not self.guard_project_action("YSBT 파일 드래그 열기"):
+            return
+        if not self.confirm_close_current_project_for_open(path):
+            return
+        self.open_project_path(path, external_request=True)
+
     # =========================================================
     # 프로젝트 저장 / 불러오기
     # =========================================================
@@ -6994,9 +7093,9 @@ class MainWindow(QMainWindow):
         safe = safe_project_name(project_name)
         return unique_dir(temp_dir(), f"unsaved_{safe}_{uuid.uuid4().hex[:8]}")
 
-    def workspace_project_dir(self, project_name="ysb_project"):
+    def workspace_project_dir(self, project_name="ysb_project", code=None, *, append_code=True):
         safe = clean_workspace_name(project_name)
-        return unique_dir(workspaces_dir(), safe)
+        return unique_dir_with_code_suffix(workspaces_dir(), safe, code, append_code=append_code)
 
     def normalize_ysb_path(self, path):
         if not path:
@@ -7088,8 +7187,9 @@ class MainWindow(QMainWindow):
             self.paths, self.data, self.idx = self.project_store.load(project_file)
             self.project_dir = self.project_store.project_dir
             self.ysbt_package_path = package_path
-            self.suggested_project_name = Path(package_path).stem if package_path else None
+            self.suggested_project_name = self.split_uuid_suffix_from_name(Path(package_path).stem)[0] if package_path else None
             self.is_temp_project = bool(temp_project)
+            self.update_window_title()
             self.mark_saved_state()
             if not self.auto_save_enabled:
                 self.start_work_cache_from_current(mark_dirty=False)
@@ -7103,21 +7203,12 @@ class MainWindow(QMainWindow):
 
     def open_ysb_package(self, package_path):
         try:
-            manifest = read_ysb_manifest(package_path)
+            # 기준은 항상 .ysbt 파일이다. 같은 UUID/같은 .ysbt이면 기존 작업 폴더를 조용히 재사용하고,
+            # 다른 파일이면 extract_ysb_package가 충돌 없는 새 작업 폴더를 만든다.
             target_dir, manifest, reused = extract_ysb_package(package_path, workspaces_dir(), reuse_existing=True)
-            if reused:
-                ans = QMessageBox.question(
-                    self,
-                    self.tr_ui("이미 가져온 프로젝트"),
-                    self.tr_msg("이 YSBT 파일은 이미 작업 폴더로 가져온 적이 있습니다.\n기존 작업 폴더를 열까요?\n\n[아니오]를 누르면 새 복사본으로 다시 가져옵니다."),
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    QMessageBox.StandardButton.Yes,
-                )
-                if ans == QMessageBox.StandardButton.No:
-                    target_dir, manifest, reused = extract_ysb_package(package_path, workspaces_dir(), reuse_existing=False)
             self.load_project_json(os.path.join(target_dir, PROJECT_FILENAME), package_path=package_path, temp_project=False)
         except Exception as e:
-            QMessageBox.critical(self, self.tr_ui("YSBT 열기 실패"), f"{self.tr_ui("YSBT 프로젝트를 열지 못했습니다.")}\n{package_path}\n\n{e}")
+            QMessageBox.critical(self, self.tr_ui("YSBT 열기 실패"), f"{self.tr_ui('YSBT 프로젝트를 열지 못했습니다.')}\n{package_path}\n\n{e}")
 
     def project_cache_root(self):
         root = get_cache_dir() / "work_sessions"
@@ -7408,6 +7499,7 @@ class MainWindow(QMainWindow):
         self.project_dir = project_dir
         self.ysbt_package_path = None
         self.is_temp_project = True
+        self.update_window_title()
         self.idx = 0
         self.is_loading_project = False
         self.log(f"📁 새 임시 프로젝트 생성: {project_dir}")
@@ -7487,6 +7579,7 @@ class MainWindow(QMainWindow):
             self.has_unsaved_changes = True
             return
         self.mark_saved_state()
+        self.update_window_title()
         self.log(f"💾 프로젝트 저장 완료: {self.ysbt_package_path}")
 
         # 자동저장 OFF에서는 저장본을 다시 로드한 뒤, 새 작업 캐시를 기준으로 이어간다.
@@ -7512,29 +7605,76 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
-        path = self.normalize_ysb_path(path)
+        old_package_path = os.path.abspath(self.ysbt_package_path) if self.ysbt_package_path else None
+        path_abs, display_project_name, new_uuid = self.make_ysbt_path_with_uuid_suffix(path)
+        path_abs = os.path.abspath(path_abs)
+
+        # 같은 .ysbt 파일을 고른 경우에는 일반 저장과 동일하게 처리한다.
+        if old_package_path and os.path.abspath(path_abs).lower() == old_package_path.lower():
+            self.save_project()
+            return
 
         self.commit_current_page_ui_to_data()
 
-        # 새 프로젝트는 첫 저장 시 temp에서 workspaces로 승격한다.
-        if self.is_temp_project:
-            project_name = Path(path).stem
-            if not self.promote_temp_project_to_workspace(project_name):
-                return
+        # Save As는 새 .ysbt 패키지와 새 작업 폴더로 분기한다.
+        # 기존 .ysbt 파일에는 현재까지의 미저장 변경분을 쓰지 않고,
+        # 새 파일/새 작업 폴더가 현재 상태를 이어받는다.
+        project_name = clean_workspace_name(display_project_name or Path(path_abs).stem)
+        old_project_dir = self.project_dir
+        old_work_cache = self.work_project_dir
+        # .ysbt 파일명은 깔끔하게 유지하고, 실제 작업 폴더에만 uuid 짧은값을 붙인다.
+        new_project_dir = self.workspace_project_dir(project_name, code=new_uuid[:8], append_code=True)
 
-        self.project_store = ProjectStore(self.project_dir)
-        self.project_store.save(self.paths, self.data, self.idx)
         try:
-            self.ysbt_package_path = package_project(self.project_dir, path)
+            new_store = ProjectStore(new_project_dir)
+            # ProjectStore.save()는 paths를 새 작업 폴더 내부 이미지 경로로 고정한다.
+            new_store.save(self.paths, self.data, self.idx)
+            new_store.write_manifest(package_source=path_abs, project_name=project_name, project_uuid=new_uuid)
+            package_project(new_project_dir, path_abs, project_name=project_name, project_uuid=new_uuid)
         except Exception as e:
-            QMessageBox.critical(self, self.tr_ui("YSBT 저장 실패"), f"{self.tr_ui("YSBT 파일을 저장하지 못했습니다.")}\n{path}\n\n{e}")
+            QMessageBox.critical(self, self.tr_ui("YSBT 저장 실패"), f"{self.tr_ui('YSBT 파일을 저장하지 못했습니다.')}\n{path_abs}\n\n{e}")
             self.has_unsaved_changes = True
             return
 
-        self.suggested_project_name = Path(path).stem
+        # 현재 작업은 새 파일/새 작업 폴더로 전환한다.
+        self.project_dir = new_project_dir
+        self.project_store = ProjectStore(new_project_dir)
+        self.ysbt_package_path = path_abs
+        self.suggested_project_name = display_project_name
+        self.is_temp_project = False
+        self.update_window_title()
+
+        # 기존 임시 캐시/임시 프로젝트 정리.
+        if old_work_cache and old_work_cache != self.work_project_dir and os.path.exists(old_work_cache):
+            try:
+                shutil.rmtree(old_work_cache, ignore_errors=True)
+            except Exception:
+                pass
+        self.work_project_dir = None
+        self.work_project_store = None
+
+        # Save As는 "현재 상태를 새 파일 B로 분기"하는 동작이다.
+        # 따라서 기존 파일 A의 작업 폴더는 B로 갱신/삭제하지 않고, A.ysbt에 저장된 상태로 되돌려 둔다.
+        # A와 B의 작업 폴더가 동시에 남아 있어야 사용자가 기대하는 Save As 동작과 맞다.
+        try:
+            if old_package_path and old_project_dir and os.path.abspath(old_project_dir) != os.path.abspath(new_project_dir):
+                old_abs = os.path.abspath(old_project_dir)
+                roots = [os.path.abspath(str(workspaces_dir())), os.path.abspath(str(temp_dir()))]
+                if any(old_abs.startswith(root) for root in roots) and os.path.exists(old_package_path):
+                    # 자동저장 ON 등으로 A의 작업 폴더에 미저장 변경분이 들어갔을 수 있으므로,
+                    # A.ysbt 패키지 기준으로 A 작업 폴더를 조용히 복구한다.
+                    if os.path.exists(old_abs):
+                        shutil.rmtree(old_abs, ignore_errors=True)
+                    extract_ysb_package(old_package_path, workspaces_dir(), reuse_existing=False)
+        except Exception as e:
+            try:
+                self.log(f"⚠️ Save As 이후 기존 작업 폴더 복구 실패: {e}")
+            except Exception:
+                pass
+
+        self.reload_saved_project_from_disk(refresh_view=False)
         self.mark_saved_state()
         self.log(f"💾 다른 이름으로 저장 완료: {self.ysbt_package_path}")
-        self.reload_saved_project_from_disk(refresh_view=False)
         if not self.auto_save_enabled:
             self.start_work_cache_from_current(mark_dirty=False)
         self.load()
@@ -9480,7 +9620,7 @@ class MainWindow(QMainWindow):
             base_img = self.bg_clean_to_np_image(export_bg)
             export_img = self.compose_final_paint_on_bgr(base_img, curr.get('final_paint'))
             export_bg = self.encode_np_image_to_png_bytes(export_img) or export_img
-        p = self.engine.export_project_result(curr['data'], self.paths[self.idx], export_bg, self.cb_font.currentFont().family(), self.sb_strk.value(), self.sb_font_size.value())
+        p = self.engine.export_project_result(curr['data'], self.paths[self.idx], export_bg, self.cb_font.currentFont().family(), self.sb_strk.value(), self.sb_font_size.value(), output_root=self.get_output_root())
         result_path = os.path.join(self.get_output_root(), "Result", f"Result_{Path(self.paths[self.idx]).stem}.png")
 
         # 텍스트 위 페인팅 레이어는 텍스트 렌더링 이후 최종 PNG 위에 다시 합성한다.

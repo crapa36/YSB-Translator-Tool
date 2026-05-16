@@ -1312,7 +1312,7 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
     # ---------------------------------------------------------
     # [CORE] 출력
     # ---------------------------------------------------------
-    def export_project_result(self, data, img_path, bg_data, font_name, stroke_size, fixed_font_size):
+    def export_project_result(self, data, img_path, bg_data, font_name, stroke_size, fixed_font_size, output_root=None):
         """
         결과 출력:
         - project_dir/clean/Clean_XXXX.png: 인페인팅된 배경
@@ -1478,8 +1478,13 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
         abs_img_path = os.path.abspath(img_path)
         img_dir = os.path.dirname(abs_img_path)
 
-        # 프로젝트 내부 images/0001.png 형태면 프로젝트 루트를 자동 추정
-        if os.path.basename(img_dir).lower() == "images":
+        # 출력 위치는 가능하면 호출자가 넘긴 실제 프로젝트 폴더를 우선한다.
+        # 자동저장 OFF 상태에서는 self.paths가 작업 캐시(work_sessions) 내부 images를 가리킬 수 있다.
+        # 이때 img_path 기준으로 출력 폴더를 추정하면 Result/scripts가 작업 캐시에 생겨 사용자가 찾지 못한다.
+        # 따라서 main/worker에서 output_root=self.project_dir을 넘겨 실제 프로젝트 폴더에 출력한다.
+        if output_root:
+            project_dir = os.path.abspath(str(output_root))
+        elif os.path.basename(img_dir).lower() == "images":
             project_dir = os.path.abspath(os.path.join(img_dir, ".."))
         else:
             project_dir = os.path.abspath(os.path.join(os.getcwd(), "Project_Result"))
