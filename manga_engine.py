@@ -1508,6 +1508,56 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
         if bg_img is not None:
             bg_img.save(clean_img_path)
 
+        def _font_candidates_for_js(name):
+            raw = str(name or '').strip()
+            candidates = []
+
+            def add(v):
+                v = str(v or '').strip()
+                if v and v not in candidates:
+                    candidates.append(v)
+
+            add(raw)
+            # Qt/Windows font combo strings may contain style hints such as "(OTF)" or trailing numbers.
+            cleaned = raw
+            if '(' in cleaned:
+                cleaned = cleaned.split('(')[0].strip()
+            # Remove trailing standalone numeric/style fragments often added by font display names.
+            parts = cleaned.split()
+            while parts and parts[-1].isdigit():
+                parts.pop()
+            cleaned = ' '.join(parts).strip()
+            add(cleaned)
+
+            compact = cleaned.replace(' ', '').replace('-', '').replace('_', '')
+            add(compact)
+
+            key = _font_key(cleaned or raw)
+            alias = {
+                '맑은고딕': ['Malgun Gothic', 'MalgunGothic', 'MalgunGothicRegular', 'MalgunGothicBold'],
+                'malgungothic': ['Malgun Gothic', 'MalgunGothic', 'MalgunGothicRegular', 'MalgunGothicBold'],
+                'malgun': ['Malgun Gothic', 'MalgunGothic', 'MalgunGothicRegular', 'MalgunGothicBold'],
+                '굴림': ['Gulim', 'GulimChe'],
+                'gulim': ['Gulim', 'GulimChe'],
+                '돋움': ['Dotum', 'DotumChe'],
+                'dotum': ['Dotum', 'DotumChe'],
+                '바탕': ['Batang', 'BatangChe'],
+                'batang': ['Batang', 'BatangChe'],
+                '궁서': ['Gungsuh', 'GungsuhChe'],
+                'gungsuh': ['Gungsuh', 'GungsuhChe'],
+                'msgothic': ['MSGothic', 'MS Gothic', 'MS-Gothic'],
+                'mspgothic': ['MSPGothic', 'MS PGothic', 'MS-PGothic'],
+                'meiryo': ['Meiryo', 'MeiryoUI'],
+                'yugothic': ['YuGothic', 'Yu Gothic', 'YuGothic-Regular'],
+                'notosanskr': ['NotoSansCJKkr-Regular', 'Noto Sans CJK KR'],
+                'notosansjp': ['NotoSansCJKjp-Regular', 'Noto Sans CJK JP'],
+            }
+            for k, vals in alias.items():
+                if key and (key == _font_key(k) or key in _font_key(k) or _font_key(k) in key):
+                    for v in vals:
+                        add(v)
+            return candidates
+
         layers_list = []
         for d in data:
             if not d.get('use_inpaint', True):
@@ -1534,6 +1584,7 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
                 "h": d['rect'][3],
                 "size": item_size,
                 "font": item_font,
+                "fontCandidates": _font_candidates_for_js(item_font),
                 "stroke": item_stroke,
                 "textColor": item_text_color,
                 "strokeColor": item_stroke_color,
@@ -1704,19 +1755,99 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
         # scripts/Script_XXXX.jsx에서 project_dir/clean/Clean_XXXX.png를 상대경로로 찾음
         jsx_content = f"""
 #target photoshop
-app.bringToFront(); var originalUnit = preferences.rulerUnits; preferences.rulerUnits = Units.PIXELS;
+app.bringToFront();
+var originalUnit = preferences.rulerUnits;
+preferences.rulerUnits = Units.PIXELS;
 try {{
-    var scriptFile = new File($.fileName); var imageFile = new File(scriptFile.parent.parent + "/clean/{clean_img_name}");
-    if (imageFile.exists) {{ open(imageFile); create_text_layers(app.activeDocument); }}
-    else {{ alert("이미지를 찾을 수 없습니다: " + imageFile.fsName); }}
-}} catch (e) {{ alert("오류: " + e); }}
+    var scriptFile = new File($.fileName);
+    var imageFile = new File(scriptFile.parent.parent + "/clean/{clean_img_name}");
+    if (imageFile.exists) {{
+        open(imageFile);
+        create_text_layers(app.activeDocument);
+    }} else {{
+        alert("이미지를 찾을 수 없습니다: " + imageFile.fsName);
+    }}
+}} catch (e) {{
+    alert("오류: " + e);
+}}
 preferences.rulerUnits = originalUnit;
-function resolveFont(fontName) {{
+
+function normFontKey(s) {{
     try {{
-        for (var i = 0; i < app.fonts.length; i++) {{
-            var f = app.fonts[i];
-            if (f.postScriptName == fontName || f.name == fontName || f.family == fontName) {{
-                return f.postScriptName;
+        s = String(s || "").toLowerCase();
+        s = s.replace(/\([^\)]*\)/g, "");
+        s = s.replace(/[\s_\-\.]/g, "");
+        s = s.replace(/[0-9]+$/g, "");
+        return s;
+    }} catch(e) {{ return ""; }}
+}}
+function uniquePush(arr, v) {{
+    v = String(v || "");
+    if (!v) return;
+    for (var i=0; i<arr.length; i++) if (arr[i] == v) return;
+    arr.push(v);
+}}
+function fontAliasCandidates(fontName) {{
+    var out = [];
+    uniquePush(out, fontName);
+    var cleaned = String(fontName || "").replace(/\([^\)]*\)/g, "").replace(/\s+[0-9]+$/g, "");
+    uniquePush(out, cleaned);
+    var key = normFontKey(cleaned || fontName);
+    var aliases = {{
+        "맑은고딕": ["Malgun Gothic", "MalgunGothic", "MalgunGothicRegular", "MalgunGothicBold"],
+        "malgungothic": ["Malgun Gothic", "MalgunGothic", "MalgunGothicRegular", "MalgunGothicBold"],
+        "malgun": ["Malgun Gothic", "MalgunGothic", "MalgunGothicRegular", "MalgunGothicBold"],
+        "굴림": ["Gulim", "GulimChe"],
+        "gulim": ["Gulim", "GulimChe"],
+        "돋움": ["Dotum", "DotumChe"],
+        "dotum": ["Dotum", "DotumChe"],
+        "바탕": ["Batang", "BatangChe"],
+        "batang": ["Batang", "BatangChe"],
+        "궁서": ["Gungsuh", "GungsuhChe"],
+        "gungsuh": ["Gungsuh", "GungsuhChe"],
+        "msgothic": ["MSGothic", "MS Gothic", "MS-Gothic"],
+        "mspgothic": ["MSPGothic", "MS PGothic", "MS-PGothic"],
+        "meiryo": ["Meiryo", "MeiryoUI"],
+        "yugothic": ["YuGothic", "Yu Gothic", "YuGothic-Regular"]
+    }};
+    for (var a in aliases) {{
+        var ak = normFontKey(a);
+        if (key == ak || key.indexOf(ak) >= 0 || ak.indexOf(key) >= 0) {{
+            for (var j=0; j<aliases[a].length; j++) uniquePush(out, aliases[a][j]);
+        }}
+    }}
+    return out;
+}}
+function resolveFont(fontName, extraCandidates) {{
+    var candidates = [];
+    if (extraCandidates && extraCandidates.length) {{
+        for (var i=0; i<extraCandidates.length; i++) uniquePush(candidates, extraCandidates[i]);
+    }}
+    var alias = fontAliasCandidates(fontName);
+    for (var a=0; a<alias.length; a++) uniquePush(candidates, alias[a]);
+
+    try {{
+        // Exact match first.
+        for (var c=0; c<candidates.length; c++) {{
+            for (var i=0; i<app.fonts.length; i++) {{
+                var f = app.fonts[i];
+                if (f.postScriptName == candidates[c] || f.name == candidates[c] || f.family == candidates[c]) {{
+                    return f.postScriptName;
+                }}
+            }}
+        }}
+        // Fuzzy match for localized/custom font names.
+        for (var c2=0; c2<candidates.length; c2++) {{
+            var ck = normFontKey(candidates[c2]);
+            if (!ck) continue;
+            for (var j=0; j<app.fonts.length; j++) {{
+                var ff = app.fonts[j];
+                var keys = [normFontKey(ff.postScriptName), normFontKey(ff.name), normFontKey(ff.family)];
+                for (var k=0; k<keys.length; k++) {{
+                    if (keys[k] && (keys[k] == ck || keys[k].indexOf(ck) >= 0 || ck.indexOf(keys[k]) >= 0)) {{
+                        return ff.postScriptName;
+                    }}
+                }}
             }}
         }}
     }} catch(e) {{}}
@@ -1736,30 +1867,69 @@ function setTextColor(ti, hex) {{
     c.rgb.red = rgb[0]; c.rgb.green = rgb[1]; c.rgb.blue = rgb[2];
     try {{ ti.color = c; }} catch(e) {{}}
 }}
+function unitToPx(v) {{
+    try {{ return Number(v.as("px")); }} catch(e) {{
+        try {{ return Number(v); }} catch(e2) {{ return 0; }}
+    }}
+}}
+function layerBoundsPx(layer) {{
+    var b = layer.bounds;
+    var left = unitToPx(b[0]);
+    var top = unitToPx(b[1]);
+    var right = unitToPx(b[2]);
+    var bottom = unitToPx(b[3]);
+    return {{ left:left, top:top, right:right, bottom:bottom, width:(right-left), height:(bottom-top) }};
+}}
+function alignLayerToBox(layer, d) {{
+    try {{
+        var b = layerBoundsPx(layer);
+        if (!isFinite(b.left) || !isFinite(b.top) || !isFinite(b.width) || !isFinite(b.height)) return;
+        var boxX = Number(d.x || 0);
+        var boxY = Number(d.y || 0);
+        var boxW = Number(d.w || 0);
+        var targetX = boxX;
+        if (d.align == "right") targetX = boxX + boxW - b.width;
+        else if (d.align != "left") targetX = boxX + (boxW - b.width) / 2.0;
+        var targetY = boxY;
+        layer.translate(targetX - b.left, targetY - b.top);
+    }} catch(e) {{}}
+}}
 function create_text_layers(doc) {{
-    var layers = {json_str}; var defaultFontName = {font_name_json};
+    var layers = {json_str};
+    var defaultFontName = {font_name_json};
     for (var i = 0; i < layers.length; i++) {{
-        var d = layers[i]; var ly = doc.artLayers.add(); ly.kind = LayerKind.TEXT; ly.name = "Txt_" + (i+1);
-        var ti = ly.textItem; ti.kind = TextType.POINTTEXT;
-        var anchorX = d.x + d.w/2;
-        if (d.align == "left") anchorX = d.x;
-        if (d.align == "right") anchorX = d.x + d.w;
-        ti.position = [anchorX, d.y + d.h/2];
-        ti.contents = d.text; ti.size = new UnitValue(d.size, "px");
-        try {{ ti.tracking = d.letterSpacing * 20; }} catch(e) {{}}
-        try {{ ti.leading = new UnitValue(d.size * (d.lineSpacing / 100.0), "px"); }} catch(e) {{}}
-        try {{ ti.horizontalScale = d.charWidth; }} catch(e) {{}}
-        try {{ ti.verticalScale = d.charHeight; }} catch(e) {{}}
+        var d = layers[i];
+        var ly = doc.artLayers.add();
+        doc.activeLayer = ly;
+        ly.kind = LayerKind.TEXT;
+        ly.name = "Txt_" + (d.id || (i+1));
+        var ti = ly.textItem;
+
+        // Photoshop 문단 텍스트는 박스 안에서 줄바꿈/행간/기준선을 다시 계산해서
+        // YSB 미리보기와 어긋나기 쉽다. 그래서 POINTTEXT로 만들고, 생성 후 실제 bounds로 박스에 재정렬한다.
+        try {{ ti.kind = TextType.POINTTEXT; }} catch(e) {{}}
+        try {{ ti.position = [new UnitValue(0, "px"), new UnitValue(0, "px")]; }} catch(e) {{ ti.position = [0, 0]; }}
+
+        try {{ ti.font = resolveFont(d.font || defaultFontName, d.fontCandidates || []); }} catch(e) {{}}
+        try {{ ti.size = new UnitValue(d.size, "px"); }} catch(e) {{ ti.size = d.size; }}
+        try {{ ti.contents = d.text; }} catch(e) {{ ti.contents = String(d.text || ""); }}
+        setTextColor(ti, d.textColor);
+
+        // 포토샵 출력용 레이어는 후편집을 우선한다.
+        // YSB의 자간/행간/문자 너비/문자 높이 값은 포토샵의 문자 엔진과 1:1 대응되지 않아 여기서는 적용하지 않는다.
         try {{ ti.fauxBold = !!d.bold; }} catch(e) {{}}
         try {{ ti.fauxItalic = !!d.italic; }} catch(e) {{}}
+        try {{ ti.strikeThru = !!d.strike; }} catch(e) {{}}
         try {{
             if (d.align == "left") ti.justification = Justification.LEFT;
             else if (d.align == "right") ti.justification = Justification.RIGHT;
             else ti.justification = Justification.CENTER;
         }} catch(e) {{}}
-        try {{ ti.font = resolveFont(d.font || defaultFontName); }} catch(e) {{}}
-        setTextColor(ti, d.textColor);
-        if (d.stroke > 0) {{ applyStroke(d.stroke, d.strokeColor); }}
+
+        doc.activeLayer = ly;
+        if (Number(d.stroke || 0) > 0) {{ applyStroke(Number(d.stroke), d.strokeColor); }}
+        try {{ if (Math.abs(Number(d.rotation || 0)) > 0.001) ly.rotate(Number(d.rotation), AnchorPosition.MIDDLECENTER); }} catch(e) {{}}
+        alignLayerToBox(ly, d);
     }}
 }}
 function applyStroke(size, colorHex) {{
