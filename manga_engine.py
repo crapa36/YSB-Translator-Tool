@@ -13,19 +13,35 @@ class Config:
     # ---------------------------------------------------------
     # [설정] 네이버 클라우드 CLOVA OCR 정보 (본인 키 입력 필수!)
     # ---------------------------------------------------------
+    OCR_PROVIDER = "clova"
     CLOVA_API_URL = ""
     CLOVA_SECRET_KEY = ""
+    CLOVA_MODEL = "clova_ocr_v2"
+    GOOGLE_VISION_CREDENTIAL_JSON_PATH = ""
+    GOOGLE_VISION_API_KEY = ""
+    GOOGLE_VISION_MODEL = "DOCUMENT_TEXT_DETECTION"
+    GOOGLE_VISION_LANGUAGE_HINTS = "ja,ko,en"
     
     # [설정] OpenAI & Replicate
+    TRANSLATION_PROVIDER = "openai"
     OPENAI_API_KEY = ""
     DEEPSEEK_API_KEY = ""
     GOOGLE_TRANSLATE_API_KEY = ""
-    REPLICATE_API_TOKEN = ""
+    GEMINI_API_KEY = ""
+    CUSTOM_TRANSLATION_API_KEY = ""
+    CUSTOM_TRANSLATION_BASE_URL = ""
+    CUSTOM_TRANSLATION_MODEL = ""
+    CUSTOM_TRANSLATION_PRESET_NAME = "Custom Compatible"
+    REPLICATE_API_TOKEN = ""  # 구버전/선택 provider 호환용
+    LAMA_REPLICATE_API_TOKEN = ""
+    STABLE_REPLICATE_API_TOKEN = ""
     
     # [설정] 번역 모델 선택
     OPENAI_TRANSLATION_MODEL = ""
     DEEPSEEK_TRANSLATION_MODEL = ""
     GOOGLE_TRANSLATE_MODEL = "google_translate_basic_v2"
+    GEMINI_TRANSLATION_MODEL = "gemini-2.5-flash-lite"
+    CUSTOM_TRANSLATION_MODEL = ""
 
     # [설정] 옵션 캐시에서 주입되는 AI 번역 프롬프트 / 단어장
     # 기본값은 비어 있다. 프로그램이 깨지지 않도록 JSON 출력 규칙만 내부에서 별도로 붙인다.
@@ -33,8 +49,11 @@ class Config:
     TRANSLATION_GLOSSARY_TEXT = ""
 
     # [설정] 인페인팅 모델 - api_settings/main에서 주입됨
+    INPAINT_PROVIDER = "replicate_lama"
     INPAINT_MODEL = ""
     REPAINT_MODEL = ""  # 구버전 설정 호환용
+    STABLE_INPAINT_MODEL = "stability-ai/stable-diffusion-inpainting:95b7223104132402a9ae91cc677285bc5eb997834bd2349fa486f53910fd68b3"
+    STABLE_INPAINT_PROMPT = "remove text and restore the original background"
 
     # [설정] 마스킹 비율
     INPAINT_RATIO = 0.1
@@ -66,6 +85,15 @@ class MangaProcessEngine:
                 base_url="https://api.deepseek.com"
             )
 
+        self.custom_translation_client = None
+        custom_base_url = str(getattr(Config, "CUSTOM_TRANSLATION_BASE_URL", "") or "").strip()
+        custom_api_key = str(getattr(Config, "CUSTOM_TRANSLATION_API_KEY", "") or "").strip()
+        if custom_api_key and custom_base_url:
+            self.custom_translation_client = OpenAI(
+                api_key=custom_api_key,
+                base_url=custom_base_url.rstrip("/")
+            )
+
     # ---------------------------------------------------------
     # [CORE] CLOVA OCR 호출
     # ---------------------------------------------------------
@@ -89,6 +117,163 @@ class MangaProcessEngine:
         except Exception as e:
             print(f"Connection Error: {e}")
             return None
+
+    # ---------------------------------------------------------
+    # [CORE] Google Vision OCR 호출
+    # ---------------------------------------------------------
+    def _format_google_vision_error(self, status_code, text_or_data):
+        """Google Vision 오류를 작업자가 바로 이해할 수 있는 문장으로 정리한다."""
+        message = ""
+        code = status_code
+        try:
+            if isinstance(text_or_data, dict):
+                err = text_or_data.get("error", {}) if isinstance(text_or_data.get("error", {}), dict) else {}
+                message = str(err.get("message", "") or text_or_data)
+                code = int(err.get("code", status_code) or status_code)
+            else:
+                data = json.loads(str(text_or_data))
+                err = data.get("error", {}) if isinstance(data.get("error", {}), dict) else {}
+                message = str(err.get("message", "") or text_or_data)
+                code = int(err.get("code", status_code) or status_code)
+        except Exception:
+            message = str(text_or_data)
+
+        lower = message.lower()
+        if code == 403 and ("billing" in lower or "permission_denied" in lower):
+            return (
+                "Google Vision OCR Error: 403 / Cloud Vision API는 결제 사용 설정이 필요합니다. "
+                "Google Cloud Console에서 해당 프로젝트의 결제 계정을 연결하고 Cloud Vision API가 활성화되어 있는지 확인해 주세요. "
+                "방금 설정했다면 몇 분 뒤 다시 시도하세요."
+            )
+        if code == 403 and ("disabled" in lower or "has not been used" in lower):
+            return (
+                "Google Vision OCR Error: 403 / Cloud Vision API가 아직 활성화되지 않았거나 전파 대기 중입니다. "
+                "Google Cloud Console에서 Cloud Vision API를 활성화한 뒤 몇 분 후 다시 시도하세요."
+            )
+        if code == 400 and ("api key" in lower or "key" in lower):
+            return "Google Vision OCR Error: 400 / API Key가 올바른지, Cloud Vision API 사용 권한이 있는 프로젝트의 키인지 확인해 주세요."
+        return f"Google Vision OCR Error: {code} / {message[:500]}"
+
+    def _call_google_vision_ocr(self, image_path):
+        import base64
+
+        api_key = str(getattr(Config, "GOOGLE_VISION_API_KEY", "") or "").strip()
+        if not api_key:
+            raise ValueError("Google Vision OCR API Key가 비어있습니다.")
+
+        model = str(getattr(Config, "GOOGLE_VISION_MODEL", "DOCUMENT_TEXT_DETECTION") or "DOCUMENT_TEXT_DETECTION").strip().upper()
+        if model not in ("TEXT_DETECTION", "DOCUMENT_TEXT_DETECTION"):
+            model = "DOCUMENT_TEXT_DETECTION"
+
+        hints_raw = str(getattr(Config, "GOOGLE_VISION_LANGUAGE_HINTS", "") or "")
+        hints = [x.strip() for x in hints_raw.replace(";", ",").split(",") if x.strip()]
+
+        with open(image_path, "rb") as f:
+            content = base64.b64encode(f.read()).decode("ascii")
+
+        req = {
+            "requests": [
+                {
+                    "image": {"content": content},
+                    "features": [{"type": model, "maxResults": 2000}],
+                }
+            ]
+        }
+        if hints:
+            req["requests"][0]["imageContext"] = {"languageHints": hints}
+
+        url = "https://vision.googleapis.com/v1/images:annotate"
+        r = requests.post(url, params={"key": api_key}, json=req, timeout=90)
+        if r.status_code != 200:
+            raise ValueError(self._format_google_vision_error(r.status_code, r.text))
+        data = r.json()
+        responses = data.get("responses", [])
+        if responses and responses[0].get("error"):
+            raise ValueError(self._format_google_vision_error(responses[0].get("error", {}).get("code", 400), {"error": responses[0].get("error", {})}))
+        return data
+
+    def _google_vertices_to_points(self, vertices, offset_x=0, offset_y=0):
+        pts = []
+        for v in vertices or []:
+            try:
+                pts.append([int(v.get("x", 0)) + offset_x, int(v.get("y", 0)) + offset_y])
+            except Exception:
+                pass
+        return pts
+
+    def _append_google_raw_item(self, raw_items, text, vertices, offset_x=0, offset_y=0, locale=""):
+        text = str(text or "").strip()
+        if not text:
+            return
+        pts = self._google_vertices_to_points(vertices, offset_x, offset_y)
+        if len(pts) < 3:
+            return
+
+        pts_arr = np.array(pts, dtype=np.int32)
+        rect_rot = cv2.minAreaRect(pts_arr)
+        (cx, cy), (rw, rh), angle = rect_rot
+        stroke_size = min(rw, rh) if min(rw, rh) > 0 else max(rw, rh)
+        bx, by, bw, bh = cv2.boundingRect(pts_arr)
+        compact = ''.join(ch for ch in text if not ch.isspace())
+        char_count = max(1, len(compact))
+
+        raw_items.append({
+            'text': text,
+            'vertices': pts,
+            'stroke_size': stroke_size,
+            'cx': cx,
+            'cy': cy,
+            'rect': [bx, by, bw, bh],
+            'char_count': char_count,
+            'source_provider': 'google_vision',
+            'locale': locale,
+        })
+
+    def _google_vision_response_to_raw_items(self, ocr_res, offset_x=0, offset_y=0):
+        """
+        Google Vision OCR 결과를 기존 엔진 raw_items 구조로 변환한다.
+
+        CLOVA와 달리 Google Vision은 fullTextAnnotation 안에
+        page > block > paragraph > word > symbol 구조를 준다.
+        textAnnotations[1:]만 쓰면 일본어 세로문/여러 줄에서 좌표 단위가 흔들릴 수 있어서,
+        가능하면 fullTextAnnotation의 word 단위를 우선 사용한다.
+        """
+        raw_items = []
+        responses = ocr_res.get("responses", []) if isinstance(ocr_res, dict) else []
+        if not responses:
+            return raw_items
+
+        res0 = responses[0] or {}
+        full = res0.get("fullTextAnnotation") or {}
+        pages = full.get("pages", []) or []
+
+        for page in pages:
+            page_locale = ""
+            try:
+                page_locale = str((page.get("property", {}).get("detectedLanguages", []) or [{}])[0].get("languageCode", "") or "")
+            except Exception:
+                page_locale = ""
+            for block in page.get("blocks", []) or []:
+                for para in block.get("paragraphs", []) or []:
+                    for word in para.get("words", []) or []:
+                        symbols = word.get("symbols", []) or []
+                        text = ''.join(str(sym.get("text", "") or "") for sym in symbols).strip()
+                        if not text:
+                            continue
+                        vertices = (word.get("boundingBox") or {}).get("vertices", []) or []
+                        self._append_google_raw_item(raw_items, text, vertices, offset_x, offset_y, page_locale)
+
+        # fullTextAnnotation이 비어 있거나 word 단위가 안 잡힌 경우만 textAnnotations fallback 사용.
+        if not raw_items:
+            annotations = res0.get("textAnnotations", []) or []
+            # 0번은 전체 텍스트라 보통 너무 큰 박스다. 개별 조각만 사용한다.
+            for ann in annotations[1:]:
+                text = str(ann.get("description", "") or "").strip()
+                vertices = ann.get("boundingPoly", {}).get("vertices", []) or []
+                locale = str(ann.get("locale", "") or "")
+                self._append_google_raw_item(raw_items, text, vertices, offset_x, offset_y, locale)
+
+        return self._dedupe_ocr_items(raw_items)
 
     # ---------------------------------------------------------
     # [LOGIC] 1. 말풍선 내부 텍스트 정렬 (형태 기반 단순화)
@@ -133,13 +318,22 @@ class MangaProcessEngine:
                 except Exception:
                     pass
 
+        text = str(item.get('text', '') or '')
+        try:
+            char_count = int(item.get('char_count') or len(''.join(ch for ch in text if not ch.isspace())) or 1)
+        except Exception:
+            char_count = max(1, len(''.join(ch for ch in text if not ch.isspace())))
+
         return {
-            'text': str(item.get('text', '') or ''),
+            'text': text,
             'vertices': vertices,
             'rect': rect,
             'cx': float(item.get('cx', rect[0] + rect[2] / 2)),
             'cy': float(item.get('cy', rect[1] + rect[3] / 2)),
             'stroke_size': float(item.get('stroke_size', 0) or 0),
+            'char_count': max(1, char_count),
+            'source_provider': str(item.get('source_provider', '') or item.get('source', '') or ''),
+            'locale': str(item.get('locale', '') or ''),
         }
 
     def _make_ocr_items_payload(self, items):
@@ -288,6 +482,13 @@ class MangaProcessEngine:
 
         try:
             cv2.imwrite(temp_path, img_bgr)
+
+            provider = str(getattr(Config, "OCR_PROVIDER", "clova") or "clova").lower()
+
+            if provider == "google_vision":
+                ocr_res = self._call_google_vision_ocr(temp_path)
+                return self._google_vision_response_to_raw_items(ocr_res, offset_x, offset_y)
+
             ocr_res = self._call_clova_ocr(temp_path)
 
             raw_items = []
@@ -615,6 +816,12 @@ class MangaProcessEngine:
         elif provider == "google":
             if not getattr(Config, "GOOGLE_TRANSLATE_API_KEY", ""):
                 raise ValueError("Google Translate API 키가 비어있습니다.")
+        elif provider == "gemini":
+            if not getattr(Config, "GEMINI_API_KEY", ""):
+                raise ValueError("Gemini API 키가 비어있습니다.")
+        elif provider == "custom":
+            if self.custom_translation_client is None or not getattr(Config, "CUSTOM_TRANSLATION_MODEL", ""):
+                raise ValueError("Custom 번역 API 설정이 비어있습니다. Base URL, Model, API Key를 확인해주세요.")
         else:
             if self.openai_client is None:
                 raise ValueError("OpenAI API 키가 비어있습니다.")
@@ -626,13 +833,15 @@ class MangaProcessEngine:
                 chunk_size = 8
             elif provider == "google":
                 chunk_size = 50
+            elif provider == "gemini":
+                chunk_size = 10
             else:
                 chunk_size = 20
         else:
             try:
                 chunk_size = int(chunk_size)
             except:
-                chunk_size = 8 if provider == "deepseek" else (50 if provider == "google" else 20)
+                chunk_size = 8 if provider == "deepseek" else (50 if provider == "google" else (10 if provider == "gemini" else 20))
             chunk_size = max(1, min(chunk_size, 100))
 
         final_results = []
@@ -697,6 +906,93 @@ class MangaProcessEngine:
                 results.append(str(original or ""))
         return results
 
+    def _translate_text_chunk_gemini(self, texts, base_id=0):
+        """Google AI Studio Gemini API 번역."""
+        key = str(getattr(Config, "GEMINI_API_KEY", "") or "").strip()
+        if not key:
+            raise ValueError("Gemini API 키가 비어있습니다.")
+
+        model = str(getattr(Config, "GEMINI_TRANSLATION_MODEL", "gemini-2.5-flash-lite") or "gemini-2.5-flash-lite").strip()
+        prompt = self._build_translation_system_prompt()
+
+        input_items = []
+        for i, text in enumerate(texts):
+            input_items.append({"id": base_id + i, "text": text})
+
+        user_text = prompt.strip() + "\n\nINPUT JSON:\n" + json.dumps(input_items, ensure_ascii=False)
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        payload = {
+            "contents": [
+                {"role": "user", "parts": [{"text": user_text}]}
+            ],
+            "generationConfig": {
+                "temperature": 0.2,
+                "responseMimeType": "application/json"
+            }
+        }
+
+        r = requests.post(url, params={"key": key}, json=payload, timeout=90)
+        if r.status_code != 200:
+            err_text = r.text[:800]
+            try:
+                err = r.json().get("error", {})
+                msg = str(err.get("message", "") or err_text)
+                code = int(err.get("code", r.status_code) or r.status_code)
+            except Exception:
+                msg = err_text
+                code = r.status_code
+
+            if code == 429:
+                raise ValueError(
+                    "Gemini Translate Error: 429 / Gemini API 할당량 또는 속도 제한을 초과했습니다. "
+                    "AI Studio의 Rate limits와 결제 설정을 확인해 주세요. 무료 등급에서 limit: 0으로 표시되면 "
+                    "해당 프로젝트에 사용 가능한 무료 할당량이 없거나 결제 설정이 필요한 상태일 수 있습니다. "
+                    f"원문: {msg[:400]}"
+                )
+            if code == 404:
+                raise ValueError(
+                    f"Gemini Translate Error: 404 / Gemini 모델명을 찾을 수 없습니다. 현재 모델명 '{model}'을 확인해 주세요. "
+                    "예: gemini-2.5-flash-lite"
+                )
+            raise ValueError(f"Gemini Translate Error: {code} / {msg[:500]}")
+        data = r.json()
+        candidates = data.get("candidates", [])
+        if not candidates:
+            raise ValueError("Gemini 번역 응답이 비어있습니다.")
+        parts = candidates[0].get("content", {}).get("parts", [])
+        content = "".join(str(part.get("text", "")) for part in parts).strip()
+        if not content:
+            raise ValueError("Gemini 번역 텍스트가 비어있습니다.")
+
+        if content.startswith("```json"):
+            content = content[7:]
+        if content.startswith("```"):
+            content = content[3:]
+        if content.endswith("```"):
+            content = content[:-3]
+
+        parsed = json.loads(content.strip())
+        items = parsed.get("items", []) if isinstance(parsed, dict) else parsed
+        by_id = {}
+        for item in items:
+            if isinstance(item, dict):
+                try:
+                    by_id[int(item.get("id"))] = str(item.get("translation", ""))
+                except Exception:
+                    pass
+
+        results = []
+        missing_ids = []
+        for i in range(len(texts)):
+            item_id = base_id + i
+            if item_id in by_id:
+                results.append(by_id[item_id])
+            else:
+                missing_ids.append(item_id)
+        if missing_ids:
+            raise ValueError(f"Gemini 번역 누락 ID 발생: {missing_ids}")
+        return results
+
     def _build_translation_system_prompt(self):
         """
         사용자가 옵션에서 입력한 프롬프트/단어장만 번역 지침으로 사용한다.
@@ -742,12 +1038,21 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
 
         if provider == "google":
             return self._translate_text_chunk_google(texts)
+        if provider == "gemini":
+            return self._translate_text_chunk_gemini(texts, base_id)
 
         if provider == "deepseek":
             if self.deepseek_client is None:
                 raise ValueError("DeepSeek API 키가 비어있습니다.")
             client = self.deepseek_client
             model = Config.DEEPSEEK_TRANSLATION_MODEL
+        elif provider == "custom":
+            if self.custom_translation_client is None:
+                raise ValueError("Custom 번역 API 설정이 비어있습니다. Base URL, Model, API Key를 확인해주세요.")
+            client = self.custom_translation_client
+            model = str(getattr(Config, "CUSTOM_TRANSLATION_MODEL", "") or "").strip()
+            if not model:
+                raise ValueError("Custom 번역 모델명이 비어있습니다.")
         else:
             if self.openai_client is None:
                 raise ValueError("OpenAI API 키가 비어있습니다.")
@@ -832,7 +1137,99 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
                 rx, ry, rw, rh = d['rect']
                 cv2.rectangle(final_mask, (rx, ry), (rx+rw, ry+rh), 0, -1)
         _, bin_mask = cv2.threshold(final_mask, 10, 255, cv2.THRESH_BINARY)
+        provider = str(getattr(Config, "INPAINT_PROVIDER", "replicate_lama") or "replicate_lama").lower()
+        if provider == "replicate_stable":
+            return self._call_stable_inpaint(image_path, bin_mask)
         return self._call_lama(image_path, bin_mask)
+
+    def _normalize_stable_model_name(self, model_name):
+        model_name = str(model_name or "").strip()
+        # 버전 없는 slug만 입력하면 Replicate 클라이언트/환경에 따라 404가 날 수 있어
+        # 공식 최신 버전 해시를 기본으로 붙인다.
+        if model_name == "stability-ai/stable-diffusion-inpainting":
+            return "stability-ai/stable-diffusion-inpainting:95b7223104132402a9ae91cc677285bc5eb997834bd2349fa486f53910fd68b3"
+        return model_name
+
+    def _replicate_run_isolated(self, model_name, input_payload, api_token):
+        """Replicate 호출을 provider별 토큰으로 분리해서 실행한다.
+
+        과거에는 REPLICATE_API_TOKEN 환경변수 하나를 LaMa/Stable이 공유했다.
+        이 함수는 각 호출 시점에 LaMa 토큰 또는 Stable 토큰을 명시해서 사용하므로,
+        한쪽 API 설정이 다른 쪽 인페인팅에 섞이지 않는다.
+        """
+        import replicate
+        api_token = str(api_token or "").strip()
+        if api_token:
+            try:
+                client = replicate.Client(api_token=api_token)
+                return client.run(model_name, input=input_payload)
+            except TypeError:
+                # 매우 구버전 replicate 클라이언트 대비 fallback
+                pass
+            except AttributeError:
+                pass
+
+            old_token = os.environ.get("REPLICATE_API_TOKEN")
+            os.environ["REPLICATE_API_TOKEN"] = api_token
+            try:
+                return replicate.run(model_name, input=input_payload)
+            finally:
+                if old_token is None:
+                    os.environ.pop("REPLICATE_API_TOKEN", None)
+                else:
+                    os.environ["REPLICATE_API_TOKEN"] = old_token
+
+        return replicate.run(model_name, input=input_payload)
+
+    def _call_stable_inpaint(self, image_path, mask_img):
+        import replicate
+        model_name = self._normalize_stable_model_name(getattr(Config, "STABLE_INPAINT_MODEL", ""))
+        if not model_name:
+            raise ValueError("Stable Diffusion 인페인팅 모델명이 비어있습니다.")
+        prompt = str(getattr(Config, "STABLE_INPAINT_PROMPT", "") or "remove text and restore the original background")
+        temp_mask = f"temp_mask_stable_{uuid.uuid4().hex}.png"
+        cv2.imwrite(temp_mask, mask_img)
+
+        def _run_with_input(extra_input):
+            with open(image_path, "rb") as img_file, open(temp_mask, "rb") as mask_file:
+                base_input = {
+                    "image": img_file,
+                    "mask": mask_file,
+                    "prompt": prompt,
+                }
+                base_input.update(extra_input or {})
+                token = str(getattr(Config, "STABLE_REPLICATE_API_TOKEN", "") or getattr(Config, "REPLICATE_API_TOKEN", "") or "").strip()
+                return self._replicate_run_isolated(model_name, base_input, token)
+
+        try:
+            try:
+                return _run_with_input({
+                    "num_outputs": 1,
+                    "num_inference_steps": 30,
+                    "guidance_scale": 7.5,
+                    "disable_safety_checker": True,
+                })
+            except Exception as e:
+                err_text = str(e)
+                # 입력 스키마가 모델 버전에 따라 다를 수 있으므로, 입력값 불일치 계열이면 최소 입력으로 한 번 더 시도한다.
+                input_schema_error = any(token in err_text.lower() for token in [
+                    "invalid input", "is not a valid", "unknown", "extra", "schema", "422"
+                ])
+                if input_schema_error:
+                    return _run_with_input({})
+                if "404" in err_text or "not found" in err_text.lower():
+                    raise ValueError(
+                        "Stable Diffusion 인페인팅 모델을 찾을 수 없습니다. "
+                        "모델명을 stability-ai/stable-diffusion-inpainting:95b7223104132402a9ae91cc677285bc5eb997834bd2349fa486f53910fd68b3 형식으로 입력해 주세요. "
+                        f"원문 오류: {err_text[:300]}"
+                    )
+                raise
+        finally:
+            if os.path.exists(temp_mask):
+                try:
+                    os.remove(temp_mask)
+                except Exception:
+                    pass
 
     def _call_lama(self, image_path, mask_img):
         import replicate
@@ -860,13 +1257,12 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
                     mask_file = open(temp_mask, "rb")
                     img_file = open(image_path, "rb")
 
-                    output = replicate.run(
-                        model_name,
-                        input={
-                            "image": img_file,
-                            "mask": mask_file,
-                        }
-                    )
+                    lama_input = {
+                        "image": img_file,
+                        "mask": mask_file,
+                    }
+                    token = str(getattr(Config, "LAMA_REPLICATE_API_TOKEN", "") or getattr(Config, "REPLICATE_API_TOKEN", "") or "").strip()
+                    output = self._replicate_run_isolated(model_name, lama_input, token)
                     return output
 
                 except Exception as e:

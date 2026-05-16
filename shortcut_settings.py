@@ -20,6 +20,220 @@ CACHE_FILE_NAME = "shortcut_cache.json"
 def cache_file():
     return get_cache_file(CACHE_FILE_NAME)
 
+
+THEME_DARK = "dark"
+THEME_LIGHT = "light"
+LANG_KO = "ko"
+LANG_EN = "en"
+
+# Independent dialog translation table is centralized in lang_text.py.
+from lang_text import SHORTCUT_TR_KO_EN as TR_KO_EN
+
+def resolve_ui_language(widget=None):
+    cur = widget
+    while cur is not None:
+        lang = getattr(cur, "ui_language", None) or getattr(cur, "_ui_language", None)
+        if lang:
+            lang = str(lang).lower()
+            if lang.startswith("en"):
+                return LANG_EN
+            return LANG_KO
+        try:
+            cur = cur.parent()
+        except Exception:
+            break
+    return LANG_KO
+
+def tr_text(text, lang=LANG_KO):
+    text = str(text)
+    if str(lang).lower().startswith("en"):
+        return TR_KO_EN.get(text, text)
+    return text
+
+
+def resolve_ui_theme(widget=None):
+    """부모 창에서 현재 UI 테마를 찾아온다."""
+    cur = widget
+    while cur is not None:
+        theme = getattr(cur, "ui_theme", None) or getattr(cur, "_ui_theme", None)
+        if theme:
+            theme = str(theme).lower()
+            if theme in (THEME_DARK, THEME_LIGHT):
+                return theme
+        try:
+            cur = cur.parent()
+        except Exception:
+            break
+    return THEME_DARK
+
+
+def shortcut_dialog_qss(theme=THEME_DARK):
+    if str(theme).lower() == THEME_LIGHT:
+        return """
+            QDialog, QWidget {
+                background-color: #f6f7f9;
+                color: #202124;
+            }
+            QLabel {
+                color: #202124;
+            }
+            QTabWidget::pane {
+                border: 1px solid #d5d8df;
+                background: #f6f7f9;
+                top: -1px;
+            }
+            QTabBar::tab {
+                background: #eef1f6;
+                color: #202124;
+                border: 1px solid #d5d8df;
+                border-bottom: none;
+                padding: 7px 14px;
+                min-width: 100px;
+            }
+            QTabBar::tab:selected {
+                background: #ffffff;
+                color: #111111;
+                font-weight: bold;
+            }
+            QTabBar::tab:!selected {
+                background: #eef1f6;
+                color: #404651;
+            }
+            QTabBar::tab:hover {
+                background: #e4f0ff;
+                color: #000000;
+            }
+            QScrollArea, QListWidget {
+                background: #ffffff;
+                color: #202124;
+                border: 1px solid #c8ccd5;
+            }
+            QLineEdit, QTextEdit, QPlainTextEdit, QKeySequenceEdit {
+                background-color: #ffffff;
+                color: #202124;
+                border: 1px solid #b8bdc8;
+                padding: 3px;
+                selection-background-color: #b8d7ff;
+                selection-color: #000000;
+            }
+            QCheckBox {
+                color: #202124;
+                spacing: 6px;
+            }
+            QCheckBox::indicator {
+                width: 15px;
+                height: 15px;
+                border: 1px solid #8d96a4;
+                background: #ffffff;
+            }
+            QCheckBox::indicator:checked {
+                background: #4b8de8;
+            }
+            QPushButton {
+                background-color: #ffffff;
+                color: #202124;
+                border: 1px solid #aeb4bf;
+                padding: 5px 10px;
+            }
+            QPushButton:hover {
+                background-color: #e9eef7;
+            }
+            QDialogButtonBox QPushButton {
+                min-width: 58px;
+            }
+        """
+    return """
+        QDialog, QWidget {
+            background-color: #1f1f22;
+            color: #f2f2f2;
+        }
+        QLabel {
+            color: #f2f2f2;
+        }
+        QTabWidget::pane {
+            border: 1px solid #5a5d66;
+            background: #1f1f22;
+            top: -1px;
+        }
+        QTabBar::tab {
+            background: #2d3038;
+            color: #f2f2f2;
+            border: 1px solid #5a5d66;
+            border-bottom: none;
+            padding: 7px 14px;
+            min-width: 100px;
+        }
+        QTabBar::tab:selected {
+            background: #3d414d;
+            color: #ffffff;
+            font-weight: bold;
+        }
+        QTabBar::tab:!selected {
+            background: #25272d;
+            color: #bfc3cc;
+        }
+        QTabBar::tab:hover {
+            background: #464b58;
+            color: #ffffff;
+        }
+        QScrollArea, QListWidget {
+            background: #1f1f22;
+            color: #f2f2f2;
+            border: 1px solid #5a5d66;
+        }
+        QLineEdit, QTextEdit, QPlainTextEdit, QKeySequenceEdit {
+            background-color: #2d2f34;
+            color: #f5f5f5;
+            border: 1px solid #53565f;
+            padding: 3px;
+            selection-background-color: #4b79ff;
+            selection-color: #ffffff;
+        }
+        QCheckBox {
+            color: #f2f2f2;
+            spacing: 6px;
+        }
+        QCheckBox::indicator {
+            width: 15px;
+            height: 15px;
+            border: 1px solid #72757f;
+            background: #2d2f34;
+        }
+        QCheckBox::indicator:checked {
+            background: #5da9ff;
+        }
+        QPushButton {
+            background-color: #353841;
+            color: #f2f2f2;
+            border: 1px solid #5a5d66;
+            padding: 5px 10px;
+        }
+        QPushButton:hover {
+            background-color: #424652;
+        }
+        QDialogButtonBox QPushButton {
+            min-width: 58px;
+        }
+    """
+
+
+def disabled_key_edit_qss(theme=THEME_DARK):
+    if str(theme).lower() == THEME_LIGHT:
+        return "QKeySequenceEdit { background:#fff1f1; color:#8a8f99; border:1px solid #e1b7b7; }"
+    return "QKeySequenceEdit { background:#4a2f2f; color:#bdbdbd; border:1px solid #8a5555; }"
+
+
+def disabled_line_edit_qss(theme=THEME_DARK):
+    if str(theme).lower() == THEME_LIGHT:
+        return "QLineEdit { background:#fff1f1; color:#8a8f99; border:1px solid #e1b7b7; }"
+    return "QLineEdit { background:#3b3030; color:#bdbdbd; border:1px solid #6a4a4a; }"
+
+
+def disabled_button_qss(theme=THEME_DARK):
+    if str(theme).lower() == THEME_LIGHT:
+        return "QPushButton { background:#fff1f1; color:#8a8f99; border:1px solid #e1b7b7; }"
+    return "QPushButton { background:#3b3030; color:#bdbdbd; border:1px solid #6a4a4a; }"
+
 TEXT_SYMBOLS = {
     "ellipsis": ("말줄임표(…)", "…"),
     "horizontal_dash": ("가로장음(―)", "―"),
@@ -83,11 +297,14 @@ DEFAULT_SHORTCUTS = {
     # 3. 프로젝트 옵션
     "project_new": "Ctrl+N",
     "project_open": "Ctrl+O",
+    "project_open_json": "Ctrl+Alt+O",
     "project_save": "Ctrl+S",
     "project_save_as": "Ctrl+Shift+S",
 
     # 3-2. 옵션
     "option_auto_save_mode": "Ctrl+Alt+1",
+    "option_theme_settings": "Ctrl+Alt+Shift+T",
+    "option_language_settings": "Ctrl+Alt+Shift+L",
     "option_api_settings": "Ctrl+Alt+2",
     "option_shortcut_settings": "Ctrl+Alt+3",
     "option_macro_settings": "Ctrl+Alt+4",
@@ -185,11 +402,14 @@ GROUPS = [
     ("프로젝트 옵션", [
         ("project_new", "새 프로젝트"),
         ("project_open", "프로젝트 열기"),
+        ("project_open_json", "JSON 파일로 열기"),
         ("project_save", "프로젝트 저장"),
         ("project_save_as", "다른 이름으로 저장"),
     ]),
     ("옵션", [
         ("option_auto_save_mode", "자동저장 모드"),
+        ("option_theme_settings", "테마 설정"),
+        ("option_language_settings", "언어 설정"),
         ("option_api_settings", "API 관리"),
         ("option_translation_prompt", "번역 프롬프트 입력"),
         ("option_glossary", "단어장"),
@@ -369,8 +589,11 @@ class ShortcutSettingsStore:
 class MacroFunctionSelectDialog(QDialog):
     def __init__(self, current_actions=None, settings: ShortcutSettings = None, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("매크로 기능 선택")
+        self._ui_language = resolve_ui_language(parent)
+        self.setWindowTitle(tr_text("매크로 기능 선택", self._ui_language))
         self.resize(720, 720)
+        self._ui_theme = resolve_ui_theme(parent)
+        self.setStyleSheet(shortcut_dialog_qss(self._ui_theme))
 
         self.settings = settings or ShortcutSettings()
         self.label_map = shortcut_label_map()
@@ -381,7 +604,7 @@ class MacroFunctionSelectDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
-        title = QLabel("현재 매크로 기능")
+        title = QLabel(tr_text("현재 매크로 기능", self._ui_language))
         title.setStyleSheet("font-weight:bold;")
         layout.addWidget(title)
 
@@ -396,12 +619,12 @@ class MacroFunctionSelectDialog(QDialog):
         self.current_box.setWidget(self.current_inner)
         layout.addWidget(self.current_box)
 
-        help_label = QLabel("기능을 더블클릭하거나, 선택 후 [기능 추가]를 누르면 창을 닫지 않고 계속 추가됩니다. 검색창/목록에 포커스를 둔 상태에서 실제 단축키를 누르면 즉시 추가됩니다. 단축키 OFF/없음은 단축키 상태 표시일 뿐, 매크로 실행에는 영향 없습니다.")
+        help_label = QLabel(tr_text("기능을 더블클릭하거나, 선택 후 [기능 추가]를 누르면 창을 닫지 않고 계속 추가됩니다. 검색창/목록에 포커스를 둔 상태에서 실제 단축키를 누르면 즉시 추가됩니다. 단축키 OFF/없음은 단축키 상태 표시일 뿐, 매크로 실행에는 영향 없습니다.", self._ui_language))
         help_label.setWordWrap(True)
         layout.addWidget(help_label)
 
         self.search = QLineEdit()
-        self.search.setPlaceholderText("기능명 / 그룹 / 단축키 검색  예: 자동 줄 내림, Ctrl+B")
+        self.search.setPlaceholderText(tr_text("기능명 / 그룹 / 단축키 검색  예: 자동 줄 내림, Ctrl+B", self._ui_language))
         layout.addWidget(self.search)
 
         self.list_widget = QListWidget()
@@ -409,8 +632,8 @@ class MacroFunctionSelectDialog(QDialog):
         layout.addWidget(self.list_widget, 1)
 
         btn_line = QHBoxLayout()
-        self.btn_add_selected = QPushButton("기능 추가")
-        self.btn_close = QPushButton("닫기")
+        self.btn_add_selected = QPushButton(tr_text("기능 추가", self._ui_language))
+        self.btn_close = QPushButton(tr_text("닫기", self._ui_language))
         btn_line.addStretch()
         btn_line.addWidget(self.btn_add_selected)
         btn_line.addWidget(self.btn_close)
@@ -586,21 +809,37 @@ class MacroFunctionSelectDialog(QDialog):
                 w.deleteLater()
 
         if not self.current_actions:
-            lab = QLabel("아직 추가된 기능이 없습니다.")
-            lab.setStyleSheet("color:#bfc3cc;")
+            lab = QLabel(tr_text("아직 추가된 기능이 없습니다.", self._ui_language))
+            lab.setStyleSheet("color:#5f6673;" if self._ui_theme == THEME_LIGHT else "color:#bfc3cc;")
             self.current_grid.addWidget(lab, 0, 0)
             return
 
         max_cols = 3
         for i, key in enumerate(self.current_actions):
-            label = self.label_map.get(key, key)
+            label = tr_text(self.label_map.get(key, key), self._ui_language)
             sk = self.display_shortcut_for_key(key)
             status = self.status_text_for_key(key)
-            extra = f" / {sk}" if sk else f" / {status}"
+            extra = f" / {sk}" if sk else f" / {tr_text(status, self._ui_language)}"
             btn = QPushButton(f"{i + 1}. {label}{extra}  ×")
-            btn.setToolTip("클릭하면 이 기능을 매크로에서 제거합니다.")
+            btn.setToolTip(tr_text("클릭하면 이 기능을 매크로에서 제거합니다.", self._ui_language))
 
-            if status == "단축키 ON":
+            if self._ui_theme == THEME_LIGHT:
+                if status == "단축키 ON":
+                    bg = "#e8f1ff"
+                    border = "#6fa8ff"
+                    hover = "#d7e8ff"
+                    color = "#202124"
+                elif status == "단축키 OFF":
+                    bg = "#fff7df"
+                    border = "#d2b45d"
+                    hover = "#fff0bf"
+                    color = "#5b4a12"
+                else:
+                    bg = "#f0f2f5"
+                    border = "#b8bdc8"
+                    hover = "#e4e8ef"
+                    color = "#404651"
+            elif status == "단축키 ON":
                 bg = "#2f425f"
                 border = "#6d93d8"
                 hover = "#4b5f86"
@@ -642,12 +881,15 @@ class MacroFunctionSelectDialog(QDialog):
             native_shortcut = self.display_shortcut_for_key(key)
             portable_shortcut = self.portable_shortcut_for_key(key)
             status = self.status_text_for_key(key)
-            hay = f"{label} {key} {group_title} {native_shortcut} {portable_shortcut} {status}".lower()
+            d_label = tr_text(label, self._ui_language)
+            d_group = tr_text(group_title, self._ui_language)
+            d_status = tr_text(status, self._ui_language)
+            hay = f"{label} {d_label} {key} {group_title} {d_group} {native_shortcut} {portable_shortcut} {status} {d_status}".lower()
             if query and query not in hay:
                 continue
 
             shortcut_part = f" / {native_shortcut}" if native_shortcut else ""
-            item = QListWidgetItem(f"[{status}] [{group_title}] {label}{shortcut_part}  ({key})")
+            item = QListWidgetItem(f"[{d_status}] [{d_group}] {d_label}{shortcut_part}  ({key})")
             item.setData(Qt.ItemDataRole.UserRole, key)
             if status != "단축키 ON":
                 item.setForeground(Qt.GlobalColor.gray)
@@ -718,13 +960,13 @@ class MacroFunctionSelectDialog(QDialog):
             self.search.clear()
             return True
 
-        QMessageBox.information(self, "기능 추가", "정확히 일치하는 단축키가 없습니다. 기능명 검색 후 더블클릭하거나 [기능 추가]를 눌러주세요.")
+        QMessageBox.information(self, tr_text("기능 추가", self._ui_language), tr_text("정확히 일치하는 단축키가 없습니다. 기능명 검색 후 더블클릭하거나 [기능 추가]를 눌러주세요.", self._ui_language))
         return False
 
     def add_selected(self):
         item = self.list_widget.currentItem()
         if not item:
-            QMessageBox.information(self, "기능 추가", "추가할 기능을 선택해주세요.")
+            QMessageBox.information(self, tr_text("기능 추가", self._ui_language), tr_text("추가할 기능을 선택해주세요.", self._ui_language))
             return
         self.add_key(item.data(Qt.ItemDataRole.UserRole))
 
@@ -745,7 +987,8 @@ class MacroFunctionSelectDialog(QDialog):
 class MacroSettingsDialog(QDialog):
     def __init__(self, settings: ShortcutSettings, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("매크로 관리")
+        self._ui_language = resolve_ui_language(parent)
+        self.setWindowTitle(tr_text("매크로 관리", self._ui_language))
         self.resize(900, 560)
         self.settings = ShortcutSettings(
             dict(settings.shortcuts),
@@ -756,40 +999,19 @@ class MacroSettingsDialog(QDialog):
         self.rows = []
         self._handling = False
 
-        self.setStyleSheet("""
-            QDialog, QWidget { background-color: #1f1f22; color: #f2f2f2; }
-            QLabel { color: #f2f2f2; }
-            QLineEdit, QKeySequenceEdit {
-                background-color: #2d2f34;
-                color: #f5f5f5;
-                border: 1px solid #53565f;
-                padding: 3px;
-            }
-            QPushButton {
-                background-color: #353841;
-                color: #f2f2f2;
-                border: 1px solid #5a5d66;
-                padding: 5px 10px;
-            }
-            QPushButton:hover { background-color: #424652; }
-            QCheckBox::indicator {
-                width: 15px;
-                height: 15px;
-                border: 1px solid #72757f;
-                background: #2d2f34;
-            }
-            QCheckBox::indicator:checked { background: #5da9ff; }
-        """)
+        self._ui_theme = resolve_ui_theme(parent)
+        self.setStyleSheet(shortcut_dialog_qss(self._ui_theme))
 
         root = QVBoxLayout(self)
-        info = QLabel(
+        info = QLabel(tr_text(
             "매크로는 여러 기능을 추가한 순서대로 연속 실행합니다.\n"
-            "매크로 단축키가 기존 단축키와 겹치면, 확인 후 기존 단축키를 비활성화합니다."
-        )
+            "매크로 단축키가 기존 단축키와 겹치면, 확인 후 기존 단축키를 비활성화합니다.",
+            self._ui_language,
+        ))
         info.setWordWrap(True)
         root.addWidget(info)
 
-        add_btn = QPushButton("매크로 추가")
+        add_btn = QPushButton(tr_text("매크로 추가", self._ui_language))
         add_btn.clicked.connect(self.add_macro)
         root.addWidget(add_btn, 0, Qt.AlignmentFlag.AlignLeft)
 
@@ -803,6 +1025,8 @@ class MacroSettingsDialog(QDialog):
         root.addWidget(self.scroll, 1)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("OK")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText(tr_text("닫기", self._ui_language))
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
@@ -810,13 +1034,13 @@ class MacroSettingsDialog(QDialog):
         self.refill()
 
     def macro_label(self, actions):
-        names = [self.label_map.get(k, k) for k in actions]
-        return " + ".join(names) if names else "기능 없음"
+        names = [tr_text(self.label_map.get(k, k), self._ui_language) for k in actions]
+        return " + ".join(names) if names else tr_text("기능 없음", self._ui_language)
 
     def normalized_macros(self):
         result = []
         for row in self.rows:
-            name = row["name"].text().strip() or "새 매크로"
+            name = row["name"].text().strip() or tr_text("새 매크로", self._ui_language)
             enabled = bool(row["enabled"].isChecked())
             seq = row["seq"].keySequence().toString(QKeySequence.SequenceFormat.PortableText) if enabled else ""
             actions = list(row.get("actions", []))
@@ -838,7 +1062,7 @@ class MacroSettingsDialog(QDialog):
 
         headers = ["사용", "이름", "기능", "단축키", ""]
         for c, h in enumerate(headers):
-            lab = QLabel(h)
+            lab = QLabel(tr_text(h, self._ui_language) if h else "")
             lab.setStyleSheet("font-weight:bold;")
             self.grid.addWidget(lab, 0, c)
 
@@ -847,10 +1071,10 @@ class MacroSettingsDialog(QDialog):
             self.add_macro_row(macro)
 
     def add_macro(self):
-        name, ok = QInputDialog.getText(self, "매크로 추가", "매크로 이름:")
+        name, ok = QInputDialog.getText(self, tr_text("매크로 추가", self._ui_language), tr_text("매크로 이름:", self._ui_language))
         if not ok:
             return
-        name = name.strip() or "새 매크로"
+        name = name.strip() or tr_text("새 매크로", self._ui_language)
         self.add_macro_row({"enabled": True, "name": name, "shortcut": "", "actions": []})
 
     def apply_macro_row_enabled_state(self, row_data, enabled):
@@ -919,8 +1143,8 @@ class MacroSettingsDialog(QDialog):
         enabled = QCheckBox()
         enabled.setChecked(bool(macro.get("enabled", True)))
 
-        name = QLineEdit(str(macro.get("name", "새 매크로")))
-        name.setPlaceholderText("매크로 이름")
+        name = QLineEdit(str(macro.get("name", tr_text("새 매크로", self._ui_language))))
+        name.setPlaceholderText(tr_text("매크로 이름", self._ui_language))
         name.installEventFilter(self)
 
         actions = list(macro.get("actions", []) or [])
@@ -930,7 +1154,7 @@ class MacroSettingsDialog(QDialog):
         seq = QKeySequenceEdit()
         seq.setKeySequence(QKeySequence(str(macro.get("shortcut", ""))))
 
-        delete_btn = QPushButton("삭제")
+        delete_btn = QPushButton(tr_text("삭제", self._ui_language))
 
         initial_shortcut = seq.keySequence().toString(QKeySequence.SequenceFormat.PortableText) if enabled.isChecked() else ""
         row_data = {
@@ -967,7 +1191,7 @@ class MacroSettingsDialog(QDialog):
         row_data["function_btn"].setText(self.macro_label(row_data["actions"]))
 
     def delete_macro_row(self, row_data):
-        ans = QMessageBox.question(self, "매크로 삭제", f"'{row_data['name'].text()}' 매크로를 삭제할까요?")
+        ans = QMessageBox.question(self, tr_text("매크로 삭제", self._ui_language), f"'{row_data['name'].text()}' {tr_text('매크로를 삭제할까요?', self._ui_language)}")
         if ans != QMessageBox.StandardButton.Yes:
             return
         if row_data in self.rows:
@@ -1076,75 +1300,11 @@ class MacroSettingsDialog(QDialog):
 class ShortcutSettingsDialog(QDialog):
     def __init__(self, settings: ShortcutSettings, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("단축키 통합 관리")
+        self._ui_language = resolve_ui_language(parent)
+        self.setWindowTitle(tr_text("단축키 통합 관리", self._ui_language))
         self.resize(760, 760)
-        self.setStyleSheet("""
-            QDialog, QWidget {
-                background-color: #1f1f22;
-                color: #f2f2f2;
-            }
-            QLabel {
-                color: #f2f2f2;
-            }
-            QTabWidget::pane {
-                border: 1px solid #5a5d66;
-                background: #1f1f22;
-                top: -1px;
-            }
-            QTabBar::tab {
-                background: #2d3038;
-                color: #f2f2f2;
-                border: 1px solid #5a5d66;
-                border-bottom: none;
-                padding: 7px 14px;
-                min-width: 100px;
-            }
-            QTabBar::tab:selected {
-                background: #3d414d;
-                color: #ffffff;
-                font-weight: bold;
-            }
-            QTabBar::tab:!selected {
-                background: #25272d;
-                color: #bfc3cc;
-            }
-            QTabBar::tab:hover {
-                background: #464b58;
-                color: #ffffff;
-            }
-            QScrollArea {
-                background: #1f1f22;
-                border: 1px solid #5a5d66;
-            }
-            QKeySequenceEdit {
-                background-color: #2d2f34;
-                color: #f5f5f5;
-                border: 1px solid #53565f;
-                padding: 3px;
-            }
-            QCheckBox {
-                color: #f2f2f2;
-                spacing: 6px;
-            }
-            QCheckBox::indicator {
-                width: 15px;
-                height: 15px;
-                border: 1px solid #72757f;
-                background: #2d2f34;
-            }
-            QCheckBox::indicator:checked {
-                background: #5da9ff;
-            }
-            QPushButton {
-                background-color: #353841;
-                color: #f2f2f2;
-                border: 1px solid #5a5d66;
-                padding: 5px 10px;
-            }
-            QPushButton:hover {
-                background-color: #424652;
-            }
-        """)
+        self._ui_theme = resolve_ui_theme(parent)
+        self.setStyleSheet(shortcut_dialog_qss(self._ui_theme))
 
         self.settings = ShortcutSettings(
             dict(settings.shortcuts),
@@ -1159,12 +1319,21 @@ class ShortcutSettingsDialog(QDialog):
         self._handling_change = False
 
         layout = QVBoxLayout(self)
-        info = QLabel(
-            "단축키는 프로그램 폴더의 캐시 파일에 저장됩니다.\n"
-            "같은 단축키를 지정하면 기존 항목과 서로 교체됩니다.\n"
-            "체크를 끄면 해당 단축키는 사용하지 않으며 입력칸이 비워집니다.\n"
-            "캐시 위치: " + ShortcutSettingsStore.cache_path()
-        )
+        if self._ui_language == LANG_EN:
+            shortcut_help_text = (
+                "Shortcuts are saved to the program cache file.\n"
+                "If you assign the same shortcut, it will be swapped with the existing item.\n"
+                "If you uncheck an item, that shortcut will be disabled and the input box will be cleared.\n"
+                "Cache path: "
+            )
+        else:
+            shortcut_help_text = (
+                "단축키는 프로그램 폴더의 캐시 파일에 저장됩니다.\n"
+                "같은 단축키를 지정하면 기존 항목과 서로 교체됩니다.\n"
+                "체크를 끄면 해당 단축키는 사용하지 않으며 입력칸이 비워집니다.\n"
+                "캐시 위치: "
+            )
+        info = QLabel(shortcut_help_text + ShortcutSettingsStore.cache_path())
         info.setWordWrap(True)
         layout.addWidget(info)
 
@@ -1187,7 +1356,7 @@ class ShortcutSettingsDialog(QDialog):
                 chk.setChecked(self.settings.is_enabled(key))
                 grid.addWidget(chk, r, 0)
 
-                label_w = QLabel(label)
+                label_w = QLabel(tr_text(label, self._ui_language))
                 grid.addWidget(label_w, r, 1)
 
                 edit = QKeySequenceEdit()
@@ -1206,10 +1375,10 @@ class ShortcutSettingsDialog(QDialog):
 
             scroll.setWidget(inner)
             page_layout.addWidget(scroll)
-            tabs.addTab(page, title)
+            tabs.addTab(page, tr_text(title, self._ui_language))
 
         btn_line = QHBoxLayout()
-        reset_btn = QPushButton("기본값 복구")
+        reset_btn = QPushButton(tr_text("기본값 복구", self._ui_language))
         reset_btn.clicked.connect(self.reset_defaults)
         btn_line.addWidget(reset_btn)
         btn_line.addStretch()
@@ -1218,6 +1387,8 @@ class ShortcutSettingsDialog(QDialog):
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("OK")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText(tr_text("닫기", self._ui_language))
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -1236,13 +1407,7 @@ class ShortcutSettingsDialog(QDialog):
         if enabled:
             edit.setStyleSheet("")
         else:
-            edit.setStyleSheet(
-                "QKeySequenceEdit {"
-                "background:#4a2f2f;"
-                "color:#bdbdbd;"
-                "border:1px solid #8a5555;"
-                "}"
-            )
+            edit.setStyleSheet(disabled_key_edit_qss(self._ui_theme))
 
     def on_enabled_toggled(self, key: str, checked: bool):
         if self._handling_change:
@@ -1335,14 +1500,14 @@ class ShortcutSettingsDialog(QDialog):
         if other_key and notify:
             new_label = self.labels.get(key).text() if self.labels.get(key) else key
             old_label = self.labels.get(other_key).text() if self.labels.get(other_key) else other_key
-            old_text_display = old_text if old_text else "비어 있음"
+            old_text_display = old_text if old_text else tr_text("비어 있음", self._ui_language)
             ans = QMessageBox.question(
                 self,
                 "단축키 교체 확인",
                 f"이미 사용 중인 단축키입니다.\n\n"
                 f"{new_label}: {new_text}\n"
                 f"{old_label}: {old_text_display}\n\n"
-                f"서로 교체해서 사용할까요?",
+                f"{tr_text('서로 교체해서 사용할까요?', self._ui_language)}",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
@@ -1376,7 +1541,7 @@ class ShortcutSettingsDialog(QDialog):
         self.swap_if_conflict(key, notify=True)
 
     def reset_defaults(self):
-        if QMessageBox.question(self, "기본값 복구", "단축키를 전부 기본값으로 돌릴까요?") != QMessageBox.StandardButton.Yes:
+        if QMessageBox.question(self, tr_text("기본값 복구", self._ui_language), tr_text("단축키를 전부 기본값으로 돌릴까요?", self._ui_language)) != QMessageBox.StandardButton.Yes:
             return
 
         self._handling_change = True

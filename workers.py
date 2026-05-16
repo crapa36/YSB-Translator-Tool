@@ -6,6 +6,44 @@ import requests
 import time
 from PyQt6.QtCore import QThread, pyqtSignal
 
+def _download_replicate_output(output):
+    """Replicate output can be URL strings, lists, FileOutput objects, file-like objects, bytes, or local paths."""
+    if output is None:
+        return b""
+    if isinstance(output, (list, tuple)):
+        if not output:
+            return b""
+        output = output[0]
+    if isinstance(output, (bytes, bytearray)):
+        return bytes(output)
+    # replicate FileOutput often supports read()
+    try:
+        if hasattr(output, "read") and callable(output.read):
+            data = output.read()
+            if isinstance(data, str):
+                return data.encode("utf-8")
+            return bytes(data or b"")
+    except Exception:
+        pass
+    # some objects expose url
+    try:
+        if hasattr(output, "url"):
+            output = output.url
+    except Exception:
+        pass
+    text = str(output)
+    if text.startswith("http://") or text.startswith("https://"):
+        r = requests.get(text, timeout=180)
+        r.raise_for_status()
+        return r.content
+    if os.path.exists(text):
+        with open(text, "rb") as f:
+            return f.read()
+    # Last fallback: requests may know how to handle object string repr for older clients.
+    r = requests.get(text, timeout=180)
+    r.raise_for_status()
+    return r.content
+
 
 def _imread_unicode(path: str):
     arr = np.fromfile(path, np.uint8)
@@ -217,7 +255,7 @@ class UniversalBatchWorker(QThread):
 
                     if res_url:
                         u = res_url[0] if isinstance(res_url, list) else res_url
-                        bg_bytes = requests.get(str(u)).content
+                        bg_bytes = _download_replicate_output(res_url)
 
                         # 중요: 워커 스냅샷 안에만 넣지 말고 payload로 main에 넘겨야 실제 페이지에 반영된다.
                         curr_data['bg_clean'] = bg_bytes
@@ -277,11 +315,18 @@ class AnalysisWorker(QThread):
 
     def run(self):
         try:
+            try:
+                from manga_engine import Config
+                provider = str(getattr(Config, "OCR_PROVIDER", "clova") or "clova")
+                provider_name = "Google Vision" if provider == "google_vision" else "CLOVA"
+            except Exception:
+                provider_name = "OCR"
+
             if self.mask is not None:
-                self.log.emit("🔄 CLOVA OCR로 영역 재분석 중...")
+                self.log.emit(f"🔄 {provider_name} OCR로 영역 재분석 중...")
                 o, d, mm, mi = self.engine.reanalyze_from_manual_mask(self.path, self.mask, self.data)
             else:
-                self.log.emit("🚀 CLOVA 전체 분석 시작...")
+                self.log.emit(f"🚀 {provider_name} 전체 분석 시작...")
                 o, d, mm, mi = self.engine.analyze_image(self.path)
             self.log.emit(f"✅ 완료 ({len(d)}개)")
             self.finished.emit(o, d, _copy_mask(mm), _copy_mask(mi))
@@ -304,14 +349,20 @@ class InpaintWorker(QThread):
 
     def run(self):
         try:
-            self.log.emit("🎨 LaMa 인페인팅 시작...")
+            try:
+                from manga_engine import Config
+                provider = str(getattr(Config, "INPAINT_PROVIDER", "replicate_lama") or "replicate_lama")
+                provider_name = "Stable Diffusion" if provider == "replicate_stable" else "LaMa"
+            except Exception:
+                provider_name = "인페인팅"
+            self.log.emit(f"🎨 {provider_name} 인페인팅 시작...")
             res = self.engine.execute_inpainting(self.path, self.data, self.mask)
             if res:
                 u = res[0] if isinstance(res, list) else res
-                img_data = requests.get(str(u)).content
+                img_data = _download_replicate_output(res)
                 self.finished.emit(img_data)
             else:
-                self.log.emit("❌ 실패: LaMa 서버에서 응답이 없습니다. (API 토큰 확인 필요)")
+                self.log.emit("❌ 실패: 인페인팅 서버에서 응답이 없습니다. (API 토큰/모델 설정 확인 필요)")
                 self.finished.emit(b"")
         except Exception as e:
             self.log.emit(f"❌ 오류 발생: {e}")

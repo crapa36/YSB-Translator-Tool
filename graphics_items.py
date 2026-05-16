@@ -534,6 +534,13 @@ class TypesettingItem(QGraphicsPathItem):
             return
 
         self.last_press_y = self.pos().y()
+        self._normal_move_press_pos = QPointF(self.pos())
+        try:
+            self._normal_move_press_xoff = int(self.data.get('x_off', 0) or 0)
+            self._normal_move_press_yoff = int(self.data.get('y_off', 0) or 0)
+        except Exception:
+            self._normal_move_press_xoff = 0
+            self._normal_move_press_yoff = 0
         self._ctrl_select_press = False
 
         active_transform = main.current_transform_data_item() if main is not None and hasattr(main, 'current_transform_data_item') else None
@@ -641,17 +648,32 @@ class TypesettingItem(QGraphicsPathItem):
         else:
             orig_x = rect[0] + rect[2] / 2
 
+        new_x_off = int(new_pos.x() - orig_x)
+        old_x_off = int(self.data.get('x_off', 0) or 0)
+        old_y_off = int(self.data.get('y_off', 0) or 0)
+        new_y_off = old_y_off
+        if hasattr(self, 'last_press_y'):
+            delta_y = int(new_pos.y() - self.last_press_y)
+            new_y_off = old_y_off + delta_y
+
+        # A plain click should not create an undo record or a "moved" log.
+        if new_x_off == old_x_off and new_y_off == old_y_off:
+            return
+
+        main = getattr(self, "main_window", None)
+        if main is not None and hasattr(main, 'push_page_text_undo'):
+            try:
+                main.push_page_text_undo('텍스트 이동')
+            except Exception:
+                pass
+
         try:
             self.prepareGeometryChange()
         except Exception:
             pass
 
-        self.data['x_off'] = int(new_pos.x() - orig_x)
-
-        if hasattr(self, 'last_press_y'):
-            delta_y = int(new_pos.y() - self.last_press_y)
-            self.data['y_off'] = self.data.get('y_off', 0) + delta_y
-
+        self.data['x_off'] = new_x_off
+        self.data['y_off'] = new_y_off
         self.update()
 
         if self.update_cb:
