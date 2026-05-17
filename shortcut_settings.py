@@ -301,6 +301,7 @@ DEFAULT_SHORTCUTS = {
     "project_open_json": "Ctrl+Alt+O",
     "project_save": "Ctrl+S",
     "project_save_as": "Ctrl+Shift+S",
+    "project_recover_last_work": "Ctrl+Alt+Shift+B",
 
     # 3-2. 옵션
     "option_auto_save_mode": "Ctrl+Alt+1",
@@ -314,6 +315,7 @@ DEFAULT_SHORTCUTS = {
     "option_translation_prompt": "Ctrl+Alt+7",
     "option_glossary": "Ctrl+Alt+8",
     "option_workspace_location": "Ctrl+Alt+9",
+    "option_cleanup_temp_files": "Ctrl+Alt+Shift+D",
     "option_register_ysb": "Ctrl+Alt+0",
     "option_unregister_ysbt": "Ctrl+Alt+Shift+0",
 
@@ -409,6 +411,7 @@ GROUPS = [
         ("project_open_json", "JSON 파일로 열기"),
         ("project_save", "프로젝트 저장"),
         ("project_save_as", "다른 이름으로 저장"),
+        ("project_recover_last_work", "마지막 작업 복구"),
     ]),
     ("옵션", [
         ("option_auto_save_mode", "자동저장 모드"),
@@ -418,6 +421,7 @@ GROUPS = [
         ("option_translation_prompt", "번역 프롬프트 입력"),
         ("option_glossary", "단어장"),
         ("option_workspace_location", "작업 폴더 위치 변경"),
+        ("option_cleanup_temp_files", "임시 파일 관리"),
         ("option_register_ysb", ".ysbt 확장자 연결 등록"),
         ("option_unregister_ysbt", ".ysbt/.ysb 확장자 연결 해제"),
         ("option_shortcut_settings", "단축키 통합 관리"),

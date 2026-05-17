@@ -7,6 +7,7 @@ from pathlib import Path
 import copy
 import json
 import re
+import time
 
 import cv2
 import numpy as np
@@ -242,6 +243,10 @@ def save_app_options(options):
         pass
 
 
+
+APP_VERSION = "v1.7.1"
+APP_NAME_KO = "역식붕이 툴"
+APP_NAME_EN = "YSB Tool"
 
 YSBT_EXTENSION = ".ysbt"
 YSBT_PROG_ID = "YSBTranslator.YSBTProject"
@@ -1538,6 +1543,8 @@ class MainWindow(QMainWindow):
         self.apply_shortcuts()
         self.apply_language(self.ui_language)
         self.install_global_input_filter()
+        # 오래된 임시 작업 폴더는 한 달에 한 번 자동 정리한다.
+        QTimer.singleShot(1500, self.auto_cleanup_temp_files_if_needed)
 
     # =========================================================
     # 메뉴 / UI
@@ -1556,6 +1563,7 @@ class MainWindow(QMainWindow):
         make_action("project_open_json", "JSON 파일로 열기", self.open_project_json)
         make_action("project_save", "프로젝트 저장", self.save_project)
         make_action("project_save_as", "다른 이름으로 저장", self.save_project_as)
+        make_action("project_recover_last_work", "마지막 작업 복구", self.recover_last_work_project)
 
         # 개별 작업
         make_action("work_tab_cycle", "작업탭 변경", self.cycle_work_tab)
@@ -1601,6 +1609,7 @@ class MainWindow(QMainWindow):
         make_action("option_translation_prompt", "번역 프롬프트 입력", self.open_translation_prompt_dialog)
         make_action("option_glossary", "단어장", self.open_glossary_dialog)
         make_action("option_workspace_location", "작업 폴더 위치 변경", self.change_workspace_location)
+        make_action("option_cleanup_temp_files", "임시 파일 관리", self.cleanup_temp_files_dialog)
         make_action("option_register_ysb", ".ysbt 확장자 연결 등록", self.register_ysb_file_association)
         make_action("option_unregister_ysbt", ".ysbt/.ysb 확장자 연결 해제", self.unregister_ysbt_file_association)
         make_action("option_shortcut_settings", "단축키 통합 관리", self.open_shortcut_settings_dialog)
@@ -1958,6 +1967,8 @@ class MainWindow(QMainWindow):
         project_menu.addAction(self.actions["project_open_json"])
         project_menu.addAction(self.actions["project_save"])
         project_menu.addAction(self.actions["project_save_as"])
+        project_menu.addSeparator()
+        project_menu.addAction(self.actions["project_recover_last_work"])
 
         work_menu = menubar.addMenu(self.tr_ui("작업")); self.work_menu = work_menu
         work_menu.addAction(self.actions["work_tab_cycle"])
@@ -2006,6 +2017,7 @@ class MainWindow(QMainWindow):
         option_menu.addAction(self.actions["option_glossary"])
         option_menu.addSeparator()
         option_menu.addAction(self.actions["option_workspace_location"])
+        option_menu.addAction(self.actions["option_cleanup_temp_files"])
         option_menu.addAction(self.actions["option_register_ysb"])
         option_menu.addAction(self.actions["option_unregister_ysbt"])
         option_menu.addSeparator()
@@ -2521,7 +2533,9 @@ class MainWindow(QMainWindow):
         return name
 
     def update_window_title(self):
-        base = "YSB Tool v1.7.0" if normalize_ui_language(getattr(self, "ui_language", current_ui_language())) == LANG_EN else "역식붕이 툴 v1.7.0"
+        is_en = normalize_ui_language(getattr(self, "ui_language", current_ui_language())) == LANG_EN
+        base_name = APP_NAME_EN if is_en else APP_NAME_KO
+        base = f"{base_name} {APP_VERSION}"
         project_name = self.display_project_name()
         try:
             self.setWindowTitle(f"{base} - {project_name}" if project_name else base)
@@ -2629,6 +2643,7 @@ class MainWindow(QMainWindow):
             "project_open_json": "JSON 파일로 열기",
             "project_save": "프로젝트 저장",
             "project_save_as": "다른 이름으로 저장",
+            "project_recover_last_work": "마지막 작업 복구",
             "work_tab_cycle": "작업탭 변경",
             "work_page_prev": "이전 페이지",
             "work_page_next": "다음 페이지",
@@ -2664,6 +2679,7 @@ class MainWindow(QMainWindow):
             "option_translation_prompt": "번역 프롬프트 입력",
             "option_glossary": "단어장",
             "option_workspace_location": "작업 폴더 위치 변경",
+            "option_cleanup_temp_files": "임시 파일 관리",
             "option_register_ysb": ".ysbt 확장자 연결 등록",
             "option_unregister_ysbt": ".ysbt/.ysb 확장자 연결 해제",
             "option_shortcut_settings": "단축키 통합 관리",
@@ -8149,6 +8165,466 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, self.tr_ui("프로젝트 이동 실패"), f"{self.tr_ui("임시 프로젝트를 작업 폴더로 옮기지 못했습니다.")}\n{e}")
             return False
 
+    def record_recovery_project_dir(self, project_dir):
+        """비정상 종료 후 복구 후보로 쓸 마지막 작업 폴더를 옵션 캐시에 기록한다."""
+        try:
+            if not project_dir:
+                return
+            project_dir = os.path.abspath(str(project_dir))
+            if not os.path.exists(os.path.join(project_dir, PROJECT_FILENAME)):
+                return
+            self.app_options["last_recovery_project_dir"] = project_dir
+            save_app_options(self.app_options)
+        except Exception:
+            pass
+
+    def recovery_candidate_roots(self):
+        return [self.project_cache_root(), temp_dir()]
+
+    def find_recovery_candidates(self):
+        """work_sessions/temp 안에서 project.json이 있는 복구 후보를 최신순으로 찾는다."""
+        candidates = []
+        seen = set()
+
+        def add_candidate(path):
+            try:
+                p = Path(path)
+                project_file = p / PROJECT_FILENAME
+                if not project_file.exists():
+                    return
+                resolved = str(p.resolve())
+                if resolved in seen:
+                    return
+                seen.add(resolved)
+                try:
+                    mtime = max(project_file.stat().st_mtime, p.stat().st_mtime)
+                except Exception:
+                    mtime = p.stat().st_mtime if p.exists() else 0
+                candidates.append((mtime, str(p), str(project_file)))
+            except Exception:
+                pass
+
+        # 1순위: 마지막 작업 캐시로 명시 기록한 폴더
+        last_dir = str((self.app_options or {}).get("last_recovery_project_dir") or "").strip()
+        if last_dir:
+            add_candidate(last_dir)
+
+        # 2순위: work cache / temp 폴더 전체 검색
+        for root in self.recovery_candidate_roots():
+            try:
+                root = Path(root)
+                if not root.exists():
+                    continue
+                for child in root.iterdir():
+                    if child.is_dir():
+                        add_candidate(child)
+            except Exception:
+                pass
+
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        return candidates
+
+    def recover_last_work_project(self):
+        """마지막 작업 캐시/임시 프로젝트를 열어 복구한다."""
+        if not self.guard_project_action("마지막 작업 복구"):
+            return
+        candidates = self.find_recovery_candidates()
+        if not candidates:
+            QMessageBox.information(
+                self,
+                self.tr_ui("복구할 작업 없음"),
+                self.tr_ui("복구할 수 있는 임시 작업 파일을 찾지 못했습니다."),
+            )
+            self.log("⚠️ 복구할 임시 작업 파일 없음")
+            return
+
+        _mtime, project_dir, project_file = candidates[0]
+        msg = (
+            f"{self.tr_ui('마지막 작업 폴더를 복구할까요?')}\n\n"
+            f"{project_dir}\n\n"
+            f"{self.tr_ui('복구한 작업은 아직 정식 YSBT 파일이 아닐 수 있습니다. 필요한 경우 [프로젝트 저장]으로 다시 저장해 주세요.')}"
+        )
+        ans = QMessageBox.question(
+            self,
+            self.tr_ui("마지막 작업 복구"),
+            msg,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            self.log("↩️ 마지막 작업 복구 취소")
+            return
+
+        if not self.confirm_unsaved_before_switch():
+            return
+
+        try:
+            # 복구 폴더 자체를 임시 프로젝트로 연다. 원본 .ysbt와 연결하지 않고,
+            # 사용자가 저장할 때 새 YSBT로 확정하게 한다.
+            self.load_project_json(project_file, package_path=None, temp_project=False)
+            self.ysbt_package_path = None
+            self.is_temp_project = True
+            self.has_unsaved_changes = True
+            self.record_recovery_project_dir(project_dir)
+            self.update_window_title()
+            self.log(f"🧯 마지막 작업 복구 완료: {project_dir}")
+            self.log("💾 복구한 작업은 [프로젝트 저장] 또는 [다른 이름으로 저장]으로 YSBT 파일에 확정하세요.")
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                self.tr_ui("복구 실패"),
+                f"{self.tr_ui('마지막 작업을 복구하지 못했습니다.')}\n{project_dir}\n\n{e}",
+            )
+            self.log(f"❌ 마지막 작업 복구 실패: {e}")
+
+    def temp_path_created_timestamp(self, path):
+        """폴더 생성 시각을 우선 사용하고, 불가능하면 수정 시각을 사용한다."""
+        try:
+            return Path(path).stat().st_ctime
+        except Exception:
+            try:
+                return Path(path).stat().st_mtime
+            except Exception:
+                return 0
+
+    def temp_cleanup_category_roots(self):
+        return [
+            ("temp", self.tr_ui("임시 프로젝트"), temp_dir()),
+            ("work_sessions", self.tr_ui("작업 캐시"), self.project_cache_root()),
+        ]
+
+    def empty_temp_cleanup_summary(self):
+        return {
+            "temp": {"label": self.tr_ui("임시 프로젝트"), "count": 0, "size": 0},
+            "work_sessions": {"label": self.tr_ui("작업 캐시"), "count": 0, "size": 0},
+        }
+
+    def format_size_mb(self, size_bytes):
+        try:
+            return f"{float(size_bytes or 0) / (1024 * 1024):.1f} MB"
+        except Exception:
+            return "0.0 MB"
+
+    def collect_temp_cleanup_targets(self, *, older_than_days=None, skip_current=True, exclude_recovery=False):
+        """temp/work_sessions에서 삭제 가능한 임시 작업 폴더를 분류별로 모은다."""
+        skip_dirs = set()
+        if skip_current:
+            for p in (getattr(self, "project_dir", None), getattr(self, "work_project_dir", None)):
+                if p:
+                    try:
+                        skip_dirs.add(str(Path(p).resolve()))
+                    except Exception:
+                        pass
+
+        if exclude_recovery:
+            try:
+                last_dir = str((self.app_options or {}).get("last_recovery_project_dir") or "").strip()
+                if last_dir:
+                    skip_dirs.add(str(Path(last_dir).resolve()))
+            except Exception:
+                pass
+
+        now_ts = time.time()
+        max_age_seconds = None
+        if older_than_days is not None:
+            try:
+                max_age_seconds = max(0, int(older_than_days)) * 24 * 60 * 60
+            except Exception:
+                max_age_seconds = None
+
+        targets = []
+        total_size = 0
+        summary = self.empty_temp_cleanup_summary()
+
+        for key, label, root in self.temp_cleanup_category_roots():
+            try:
+                root = Path(root)
+                if not root.exists():
+                    continue
+                for child in root.iterdir():
+                    if not child.is_dir():
+                        continue
+                    try:
+                        resolved = str(child.resolve())
+                    except Exception:
+                        resolved = str(child)
+                    if resolved in skip_dirs:
+                        continue
+
+                    if max_age_seconds is not None:
+                        created_ts = self.temp_path_created_timestamp(child)
+                        if created_ts and (now_ts - created_ts) < max_age_seconds:
+                            continue
+
+                    folder_size = 0
+                    try:
+                        for file in child.rglob("*"):
+                            if file.is_file():
+                                folder_size += file.stat().st_size
+                    except Exception:
+                        pass
+
+                    targets.append(child)
+                    total_size += folder_size
+                    summary.setdefault(key, {"label": label, "count": 0, "size": 0})
+                    summary[key]["label"] = label
+                    summary[key]["count"] += 1
+                    summary[key]["size"] += folder_size
+            except Exception:
+                pass
+
+        return targets, total_size, summary
+
+    def temp_cleanup_summary_text(self, summary, total_count=None, total_size=None):
+        summary = summary or self.empty_temp_cleanup_summary()
+        temp_info = summary.get("temp", {})
+        work_info = summary.get("work_sessions", {})
+        if total_count is None:
+            total_count = int(temp_info.get("count", 0) or 0) + int(work_info.get("count", 0) or 0)
+        if total_size is None:
+            total_size = int(temp_info.get("size", 0) or 0) + int(work_info.get("size", 0) or 0)
+        return (
+            f"{self.tr_ui('임시 프로젝트')}: {int(temp_info.get('count', 0) or 0)} / {self.format_size_mb(temp_info.get('size', 0))}\n"
+            f"{self.tr_ui('작업 캐시')}: {int(work_info.get('count', 0) or 0)} / {self.format_size_mb(work_info.get('size', 0))}\n"
+            f"{self.tr_ui('총합')}: {int(total_count or 0)} / {self.format_size_mb(total_size)}"
+        )
+
+    def temp_cleanup_period_options(self):
+        return [
+            (7, "일주일"),
+            (30, "한달"),
+            (90, "3개월"),
+            (180, "6개월"),
+            (365, "12개월"),
+        ]
+
+    def get_temp_auto_cleanup_days(self):
+        try:
+            days = int((self.app_options or {}).get("temp_auto_cleanup_days", 7) or 7)
+        except Exception:
+            days = 7
+        if days not in (7, 30, 90, 180, 365):
+            days = 7
+        return days
+
+    def is_temp_auto_cleanup_enabled(self):
+        return bool((self.app_options or {}).get("temp_auto_cleanup_enabled", True))
+
+    def set_temp_cleanup_options(self, enabled=None, days=None):
+        try:
+            if enabled is not None:
+                self.app_options["temp_auto_cleanup_enabled"] = bool(enabled)
+            if days is not None:
+                days = int(days)
+                if days not in (7, 30, 90, 180, 365):
+                    days = 7
+                self.app_options["temp_auto_cleanup_days"] = days
+            save_app_options(self.app_options)
+        except Exception:
+            pass
+
+    def auto_cleanup_temp_files_if_needed(self):
+        """설정된 주기마다, 설정된 기간 이상 지난 임시 작업 폴더를 자동 삭제한다."""
+        try:
+            if not self.is_temp_auto_cleanup_enabled():
+                self.log(
+                    "🧹 Auto temp cleanup is disabled."
+                    if getattr(self, "ui_language", LANG_KO) == LANG_EN else
+                    "🧹 자동 임시 파일 정리: 꺼짐"
+                )
+                return
+
+            period_days = self.get_temp_auto_cleanup_days()
+            max_age_days = period_days
+            now_ts = time.time()
+            last_ts = float((self.app_options or {}).get("last_temp_auto_cleanup_at", 0) or 0)
+            if last_ts and (now_ts - last_ts) < period_days * 24 * 60 * 60:
+                return
+
+            targets, total_size, summary = self.collect_temp_cleanup_targets(older_than_days=max_age_days, skip_current=True, exclude_recovery=True)
+
+            deleted = 0
+            failed = 0
+            for path in targets:
+                try:
+                    shutil.rmtree(path, ignore_errors=False)
+                    deleted += 1
+                except Exception:
+                    failed += 1
+
+            try:
+                last_dir = str((self.app_options or {}).get("last_recovery_project_dir") or "")
+                if last_dir and not os.path.exists(last_dir):
+                    self.app_options.pop("last_recovery_project_dir", None)
+            except Exception:
+                pass
+
+            self.app_options["last_temp_auto_cleanup_at"] = now_ts
+            self.app_options["temp_auto_cleanup_enabled"] = True
+            self.app_options["temp_auto_cleanup_days"] = period_days
+            save_app_options(self.app_options)
+
+            if deleted or failed:
+                size_mb = total_size / (1024 * 1024)
+                self.log(
+                    f"🧹 Auto temp cleanup: deleted {deleted}, failed {failed}, approx. {size_mb:.1f} MB / period {period_days} days"
+                    if getattr(self, "ui_language", LANG_KO) == LANG_EN else
+                    f"🧹 자동 임시 파일 정리: 삭제 {deleted}개 / 실패 {failed}개 / 약 {size_mb:.1f} MB / 주기 {period_days}일"
+                )
+            else:
+                self.log(
+                    "🧹 Auto temp cleanup: no old temporary files."
+                    if getattr(self, "ui_language", LANG_KO) == LANG_EN else
+                    "🧹 자동 임시 파일 정리: 오래된 임시 파일 없음"
+                )
+        except Exception as e:
+            try:
+                self.log(
+                    f"⚠️ Auto temp cleanup failed: {e}"
+                    if getattr(self, "ui_language", LANG_KO) == LANG_EN else
+                    f"⚠️ 자동 임시 파일 정리 실패: {e}"
+                )
+            except Exception:
+                pass
+
+    def delete_temp_files_now(self, parent=None):
+        """현재 작업과 연결되지 않은 temp/work_sessions 임시 파일을 즉시 삭제한다."""
+        targets, total_size, summary = self.collect_temp_cleanup_targets(
+            older_than_days=None,
+            skip_current=True,
+            exclude_recovery=False,
+        )
+
+        if not targets:
+            QMessageBox.information(
+                parent or self,
+                self.tr_ui("삭제할 임시 파일 없음"),
+                self.tr_ui("삭제할 수 있는 임시 작업 파일이 없습니다."),
+            )
+            self.log("🧹 삭제할 임시 작업 파일 없음")
+            return False
+
+        msg = (
+            f"{self.tr_ui('현재 열려 있는 작업을 제외한 임시 작업 폴더를 삭제합니다.')}\n\n"
+            f"{self.temp_cleanup_summary_text(summary, len(targets), total_size)}\n\n"
+            f"{self.tr_ui('삭제 후에는 해당 임시 작업을 복구할 수 없습니다. 계속할까요?')}"
+        )
+        ans = QMessageBox.question(
+            parent or self,
+            self.tr_ui("임시 파일 삭제"),
+            msg,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            self.log("↩️ 임시 파일 삭제 취소")
+            return False
+
+        deleted = 0
+        failed = 0
+        for path in targets:
+            try:
+                shutil.rmtree(path, ignore_errors=False)
+                deleted += 1
+            except Exception:
+                failed += 1
+
+        # 삭제한 폴더가 마지막 복구 기록이면 기록도 비운다.
+        try:
+            last_dir = str((self.app_options or {}).get("last_recovery_project_dir") or "")
+            if last_dir and not os.path.exists(last_dir):
+                self.app_options.pop("last_recovery_project_dir", None)
+                save_app_options(self.app_options)
+        except Exception:
+            pass
+
+        self.log(f"🧹 임시 파일 삭제 완료: {deleted}개 삭제 / {failed}개 실패")
+        QMessageBox.information(
+            parent or self,
+            self.tr_ui("임시 파일 삭제 완료"),
+            self.tr_ui(f"임시 파일 삭제가 완료되었습니다.\n삭제: {deleted}개\n실패: {failed}개"),
+        )
+        return True
+
+    def cleanup_temp_files_dialog(self):
+        """임시 파일 수동 삭제 + 자동 삭제 옵션 설정 창."""
+        if not self.guard_project_action("임시 파일 관리"):
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(self.tr_ui("임시 파일 관리"))
+        dlg.setModal(True)
+        layout = QVBoxLayout(dlg)
+
+        desc = QLabel(self.tr_ui("임시 파일 삭제와 자동 삭제 주기를 설정합니다."))
+        desc.setWordWrap(True)
+        layout.addWidget(desc)
+
+        stats_label = QLabel("")
+        stats_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        stats_label.setWordWrap(True)
+        layout.addWidget(stats_label)
+
+        row = QHBoxLayout()
+        btn_delete = QPushButton(self.tr_ui("임시파일 삭제"))
+        cb_auto = QCheckBox(self.tr_ui("임시파일 자동삭제"))
+        combo_days = QComboBox()
+
+        current_days = self.get_temp_auto_cleanup_days()
+        for days, label in self.temp_cleanup_period_options():
+            combo_days.addItem(self.tr_ui(label), days)
+            if days == current_days:
+                combo_days.setCurrentIndex(combo_days.count() - 1)
+
+        cb_auto.setChecked(self.is_temp_auto_cleanup_enabled())
+        combo_days.setEnabled(cb_auto.isChecked())
+
+        row.addWidget(btn_delete)
+        row.addStretch(1)
+        row.addWidget(cb_auto)
+        row.addWidget(combo_days)
+        layout.addLayout(row)
+
+        note = QLabel(self.tr_ui("자동 삭제는 선택한 기간마다 실행되며, 선택한 기간 이상 지난 임시 작업 폴더만 삭제합니다."))
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        layout.addWidget(btns)
+
+        def refresh_stats():
+            try:
+                targets, total_size, summary = self.collect_temp_cleanup_targets(
+                    older_than_days=None,
+                    skip_current=True,
+                    exclude_recovery=False,
+                )
+                stats_label.setText(self.temp_cleanup_summary_text(summary, len(targets), total_size))
+            except Exception as e:
+                stats_label.setText(f"{self.tr_ui('임시 파일 상태를 읽지 못했습니다.')}: {e}")
+
+        def save_options():
+            days = combo_days.currentData()
+            self.set_temp_cleanup_options(cb_auto.isChecked(), days)
+            combo_days.setEnabled(cb_auto.isChecked())
+            self.log(
+                f"🧹 임시 파일 자동삭제 설정: {'ON' if cb_auto.isChecked() else 'OFF'} / {int(days)}일"
+            )
+
+        def delete_and_refresh():
+            changed = self.delete_temp_files_now(dlg)
+            if changed:
+                refresh_stats()
+
+        cb_auto.toggled.connect(lambda _checked: save_options())
+        combo_days.currentIndexChanged.connect(lambda _idx: save_options())
+        btn_delete.clicked.connect(delete_and_refresh)
+        btns.rejected.connect(dlg.reject)
+
+        refresh_stats()
+        dlg.resize(560, 220)
+        dlg.exec()
+
     def open_project_path(self, path, external_request=False):
         """파일 연결/명령행 인자로 받은 .ysbt 또는 project.json을 연다."""
         if not path:
@@ -8259,6 +8735,7 @@ class MainWindow(QMainWindow):
         # store.save()가 paths를 cache 내부 이미지 경로로 고정할 수 있으므로 이후 작업은 캐시 기준으로 돌아간다.
         self.work_project_store = store
         self.work_project_dir = cache_dir
+        self.record_recovery_project_dir(cache_dir)
         self.has_unsaved_changes = bool(mark_dirty)
 
         if old_cache and old_cache != cache_dir and os.path.exists(old_cache):
@@ -8277,6 +8754,7 @@ class MainWindow(QMainWindow):
         if self.work_project_store is None:
             return
         self.save_project_store(self.work_project_store)
+        self.record_recovery_project_dir(self.work_project_dir)
         self.has_unsaved_changes = True
 
     def mark_saved_state(self):
@@ -8287,6 +8765,11 @@ class MainWindow(QMainWindow):
         self.app_options[UI_THEME_KEY] = str(getattr(self, "ui_theme", THEME_DARK) or THEME_DARK)
         self.app_options[UI_LANGUAGE_KEY] = normalize_ui_language(getattr(self, "ui_language", LANG_KO))
         self.app_options["analysis_number_box_width"] = int(getattr(self, "analysis_number_box_width", 40))
+        self.app_options["temp_auto_cleanup_enabled"] = bool(self.app_options.get("temp_auto_cleanup_enabled", True))
+        cleanup_days = int(self.app_options.get("temp_auto_cleanup_days", 7) or 7)
+        if cleanup_days not in (7, 30, 90, 180, 365):
+            cleanup_days = 7
+        self.app_options["temp_auto_cleanup_days"] = cleanup_days
         self.app_options.setdefault(TRANSLATION_PROMPT_KEY, "")
         self.app_options.setdefault(TRANSLATION_GLOSSARY_TEXT_KEY, "")
         self.app_options.setdefault(TRANSLATION_GLOSSARY_PATH_KEY, "")
@@ -8534,6 +9017,7 @@ class MainWindow(QMainWindow):
         self.project_ui_view_states = {}
         self.project_store.write_manifest(project_name="unsaved_project")
         self.project_dir = project_dir
+        self.record_recovery_project_dir(project_dir)
         self.ysbt_package_path = None
         self.is_temp_project = True
         self.update_window_title()
