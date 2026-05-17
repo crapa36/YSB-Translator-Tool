@@ -256,6 +256,7 @@ DEFAULT_SHORTCUTS = {
     "paint_zoom_out": "[",
     "paint_reanalyze": "F5",
     "paint_undo": "Ctrl+Z",
+    "paint_redo": "Ctrl+Y",
     "paint_magic_select": "Ctrl+D",
     "paint_magic_expand": "Ctrl+Shift+D",
     "paint_magic_tolerance_inc": "Ctrl+'",
@@ -283,16 +284,16 @@ DEFAULT_SHORTCUTS = {
     # 2. 텍스트 입력 옵션
     # 사용자가 'Shift'라고 적어준 항목은 실제 입력 충돌 방지를 위해 Shift+Enter로 처리
     "text_linebreak": "Shift+Return",
-    "text_ellipsis": "Ctrl+Q",
-    "text_horizontal_dash": "Ctrl+W",
-    "text_vertical_dash": "Ctrl+E",
-    "text_single_corner": "Ctrl+R",
-    "text_double_corner": "Ctrl+T",
-    "text_white_heart": "Ctrl+Y",
-    "text_black_heart": "Ctrl+U",
-    "text_music_note": "Ctrl+I",
-    "text_black_circle": "Ctrl+O",
-    "text_middle_dot": "Ctrl+P",
+    "text_ellipsis": "Ctrl+Alt+Shift+Q",
+    "text_horizontal_dash": "Ctrl+Alt+Shift+W",
+    "text_vertical_dash": "Ctrl+Alt+Shift+E",
+    "text_single_corner": "Ctrl+Alt+Shift+R",
+    "text_double_corner": "Ctrl+Alt+Shift+T",
+    "text_white_heart": "Ctrl+Alt+Shift+Y",
+    "text_black_heart": "Ctrl+Alt+Shift+U",
+    "text_music_note": "Ctrl+Alt+Shift+I",
+    "text_black_circle": "Ctrl+Alt+Shift+O",
+    "text_middle_dot": "Ctrl+Alt+Shift+P",
 
     # 3. 프로젝트 옵션
     "project_new": "Ctrl+N",
@@ -303,7 +304,7 @@ DEFAULT_SHORTCUTS = {
 
     # 3-2. 옵션
     "option_auto_save_mode": "Ctrl+Alt+1",
-    "option_theme_settings": "Ctrl+Alt+Shift+T",
+    "option_theme_settings": "Ctrl+Alt+Shift+F9",
     "option_language_settings": "Ctrl+Alt+Shift+L",
     "option_api_settings": "Ctrl+Alt+2",
     "option_shortcut_settings": "Ctrl+Alt+3",
@@ -329,7 +330,8 @@ DEFAULT_SHORTCUTS = {
     "work_extract_text": "Ctrl+L",
     "work_import_translation": "Ctrl+K",
     "work_clear_translation": "Ctrl+/",
-    "work_clean_text": "Ctrl+Y",
+    "work_clean_text": "Ctrl+Alt+Shift+C",
+    "work_reset_text_rects": "Ctrl+G",
     "work_export": "Ctrl+E",
     "view_text_toggle": "Ctrl+T",
 
@@ -347,6 +349,7 @@ DEFAULT_SHORTCUTS = {
     "batch_import_translation": "Ctrl+Shift+K",
     "batch_clear_translation": "Ctrl+Shift+/",
     "batch_clean_text": "Ctrl+Shift+Y",
+    "batch_reset_text_rects": "Ctrl+Shift+G",
     "batch_export": "Ctrl+Shift+E",
 
     # 6. 개별 텍스트 작업 옵션
@@ -371,6 +374,7 @@ GROUPS = [
         ("paint_zoom_out", "축소"),
         ("paint_reanalyze", "재분석"),
         ("paint_undo", "작업 취소"),
+        ("paint_redo", "작업 재실행"),
         ("paint_magic_select", "요술봉 선택"),
         ("paint_magic_expand", "요술봉 영역 확장"),
         ("paint_magic_tolerance_inc", "요술봉 허용범위 증가"),
@@ -435,6 +439,7 @@ GROUPS = [
         ("work_import_translation", "개별 번역문 불러오기"),
         ("work_clear_translation", "번역문 내용 지우기"),
         ("work_clean_text", "개별 텍스트 정리"),
+        ("work_reset_text_rects", "현재 텍스트 기준 영역 재설정"),
         ("work_export", "개별 출력"),
         ("view_text_toggle", "텍스트 표시 ON/OFF"),
     ]),
@@ -452,6 +457,7 @@ GROUPS = [
         ("batch_import_translation", "일괄 번역문 불러오기"),
         ("batch_clear_translation", "일괄 번역문 내용 지우기"),
         ("batch_clean_text", "일괄 텍스트 정리"),
+        ("batch_reset_text_rects", "일괄 텍스트 기준 영역 재설정"),
         ("batch_export", "일괄 출력"),
     ]),
     ("개별 텍스트 작업 옵션", [
@@ -564,6 +570,31 @@ class ShortcutSettingsStore:
             if merged_shortcuts.get("batch_import_translation") == "Ctrl+Shift+B":
                 merged_shortcuts["batch_import_translation"] = ""
 
+            # v1.7 Redo는 Windows 표준에 가까운 Ctrl+Y를 사용한다.
+            # 특수문자 입력은 Ctrl 계열 충돌을 줄이기 위해 Ctrl+Alt+Shift 계열로 이동한다.
+            symbol_shortcut_migration = {
+                "text_ellipsis": {"Ctrl+Q", "Ctrl+Alt+Q"},
+                "text_horizontal_dash": {"Ctrl+W", "Ctrl+Alt+W"},
+                "text_vertical_dash": {"Ctrl+E", "Ctrl+Alt+E"},
+                "text_single_corner": {"Ctrl+R", "Ctrl+Alt+R"},
+                "text_double_corner": {"Ctrl+T", "Ctrl+Alt+T"},
+                "text_white_heart": {"Ctrl+Y", "Ctrl+Alt+Shift+H"},
+                "text_black_heart": {"Ctrl+U", "Ctrl+Alt+U"},
+                "text_music_note": {"Ctrl+I", "Ctrl+Alt+I"},
+                "text_black_circle": {"Ctrl+O", "Ctrl+Alt+O"},
+                "text_middle_dot": {"Ctrl+P", "Ctrl+Alt+P"},
+            }
+            for key, old_values in symbol_shortcut_migration.items():
+                current_value = str(merged_shortcuts.get(key) or "")
+                if current_value in old_values:
+                    merged_shortcuts[key] = DEFAULT_SHORTCUTS.get(key, current_value)
+
+            # 특수문자 새 기본 단축키와 겹치는 기존 기능은 자동 이동한다.
+            if merged_shortcuts.get("option_theme_settings") in {"Ctrl+Alt+Shift+T", "Ctrl+Alt+T"}:
+                merged_shortcuts["option_theme_settings"] = "Ctrl+Alt+Shift+F9"
+            if merged_shortcuts.get("work_clean_text") in {"Ctrl+Y", "Ctrl+Alt+Shift+Y"}:
+                merged_shortcuts["work_clean_text"] = "Ctrl+Alt+Shift+C"
+
             # 비활성화된 단축키는 입력칸/동작에서 빠진 상태로 유지한다.
             for key in list(merged_shortcuts.keys()):
                 if not merged_enabled.get(key, True):
@@ -619,7 +650,7 @@ class MacroFunctionSelectDialog(QDialog):
         self.current_box.setWidget(self.current_inner)
         layout.addWidget(self.current_box)
 
-        help_label = QLabel(tr_text("기능을 더블클릭하거나, 선택 후 [기능 추가]를 누르면 창을 닫지 않고 계속 추가됩니다. 검색창/목록에 포커스를 둔 상태에서 실제 단축키를 누르면 즉시 추가됩니다. 단축키 OFF/없음은 단축키 상태 표시일 뿐, 매크로 실행에는 영향 없습니다.", self._ui_language))
+        help_label = QLabel(tr_text("기능은 더블클릭하거나 검색창/목록에 포커스를 둔 상태에서 실제 단축키를 눌러 추가합니다. Enter는 기능 추가가 아니라 확인으로 동작합니다. 확인을 누르면 현재 매크로 기능 목록을 저장하고, 닫기를 누르면 저장하지 않고 나갑니다. 단축키 OFF/없음은 단축키 상태 표시일 뿐, 매크로 실행에는 영향 없습니다.", self._ui_language))
         help_label.setWordWrap(True)
         layout.addWidget(help_label)
 
@@ -632,17 +663,22 @@ class MacroFunctionSelectDialog(QDialog):
         layout.addWidget(self.list_widget, 1)
 
         btn_line = QHBoxLayout()
-        self.btn_add_selected = QPushButton(tr_text("기능 추가", self._ui_language))
+        self.btn_ok = QPushButton(tr_text("확인", self._ui_language))
         self.btn_close = QPushButton(tr_text("닫기", self._ui_language))
         btn_line.addStretch()
-        btn_line.addWidget(self.btn_add_selected)
+        btn_line.addWidget(self.btn_ok)
         btn_line.addWidget(self.btn_close)
         layout.addLayout(btn_line)
 
-        self.btn_add_selected.clicked.connect(self.add_selected)
-        self.btn_close.clicked.connect(self.accept)
+        self.btn_ok.setDefault(True)
+        self.btn_ok.setAutoDefault(True)
+        self.btn_close.setAutoDefault(False)
+
+        self.btn_ok.clicked.connect(self.accept)
+        self.btn_close.clicked.connect(self.reject)
         self.search.textChanged.connect(self.refill)
-        self.search.returnPressed.connect(self.add_exact_shortcut_from_search)
+        # Enter는 기능 추가가 아니라 확인으로 동작한다.
+        self.search.returnPressed.connect(self.accept)
         self.list_widget.itemDoubleClicked.connect(lambda item: self.add_key(item.data(Qt.ItemDataRole.UserRole)))
 
         # 검색창에서 Ctrl+F5/F5/Alt+D처럼 실제 단축키를 누르면 즉시 기능으로 추가한다.
@@ -939,11 +975,17 @@ class MacroFunctionSelectDialog(QDialog):
 
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Type.ShortcutOverride:
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                event.accept()
+                return True
             if self.key_from_key_event(event):
                 event.accept()
                 return True
 
         if event.type() == QEvent.Type.KeyPress:
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self.accept()
+                return True
             if self.handle_shortcut_key_event(event):
                 return True
 
@@ -960,13 +1002,13 @@ class MacroFunctionSelectDialog(QDialog):
             self.search.clear()
             return True
 
-        QMessageBox.information(self, tr_text("기능 추가", self._ui_language), tr_text("정확히 일치하는 단축키가 없습니다. 기능명 검색 후 더블클릭하거나 [기능 추가]를 눌러주세요.", self._ui_language))
+        QMessageBox.information(self, tr_text("기능 선택", self._ui_language), tr_text("정확히 일치하는 단축키가 없습니다. 기능명 검색 후 항목을 더블클릭하거나 실제 단축키를 눌러주세요.", self._ui_language))
         return False
 
     def add_selected(self):
         item = self.list_widget.currentItem()
         if not item:
-            QMessageBox.information(self, tr_text("기능 추가", self._ui_language), tr_text("추가할 기능을 선택해주세요.", self._ui_language))
+            QMessageBox.information(self, tr_text("기능 선택", self._ui_language), tr_text("추가할 기능을 선택해주세요.", self._ui_language))
             return
         self.add_key(item.data(Qt.ItemDataRole.UserRole))
 
@@ -977,7 +1019,7 @@ class MacroFunctionSelectDialog(QDialog):
         self.refresh_current_actions()
 
     def closeEvent(self, event):
-        self.accept()
+        self.reject()
         event.accept()
 
     def get_actions(self):
@@ -998,6 +1040,9 @@ class MacroSettingsDialog(QDialog):
         self.label_map = shortcut_label_map()
         self.rows = []
         self._handling = False
+        # 매크로 입력 중 개별 글꼴 프리셋과 충돌을 허용한 경우,
+        # 실제 비활성화는 OK로 저장할 때 메인 창에서 적용한다.
+        self._pending_disabled_item_presets = set()
 
         self._ui_theme = resolve_ui_theme(parent)
         self.setStyleSheet(shortcut_dialog_qss(self._ui_theme))
@@ -1186,7 +1231,8 @@ class MacroSettingsDialog(QDialog):
 
     def add_function_to_macro(self, row_data):
         dlg = MacroFunctionSelectDialog(row_data.get("actions", []), self.settings, self)
-        dlg.exec()
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
         row_data["actions"] = dlg.get_actions()
         row_data["function_btn"].setText(self.macro_label(row_data["actions"]))
 
@@ -1283,6 +1329,35 @@ class MacroSettingsDialog(QDialog):
                     self.settings.shortcuts[key] = ""
                     break
 
+            # 개별 글꼴 프리셋과 충돌하면 입력 시점에 확인한다.
+            # 실제 비활성화는 이 창에서 OK를 눌렀을 때 메인 창이 최종 설정과 다시 대조한 뒤 적용한다.
+            parent = self.parent()
+            for preset_name, preset in list(getattr(parent, "item_text_presets", {}) .items() if parent is not None else []):
+                if str(preset_name) in self._pending_disabled_item_presets:
+                    continue
+                if not preset.get("enabled", True):
+                    continue
+                item_seq = str(preset.get("shortcut", "") or "")
+                if item_seq and QKeySequence(item_seq).toString(QKeySequence.SequenceFormat.PortableText) == seq_text:
+                    ans = QMessageBox.question(
+                        self,
+                        tr_text("개별 프리셋 단축키 비활성화 확인", self._ui_language),
+                        (
+                            f"'{preset_name}' individual font preset is using the same shortcut.\n\n"
+                            f"Disable the individual font preset shortcut and assign it to this macro?"
+                            if self._ui_language == LANG_EN else
+                            f"'{preset_name}' 개별 글꼴 프리셋이 같은 단축키를 사용 중입니다.\n\n"
+                            f"개별 글꼴 프리셋 단축키를 비활성화하고 이 매크로에 지정할까요?"
+                        ),
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.No,
+                    )
+                    if ans != QMessageBox.StandardButton.Yes:
+                        restore_previous_shortcut()
+                        return
+                    self._pending_disabled_item_presets.add(str(preset_name))
+                    break
+
             row_data["last_shortcut"] = seq_text
             row_data["backup_shortcut"] = seq_text
 
@@ -1317,6 +1392,9 @@ class ShortcutSettingsDialog(QDialog):
         self.last_sequences = {}
         self.disabled_backup = {}
         self._handling_change = False
+        # 기본 단축키 입력 중 개별 글꼴 프리셋과 충돌을 허용한 경우,
+        # 실제 비활성화는 OK로 저장할 때 메인 창에서 최종 충돌 여부를 재확인한 뒤 적용한다.
+        self._pending_disabled_item_presets = set()
 
         layout = QVBoxLayout(self)
         if self._ui_language == LANG_EN:
@@ -1454,6 +1532,17 @@ class ShortcutSettingsDialog(QDialog):
         if new_text == old_text:
             return
 
+        def restore_previous_shortcut():
+            self._handling_change = True
+            try:
+                if old_text:
+                    edit.setKeySequence(QKeySequence(old_text))
+                else:
+                    edit.clear()
+                self.last_sequences[key] = old_text
+            finally:
+                self._handling_change = False
+
         # 매크로 단축키와도 서로 감시한다.
         for macro in getattr(self.settings, "macros", []) or []:
             if not macro.get("enabled", True):
@@ -1473,18 +1562,40 @@ class ShortcutSettingsDialog(QDialog):
                     QMessageBox.StandardButton.No,
                 )
                 if ans != QMessageBox.StandardButton.Yes:
-                    self._handling_change = True
-                    try:
-                        if old_text:
-                            edit.setKeySequence(QKeySequence(old_text))
-                        else:
-                            edit.clear()
-                        self.last_sequences[key] = old_text
-                    finally:
-                        self._handling_change = False
+                    restore_previous_shortcut()
                     return
                 macro["enabled"] = False
                 macro["shortcut"] = ""
+                break
+
+        # 개별 글꼴 프리셋 단축키와도 서로 감시한다.
+        # 실제 프리셋 비활성화는 OK 저장 시 메인 창에서 최종 설정과 다시 대조한 뒤 적용한다.
+        parent = self.parent()
+        for preset_name, preset in list(getattr(parent, "item_text_presets", {}) .items() if parent is not None else []):
+            if str(preset_name) in self._pending_disabled_item_presets:
+                continue
+            if not preset.get("enabled", True):
+                continue
+            item_seq = str(preset.get("shortcut", "") or "")
+            if item_seq and QKeySequence(item_seq).toString(QKeySequence.SequenceFormat.PortableText) == new_text:
+                label = self.labels.get(key).text() if self.labels.get(key) else key
+                ans = QMessageBox.question(
+                    self,
+                    tr_text("개별 프리셋 단축키 비활성화 확인", self._ui_language),
+                    (
+                        f"'{preset_name}' individual font preset is using the same shortcut.\n\n"
+                        f"Disable the individual font preset shortcut and assign it to '{label}'?"
+                        if self._ui_language == LANG_EN else
+                        f"'{preset_name}' 개별 글꼴 프리셋이 같은 단축키를 사용 중입니다.\n\n"
+                        f"개별 글꼴 프리셋 단축키를 비활성화하고 '{label}'에 지정할까요?"
+                    ),
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if ans != QMessageBox.StandardButton.Yes:
+                    restore_previous_shortcut()
+                    return
+                self._pending_disabled_item_presets.add(str(preset_name))
                 break
 
         other_key = None
@@ -1512,15 +1623,7 @@ class ShortcutSettingsDialog(QDialog):
                 QMessageBox.StandardButton.No,
             )
             if ans != QMessageBox.StandardButton.Yes:
-                self._handling_change = True
-                try:
-                    if old_text:
-                        edit.setKeySequence(QKeySequence(old_text))
-                    else:
-                        edit.clear()
-                    self.last_sequences[key] = old_text
-                finally:
-                    self._handling_change = False
+                restore_previous_shortcut()
                 return
 
         self._handling_change = True

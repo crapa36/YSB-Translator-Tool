@@ -77,6 +77,7 @@ class ProjectStore:
 
     def __init__(self, project_dir: str | None = None):
         self.project_dir = project_dir
+        self.ui_state = {}
 
     @property
     def project_file(self) -> str | None:
@@ -134,6 +135,7 @@ class ProjectStore:
                 "original_name": src_path.name,
             }
 
+        self.ui_state = {"current_mode": 0, "view_states": {}}
         self.save(paths, data, current_index=0)
         return paths, data
 
@@ -292,10 +294,26 @@ class ProjectStore:
 
             pages.append(page)
 
+        ui_state = getattr(self, "ui_state", None)
+        if ui_state is None:
+            ui_state = {}
+        if not isinstance(ui_state, dict):
+            ui_state = {}
+        if not ui_state:
+            try:
+                if self.project_file and os.path.exists(self.project_file):
+                    with open(self.project_file, "r", encoding="utf-8") as f:
+                        old_payload = json.load(f)
+                    if isinstance(old_payload, dict) and isinstance(old_payload.get("ui_state"), dict):
+                        ui_state = old_payload.get("ui_state") or {}
+            except Exception:
+                ui_state = {}
+
         payload = {
             "version": PROJECT_VERSION,
             "current_index": int(current_index),
             "pages": pages,
+            "ui_state": json_safe(ui_state),
         }
 
         self.write_manifest()
@@ -308,6 +326,8 @@ class ProjectStore:
 
         with open(project_json_path, "r", encoding="utf-8") as f:
             payload = json.load(f)
+
+        self.ui_state = payload.get("ui_state") if isinstance(payload.get("ui_state"), dict) else {}
 
         paths: List[str] = []
         data: Dict[int, dict] = {}

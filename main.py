@@ -20,7 +20,7 @@ from project_store import ProjectStore, PROJECT_FILENAME, YSB_EXTENSION, package
 from api_settings import ApiSettingsStore, ApiSettingsDialog, apply_settings_to_config
 from shortcut_settings import ShortcutSettingsStore, ShortcutSettingsDialog, MacroSettingsDialog, TEXT_SYMBOLS, shortcut_label_map
 from viewer import MuleImageViewer
-from graphics_items import TypesettingItem
+from graphics_items import TypesettingItem, build_typesetting_text_path
 from delegates import MultilineDelegate
 from workers import UniversalBatchWorker, AnalysisWorker, InpaintWorker
 from cache_utils import get_cache_dir, get_cache_file
@@ -256,15 +256,72 @@ QMessageBox QPushButton:hover { background-color: #434957; }
 """
 
 
-def styled_question(parent, title, text, default_yes=False):
+def _messagebox_ui_language(parent=None):
+    lang = None
+    for attr in ("ui_language", "_ui_language"):
+        try:
+            value = getattr(parent, attr, None)
+            if value:
+                lang = value
+                break
+        except Exception:
+            pass
+    return normalize_ui_language(lang or current_ui_language())
+
+
+def styled_question(parent, title, text, buttons=None, defaultButton=None, default_yes=True):
+    buttons = buttons or (QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+    defaultButton = defaultButton or QMessageBox.StandardButton.Yes
+    if buttons != (QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No):
+        msg = QMessageBox(parent)
+        msg.setIcon(QMessageBox.Icon.Question)
+        msg.setWindowTitle(title)
+        msg.setText(text)
+        msg.setStandardButtons(buttons)
+        try:
+            msg.setDefaultButton(QMessageBox.StandardButton.Yes if default_yes and (buttons & QMessageBox.StandardButton.Yes) else defaultButton)
+        except Exception:
+            pass
+        msg.setStyleSheet(DARK_MESSAGEBOX_QSS)
+        return msg.exec()
+
+    lang = _messagebox_ui_language(parent)
+    confirm_text = translate_ui_text("확인(Y)", lang)
+    cancel_text = translate_ui_text("취소(N)", lang)
+    confirm_tip = translate_ui_text("Enter 또는 Y 키로 확인합니다.", lang)
+    cancel_tip = translate_ui_text("N 키로 취소합니다.", lang)
+
     msg = QMessageBox(parent)
     msg.setIcon(QMessageBox.Icon.Question)
     msg.setWindowTitle(title)
     msg.setText(text)
-    msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-    msg.setDefaultButton(QMessageBox.StandardButton.Yes if default_yes else QMessageBox.StandardButton.No)
     msg.setStyleSheet(DARK_MESSAGEBOX_QSS)
-    return msg.exec()
+
+    yes_button = msg.addButton(confirm_text, QMessageBox.ButtonRole.YesRole)
+    no_button = msg.addButton(cancel_text, QMessageBox.ButtonRole.NoRole)
+    yes_button.setShortcut(QKeySequence("Y"))
+    no_button.setShortcut(QKeySequence("N"))
+    yes_button.setToolTip(confirm_tip)
+    no_button.setToolTip(cancel_tip)
+    msg.setDefaultButton(yes_button)
+    msg.setEscapeButton(no_button)
+
+    try:
+        yes_button.setAutoDefault(True)
+        no_button.setAutoDefault(False)
+    except Exception:
+        pass
+
+    result = msg.exec()
+    clicked = msg.clickedButton()
+    if clicked is yes_button:
+        return QMessageBox.StandardButton.Yes
+    if clicked is no_button:
+        return QMessageBox.StandardButton.No
+    return QMessageBox.StandardButton.Yes if result == int(QDialog.DialogCode.Accepted) else QMessageBox.StandardButton.No
+
+
+QMessageBox.question = staticmethod(styled_question)
 
 def is_windows():
     return sys.platform.startswith("win")
@@ -973,6 +1030,9 @@ class InlineTextEditItem(QGraphicsTextItem):
         if self.align not in ('left', 'center', 'right'):
             self.align = 'center'
 
+        # 편집기는 현재 보이는 실제 텍스트 bounds에서 시작한다.
+        # 세로 기준은 top을 유지해서 사용자가 편집 중 텍스트가 튀어 보이지 않게 하고,
+        # 완료 시에는 이 bounds 자체가 새 텍스트 영역이 된다.
         self.anchor_y = float(scene_rect.y())
         if self.align == 'right':
             self.anchor_x = float(scene_rect.right())
@@ -1019,9 +1079,71 @@ class InlineTextEditItem(QGraphicsTextItem):
         except Exception:
             pass
 
+    def _content_path_rect(self):
+        """현재 편집 텍스트가 실제로 차지하는 타이트한 로컬 영역을 계산한다.
+
+        QGraphicsTextItem.boundingRect()는 편집 커서/문서 여백/추가 줄 높이 때문에
+        실제 글자보다 아래쪽이 한 줄 정도 더 남는 경우가 있다. 최종 식자 박스는
+        TypesettingItem과 같은 QPainterPath 기준으로 다시 계산한다.
+        """
+        d = getattr(getattr(self, "target_item", None), "data", {}) or {}
+        text = str(self.toPlainText() or "")
+        lines = text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
+        if not lines:
+            lines = ['']
+
+        font = QFont(self.font())
+        try:
+            font.setBold(bool(d.get('bold', False)))
+            font.setItalic(bool(d.get('italic', False)))
+            letter_spacing = int(d.get('letter_spacing', 0) or 0)
+        except Exception:
+            pass
+
+        try:
+            line_spacing_pct = max(50, min(300, int(d.get('line_spacing', 100) or 100)))
+        except Exception:
+            line_spacing_pct = 100
+        try:
+            char_width_pct = max(10, min(300, int(d.get('char_width', 100) or 100)))
+        except Exception:
+            char_width_pct = 100
+        try:
+            char_height_pct = max(10, min(300, int(d.get('char_height', 100) or 100)))
+        except Exception:
+            char_height_pct = 100
+
+        fm = QFontMetrics(font)
+        line_height = max(1, int(fm.lineSpacing() * (line_spacing_pct / 100.0)))
+        align = getattr(self, 'align', 'center')
+        path, _line_rects = build_typesetting_text_path(lines, font, align, line_height, letter_spacing)
+
+        if char_width_pct != 100 or char_height_pct != 100:
+            tr = QTransform()
+            tr.scale(char_width_pct / 100.0, char_height_pct / 100.0)
+            path = tr.map(path)
+
+        rect = path.boundingRect()
+        if rect.isNull() or rect.width() <= 0 or rect.height() <= 0:
+            # 빈 텍스트/예외 상황용 최소 박스
+            rect = QRectF(0, 0, 1, max(1, fm.height()))
+        return rect
+
     def adjusted_scene_rect(self):
-        br = self.boundingRect()
-        return self.mapToScene(br).boundingRect()
+        # 실제 글자 path 기준으로 타이트한 rect를 반환한다.
+        # 완료 후에는 이 rect 자체가 새 텍스트 영역이 된다.
+        rect = self._content_path_rect()
+        w = max(1.0, float(rect.width()))
+        h = max(1.0, float(rect.height()))
+        anchor_x = float(getattr(self, 'anchor_x', 0.0))
+        if getattr(self, 'align', 'center') == 'right':
+            x = anchor_x - w
+        elif getattr(self, 'align', 'center') == 'left':
+            x = anchor_x
+        else:
+            x = anchor_x - w / 2.0
+        y = float(getattr(self, 'anchor_y', 0.0))
+        return QRectF(x, y, w, h)
 
     def adjust_to_contents(self):
         if self._adjusting:
@@ -1078,6 +1200,8 @@ class InlineTextEditItem(QGraphicsTextItem):
 
     def focusOutEvent(self, event):
         super().focusOutEvent(event)
+        if getattr(self.main_window, "_app_is_closing", False):
+            return
         if not self._closing:
             self.main_window.finish_inline_text_edit(commit=True)
 
@@ -1282,6 +1406,9 @@ class MainWindow(QMainWindow):
         self.is_temp_project = False
         self.is_loading_project = False
         self.is_autosaving = False
+        self._busy_counter = 0
+        self._busy_reason_stack = []
+        self._busy_widgets = []
 
         self.app_options = load_app_options()
         self.sync_translation_option_cache_to_config()
@@ -1299,6 +1426,8 @@ class MainWindow(QMainWindow):
         self.work_project_dir = None
         self.has_unsaved_changes = False
         self._closing_confirmed = False
+        # 종료 처리 중에는 focusOut/QTimer가 삭제된 QGraphicsScene에 접근하지 못하게 막는다.
+        self._app_is_closing = False
 
         # 일괄 작업/페이지 로딩 중에는 화면에 남아 있는 마스크를
         # 현재 페이지 데이터에 자동 저장하면 안 된다.
@@ -1314,6 +1443,8 @@ class MainWindow(QMainWindow):
         self.last_canvas_context_pos = None
 
         self.last_mode = 0
+        self._current_work_mode = 0
+        self._global_event_filter_installed = False
 
         # 번역 묶음 수: 한 번의 API 요청에 몇 줄을 묶어 보낼지
         # 번역 API별로 따로 기억한다.
@@ -1327,7 +1458,7 @@ class MainWindow(QMainWindow):
 
         self.default_text_color = "#000000"
         self.default_stroke_color = "#FFFFFF"
-        self.default_line_spacing = 0
+        self.default_line_spacing = 100
         self.default_letter_spacing = 0
         self.default_char_width = 100
         self.default_char_height = 100
@@ -1366,6 +1497,7 @@ class MainWindow(QMainWindow):
         self.macro_waiting_key = None
         self.macro_waiting_kind = None
         self.macro_current_name = ""
+        self._suppress_project_undo = False
         self._tooltip_timer = QTimer(self)
         self._tooltip_timer.setSingleShot(True)
         self._tooltip_timer.timeout.connect(self._show_delayed_tooltip)
@@ -1374,15 +1506,38 @@ class MainWindow(QMainWindow):
 
         # 최종화면 텍스트 작업용 실행 취소 스택
         self.page_text_undo_stacks = {}
+        # 표/화면 동기화 중에는 텍스트 undo 스냅샷을 만들지 않는다.
+        self._text_undo_restore_lock = False
+        # 자동저장 직전 화면의 텍스트 아이템 좌표를 data에 반영할 때 재진입을 막는다.
+        self._text_scene_sync_lock = False
+
+        # 전역 작업 되돌리기 스택.
+        # 페이지/탭/줌/화면 이동/텍스트 편집처럼 여러 페이지를 오가며 생기는 작업을
+        # 현재 페이지 전용 스택이 아니라 하나의 시간순 스택으로 관리한다.
+        self.project_undo_stack = []
+        self.project_redo_stack = []
+        self._project_undo_restore_lock = False
+        self._deferred_undo_records = {}
+        # 매크로/글꼴 프리셋처럼 Undo 기록을 남기지 않는 작업은
+        # 과거 Undo로 되돌아가면 상태가 꼬일 수 있으므로 Undo 경계를 세운다.
+        self.undo_boundary = None
+        self.macro_executed_any = False
+        self.macro_has_undo_boundary = False
+        self.macro_undo_record = None
+        self._macro_allow_undo_append = False
+        self.project_ui_view_states = {}
 
         self.setup_actions()
         self.setup_ui()
+        self._last_show_final_text_checked = bool(self.cb_show_final_text.isChecked()) if hasattr(self, "cb_show_final_text") else True
+        self._last_final_paint_above_text = bool(getattr(self, "final_paint_above_text", False))
         self.load_text_preset_cache()
         self.load_item_text_preset_cache()
         self.setup_menu()
         self.apply_theme(self.ui_theme)
         self.apply_shortcuts()
         self.apply_language(self.ui_language)
+        self.install_global_input_filter()
 
     # =========================================================
     # 메뉴 / UI
@@ -1416,6 +1571,7 @@ class MainWindow(QMainWindow):
         make_action("work_import_translation", "개별 번역문 불러오기", self.import_translation_current)
         make_action("work_clear_translation", "번역문 내용 지우기", self.clear_translation_current)
         make_action("work_clean_text", "개별 텍스트 정리", self.clean_text_current)
+        make_action("work_reset_text_rects", "현재 텍스트 기준 영역 재설정", self.reset_text_rects_current)
         make_action("work_export", "개별 출력", self.export_result)
 
         # 자동화 작업
@@ -1432,6 +1588,7 @@ class MainWindow(QMainWindow):
         make_action("batch_import_translation", "일괄 번역문 불러오기", self.import_translation_batch)
         make_action("batch_clear_translation", "일괄 번역문 내용 지우기", self.clear_translation_batch)
         make_action("batch_clean_text", "일괄 텍스트 정리", self.clean_text_batch)
+        make_action("batch_reset_text_rects", "일괄 텍스트 기준 영역 재설정", self.reset_text_rects_batch)
         make_action("batch_export", "일괄 출력", lambda: self.run_batch('export'))
 
         # 옵션
@@ -1452,6 +1609,7 @@ class MainWindow(QMainWindow):
         make_action("option_item_text_preset_settings", "개별 글꼴 프리셋 관리", self.open_item_text_preset_dialog)
 
         # 토글/보조 작업
+        make_action("paint_redo", "작업 재실행", self.handle_general_redo)
         make_action("paint_magic_fill", "마스킹 칠하기", self.fill_magic_wand_mask)
         make_action("paint_mask_toggle", "마스크 ON/OFF", self.toggle_mask_toggle)
         make_action("view_text_toggle", "텍스트 표시 ON/OFF", self.toggle_show_final_text)
@@ -1505,7 +1663,9 @@ class MainWindow(QMainWindow):
             action = QAction(f"개별 글꼴 프리셋: {name}", self)
             action.setShortcut(QKeySequence(shortcut))
             action.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
-            action.triggered.connect(lambda checked=False, n=name: self.apply_item_text_preset_by_name(n))
+            # 개별 글꼴 프리셋 "단축키" 적용은 Ctrl+Z 기록에서 제외한다.
+            # 일반 텍스트 조정/콤보 적용은 기존처럼 Undo 대상이다.
+            action.triggered.connect(lambda checked=False, n=name: self.apply_item_text_preset_by_name(n, record_undo=True))
             self.addAction(action)
             self.item_preset_actions.append(action)
 
@@ -1572,6 +1732,71 @@ class MainWindow(QMainWindow):
             rows.append(f'<div style="margin-top:4px;color:#333333; border-top:1px solid #c9bd7a; padding-top:3px;">{description}</div>')
         return f'<div style="{base}">' + ''.join(rows) + '</div>'
 
+    def install_global_input_filter(self):
+        """Ctrl+Z/Delete가 우측 표 편집기나 이미지 뷰에 포커스가 있을 때도 메인 작업으로 들어오게 한다.
+
+        QTableWidget의 셀 편집기(QLineEdit/QTextEdit)는 Ctrl+Z를 자체 텍스트 편집 Undo로
+        소비할 수 있다. YSB에서는 텍스트 라인 변경도 프로젝트 Undo 스택에 넣어야 하므로,
+        메인 윈도우 안에서 발생한 Ctrl+Z는 먼저 편집 내용을 확정한 뒤 일반 Undo로 넘긴다.
+        """
+        if getattr(self, "_global_event_filter_installed", False):
+            return
+        app = QApplication.instance()
+        if app is None:
+            return
+        try:
+            app.installEventFilter(self)
+            self._global_event_filter_installed = True
+        except Exception:
+            pass
+
+    def _is_own_window_object(self, obj):
+        try:
+            if obj is self:
+                return True
+            w = obj if isinstance(obj, QWidget) else None
+            if w is None:
+                return False
+            return w.window() is self
+        except Exception:
+            return False
+
+    def commit_active_text_editors_before_undo(self):
+        """Undo 직전 열린 셀/인라인 텍스트 편집을 data에 먼저 확정한다."""
+        try:
+            if getattr(self, "inline_text_editor", None) is not None:
+                self.finish_inline_text_edit(commit=True, refresh=False)
+        except Exception:
+            pass
+
+        fw = QApplication.focusWidget()
+        if fw is None:
+            return
+
+        # 우측 텍스트 표의 임시 편집기라면 닫아서 itemChanged를 먼저 발생시킨다.
+        try:
+            if getattr(self, "tab", None) is not None and (fw is self.tab or self.tab.isAncestorOf(fw)):
+                try:
+                    self.tab.commitData(fw)
+                except Exception:
+                    pass
+                try:
+                    self.tab.closeEditor(fw, QAbstractItemDelegate.EndEditHint.NoHint)
+                except Exception:
+                    try:
+                        fw.clearFocus()
+                        self.tab.setFocus()
+                    except Exception:
+                        pass
+                QApplication.processEvents()
+        except Exception:
+            pass
+
+    def handle_global_undo_shortcut(self):
+        self.commit_active_text_editors_before_undo()
+        self.handle_general_undo()
+        return True
+
     def register_delayed_tooltip(self, widget, title, shortcut_text="", description=""):
         if widget is None:
             return
@@ -1612,6 +1837,28 @@ class MainWindow(QMainWindow):
 
     def eventFilter(self, obj, event):
         et = event.type()
+        if et == QEvent.Type.KeyPress and self._is_own_window_object(obj):
+            try:
+                key = event.key()
+                mods = event.modifiers()
+                ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
+                if self._event_matches_shortcut(event, "paint_undo") or (ctrl and key == Qt.Key.Key_Z):
+                    self.handle_global_undo_shortcut()
+                    event.accept()
+                    return True
+                if self._event_matches_shortcut(event, "paint_redo") or (ctrl and key == Qt.Key.Key_Y):
+                    self.handle_general_redo()
+                    event.accept()
+                    return True
+                if key == Qt.Key.Key_Delete:
+                    fw = QApplication.focusWidget()
+                    in_table = getattr(self, "tab", None) is not None and (fw is self.tab or self.tab.isAncestorOf(fw))
+                    if in_table and self.selected_table_text_ids():
+                        self.delete_text_data_items(ask=True)
+                        event.accept()
+                        return True
+            except Exception:
+                pass
         if hasattr(obj, "property") and obj.property("delayed_tooltip_html"):
             # QAction/QToolButton 기본 툴팁은 action text를 작게 띄우는 경우가 있다.
             # 예: W, ☐ 같은 "아이콘 확대"처럼 보이는 검은 툴팁.
@@ -1647,6 +1894,7 @@ class MainWindow(QMainWindow):
             if hasattr(self, "act_erase"): action_info.append((self.act_erase, "지우개", seq_text("paint_erase")))
             if hasattr(self, "act_reanal"): action_info.append((self.act_reanal, "재분석", seq_text("paint_reanalyze")))
             if hasattr(self, "act_undo"): action_info.append((self.act_undo, "작업 취소", seq_text("paint_undo")))
+            if hasattr(self, "act_redo"): action_info.append((self.act_redo, "작업 재실행", seq_text("paint_redo")))
             if hasattr(self, "act_magic"): action_info.append((self.act_magic, "요술봉 선택", seq_text("paint_magic_select")))
             if hasattr(self, "act_final_text_tool"): action_info.append((self.act_final_text_tool, "최종 텍스트 도구", seq_text("final_text_tool"), "최종화면을 클릭하면 텍스트 영역을 만듭니다. 내용 작성 후 Ctrl+Return을 누르거나 다른 곳을 클릭하면 작성이 완료됩니다."))
             if hasattr(self, "act_final_paint_to_bg"): action_info.append((self.act_final_paint_to_bg, "최종 페인팅을 배경으로 반영", seq_text("final_paint_to_background")))
@@ -1726,6 +1974,7 @@ class MainWindow(QMainWindow):
         work_menu.addAction(self.actions["work_import_translation"])
         work_menu.addAction(self.actions["work_clear_translation"])
         work_menu.addAction(self.actions["work_clean_text"])
+        work_menu.addAction(self.actions["work_reset_text_rects"])
         work_menu.addAction(self.actions["work_export"])
 
         batch_menu = menubar.addMenu(self.tr_ui("일괄 작업")); self.batch_menu = batch_menu
@@ -1736,6 +1985,7 @@ class MainWindow(QMainWindow):
         batch_menu.addAction(self.actions["batch_import_translation"])
         batch_menu.addAction(self.actions["batch_clear_translation"])
         batch_menu.addAction(self.actions["batch_clean_text"])
+        batch_menu.addAction(self.actions["batch_reset_text_rects"])
         batch_menu.addAction(self.actions["batch_export"])
 
         auto_menu = menubar.addMenu(self.tr_ui("자동화 작업")); self.auto_menu = auto_menu
@@ -1941,7 +2191,19 @@ class MainWindow(QMainWindow):
         self.cb_mode.addItems(["1. 원본", "2. 분석도", "3. 텍스트 마스크", "4. 페인팅 마스크", "5. 최종결과"])
         self.cb_mode.currentIndexChanged.connect(self.mode_chg)
         cl.addWidget(self.cb_mode)
+
+        # Undo / Redo quick buttons.
+        # 작업 탭 콤보 바로 오른쪽에 두어 탭/페이지/텍스트 작업을 마우스로도 되돌릴 수 있게 한다.
+        self.btn_quick_undo = QPushButton("↶")
+        self.btn_quick_undo.setFixedWidth(30)
+        self.btn_quick_undo.clicked.connect(self.handle_global_undo_shortcut)
+        cl.addWidget(self.btn_quick_undo)
+        self.btn_quick_redo = QPushButton("↷")
+        self.btn_quick_redo.setFixedWidth(30)
+        self.btn_quick_redo.clicked.connect(self.handle_general_redo)
+        cl.addWidget(self.btn_quick_redo)
         self.update_paint_toolbar_visibility()
+        self.update_undo_redo_buttons()
 
         cl.addStretch()
         self.btn_text_mask_reanalyze = QPushButton(self.tr_ui("🔄 재분석"))
@@ -2021,16 +2283,14 @@ class MainWindow(QMainWindow):
             b.setToolTip("글자 정렬")
 
         self.sb_line_spacing = QSpinBox()
-        self.sb_line_spacing.setRange(0, 300)
-        self.sb_line_spacing.setSpecialValueText("자동")
-        self.sb_line_spacing.setValue(0)
+        self.sb_line_spacing.setRange(50, 300)
+        self.sb_line_spacing.setValue(100)
         self.sb_line_spacing.setSuffix(" %")
         self.sb_line_spacing.setFixedWidth(72)
         self.sb_line_spacing.setToolTip("행간")
 
         self.sb_letter_spacing = QSpinBox()
-        self.sb_letter_spacing.setRange(0, 200)
-        self.sb_letter_spacing.setSpecialValueText("자동")
+        self.sb_letter_spacing.setRange(-100, 200)
         self.sb_letter_spacing.setValue(0)
         self.sb_letter_spacing.setSuffix(" px")
         self.sb_letter_spacing.setFixedWidth(72)
@@ -2261,7 +2521,7 @@ class MainWindow(QMainWindow):
         return name
 
     def update_window_title(self):
-        base = "YSB Tool v1.6" if normalize_ui_language(getattr(self, "ui_language", current_ui_language())) == LANG_EN else "역식붕이 툴 v1.6"
+        base = "YSB Tool v1.7.0" if normalize_ui_language(getattr(self, "ui_language", current_ui_language())) == LANG_EN else "역식붕이 툴 v1.7.0"
         project_name = self.display_project_name()
         try:
             self.setWindowTitle(f"{base} - {project_name}" if project_name else base)
@@ -2382,6 +2642,7 @@ class MainWindow(QMainWindow):
             "work_import_translation": "개별 번역문 불러오기",
             "work_clear_translation": "번역문 내용 지우기",
             "work_clean_text": "개별 텍스트 정리",
+            "work_reset_text_rects": "현재 텍스트 기준 영역 재설정",
             "work_export": "개별 출력",
             "batch_analyze": "일괄 분석",
             "batch_translate": "일괄 번역",
@@ -2390,6 +2651,7 @@ class MainWindow(QMainWindow):
             "batch_import_translation": "일괄 번역문 불러오기",
             "batch_clear_translation": "일괄 번역문 내용 지우기",
             "batch_clean_text": "일괄 텍스트 정리",
+            "batch_reset_text_rects": "일괄 텍스트 기준 영역 재설정",
             "batch_export": "일괄 출력",
             "auto_text_size_current": "자동 텍스트 크기 조정",
             "auto_text_size_batch": "일괄 자동 텍스트 크기 조정",
@@ -2497,11 +2759,8 @@ class MainWindow(QMainWindow):
 
         # 일부 위젯은 이모지/특수값 때문에 일반 순회 번역만으로는 바뀌지 않으므로 직접 보정한다.
         try:
-            auto_text = self.tr_ui("자동")
-            if hasattr(self, "sb_line_spacing"):
-                self.sb_line_spacing.setSpecialValueText(auto_text)
-            if hasattr(self, "sb_letter_spacing"):
-                self.sb_letter_spacing.setSpecialValueText(auto_text)
+            # 행간/자간은 수치 기반으로 표시한다. 행간 기본값은 100%, 자간 기본값은 0px.
+            # QSpinBox specialValueText("자동")는 최솟값 전용이라 음수/기본값 UX와 충돌한다.
             if hasattr(self, "btn_analyze"):
                 self.btn_analyze.setText(self.tr_ui("⚡ 분석"))
             if hasattr(self, "btn_text_mask_reanalyze"):
@@ -3068,7 +3327,7 @@ class MainWindow(QMainWindow):
             elif key == "stroke_width":
                 value = f"{value}px"
             elif key in ("line_spacing",):
-                value = "자동" if int(value or 0) == 0 else f"{value}%"
+                value = f"{100 if int(value or 0) == 0 else value}%"
             elif key in ("letter_spacing",):
                 value = "자동" if int(value or 0) == 0 else f"{value}px"
             elif key in ("char_width", "char_height"):
@@ -3140,8 +3399,8 @@ class MainWindow(QMainWindow):
             "text_color": str(style.get("text_color") or "#000000"),
             "stroke_color": str(style.get("stroke_color") or "#FFFFFF"),
             "align": align,
-            "line_spacing": _int("line_spacing", 0, 0, 300),
-            "letter_spacing": _int("letter_spacing", 0, 0, 500),
+            "line_spacing": _int("line_spacing", 100, 50, 300),
+            "letter_spacing": _int("letter_spacing", 0, -500, 500),
             "char_width": _int("char_width", 100, 10, 300),
             "char_height": _int("char_height", 100, 10, 300),
             "bold": bool(style.get("bold", False)),
@@ -3160,7 +3419,7 @@ class MainWindow(QMainWindow):
             self.default_stroke_color = style["stroke_color"]
             self.default_align = style["align"]
             if hasattr(self, "sb_line_spacing"):
-                self.sb_line_spacing.setValue(int(style["line_spacing"]))
+                self.sb_line_spacing.setValue(100 if int(style["line_spacing"] or 0) == 0 else int(style["line_spacing"]))
             if hasattr(self, "sb_letter_spacing"):
                 self.sb_letter_spacing.setValue(int(style["letter_spacing"]))
             if hasattr(self, "sb_char_width"):
@@ -3252,10 +3511,15 @@ class MainWindow(QMainWindow):
             if not style:
                 return
         self.apply_style_to_controls(style)
+        applied_to_selection = False
         if self.cb_mode.currentIndex() == 4 and self.selected_text_items():
             self.apply_style_to_selected(**style)
+            applied_to_selection = True
         self.save_last_text_preset(str(key))
-        self.log(f"🎛️ 글꼴 프리셋 로딩: {self.cb_text_preset.currentText()}")
+        preset_label = self.cb_text_preset.currentText()
+        self.log(f"🎛️ 글꼴 프리셋 로딩: {preset_label}")
+        # 글꼴 프리셋은 일반 스타일 변경과 같은 Undo 대상이다.
+        # 매크로와 달리 Undo 체인을 끊지 않는다.
 
     def save_text_preset_named(self):
         name, ok = QInputDialog.getText(self, "프리셋 저장", "저장할 프리셋 이름:")
@@ -3473,6 +3737,48 @@ class MainWindow(QMainWindow):
             self.refresh_item_text_preset_combo()
         return True
 
+    def apply_pending_item_preset_disables_for_shortcut_settings(self, pending_names, new_settings):
+        """단축키/매크로 설정창에서 입력 중 허용한 개별 프리셋 충돌을 OK 저장 시점에 적용한다.
+
+        사용자가 중간에 단축키를 다시 바꿨을 수 있으므로, 최종 new_settings와 실제로
+        아직 충돌하는 경우에만 해당 개별 프리셋을 비활성화한다.
+        """
+        changed = False
+        for name in sorted({str(x) for x in (pending_names or []) if str(x)}):
+            preset = self.item_text_presets.get(name)
+            if not preset or not preset.get("enabled", True):
+                continue
+            item_seq = self.normalize_shortcut_text(preset.get("shortcut", "") or "")
+            if not item_seq:
+                continue
+
+            conflict = False
+            for key, shortcut in list(getattr(new_settings, "shortcuts", {}) .items()):
+                if not getattr(new_settings, "enabled", {}).get(key, True):
+                    continue
+                if shortcut and self.normalize_shortcut_text(shortcut) == item_seq:
+                    conflict = True
+                    break
+            if not conflict:
+                for macro in getattr(new_settings, "macros", []) or []:
+                    if not macro.get("enabled", True):
+                        continue
+                    macro_seq = self.normalize_shortcut_text(macro.get("shortcut", "") or "")
+                    if macro_seq and macro_seq == item_seq:
+                        conflict = True
+                        break
+
+            if conflict:
+                preset["enabled"] = False
+                self.save_item_text_preset_named(name, preset)
+                changed = True
+                self.log(f"🔕 개별 글꼴 프리셋 단축키 비활성화: {name}")
+
+        if changed:
+            self.refresh_item_text_preset_combo()
+            self.apply_shortcuts()
+        return changed
+
     def load_item_text_preset_cache(self):
         self.item_text_presets = {}
         preset_dir = self.item_text_preset_dir()
@@ -3615,7 +3921,7 @@ class MainWindow(QMainWindow):
                 subset[key] = style.get(key)
         return subset
 
-    def apply_item_text_preset_by_name(self, name, from_combo=False):
+    def apply_item_text_preset_by_name(self, name, from_combo=False, record_undo=True):
         name = str(name or "")
         preset = self.item_text_presets.get(name)
         if not preset:
@@ -3631,7 +3937,7 @@ class MainWindow(QMainWindow):
 
         selected = self.selected_text_items()
         if selected and self.cb_mode.currentIndex() == 4:
-            self.apply_style_to_selected(preset_name=name, **subset)
+            self.apply_style_to_selected(preset_name=name, record_undo=record_undo, **subset)
             if from_combo and hasattr(self, "cb_item_text_preset"):
                 self._item_preset_signal_lock = True
                 try:
@@ -3641,6 +3947,7 @@ class MainWindow(QMainWindow):
                 finally:
                     self._item_preset_signal_lock = False
             self.log(f"🎛️ 개별 글꼴 프리셋 적용: {name}")
+            # 글꼴 프리셋은 Undo 경계가 아니라 일반 Undo 스택에 포함한다.
             return True
 
         self.log("⚠️ 개별 글꼴 프리셋을 적용할 텍스트를 최종화면에서 선택하세요.")
@@ -3719,8 +4026,8 @@ class MainWindow(QMainWindow):
 
         row2 = QHBoxLayout()
         row2.setSpacing(6)
-        dlg_line_spacing = QSpinBox(dialog); dlg_line_spacing.setRange(0, 300); dlg_line_spacing.setSpecialValueText(self.tr_ui("자동")); dlg_line_spacing.setSuffix(" %"); dlg_line_spacing.setFixedWidth(72)
-        dlg_letter_spacing = QSpinBox(dialog); dlg_letter_spacing.setRange(0, 200); dlg_letter_spacing.setSpecialValueText(self.tr_ui("자동")); dlg_letter_spacing.setSuffix(" px"); dlg_letter_spacing.setFixedWidth(72)
+        dlg_line_spacing = QSpinBox(dialog); dlg_line_spacing.setRange(50, 300); dlg_line_spacing.setValue(100); dlg_line_spacing.setSuffix(" %"); dlg_line_spacing.setFixedWidth(72)
+        dlg_letter_spacing = QSpinBox(dialog); dlg_letter_spacing.setRange(-100, 200); dlg_letter_spacing.setSuffix(" px"); dlg_letter_spacing.setFixedWidth(72)
         dlg_char_width = QSpinBox(dialog); dlg_char_width.setRange(10, 300); dlg_char_width.setValue(100); dlg_char_width.setSuffix(" %"); dlg_char_width.setFixedWidth(72)
         dlg_char_height = QSpinBox(dialog); dlg_char_height.setRange(10, 300); dlg_char_height.setValue(100); dlg_char_height.setSuffix(" %"); dlg_char_height.setFixedWidth(72)
         dlg_bold = QPushButton("B", dialog); dlg_italic = QPushButton("I", dialog); dlg_strike = QPushButton("S", dialog)
@@ -3769,7 +4076,7 @@ class MainWindow(QMainWindow):
                 dialog_text_color["value"] = style["text_color"]
                 dialog_stroke_color["value"] = style["stroke_color"]
                 dialog_align["value"] = style["align"]
-                dlg_line_spacing.setValue(int(style["line_spacing"]))
+                dlg_line_spacing.setValue(100 if int(style["line_spacing"] or 0) == 0 else int(style["line_spacing"]))
                 dlg_letter_spacing.setValue(int(style["letter_spacing"]))
                 dlg_char_width.setValue(int(style["char_width"]))
                 dlg_char_height.setValue(int(style["char_height"]))
@@ -4189,8 +4496,8 @@ class MainWindow(QMainWindow):
         top_l.addLayout(row1)
 
         row2 = QHBoxLayout(); row2.setSpacing(6)
-        dlg_line_spacing = QSpinBox(dialog); dlg_line_spacing.setRange(0, 300); dlg_line_spacing.setSpecialValueText(self.tr_ui("자동")); dlg_line_spacing.setSuffix(" %"); dlg_line_spacing.setFixedWidth(72)
-        dlg_letter_spacing = QSpinBox(dialog); dlg_letter_spacing.setRange(0, 200); dlg_letter_spacing.setSpecialValueText(self.tr_ui("자동")); dlg_letter_spacing.setSuffix(" px"); dlg_letter_spacing.setFixedWidth(72)
+        dlg_line_spacing = QSpinBox(dialog); dlg_line_spacing.setRange(50, 300); dlg_line_spacing.setValue(100); dlg_line_spacing.setSuffix(" %"); dlg_line_spacing.setFixedWidth(72)
+        dlg_letter_spacing = QSpinBox(dialog); dlg_letter_spacing.setRange(-100, 200); dlg_letter_spacing.setSuffix(" px"); dlg_letter_spacing.setFixedWidth(72)
         dlg_char_width = QSpinBox(dialog); dlg_char_width.setRange(10, 300); dlg_char_width.setValue(100); dlg_char_width.setSuffix(" %"); dlg_char_width.setFixedWidth(72)
         dlg_char_height = QSpinBox(dialog); dlg_char_height.setRange(10, 300); dlg_char_height.setValue(100); dlg_char_height.setSuffix(" %"); dlg_char_height.setFixedWidth(72)
         dlg_bold = QPushButton("B", dialog); dlg_italic = QPushButton("I", dialog); dlg_strike = QPushButton("S", dialog)
@@ -4253,7 +4560,7 @@ class MainWindow(QMainWindow):
                 dialog_text_color["value"] = st["text_color"]
                 dialog_stroke_color["value"] = st["stroke_color"]
                 dialog_align["value"] = st["align"]
-                dlg_line_spacing.setValue(int(st["line_spacing"]))
+                dlg_line_spacing.setValue(100 if int(st["line_spacing"] or 0) == 0 else int(st["line_spacing"]))
                 dlg_letter_spacing.setValue(int(st["letter_spacing"]))
                 dlg_char_width.setValue(int(st["char_width"]))
                 dlg_char_height.setValue(int(st["char_height"]))
@@ -4424,24 +4731,33 @@ class MainWindow(QMainWindow):
                     refresh_rows(n)
                     self.log(f"🎛️ 개별 글꼴 프리셋 선택: {n}")
 
-                def on_enabled(v, n=name):
-                    p = self.item_text_presets.get(n)
-                    if not p:
+                def on_enabled(v, n=name, checkbox=chk_enabled):
+                    if not self.set_item_text_preset_enabled_checked(n, bool(v), parent=dialog):
+                        checkbox.blockSignals(True)
+                        try:
+                            checkbox.setChecked(not bool(v))
+                        finally:
+                            checkbox.blockSignals(False)
                         return
-                    p["enabled"] = bool(v)
-                    self.save_item_text_preset_named(n, p)
-                    self.refresh_item_text_preset_combo()
-                    self.apply_shortcuts()
                     self.log(f"🔘 개별 글꼴 프리셋 {'사용' if v else '미사용'}: {n}")
                     refresh_rows(selected_name["value"])
 
-                def on_shortcut_changed(seq, n=name):
-                    p = self.item_text_presets.get(n)
-                    if not p:
+                def on_shortcut_finished(edit=key_edit, n=name, old_seq=str(preset.get("shortcut", "") or "")):
+                    seq_text = edit.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
+                    if self.normalize_shortcut_text(seq_text) == self.normalize_shortcut_text(old_seq):
                         return
-                    p["shortcut"] = seq.toString(QKeySequence.SequenceFormat.NativeText)
-                    self.save_item_text_preset_named(n, p)
-                    self.apply_shortcuts()
+                    if not self.set_item_text_preset_shortcut_checked(n, seq_text, parent=dialog):
+                        edit.blockSignals(True)
+                        try:
+                            if old_seq:
+                                edit.setKeySequence(QKeySequence(old_seq))
+                            else:
+                                edit.clear()
+                        finally:
+                            edit.blockSignals(False)
+                        return
+                    self.log(f"⌨️ 개별 글꼴 프리셋 단축키 변경: {n} = {seq_text or '없음'}")
+                    refresh_rows(selected_name["value"])
 
                 def on_name_finished(edit=name_edit, old_name=name):
                     new_name = self.safe_preset_name(edit.text())
@@ -4491,7 +4807,7 @@ class MainWindow(QMainWindow):
 
                 btn_select.clicked.connect(on_select)
                 chk_enabled.toggled.connect(on_enabled)
-                key_edit.keySequenceChanged.connect(on_shortcut_changed)
+                key_edit.editingFinished.connect(on_shortcut_finished)
                 name_edit.editingFinished.connect(on_name_finished)
                 btn_update.clicked.connect(on_update)
                 btn_delete.clicked.connect(on_delete)
@@ -4659,6 +4975,8 @@ class MainWindow(QMainWindow):
             self.log("⚠️ 현재 페이지가 없어 프리셋 페이지 적용을 건너뜁니다.")
             return 0
         targets = [x for x in curr.get('data', []) if x.get('use_inpaint', True)]
+        if targets:
+            self.push_project_undo("현재 페이지 글꼴 프리셋 적용", page_idx=page_idx)
         self.apply_current_preset_to_data_items(targets)
         if refresh and page_idx == self.idx:
             self.ref_tab()
@@ -4666,11 +4984,13 @@ class MainWindow(QMainWindow):
                 self.mode_chg(4)
         self.auto_save_project()
         self.log(f"🎛️ 현재 페이지 프리셋 적용: {len(targets)}개")
+        # 현재 페이지 프리셋 적용은 Undo 경계가 아니라 일반 Undo 스택에 포함한다.
         return len(targets)
 
     def apply_current_preset_to_all_pages(self):
         total = 0
         touched_current = False
+        undo_record = self.make_project_undo_record("전체 페이지 글꼴 프리셋 적용", full_project=True)
 
         for i in range(len(self.paths)):
             curr = self.data.get(i)
@@ -4689,7 +5009,9 @@ class MainWindow(QMainWindow):
 
         self.auto_save_project()
         if total:
+            self.append_project_undo_record(undo_record)
             self.log(f"🎛️ 전체 페이지 프리셋 적용: {total}개")
+            # 전체 페이지 프리셋 적용은 Undo 경계가 아니라 일반 Undo 스택에 포함한다.
         else:
             self.log("⚠️ 적용할 페이지/텍스트가 없어 전체 프리셋 적용을 건너뜁니다.")
 
@@ -5276,7 +5598,10 @@ class MainWindow(QMainWindow):
         if not self.paths:
             return
         self.commit_current_page_ui_to_data()
+        undo_rec = self.make_project_undo_record("자동 텍스트 크기 조정")
         changed = self.auto_text_size_for_page(self.idx, refresh=True)
+        if changed:
+            self.append_project_undo_record(undo_rec)
         self.auto_save_project()
         self.log(f"🤖 자동 텍스트 크기 조정 완료: 현재 페이지 {changed}개")
 
@@ -5291,6 +5616,7 @@ class MainWindow(QMainWindow):
             self.log("↩️ 일괄 자동 텍스트 크기 조정 취소")
             return
         self.commit_current_page_ui_to_data()
+        undo_rec = self.make_project_undo_record("일괄 자동 텍스트 크기 조정", full_project=True)
         total = 0
         pages = 0
         for i in range(len(self.paths)):
@@ -5298,6 +5624,8 @@ class MainWindow(QMainWindow):
             if changed:
                 pages += 1
                 total += changed
+        if total:
+            self.append_project_undo_record(undo_rec)
         self.ref_tab()
         if self.cb_mode.currentIndex() == 4:
             self.mode_chg(4)
@@ -5308,7 +5636,10 @@ class MainWindow(QMainWindow):
         if not self.paths:
             return
         self.commit_current_page_ui_to_data()
+        undo_rec = self.make_project_undo_record("자동 줄 내림")
         changed = self.auto_linebreak_for_page(self.idx, refresh=True)
+        if changed:
+            self.append_project_undo_record(undo_rec)
         self.auto_save_project()
         self.log(f"🤖 자동 줄 내림 완료: 현재 페이지 {changed}개")
 
@@ -5323,6 +5654,7 @@ class MainWindow(QMainWindow):
             self.log("↩️ 일괄 자동 줄 내림 취소")
             return
         self.commit_current_page_ui_to_data()
+        undo_rec = self.make_project_undo_record("일괄 자동 줄 내림", full_project=True)
         total = 0
         pages = 0
         for i in range(len(self.paths)):
@@ -5330,6 +5662,8 @@ class MainWindow(QMainWindow):
             if changed:
                 pages += 1
                 total += changed
+        if total:
+            self.append_project_undo_record(undo_rec)
         self.ref_tab()
         if self.cb_mode.currentIndex() == 4:
             self.mode_chg(4)
@@ -5362,12 +5696,19 @@ class MainWindow(QMainWindow):
     def select_text_item_and_row(self, text_item):
         if text_item is None:
             return
+        if getattr(self, "_app_is_closing", False) or getattr(self, "_closing_confirmed", False):
+            return
+        scene = self._safe_graphics_scene()
+        if scene is None:
+            return
         self._syncing_selection = True
         try:
-            if hasattr(self, "view"):
-                for item in self.view.scene.items():
+            try:
+                for item in scene.items():
                     if isinstance(item, TypesettingItem):
                         item.setSelected(item is text_item)
+            except RuntimeError:
+                return
             self.select_table_rows_by_ids([text_item.data.get('id')])
         finally:
             self._syncing_selection = False
@@ -5454,21 +5795,29 @@ class MainWindow(QMainWindow):
             if ans != QMessageBox.StandardButton.Yes:
                 return False
 
+        # 058에서 텍스트 라인 삭제를 프로젝트 스냅샷 Undo로 잡았더니
+        # 표/탭 갱신 시 렉이 커져서, 가벼운 기존 page undo 방식으로 되돌린다.
+        self.push_text_line_undo('텍스트 삭제', include_masks=True)
+
+        deleted_count = 0
         for d in list(data_items):
             self.clear_masks_for_text_data(d)
             try:
                 curr['data'].remove(d)
+                deleted_count += 1
             except ValueError:
                 pass
 
+        if deleted_count <= 0:
+            return False
+
         # 삭제 후 우측 텍스트 행 라인넘버(ID)를 1부터 다시 정렬한다.
+        # 분석도/마스크 탭의 왼쪽 번호 박스도 같은 data id를 보므로 즉시 다시 그린다.
         self.renumber_text_items_for_current_page(curr)
 
         self.ref_tab()
-        if self.cb_mode.currentIndex() == 4:
-            self.mode_chg(4)
-        self.auto_save_project()
-        self.log((f"🗑️ Text deletion complete: {len(data_items)} items" if self.ui_language == LANG_EN else f"🗑️ 텍스트 삭제 완료: {len(data_items)}개"))
+        self.refresh_after_text_line_change(autosave=True)
+        self.log((f"🗑️ Text deletion complete: {deleted_count} items / IDs reordered" if self.ui_language == LANG_EN else f"🗑️ 텍스트 삭제 완료: {deleted_count}개 / 번호 재정렬"))
         return True
 
     def copy_text_data_items(self, data_items=None):
@@ -5517,6 +5866,8 @@ class MainWindow(QMainWindow):
         except Exception:
             base_x, base_y = 0.0, 0.0
 
+        self.push_page_text_undo('텍스트 붙여넣기')
+
         new_ids = []
         next_id = self.next_text_id()
         for i, d in enumerate(src_items):
@@ -5540,6 +5891,7 @@ class MainWindow(QMainWindow):
             d['x_off'] = 0
             d['y_off'] = 0
             d['manual_text_rect'] = True
+            d['text_anchor_mode'] = 'text'
             d['use_inpaint'] = True
             d.pop('pending_new_text', None)
             d.pop('force_show', None)
@@ -5629,16 +5981,32 @@ class MainWindow(QMainWindow):
 
         enabled = not bool(data_item.get('_transform_mode', False))
         self.clear_text_transform_modes(except_data=data_item)
+        selected_id = data_item.get('id')
+
         if enabled:
+            # 변형 모드는 영역 자체를 만지는 작업이다.
+            # 따라서 OCR 초기 박스가 남아 있더라도 변형 진입 순간 현재 보이는
+            # 실제 텍스트 bounds로 rect를 재생성하고 그 영역을 바로 띄운다.
+            rect_changed = self.ensure_text_anchor_rect(
+                data_item,
+                record_undo=True,
+                reason="텍스트 변형 영역 자동 재생성",
+            )
             data_item['_transform_mode'] = True
+            if rect_changed:
+                self.log("🔷 텍스트 변형 영역 자동 재생성: OCR 영역 대신 현재 텍스트 bounds를 사용합니다.")
             self.log("🔷 텍스트 변형 모드 ON: 파란 테두리/핸들을 조작하세요. Alt+드래그로 이동, Ctrl+Enter 또는 배경 클릭으로 종료")
         else:
             data_item.pop('_transform_mode', None)
             self.log("🔷 텍스트 변형 모드 OFF")
 
-        selected_id = data_item.get('id')
         if self.cb_mode.currentIndex() == 4:
-            self.mode_chg(4)
+            old_suppress = getattr(self, "_suppress_mode_undo", False)
+            self._suppress_mode_undo = True
+            try:
+                self.mode_chg(4)
+            finally:
+                self._suppress_mode_undo = old_suppress
             if selected_id is not None:
                 self.reselect_text_items([selected_id])
         self.auto_save_project()
@@ -5766,6 +6134,14 @@ class MainWindow(QMainWindow):
             return
 
         old_data = curr.get('data', [])
+        old_id_order = [str(d.get('id')) for d in old_data]
+        if id_order == old_id_order:
+            return
+
+        # 058에서 프로젝트 스냅샷 Undo로 바꾼 뒤 탭 이동/표 갱신 렉이 커져
+        # 행 순서 변경도 기존의 가벼운 page undo 방식으로 되돌린다.
+        self.push_text_line_undo('텍스트 행 순서 변경')
+
         by_id = {str(d.get('id')): d for d in old_data}
         new_data = [by_id[i] for i in id_order if i in by_id]
         for d in old_data:
@@ -5775,10 +6151,8 @@ class MainWindow(QMainWindow):
         curr['data'] = new_data
         self.renumber_text_items_for_current_page(curr)
         self.ref_tab()
-        if self.cb_mode.currentIndex() == 4:
-            self.mode_chg(4)
-        self.auto_save_project()
-        self.log("↕️ 텍스트 행 순서 변경 완료")
+        self.refresh_after_text_line_change(autosave=True)
+        self.log("↕️ Text row order changed / IDs reordered" if self.ui_language == LANG_EN else "↕️ 텍스트 행 순서 변경 완료 / 번호 재정렬")
 
     def set_text_detail_focus(self, attr):
         widget = getattr(self, attr, None)
@@ -5802,10 +6176,289 @@ class MainWindow(QMainWindow):
         if hasattr(self, "btn_strike"):
             self.btn_strike.toggle()
 
+    def _safe_graphics_scene(self):
+        """현재 QGraphicsScene이 살아 있으면 반환한다.
+
+        Qt 종료/모드 전환/씬 재생성 타이밍에는 Python 래퍼는 남아 있는데
+        내부 C++ QGraphicsScene이 이미 삭제된 상태가 될 수 있다. 이때 selectedItems(),
+        items(), blockSignals() 같은 호출이 RuntimeError를 내므로 모든 scene 접근 전
+        이 헬퍼를 통과시킨다.
+        """
+        view = getattr(self, "view", None)
+        scene = getattr(view, "scene", None) if view is not None else None
+        if scene is None:
+            return None
+        try:
+            # C++ 객체 생존 여부를 확인하는 가장 가벼운 호출.
+            scene.sceneRect()
+        except RuntimeError:
+            return None
+        except Exception:
+            return None
+        return scene
+
     def selected_text_items(self):
-        if not hasattr(self, "view"):
+        if getattr(self, "_app_is_closing", False) or getattr(self, "_closing_confirmed", False):
             return []
-        return [item for item in self.view.scene.selectedItems() if isinstance(item, TypesettingItem)]
+        scene = self._safe_graphics_scene()
+        if scene is None:
+            return []
+        try:
+            return [item for item in scene.selectedItems() if isinstance(item, TypesettingItem)]
+        except RuntimeError:
+            return []
+        except Exception:
+            return []
+
+    def calculate_tight_text_scene_rect(self, data_item):
+        """data_item의 현재 번역문/스타일이 실제로 차지하는 scene rect를 계산한다.
+
+        OCR 원본 박스는 처음 배치용으로 유지하되, 사용자가 텍스트를 한 번 수정하면
+        그 이후의 선택/변형 박스는 실제 텍스트 크기에 맞게 축소되어야 한다.
+        Qt 문서 boundingRect 대신 TypesettingItem과 같은 QPainterPath 기준을 사용한다.
+        """
+        if not isinstance(data_item, dict):
+            return None
+        text = str(data_item.get('translated_text', '') or '')
+        lines = text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
+        if not lines:
+            lines = ['']
+
+        try:
+            fallback_family = self.cb_font.currentFont().family() if hasattr(self, 'cb_font') else 'Arial'
+        except Exception:
+            fallback_family = 'Arial'
+        try:
+            fallback_size = int(self.sb_font_size.value()) if hasattr(self, 'sb_font_size') else 24
+        except Exception:
+            fallback_size = 24
+
+        font = QFont(str(data_item.get('font_family') or fallback_family))
+        try:
+            font.setPixelSize(int(data_item.get('font_size', fallback_size) or fallback_size))
+        except Exception:
+            font.setPixelSize(fallback_size)
+        try:
+            font.setBold(bool(data_item.get('bold', False)))
+            font.setItalic(bool(data_item.get('italic', False)))
+            letter_spacing = int(data_item.get('letter_spacing', 0) or 0)
+        except Exception:
+            pass
+
+        try:
+            line_spacing_pct = max(50, min(300, int(data_item.get('line_spacing', 100) or 100)))
+        except Exception:
+            line_spacing_pct = 100
+        try:
+            char_width_pct = max(10, min(300, int(data_item.get('char_width', 100) or 100)))
+        except Exception:
+            char_width_pct = 100
+        try:
+            char_height_pct = max(10, min(300, int(data_item.get('char_height', 100) or 100)))
+        except Exception:
+            char_height_pct = 100
+
+        align = (data_item.get('align') or getattr(self, 'default_align', 'center') or 'center').lower()
+        if align not in ('left', 'center', 'right'):
+            align = 'center'
+
+        fm = QFontMetrics(font)
+        line_height = max(1, int(fm.lineSpacing() * (line_spacing_pct / 100.0)))
+        path, _line_rects = build_typesetting_text_path(lines, font, align, line_height, letter_spacing)
+
+        if char_width_pct != 100 or char_height_pct != 100:
+            tr = QTransform()
+            tr.scale(char_width_pct / 100.0, char_height_pct / 100.0)
+            path = tr.map(path)
+
+        path_rect = path.boundingRect()
+        if path_rect.isNull() or path_rect.width() <= 0 or path_rect.height() <= 0:
+            path_rect = QRectF(0, 0, 1, max(1, fm.height()))
+
+        rect = list(data_item.get('rect') or [0, 0, 1, 1])
+        while len(rect) < 4:
+            rect.append(1)
+        x_off = float(data_item.get('x_off', 0) or 0)
+        y_off = float(data_item.get('y_off', 0) or 0)
+        rect_x = float(rect[0])
+        rect_y = float(rect[1])
+        rect_w = max(1.0, float(rect[2]))
+        rect_h = max(1.0, float(rect[3]))
+        text_w = max(1.0, float(path_rect.width()))
+        text_h = max(1.0, float(path_rect.height()))
+
+        if align == 'left':
+            anchor_x = rect_x + x_off
+            left = anchor_x
+        elif align == 'right':
+            anchor_x = rect_x + x_off + rect_w
+            left = anchor_x - text_w
+        else:
+            anchor_x = rect_x + x_off + rect_w / 2.0
+            left = anchor_x - text_w / 2.0
+
+        # v1.6.3+: 텍스트는 영역의 세로 중심에 배치된다.
+        anchor_y = rect_y + y_off + rect_h / 2.0
+        top = anchor_y - text_h / 2.0
+
+        return QRectF(left, top, text_w, text_h)
+
+    def shrink_text_rect_to_content(self, data_item):
+        """텍스트 수정 후 작업/변형 박스를 실제 텍스트 크기로 줄인다."""
+        return self.ensure_text_anchor_rect(data_item, record_undo=False)
+
+    def ensure_text_anchor_rect(self, data_item, record_undo=False, reason="텍스트 영역 자동 재생성"):
+        """현재 보이는 실제 텍스트 bounds를 새 텍스트 영역으로 확정한다.
+
+        초기 OCR 영역은 최초 배치용 기준일 뿐이다. 텍스트 직접 수정 또는
+        텍스트 변형 모드 진입 시점에는 현재 화면에 보이는 실제 글자 영역을
+        기준으로 rect를 다시 만들고, 이후 선택/변형 박스가 이 영역을 보게 한다.
+        """
+        if not isinstance(data_item, dict):
+            return False
+        rect = self.calculate_tight_text_scene_rect(data_item)
+        if rect is None:
+            return False
+
+        new_rect = [
+            int(round(rect.x())),
+            int(round(rect.y())),
+            max(1, int(round(rect.width()))),
+            max(1, int(round(rect.height()))),
+        ]
+        old_rect = list(data_item.get('rect') or [])
+        while len(old_rect) < 4:
+            old_rect.append(0)
+        try:
+            old_rect4 = [int(round(float(v))) for v in old_rect[:4]]
+        except Exception:
+            old_rect4 = old_rect[:4]
+        old_x = int(round(float(data_item.get('x_off', 0) or 0)))
+        old_y = int(round(float(data_item.get('y_off', 0) or 0)))
+        already_text_anchor = bool(data_item.get('manual_text_rect')) or str(data_item.get('text_anchor_mode') or '').lower() == 'text'
+        changed = (
+            old_rect4 != new_rect
+            or old_x != 0
+            or old_y != 0
+            or not already_text_anchor
+        )
+        if not changed:
+            return False
+
+        if record_undo:
+            try:
+                self.push_page_text_undo(reason)
+            except Exception:
+                pass
+
+        data_item['rect'] = new_rect
+        data_item['x_off'] = 0
+        data_item['y_off'] = 0
+        data_item['manual_text_rect'] = True
+        data_item['text_anchor_mode'] = 'text'
+        return True
+
+    def reset_text_rects_current(self):
+        """현재 페이지의 모든 텍스트 영역을 현재 보이는 텍스트 bounds 기준으로 재생성한다."""
+        if not self.paths or self.idx not in self.data:
+            self.log("⚠️ 영역을 재설정할 현재 페이지가 없습니다.")
+            return
+
+        # 최종화면에서 드래그 이동한 좌표가 아직 data에 완전히 박히기 전일 수 있으므로
+        # 먼저 현재 UI 상태를 data에 동기화한 뒤, 그 상태를 Undo 기준으로 저장한다.
+        try:
+            self.commit_current_page_ui_to_data(include_mask=False)
+        except Exception:
+            pass
+
+        curr = self.data.get(self.idx) or {}
+        items = [d for d in (curr.get('data', []) or []) if isinstance(d, dict)]
+        if not items:
+            self.log("⚠️ 영역을 재설정할 텍스트가 없습니다.")
+            return
+
+        undo_rec = self.make_project_undo_record("현재 텍스트 기준 영역 재설정")
+        changed = 0
+        for d in items:
+            try:
+                if self.ensure_text_anchor_rect(d, record_undo=False, reason="현재 텍스트 기준 영역 재설정"):
+                    changed += 1
+            except Exception:
+                continue
+
+        if changed <= 0:
+            self.log("↩️ 현재 텍스트 기준 영역 재설정: 변경된 영역이 없습니다.")
+            return
+
+        self.append_project_undo_record(undo_rec)
+        self.auto_save_project()
+        self.ref_tab()
+        if self.cb_mode.currentIndex() == 4:
+            self.mode_chg(4)
+        self.log(f"📐 현재 텍스트 기준 영역 재설정 완료: {changed}개")
+
+    def reset_text_rects_batch(self):
+        """전체 페이지의 모든 텍스트 영역을 현재 텍스트 bounds 기준으로 일괄 재생성한다."""
+        if not self.paths or not self.data:
+            self.log("⚠️ 영역을 재설정할 프로젝트가 없습니다.")
+            return
+
+        try:
+            self.commit_current_page_ui_to_data(include_mask=False)
+        except Exception:
+            pass
+
+        total_candidates = 0
+        try:
+            for page_data in (self.data or {}).values():
+                if isinstance(page_data, dict):
+                    total_candidates += sum(1 for d in (page_data.get('data', []) or []) if isinstance(d, dict))
+        except Exception:
+            total_candidates = 0
+        if total_candidates <= 0:
+            self.log("⚠️ 영역을 재설정할 텍스트가 없습니다.")
+            return
+
+        msg = f"전체 {len(self.paths)}페이지의 텍스트 영역을 현재 텍스트 기준으로 다시 만들까요?\n총 {total_candidates}개 텍스트가 대상입니다."
+        if not self.confirm_batch_operation("일괄 텍스트 기준 영역 재설정", msg):
+            self.log("↩️ 일괄 텍스트 기준 영역 재설정 취소")
+            return
+
+        undo_rec = self.make_project_undo_record("일괄 텍스트 기준 영역 재설정", full_project=True)
+        changed_pages = 0
+        changed_total = 0
+        old_batch = getattr(self, "is_batch_running", False)
+        self.is_batch_running = True
+        try:
+            for page_idx in sorted((self.data or {}).keys()):
+                page_data = self.data.get(page_idx)
+                if not isinstance(page_data, dict):
+                    continue
+                page_changed = 0
+                for d in (page_data.get('data', []) or []):
+                    if not isinstance(d, dict):
+                        continue
+                    try:
+                        if self.ensure_text_anchor_rect(d, record_undo=False, reason="일괄 텍스트 기준 영역 재설정"):
+                            page_changed += 1
+                    except Exception:
+                        continue
+                if page_changed:
+                    changed_pages += 1
+                    changed_total += page_changed
+        finally:
+            self.is_batch_running = old_batch
+
+        if changed_total <= 0:
+            self.log("↩️ 일괄 텍스트 기준 영역 재설정: 변경된 영역이 없습니다.")
+            return
+
+        self.append_project_undo_record(undo_rec)
+        self.auto_save_project()
+        self.ref_tab()
+        if self.cb_mode.currentIndex() == 4:
+            self.mode_chg(4)
+        self.log(f"📐 일괄 텍스트 기준 영역 재설정 완료: {changed_pages}페이지 / {changed_total}개")
 
     def start_inline_text_edit(self, text_item, select_all=False):
         """최종 화면 텍스트를 더블클릭/F2 했을 때 그 자리에서 직접 편집한다."""
@@ -5851,7 +6504,23 @@ class MainWindow(QMainWindow):
         if editor is None:
             return
 
-        editor._closing = True
+        is_closing = bool(getattr(self, "_app_is_closing", False))
+        try:
+            editor._closing = True
+        except Exception:
+            pass
+
+        # Qt 종료/탭 재구성 타이밍에 QGraphicsTextItem의 C++ 객체가 먼저 삭제될 수 있다.
+        # 이 상태에서 toPlainText()/scene()/removeItem() 등을 호출하면
+        # "wrapped C/C++ object ... has been deleted"가 나므로 조용히 포인터만 정리한다.
+        try:
+            _ = editor.toPlainText()
+        except RuntimeError:
+            self.inline_text_editor = None
+            self.inline_text_target = None
+            return
+        except Exception:
+            pass
 
         selected_id = target.data.get('id') if target is not None else None
         pending_new = bool(target is not None and target.data.get('pending_new_text'))
@@ -5861,7 +6530,12 @@ class MainWindow(QMainWindow):
         canceled_new = False
 
         if commit and target is not None:
-            new_text = editor.toPlainText()
+            try:
+                new_text = editor.toPlainText()
+            except RuntimeError:
+                self.inline_text_editor = None
+                self.inline_text_target = None
+                return
             changed = (new_text != getattr(editor, 'original_text', ''))
 
             if pending_new and not str(new_text or '').strip():
@@ -5869,12 +6543,14 @@ class MainWindow(QMainWindow):
                 changed = False
                 self.log(f"↩️ 새 텍스트 입력 취소 (ID: {target.data.get('id')})")
             elif changed or pending_new:
+                self.push_page_text_undo('텍스트 직접 수정' if not pending_new else '새 텍스트 추가')
                 target.data['translated_text'] = new_text
                 target.data.pop('force_show', None)
                 target.data.pop('pending_new_text', None)
 
                 # 직접 수정한 경우에는 기존 OCR 박스가 아니라 현재 편집 텍스트 자체를 기준으로
-                # 텍스트 영역을 다시 잡는다.
+                # 텍스트 영역을 다시 잡는다. QGraphicsTextItem의 boundingRect()가 아래쪽에
+                # 여분 한 줄을 남기는 경우를 피하기 위해 adjusted_scene_rect()의 타이트 계산을 쓴다.
                 try:
                     edit_rect = editor.adjusted_scene_rect()
                     if edit_rect.width() > 1 and edit_rect.height() > 1:
@@ -5887,8 +6563,14 @@ class MainWindow(QMainWindow):
                         target.data['x_off'] = 0
                         target.data['y_off'] = 0
                         target.data['manual_text_rect'] = True
+                        target.data['text_anchor_mode'] = 'text'
+                    else:
+                        self.shrink_text_rect_to_content(target.data)
                 except Exception:
-                    pass
+                    try:
+                        self.shrink_text_rect_to_content(target.data)
+                    except Exception:
+                        pass
 
                 if pending_new:
                     curr = self.data.get(self.idx)
@@ -5942,16 +6624,23 @@ class MainWindow(QMainWindow):
         self.inline_text_editor = None
         self.inline_text_target = None
 
-        if commit and (changed or added_new) and refresh and self.cb_mode.currentIndex() == 4:
+        if (not is_closing) and commit and (changed or added_new) and refresh and self.cb_mode.currentIndex() == 4:
             self.ref_tab()
             self.mode_chg(4)
             if selected_id is not None and not canceled_new:
                 self.reselect_text_items([selected_id])
-        elif selected_id is not None and not canceled_new:
+        elif (not is_closing) and selected_id is not None and not canceled_new:
             self.reselect_text_items([selected_id])
 
 
     def on_scene_selection_changed(self):
+        # 프로그램 종료/씬 재생성 중 selectionChanged가 뒤늦게 들어오면
+        # 삭제된 QGraphicsScene에 접근하지 않고 조용히 무시한다.
+        if getattr(self, "_app_is_closing", False) or getattr(self, "_closing_confirmed", False):
+            return
+        if self._safe_graphics_scene() is None:
+            return
+
         # 개별 텍스트 스타일 작업은 우측 패널의 "선택 텍스트 스타일"에서만 한다.
         # 예전처럼 이미지 위쪽에 별도 작업바가 뜨지 않게 항상 숨긴다.
         if hasattr(self, 'final_edit_bar'):
@@ -6011,11 +6700,15 @@ class MainWindow(QMainWindow):
             stroke_width=self.final_item_stroke.value(),
         )
 
-    def apply_style_to_selected(self, keep_selection=True, preset_name=None, **style):
+    def apply_style_to_selected(self, keep_selection=True, preset_name=None, record_undo=True, **style):
+        if getattr(self, "_app_is_closing", False) or getattr(self, "_closing_confirmed", False):
+            return
         items = self.selected_text_items()
         if not items:
             return
         selected_ids = [item.data.get('id') for item in items]
+        if record_undo:
+            self.push_page_text_undo('텍스트 스타일 변경')
         for item in items:
             for key, value in style.items():
                 item.data[key] = value
@@ -6023,6 +6716,13 @@ class MainWindow(QMainWindow):
                 item.data['item_text_preset_name'] = str(preset_name)
             else:
                 item.data.pop('item_text_preset_name', None)
+            # 이미 직접 수정된 텍스트는 OCR 박스를 버린 상태이므로,
+            # 스타일 변경 후에도 실제 글자 bounds를 기준으로 텍스트 영역을 다시 만든다.
+            try:
+                if bool(item.data.get('manual_text_rect')) or str(item.data.get('text_anchor_mode') or '').lower() == 'text':
+                    self.shrink_text_rect_to_content(item.data)
+            except Exception:
+                pass
         self.auto_save_project()
         if self.cb_mode.currentIndex() == 4:
             self.mode_chg(4)
@@ -6032,11 +6732,19 @@ class MainWindow(QMainWindow):
 
     def reselect_text_items(self, selected_ids):
         ids = set(selected_ids or [])
-        if not ids:
+        if not ids or getattr(self, "_app_is_closing", False) or getattr(self, "_closing_confirmed", False):
             return
-        for item in self.view.scene.items():
-            if isinstance(item, TypesettingItem) and item.data.get('id') in ids:
-                item.setSelected(True)
+        scene = self._safe_graphics_scene()
+        if scene is None:
+            return
+        try:
+            for item in scene.items():
+                if isinstance(item, TypesettingItem) and item.data.get('id') in ids:
+                    item.setSelected(True)
+        except RuntimeError:
+            return
+        except Exception:
+            return
 
     def select_table_rows_by_ids(self, selected_ids):
         if not hasattr(self, 'tab') or self._syncing_selection:
@@ -6080,7 +6788,12 @@ class MainWindow(QMainWindow):
     def on_table_selection_changed(self):
         if self._syncing_selection:
             return
+        if getattr(self, "_app_is_closing", False) or getattr(self, "_closing_confirmed", False):
+            return
         if self.cb_mode.currentIndex() != 4:
+            return
+        scene = self._safe_graphics_scene()
+        if scene is None:
             return
         active_transform = self.current_transform_data_item()
         if active_transform is not None:
@@ -6088,19 +6801,27 @@ class MainWindow(QMainWindow):
             return
         ids = set(self.selected_table_text_ids())
         self._syncing_selection = True
-        self.view.scene.blockSignals(True)
         try:
-            for item in self.view.scene.items():
-                if isinstance(item, TypesettingItem):
-                    item.setSelected(str(item.data.get('id')) in ids)
+            scene.blockSignals(True)
+            try:
+                for item in scene.items():
+                    if isinstance(item, TypesettingItem):
+                        item.setSelected(str(item.data.get('id')) in ids)
+            finally:
+                scene.blockSignals(False)
+        except RuntimeError:
+            pass
+        except Exception:
+            pass
         finally:
-            self.view.scene.blockSignals(False)
             self._syncing_selection = False
         # 우측 스타일 칸은 첫 선택 항목 기준으로 맞춘다.
         self.on_scene_selection_changed()
 
     def on_global_text_style_changed(self, *args):
         if self._style_signal_lock:
+            return
+        if getattr(self, "_app_is_closing", False) or getattr(self, "_closing_confirmed", False):
             return
         self.set_preset_combo_to_last()
         self.set_item_preset_combo_custom()
@@ -6124,6 +6845,8 @@ class MainWindow(QMainWindow):
             )
 
     def set_global_align(self, align):
+        if getattr(self, "_app_is_closing", False) or getattr(self, "_closing_confirmed", False):
+            return
         self.default_align = align
         self.set_preset_combo_to_last()
         self.set_item_preset_combo_custom()
@@ -6159,8 +6882,31 @@ class MainWindow(QMainWindow):
             self.log(f"🎨 최종 페인팅 색상: {hex_color}")
 
     def on_show_final_text_toggled(self, checked):
+        old_state = bool(getattr(self, "_last_show_final_text_checked", not bool(checked)))
+        new_state = bool(checked)
+        if (
+            old_state != new_state
+            and not getattr(self, "_project_undo_restore_lock", False)
+            and not getattr(self, "is_loading_project", False)
+            and not getattr(self, "is_page_loading", False)
+            and not getattr(self, "is_batch_running", False)
+        ):
+            try:
+                rec = self.make_project_undo_record("텍스트 표시 ON/OFF")
+                rec.setdefault("ui_state", self.current_project_ui_state())
+                rec["ui_state"]["show_final_text"] = old_state
+                self.append_project_undo_record(rec)
+            except Exception:
+                pass
+        self._last_show_final_text_checked = new_state
         if self.cb_mode.currentIndex() == 4:
-            self.mode_chg(4)
+            old_suppress = getattr(self, "_suppress_mode_undo", False)
+            self._suppress_mode_undo = True
+            try:
+                self.mode_chg(4)
+            finally:
+                self._suppress_mode_undo = old_suppress
+        self.auto_save_project()
 
     def active_mask_key(self, mode_idx=None):
         mode_idx = self.cb_mode.currentIndex() if mode_idx is None else mode_idx
@@ -6187,6 +6933,17 @@ class MainWindow(QMainWindow):
         curr = self.data.get(self.idx)
         old_state = self.mask_toggle_enabled
         mode = self.cb_mode.currentIndex()
+        if (
+            mode == 3
+            and not getattr(self, "_project_undo_restore_lock", False)
+            and not getattr(self, "is_page_loading", False)
+            and not getattr(self, "is_batch_running", False)
+        ):
+            try:
+                self.commit_current_page_ui_to_data(include_mask=True)
+                self.push_project_undo("마스크 ON/OFF")
+            except Exception:
+                pass
 
         # 토글은 페인팅 마스크 전용이다.
         # 텍스트 마스크에서는 분석 마스크(mask_merge)만 쓰므로 ON/OFF 분리 저장을 하지 않는다.
@@ -6205,12 +6962,23 @@ class MainWindow(QMainWindow):
         self.log(f"🎚️ 페인팅 마스크 토글: {state}")
 
         if mode == 3:
-            # mode_chg의 이전 탭 자동저장이 새 토글 슬롯에 덮어쓰지 않도록 차단한다.
-            old_last_mode = self.last_mode
-            self.last_mode = -1
-            self.mode_chg(3)
-            if self.last_mode == -1:
-                self.last_mode = old_last_mode
+            # 토글은 탭 이동이 아니라 같은 페인팅 마스크 탭 안에서
+            # mask_inpaint / mask_inpaint_off 슬롯만 바꾸는 작업이다.
+            # 따라서 mode_chg(3)로 화면을 다시 그릴 때:
+            # 1) 탭 변경 Undo를 만들지 않고
+            # 2) 이전 화면 마스크를 새 토글 슬롯에 덮어쓰지 않도록 막는다.
+            old_suppress_mode_undo = getattr(self, "_suppress_mode_undo", False)
+            old_skip_mode_mask_commit = getattr(self, "_skip_mode_mask_commit", False)
+            old_mask_toggle_refreshing = getattr(self, "_mask_toggle_refreshing", False)
+            self._suppress_mode_undo = True
+            self._skip_mode_mask_commit = True
+            self._mask_toggle_refreshing = True
+            try:
+                self.mode_chg(3)
+            finally:
+                self._suppress_mode_undo = old_suppress_mode_undo
+                self._skip_mode_mask_commit = old_skip_mode_mask_commit
+                self._mask_toggle_refreshing = old_mask_toggle_refreshing
         self.auto_save_project()
 
     def set_mask_toggle_safely(self, checked):
@@ -6377,8 +7145,15 @@ class MainWindow(QMainWindow):
         for i, item in enumerate(curr.get('data', []), 1):
             text_id = str(item.get('id', i))
             if text_id in trans_map:
-                item['translated_text'] = trans_map[text_id]
-                count += 1
+                new_text = str(trans_map[text_id] or '')
+                old_text = str(item.get('translated_text', '') or '')
+                if new_text != old_text:
+                    item['translated_text'] = new_text
+                    try:
+                        self.shrink_text_rect_to_content(item)
+                    except Exception:
+                        pass
+                    count += 1
         return count
 
     def find_translation_txt_in_folder(self, folder, page_stem):
@@ -6425,7 +7200,10 @@ class MainWindow(QMainWindow):
         if not trans_map:
             QMessageBox.warning(self, self.tr_ui("불러오기 실패"), self.tr_ui("현재 페이지 텍스트 번호와 맞는 번역문을 찾지 못했습니다."))
             return
+        undo_rec = self.make_project_undo_record("번역문 불러오기")
         count = self.apply_translation_map_to_page(self.idx, trans_map)
+        if count:
+            self.append_project_undo_record(undo_rec)
         self.ref_tab()
         if self.cb_mode.currentIndex() == 4:
             self.mode_chg(4)
@@ -6442,6 +7220,8 @@ class MainWindow(QMainWindow):
         if not self.confirm_batch_operation("일괄 번역문 불러오기", f"선택한 폴더의 TXT 번역문을 {len(self.paths)}페이지에 적용합니다."):
             self.log("↩️ 일괄 번역문 불러오기 취소")
             return
+        self.commit_current_page_ui_to_data()
+        undo_rec = self.make_project_undo_record("일괄 번역문 불러오기", full_project=True)
         total_pages = 0
         total_items = 0
         missing = 0
@@ -6461,6 +7241,8 @@ class MainWindow(QMainWindow):
             if count:
                 total_pages += 1
                 total_items += count
+        if total_items:
+            self.append_project_undo_record(undo_rec)
         self.ref_tab()
         if self.cb_mode.currentIndex() == 4:
             self.mode_chg(4)
@@ -6485,12 +7267,19 @@ class MainWindow(QMainWindow):
             self.log("⚠️ 지울 번역문이 없습니다.")
             return
 
+        undo_rec = self.make_project_undo_record("번역문 내용 지우기")
         count = 0
         for item in curr.get('data', []):
             if str(item.get('translated_text', '') or ''):
                 item['translated_text'] = ''
+                try:
+                    self.shrink_text_rect_to_content(item)
+                except Exception:
+                    pass
                 count += 1
 
+        if count:
+            self.append_project_undo_record(undo_rec)
         self.ref_tab()
         if self.cb_mode.currentIndex() == 4:
             self.mode_chg(4)
@@ -6507,6 +7296,7 @@ class MainWindow(QMainWindow):
             return
 
         self.commit_current_page_ui_to_data()
+        undo_rec = self.make_project_undo_record("일괄 번역문 내용 지우기", full_project=True)
 
         total_pages = 0
         total_items = 0
@@ -6520,12 +7310,18 @@ class MainWindow(QMainWindow):
             for item in curr.get('data', []):
                 if str(item.get('translated_text', '') or ''):
                     item['translated_text'] = ''
+                    try:
+                        self.shrink_text_rect_to_content(item)
+                    except Exception:
+                        pass
                     page_count += 1
 
             if page_count:
                 total_pages += 1
                 total_items += page_count
 
+        if total_items:
+            self.append_project_undo_record(undo_rec)
         self.ref_tab()
         if self.cb_mode.currentIndex() == 4:
             self.mode_chg(4)
@@ -6587,7 +7383,10 @@ class MainWindow(QMainWindow):
         )
         if ans != QMessageBox.StandardButton.Yes:
             return
+        undo_rec = self.make_project_undo_record("텍스트 정리")
         removed = self.clean_text_for_page(self.idx)
+        if removed:
+            self.append_project_undo_record(undo_rec)
         self.ref_tab()
         self.mode_chg(self.cb_mode.currentIndex())
         self.log((f"🧹 Clean text complete: {removed} items deleted / IDs reordered" if self.ui_language == LANG_EN else f"🧹 텍스트 정리 완료: {removed}개 삭제 / 번호 재정렬"))
@@ -6616,6 +7415,7 @@ class MainWindow(QMainWindow):
         )
         if ans != QMessageBox.StandardButton.Yes:
             return
+        undo_rec = self.make_project_undo_record("일괄 텍스트 정리", full_project=True)
         total_removed = 0
         pages = 0
         for i in range(len(self.paths)):
@@ -6623,6 +7423,8 @@ class MainWindow(QMainWindow):
             if removed:
                 total_removed += removed
                 pages += 1
+        if total_removed:
+            self.append_project_undo_record(undo_rec)
         self.ref_tab()
         self.mode_chg(self.cb_mode.currentIndex())
         self.log((f"🧹 Batch clean text complete: {pages} page(s) / {total_removed} items deleted" if self.ui_language == LANG_EN else f"🧹 일괄 텍스트 정리 완료: {pages}페이지 / {total_removed}개 삭제"))
@@ -6868,16 +7670,204 @@ class MainWindow(QMainWindow):
     # =========================================================
     def bring_to_front(self):
         """두 번째 실행 요청이 들어왔을 때 현재 창을 앞으로 가져온다."""
+        self.force_app_focus(reason="single-instance")
+
+    def force_app_focus(self, reason="external-open", log_once=False):
+        """
+        .ysbt 더블클릭 / 드래그 앤 드롭 / 외부 열기 후 창 포커스를 YSB로 되돌린다.
+        Windows는 다른 프로세스가 만든 포커스 변경을 막는 경우가 있어 Qt 포커스와 Win32 포커스를 여러 번 같이 시도한다.
+        """
+        delays = (0, 80, 220, 450)
+        for delay in delays:
+            QTimer.singleShot(delay, lambda r=reason: self._force_app_focus_once(r))
+        if log_once:
+            try:
+                if self.ui_language == LANG_EN:
+                    self.log(f"🪟 Focus requested: {reason}")
+                else:
+                    self.log(f"🪟 창 포커스 요청: {reason}")
+            except Exception:
+                pass
+
+    def _force_app_focus_once(self, reason="external-open"):
         try:
             if self.isMinimized():
                 self.showNormal()
+            else:
+                self.show()
+
+            try:
+                self.setWindowState((self.windowState() & ~Qt.WindowState.WindowMinimized) | Qt.WindowState.WindowActive)
+            except Exception:
+                pass
+
+            # Qt 기본 포커스 요청
             self.raise_()
             self.activateWindow()
+            self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
+
+            # Windows에서는 파일 더블클릭/두 번째 프로세스 전달 뒤 포커스가 탐색기나 cmd에 남는 경우가 있다.
+            if sys.platform.startswith("win"):
+                try:
+                    import ctypes
+                    user32 = ctypes.windll.user32
+                    hwnd = int(self.winId())
+                    SW_RESTORE = 9
+                    HWND_TOPMOST = -1
+                    HWND_NOTOPMOST = -2
+                    SWP_NOMOVE = 0x0002
+                    SWP_NOSIZE = 0x0001
+                    SWP_SHOWWINDOW = 0x0040
+                    ASFW_ANY = -1
+                    try:
+                        user32.AllowSetForegroundWindow(ASFW_ANY)
+                    except Exception:
+                        pass
+                    try:
+                        user32.ShowWindow(hwnd, SW_RESTORE)
+                    except Exception:
+                        pass
+                    # 포커스 제한이 걸린 환경에서도 앞으로 나오도록 topmost를 아주 짧게 토글한다.
+                    try:
+                        user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
+                        user32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
+                    except Exception:
+                        pass
+                    try:
+                        user32.BringWindowToTop(hwnd)
+                    except Exception:
+                        pass
+                    try:
+                        user32.SetForegroundWindow(hwnd)
+                    except Exception:
+                        pass
+                    try:
+                        user32.SetFocus(hwnd)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
         except Exception:
             pass
 
     def has_open_project(self):
         return bool(self.project_dir or self.paths)
+
+    def busy_reason_text(self, reason=""):
+        reason = str(reason or "").strip()
+        if reason:
+            return reason
+        return "Working..." if getattr(self, "ui_language", LANG_KO) == LANG_EN else "작업 중"
+
+    def begin_busy_state(self, reason="작업 중"):
+        """긴 내부 작업 중에는 Wait Cursor와 UI 잠금을 걸어 중복 클릭을 막는다."""
+        try:
+            if not hasattr(self, "_busy_counter"):
+                self._busy_counter = 0
+            if not hasattr(self, "_busy_reason_stack"):
+                self._busy_reason_stack = []
+            self._busy_counter += 1
+            self._busy_reason_stack.append(self.busy_reason_text(reason))
+            if self._busy_counter > 1:
+                QApplication.processEvents()
+                return
+
+            try:
+                QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            except Exception:
+                pass
+
+            widgets = []
+            try:
+                cw = self.centralWidget()
+                if cw is not None:
+                    widgets.append(cw)
+            except Exception:
+                pass
+            try:
+                mb = self.menuBar()
+                if mb is not None:
+                    widgets.append(mb)
+            except Exception:
+                pass
+            try:
+                for tb in self.findChildren(QToolBar):
+                    widgets.append(tb)
+            except Exception:
+                pass
+
+            self._busy_widgets = []
+            for w in widgets:
+                try:
+                    self._busy_widgets.append((w, bool(w.isEnabled())))
+                    w.setEnabled(False)
+                except Exception:
+                    pass
+
+            try:
+                self.setCursor(Qt.CursorShape.WaitCursor)
+            except Exception:
+                pass
+
+            text = self._busy_reason_stack[-1] if self._busy_reason_stack else self.busy_reason_text(reason)
+            self.log(
+                f"⏳ Busy: {text} / UI locked"
+                if getattr(self, "ui_language", LANG_KO) == LANG_EN else
+                f"⏳ 작업 중: {text} / UI 잠금"
+            )
+            QApplication.processEvents()
+        except Exception:
+            pass
+
+    def end_busy_state(self, reason=""):
+        """begin_busy_state()로 잠근 UI와 커서를 복구한다."""
+        try:
+            if not hasattr(self, "_busy_counter"):
+                self._busy_counter = 0
+            if self._busy_counter <= 0:
+                self._busy_counter = 0
+                return
+
+            self._busy_counter -= 1
+            try:
+                if getattr(self, "_busy_reason_stack", None):
+                    self._busy_reason_stack.pop()
+            except Exception:
+                pass
+
+            if self._busy_counter > 0:
+                QApplication.processEvents()
+                return
+
+            for w, enabled in reversed(getattr(self, "_busy_widgets", []) or []):
+                try:
+                    w.setEnabled(enabled)
+                except Exception:
+                    pass
+            self._busy_widgets = []
+
+            try:
+                self.unsetCursor()
+            except Exception:
+                pass
+            try:
+                while QApplication.overrideCursor() is not None:
+                    QApplication.restoreOverrideCursor()
+            except Exception:
+                pass
+
+            text = self.busy_reason_text(reason)
+            self.log(
+                f"✅ Busy finished: {text} / UI unlocked"
+                if getattr(self, "ui_language", LANG_KO) == LANG_EN else
+                f"✅ 작업 완료: {text} / UI 잠금 해제"
+            )
+            QApplication.processEvents()
+        except Exception:
+            try:
+                QApplication.restoreOverrideCursor()
+            except Exception:
+                pass
 
     def guard_project_action(self, action_name="프로젝트 작업"):
         """일괄 작업 중에는 프로젝트 열기/저장/위치 변경 같은 구조 변경 동작을 막는다."""
@@ -6949,7 +7939,7 @@ class MainWindow(QMainWindow):
 
     def handle_single_instance_payload(self, payload):
         """두 번째 실행 프로세스에서 넘어온 메시지를 현재 창에서 처리한다."""
-        self.bring_to_front()
+        self.force_app_focus(reason="external request")
         payload = payload or {}
         command = str(payload.get("command", "activate") or "activate")
         if command != "open":
@@ -6962,6 +7952,7 @@ class MainWindow(QMainWindow):
         if not self.confirm_close_current_project_for_open(path):
             return
         self.open_project_path(path, external_request=True)
+        self.force_app_focus(reason="external file open")
 
     def _dragged_ysbt_path(self, event):
         try:
@@ -7001,6 +7992,7 @@ class MainWindow(QMainWindow):
         if not self.confirm_close_current_project_for_open(path):
             return
         self.open_project_path(path, external_request=True)
+        self.force_app_focus(reason="drag and drop open")
 
     # =========================================================
     # 프로젝트 저장 / 불러오기
@@ -7130,7 +8122,7 @@ class MainWindow(QMainWindow):
         old_dir = self.project_dir
         try:
             # 현재 temp 프로젝트 저장 후, 새 폴더를 만들지 않고 temp 폴더 자체를 정식 작업 폴더로 승격한다.
-            self.project_store.save(self.paths, self.data, self.idx)
+            self.save_project_store(self.project_store)
             if os.path.abspath(old_dir) != os.path.abspath(dst):
                 shutil.move(old_dir, dst)
             self.project_dir = dst
@@ -7169,6 +8161,8 @@ class MainWindow(QMainWindow):
                 return
         if path.lower().endswith(YSB_EXTENSION):
             self.open_ysb_package(path)
+            if external_request:
+                self.force_app_focus(reason="external project open")
             return
         if os.path.isdir(path):
             project_file = os.path.join(path, PROJECT_FILENAME)
@@ -7178,6 +8172,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, self.tr_ui("프로젝트 없음"), f"{self.tr_ui("열 수 있는 프로젝트 파일이 아닙니다.")}\n{path}")
             return
         self.load_project_json(project_file)
+        if external_request:
+            self.force_app_focus(reason="external project open")
 
     def load_project_json(self, project_file, package_path=None, temp_project=False):
         self.is_loading_project = True
@@ -7185,19 +8181,37 @@ class MainWindow(QMainWindow):
             self.commit_current_page_ui_to_data()
             self.project_store = ProjectStore()
             self.paths, self.data, self.idx = self.project_store.load(project_file)
+            self.page_text_undo_stacks = {}
+            self.project_undo_stack = []
+            self.project_redo_stack = []
+            self.undo_boundary = None
+            self.update_undo_redo_buttons()
+            ui_state = getattr(self.project_store, "ui_state", {}) or {}
+            self.project_ui_view_states = copy.deepcopy(ui_state.get("view_states") or {})
+            self.restore_project_ui_state(ui_state, refresh=False)
             self.project_dir = self.project_store.project_dir
             self.ysbt_package_path = package_path
             self.suggested_project_name = self.split_uuid_suffix_from_name(Path(package_path).stem)[0] if package_path else None
             self.is_temp_project = bool(temp_project)
             self.update_window_title()
             self.mark_saved_state()
-            if not self.auto_save_enabled:
-                self.start_work_cache_from_current(mark_dirty=False)
             self.log(f"📂 프로젝트 열림: {self.project_dir}")
             if package_path:
                 self.log(f"📦 연결된 YSBT 파일: {package_path}")
-            self.reset_mode_to_original()
+
+            # 새 프로젝트 생성은 원본 탭으로 시작하지만, 기존 프로젝트 열기는 마지막 작업 탭/화면 상태로 복원한다.
+            mode_to_load = 0 if temp_project else int(ui_state.get("current_mode", 0) or 0)
+            self.set_work_mode_without_undo(mode_to_load)
             self.load()
+            state = self.project_ui_view_states.get(self.view_state_key(self.idx, mode_to_load))
+            if state:
+                self.apply_view_state(state)
+                QTimer.singleShot(0, lambda st=copy.deepcopy(state): self.apply_view_state(st))
+                QTimer.singleShot(30, lambda st=copy.deepcopy(state): self.apply_view_state(st))
+                QTimer.singleShot(80, lambda st=copy.deepcopy(state): self.apply_view_state(st))
+
+            if not self.auto_save_enabled:
+                self.start_work_cache_from_current(mark_dirty=False)
         finally:
             self.is_loading_project = False
 
@@ -7240,7 +8254,7 @@ class MainWindow(QMainWindow):
         cache_dir = self.make_work_cache_dir()
 
         store = ProjectStore(cache_dir)
-        store.save(self.paths, self.data, self.idx)
+        self.save_project_store(store)
 
         # store.save()가 paths를 cache 내부 이미지 경로로 고정할 수 있으므로 이후 작업은 캐시 기준으로 돌아간다.
         self.work_project_store = store
@@ -7262,7 +8276,7 @@ class MainWindow(QMainWindow):
             self.start_work_cache_from_current(mark_dirty=False)
         if self.work_project_store is None:
             return
-        self.work_project_store.save(self.paths, self.data, self.idx)
+        self.save_project_store(self.work_project_store)
         self.has_unsaved_changes = True
 
     def mark_saved_state(self):
@@ -7300,9 +8314,19 @@ class MainWindow(QMainWindow):
             self.paths, self.data, self.idx = store.load(project_file)
             self.project_store = store
             self.project_dir = store.project_dir
+            ui_state = getattr(store, "ui_state", {}) or {}
+            self.project_ui_view_states = copy.deepcopy(ui_state.get("view_states") or getattr(self, "project_ui_view_states", {}) or {})
+            self.restore_project_ui_state(ui_state, refresh=False)
             if refresh_view:
-                self.reset_mode_to_original()
+                mode_to_load = int(ui_state.get("current_mode", self.cb_mode.currentIndex() if hasattr(self, "cb_mode") else 0) or 0)
+                self.set_work_mode_without_undo(mode_to_load)
                 self.load()
+                state = self.project_ui_view_states.get(self.view_state_key(self.idx, mode_to_load))
+                if state:
+                    self.apply_view_state(state)
+                    QTimer.singleShot(0, lambda st=copy.deepcopy(state): self.apply_view_state(st))
+                    QTimer.singleShot(30, lambda st=copy.deepcopy(state): self.apply_view_state(st))
+                    QTimer.singleShot(80, lambda st=copy.deepcopy(state): self.apply_view_state(st))
             return True
         finally:
             self.is_loading_project = False
@@ -7312,7 +8336,7 @@ class MainWindow(QMainWindow):
         if not self.project_dir or not self.paths:
             return False
         self.commit_current_page_ui_to_data()
-        self.project_store.save(self.paths, self.data, self.idx)
+        self.save_project_store(self.project_store)
         self.mark_saved_state()
         return True
 
@@ -7402,6 +8426,8 @@ class MainWindow(QMainWindow):
                 event.accept()
                 return
 
+            self._app_is_closing = True
+
             # 핵심 보정: 최종화면 인라인 텍스트 편집 중 종료하면 QMessageBox 포커스 이동으로
             # finish_inline_text_edit()가 closeEvent 도중 재진입할 수 있다. 먼저 확정해서 안정화한다.
             if getattr(self, "inline_text_editor", None) is not None:
@@ -7414,6 +8440,8 @@ class MainWindow(QMainWindow):
             try:
                 if getattr(self, "project_dir", None) and getattr(self, "paths", None):
                     self.commit_current_page_ui_to_data()
+                    if getattr(self, "auto_save_enabled", False):
+                        self.auto_save_project()
             except Exception as e:
                 self.log(f"⚠️ 종료 전 현재 화면 상태 반영 실패: {e}")
 
@@ -7431,11 +8459,13 @@ class MainWindow(QMainWindow):
 
                 clicked = msg.clickedButton()
                 if clicked == btn_cancel:
+                    self._app_is_closing = False
                     event.ignore()
                     return
                 if clicked == btn_save:
                     self.save_project()
                     if self.has_unsaved_changes:
+                        self._app_is_closing = False
                         event.ignore()
                         return
                 elif clicked == btn_discard:
@@ -7458,6 +8488,7 @@ class MainWindow(QMainWindow):
             self._closing_confirmed = True
             event.accept()
         except Exception as e:
+            self._app_is_closing = False
             try:
                 import traceback
                 detail = traceback.format_exc()
@@ -7495,6 +8526,12 @@ class MainWindow(QMainWindow):
 
         self.project_store = ProjectStore(project_dir)
         self.paths, self.data = self.project_store.create_from_images(project_dir, source_paths)
+        self.page_text_undo_stacks = {}
+        self.project_undo_stack = []
+        self.project_redo_stack = []
+        self.undo_boundary = None
+        self.update_undo_redo_buttons()
+        self.project_ui_view_states = {}
         self.project_store.write_manifest(project_name="unsaved_project")
         self.project_dir = project_dir
         self.ysbt_package_path = None
@@ -7570,24 +8607,28 @@ class MainWindow(QMainWindow):
             self.save_project_as()
             return
 
-        self.commit_current_page_ui_to_data()
-        self.project_store.save(self.paths, self.data, self.idx)
+        self.begin_busy_state("프로젝트 저장")
         try:
-            package_project(self.project_dir, self.ysbt_package_path)
-        except Exception as e:
-            QMessageBox.critical(self, self.tr_ui("YSBT 저장 실패"), f"{self.tr_ui("프로젝트는 작업 폴더에 저장했지만, YSBT 파일 저장에 실패했습니다.")}\n\n{e}")
-            self.has_unsaved_changes = True
-            return
-        self.mark_saved_state()
-        self.update_window_title()
-        self.log(f"💾 프로젝트 저장 완료: {self.ysbt_package_path}")
+            self.commit_current_page_ui_to_data()
+            self.save_project_store(self.project_store)
+            try:
+                package_project(self.project_dir, self.ysbt_package_path)
+            except Exception as e:
+                QMessageBox.critical(self, self.tr_ui("YSBT 저장 실패"), f"{self.tr_ui("프로젝트는 작업 폴더에 저장했지만, YSBT 파일 저장에 실패했습니다.")}\n\n{e}")
+                self.has_unsaved_changes = True
+                return
+            self.mark_saved_state()
+            self.update_window_title()
+            self.log(f"💾 프로젝트 저장 완료: {self.ysbt_package_path}")
 
-        # 자동저장 OFF에서는 저장본을 다시 로드한 뒤, 새 작업 캐시를 기준으로 이어간다.
-        if not self.auto_save_enabled:
-            self.reload_saved_project_from_disk(refresh_view=False)
-            self.start_work_cache_from_current(mark_dirty=False)
-            if self.cb_mode.currentIndex() >= 0:
-                self.load()
+            # 자동저장 OFF에서는 저장본을 다시 로드한 뒤, 새 작업 캐시를 기준으로 이어간다.
+            if not self.auto_save_enabled:
+                self.reload_saved_project_from_disk(refresh_view=False)
+                self.start_work_cache_from_current(mark_dirty=False)
+                if self.cb_mode.currentIndex() >= 0:
+                    self.load()
+        finally:
+            self.end_busy_state("프로젝트 저장")
 
     def save_project_as(self):
         if not self.guard_project_action("다른 이름으로 저장"):
@@ -7614,70 +8655,74 @@ class MainWindow(QMainWindow):
             self.save_project()
             return
 
-        self.commit_current_page_ui_to_data()
-
-        # Save As는 새 .ysbt 패키지와 새 작업 폴더로 분기한다.
-        # 기존 .ysbt 파일에는 현재까지의 미저장 변경분을 쓰지 않고,
-        # 새 파일/새 작업 폴더가 현재 상태를 이어받는다.
-        project_name = clean_workspace_name(display_project_name or Path(path_abs).stem)
-        old_project_dir = self.project_dir
-        old_work_cache = self.work_project_dir
-        # .ysbt 파일명은 깔끔하게 유지하고, 실제 작업 폴더에만 uuid 짧은값을 붙인다.
-        new_project_dir = self.workspace_project_dir(project_name, code=new_uuid[:8], append_code=True)
-
+        self.begin_busy_state("다른 이름으로 저장")
         try:
-            new_store = ProjectStore(new_project_dir)
-            # ProjectStore.save()는 paths를 새 작업 폴더 내부 이미지 경로로 고정한다.
-            new_store.save(self.paths, self.data, self.idx)
-            new_store.write_manifest(package_source=path_abs, project_name=project_name, project_uuid=new_uuid)
-            package_project(new_project_dir, path_abs, project_name=project_name, project_uuid=new_uuid)
-        except Exception as e:
-            QMessageBox.critical(self, self.tr_ui("YSBT 저장 실패"), f"{self.tr_ui('YSBT 파일을 저장하지 못했습니다.')}\n{path_abs}\n\n{e}")
-            self.has_unsaved_changes = True
-            return
+            self.commit_current_page_ui_to_data()
 
-        # 현재 작업은 새 파일/새 작업 폴더로 전환한다.
-        self.project_dir = new_project_dir
-        self.project_store = ProjectStore(new_project_dir)
-        self.ysbt_package_path = path_abs
-        self.suggested_project_name = display_project_name
-        self.is_temp_project = False
-        self.update_window_title()
+            # Save As는 새 .ysbt 패키지와 새 작업 폴더로 분기한다.
+            # 기존 .ysbt 파일에는 현재까지의 미저장 변경분을 쓰지 않고,
+            # 새 파일/새 작업 폴더가 현재 상태를 이어받는다.
+            project_name = clean_workspace_name(display_project_name or Path(path_abs).stem)
+            old_project_dir = self.project_dir
+            old_work_cache = self.work_project_dir
+            # .ysbt 파일명은 깔끔하게 유지하고, 실제 작업 폴더에만 uuid 짧은값을 붙인다.
+            new_project_dir = self.workspace_project_dir(project_name, code=new_uuid[:8], append_code=True)
 
-        # 기존 임시 캐시/임시 프로젝트 정리.
-        if old_work_cache and old_work_cache != self.work_project_dir and os.path.exists(old_work_cache):
             try:
-                shutil.rmtree(old_work_cache, ignore_errors=True)
-            except Exception:
-                pass
-        self.work_project_dir = None
-        self.work_project_store = None
+                new_store = ProjectStore(new_project_dir)
+                # ProjectStore.save()는 paths를 새 작업 폴더 내부 이미지 경로로 고정한다.
+                self.save_project_store(new_store)
+                new_store.write_manifest(package_source=path_abs, project_name=project_name, project_uuid=new_uuid)
+                package_project(new_project_dir, path_abs, project_name=project_name, project_uuid=new_uuid)
+            except Exception as e:
+                QMessageBox.critical(self, self.tr_ui("YSBT 저장 실패"), f"{self.tr_ui('YSBT 파일을 저장하지 못했습니다.')}\n{path_abs}\n\n{e}")
+                self.has_unsaved_changes = True
+                return
 
-        # Save As는 "현재 상태를 새 파일 B로 분기"하는 동작이다.
-        # 따라서 기존 파일 A의 작업 폴더는 B로 갱신/삭제하지 않고, A.ysbt에 저장된 상태로 되돌려 둔다.
-        # A와 B의 작업 폴더가 동시에 남아 있어야 사용자가 기대하는 Save As 동작과 맞다.
-        try:
-            if old_package_path and old_project_dir and os.path.abspath(old_project_dir) != os.path.abspath(new_project_dir):
-                old_abs = os.path.abspath(old_project_dir)
-                roots = [os.path.abspath(str(workspaces_dir())), os.path.abspath(str(temp_dir()))]
-                if any(old_abs.startswith(root) for root in roots) and os.path.exists(old_package_path):
-                    # 자동저장 ON 등으로 A의 작업 폴더에 미저장 변경분이 들어갔을 수 있으므로,
-                    # A.ysbt 패키지 기준으로 A 작업 폴더를 조용히 복구한다.
-                    if os.path.exists(old_abs):
-                        shutil.rmtree(old_abs, ignore_errors=True)
-                    extract_ysb_package(old_package_path, workspaces_dir(), reuse_existing=False)
-        except Exception as e:
+            # 현재 작업은 새 파일/새 작업 폴더로 전환한다.
+            self.project_dir = new_project_dir
+            self.project_store = ProjectStore(new_project_dir)
+            self.ysbt_package_path = path_abs
+            self.suggested_project_name = display_project_name
+            self.is_temp_project = False
+            self.update_window_title()
+
+            # 기존 임시 캐시/임시 프로젝트 정리.
+            if old_work_cache and old_work_cache != self.work_project_dir and os.path.exists(old_work_cache):
+                try:
+                    shutil.rmtree(old_work_cache, ignore_errors=True)
+                except Exception:
+                    pass
+            self.work_project_dir = None
+            self.work_project_store = None
+
+            # Save As는 "현재 상태를 새 파일 B로 분기"하는 동작이다.
+            # 따라서 기존 파일 A의 작업 폴더는 B로 갱신/삭제하지 않고, A.ysbt에 저장된 상태로 되돌려 둔다.
+            # A와 B의 작업 폴더가 동시에 남아 있어야 사용자가 기대하는 Save As 동작과 맞다.
             try:
-                self.log(f"⚠️ Save As 이후 기존 작업 폴더 복구 실패: {e}")
-            except Exception:
-                pass
+                if old_package_path and old_project_dir and os.path.abspath(old_project_dir) != os.path.abspath(new_project_dir):
+                    old_abs = os.path.abspath(old_project_dir)
+                    roots = [os.path.abspath(str(workspaces_dir())), os.path.abspath(str(temp_dir()))]
+                    if any(old_abs.startswith(root) for root in roots) and os.path.exists(old_package_path):
+                        # 자동저장 ON 등으로 A의 작업 폴더에 미저장 변경분이 들어갔을 수 있으므로,
+                        # A.ysbt 패키지 기준으로 A 작업 폴더를 조용히 복구한다.
+                        if os.path.exists(old_abs):
+                            shutil.rmtree(old_abs, ignore_errors=True)
+                        extract_ysb_package(old_package_path, workspaces_dir(), reuse_existing=False)
+            except Exception as e:
+                try:
+                    self.log(f"⚠️ Save As 이후 기존 작업 폴더 복구 실패: {e}")
+                except Exception:
+                    pass
 
-        self.reload_saved_project_from_disk(refresh_view=False)
-        self.mark_saved_state()
-        self.log(f"💾 다른 이름으로 저장 완료: {self.ysbt_package_path}")
-        if not self.auto_save_enabled:
-            self.start_work_cache_from_current(mark_dirty=False)
-        self.load()
+            self.reload_saved_project_from_disk(refresh_view=False)
+            self.mark_saved_state()
+            self.log(f"💾 다른 이름으로 저장 완료: {self.ysbt_package_path}")
+            if not self.auto_save_enabled:
+                self.start_work_cache_from_current(mark_dirty=False)
+            self.load()
+        finally:
+            self.end_busy_state("다른 이름으로 저장")
 
     def auto_save_project(self):
         if self.is_loading_project or self.is_autosaving:
@@ -7686,8 +8731,22 @@ class MainWindow(QMainWindow):
             return
         self.is_autosaving = True
         try:
+            # 자동저장 진입 시점에 우측 표 텍스트와 최종화면 텍스트 좌표를 먼저 data에 고정한다.
+            # 이전 버전은 마스크/브러시는 화면에서 바로 읽어왔지만, 텍스트 이동/수정은
+            # 일부 경로에서 data 반영이 늦어져 자동저장 결과가 빠질 수 있었다.
+            self.commit_current_page_ui_to_data(include_mask=False)
             if self.auto_save_enabled:
-                self.project_store.save(self.paths, self.data, self.idx)
+                self.save_project_store(self.project_store)
+                # 자동저장 ON은 실제 프로젝트 파일까지 확정한다.
+                # .ysbt가 있는 프로젝트는 작업 폴더 project.json만이 아니라 패키지 파일도 즉시 갱신한다.
+                # 자동저장 OFF일 때는 아래 save_to_work_cache()만 사용하므로 실제 파일은 건드리지 않는다.
+                if self.ysbt_package_path and not self.is_temp_project:
+                    try:
+                        package_project(self.project_dir, self.ysbt_package_path)
+                    except Exception as e:
+                        self.has_unsaved_changes = True
+                        self.log(f"⚠️ 자동저장 패키지 갱신 실패: {e}")
+                        return
                 # 새 임시 프로젝트는 폴더에는 저장되어도 아직 .ysbt 패키지가 없으므로 저장 필요 상태를 유지한다.
                 self.has_unsaved_changes = bool(self.is_temp_project or not self.ysbt_package_path)
             else:
@@ -7695,10 +8754,91 @@ class MainWindow(QMainWindow):
         finally:
             self.is_autosaving = False
 
+    def sync_final_text_scene_to_data(self):
+        """최종화면의 실제 텍스트 아이템 위치를 현재 페이지 data에 동기화한다.
+
+        일반 드래그/변형 드래그는 대부분 해당 이벤트에서 data를 갱신하지만,
+        자동저장/페이지 이동/닫기처럼 이벤트 타이밍이 섞이는 경우를 위해
+        저장 직전 화면에 남아 있는 TypesettingItem의 좌표를 한 번 더 확정한다.
+        """
+        if getattr(self, "_text_scene_sync_lock", False) or getattr(self, "_text_undo_restore_lock", False):
+            return False
+        scene = self._safe_graphics_scene()
+        if scene is None:
+            return False
+        curr = self.data.get(self.idx)
+        if not curr:
+            return False
+
+        self._text_scene_sync_lock = True
+        changed = False
+        try:
+            data_list = curr.get('data', []) or []
+            by_id = {str(d.get('id')): d for d in data_list if isinstance(d, dict)}
+            try:
+                scene_items = list(scene.items())
+            except RuntimeError:
+                return False
+            except Exception:
+                return False
+            for item in scene_items:
+                if not isinstance(item, TypesettingItem):
+                    continue
+                d = getattr(item, 'data', None)
+                if not isinstance(d, dict):
+                    continue
+                if d.get('pending_new_text'):
+                    continue
+                item_id = str(d.get('id'))
+                target = by_id.get(item_id)
+                if target is None:
+                    continue
+
+                rect = list(target.get('rect') or [0, 0, 1, 1])
+                while len(rect) < 4:
+                    rect.append(1)
+                try:
+                    align = (target.get('align') or 'center').lower()
+                    if align == 'left':
+                        anchor_x = float(rect[0])
+                    elif align == 'right':
+                        anchor_x = float(rect[0]) + float(rect[2])
+                    else:
+                        anchor_x = float(rect[0]) + float(rect[2]) / 2.0
+
+                    path_rect = getattr(item, '_text_path_rect', item.boundingRect())
+                    item_pos = item.pos()
+                    rect_x = float(rect[0])
+                    rect_y = float(rect[1])
+                    rect_w = max(1.0, float(rect[2]))
+                    rect_h = max(1.0, float(rect[3]))
+                    if align == 'left':
+                        new_x_off = int(round(float(item_pos.x()) + float(path_rect.left()) - rect_x))
+                    elif align == 'right':
+                        new_x_off = int(round(float(item_pos.x()) + float(path_rect.right()) - (rect_x + rect_w)))
+                    else:
+                        new_x_off = int(round(float(item_pos.x()) + float(path_rect.center().x()) - (rect_x + rect_w / 2.0)))
+                    new_y_off = int(round(float(item_pos.y()) + float(path_rect.center().y()) - (rect_y + rect_h / 2.0)))
+                except Exception:
+                    continue
+
+                old_x_off = int(target.get('x_off', 0) or 0)
+                old_y_off = int(target.get('y_off', 0) or 0)
+                if new_x_off != old_x_off or new_y_off != old_y_off:
+                    target['x_off'] = new_x_off
+                    target['y_off'] = new_y_off
+                    changed = True
+            return changed
+        finally:
+            self._text_scene_sync_lock = False
+
     def commit_current_page_ui_to_data(self, include_mask=True):
         curr = self.data.get(self.idx)
         if not curr:
             return
+
+        # 최종화면 탭에서는 화면 위 텍스트 아이템의 현재 위치를 저장 데이터에 먼저 고정한다.
+        self.sync_final_text_scene_to_data()
 
         # 표 상태 반영
         for row in range(1, self.tab.rowCount()):
@@ -7757,11 +8897,29 @@ class MainWindow(QMainWindow):
     def on_final_paint_above_text_toggled(self, checked):
         # 기존에 그린 레이어의 위치는 바꾸지 않는다.
         # 이 토글은 이후 새로 그리는 브러시가 들어갈 레이어만 선택한다.
-        self.final_paint_above_text = bool(checked)
+        old_state = bool(getattr(self, "_last_final_paint_above_text", getattr(self, "final_paint_above_text", False)))
+        new_state = bool(checked)
+        if (
+            old_state != new_state
+            and not getattr(self, "_project_undo_restore_lock", False)
+            and not getattr(self, "is_loading_project", False)
+            and not getattr(self, "is_page_loading", False)
+            and not getattr(self, "is_batch_running", False)
+        ):
+            try:
+                rec = self.make_project_undo_record("텍스트 위 페인팅 ON/OFF")
+                rec.setdefault("ui_state", self.current_project_ui_state())
+                rec["ui_state"]["final_paint_above_text"] = old_state
+                self.append_project_undo_record(rec)
+            except Exception:
+                pass
+        self.final_paint_above_text = new_state
+        self._last_final_paint_above_text = new_state
         if hasattr(self, "act_final_paint_above_text"):
             self.act_final_paint_above_text.setText("T↑" if self.final_paint_above_text else "T↓")
         state = "ON" if checked else "OFF"
         self.log(f"🎚️ 새 브러시를 텍스트 위에 그리기: {state}")
+        self.auto_save_project()
 
     def toggle_final_paint_above_text(self):
         if hasattr(self, "act_final_paint_above_text"):
@@ -7918,7 +9076,7 @@ class MainWindow(QMainWindow):
             'id': new_id,
             'text': '',
             'translated_text': '',
-            'rect': [int(x - w / 2), int(y), w, h],
+            'rect': [int(x - w / 2), int(y - h / 2), w, h],
             'use_inpaint': True,
             'font_family': self.cb_font.currentFont().family(),
             'font_size': int(self.sb_font_size.value()),
@@ -7929,6 +9087,7 @@ class MainWindow(QMainWindow):
             'x_off': 0,
             'y_off': 0,
             'manual_text_rect': True,
+            'text_anchor_mode': 'text',
             'force_show': True,
             'pending_new_text': True,
         }
@@ -8085,6 +9244,7 @@ class MainWindow(QMainWindow):
         # 단축키 창에서 비활성화된 기존 단축키 상태를 유지하면서 매크로도 보존한다.
         if not hasattr(new_settings, "macros"):
             new_settings.macros = getattr(self.shortcut_settings, "macros", [])
+        self.apply_pending_item_preset_disables_for_shortcut_settings(getattr(dlg, "_pending_disabled_item_presets", set()), new_settings)
         if not self.resolve_item_preset_conflicts_for_new_shortcut_settings(new_settings, parent=self, source_label="단축키"):
             self.log("↩️ 단축키 설정 저장 취소: 개별 글꼴 프리셋 단축키 충돌")
             return
@@ -8098,6 +9258,7 @@ class MainWindow(QMainWindow):
         if not dlg.exec():
             return
         new_settings = dlg.get_settings()
+        self.apply_pending_item_preset_disables_for_shortcut_settings(getattr(dlg, "_pending_disabled_item_presets", set()), new_settings)
         if not self.resolve_item_preset_conflicts_for_new_shortcut_settings(new_settings, parent=self, source_label="매크로"):
             self.log("↩️ 매크로 설정 저장 취소: 개별 글꼴 프리셋 단축키 충돌")
             return
@@ -8105,6 +9266,27 @@ class MainWindow(QMainWindow):
         ShortcutSettingsStore.save(self.shortcut_settings)
         self.apply_shortcuts()
         self.log("🧩 매크로 설정 캐시 저장 완료")
+
+    def macro_action_requires_undo_boundary(self, key):
+        """Undo로 복원하면 상태가 꼬일 수 있는 매크로 단계인지 판단한다.
+
+        분석/번역/인페인팅 계열은 외부/API 결과 또는 큰 처리 결과를 반영하므로
+        매크로 전체를 Undo 경계로 처리한다. 그 외 일반 편집 매크로는 1개의
+        Undo 스냅샷으로 되돌릴 수 있게 둔다.
+        """
+        key = str(key or "")
+        return key in {
+            "work_analyze",
+            "paint_reanalyze",
+            "work_translate",
+            "work_inpaint",
+            "batch_analyze",
+            "batch_translate",
+            "batch_inpaint",
+        }
+
+    def macro_actions_require_undo_boundary(self, actions):
+        return any(self.macro_action_requires_undo_boundary(k) for k in (actions or []))
 
     def macro_wait_kind_for_key(self, key):
         """매크로에서 다음 단계로 넘어가기 전에 완료 신호를 기다려야 하는 기능."""
@@ -8148,12 +9330,23 @@ class MainWindow(QMainWindow):
                 self.log(f"↩️ 매크로 취소: {name}")
                 return
 
+        has_undo_boundary = self.macro_actions_require_undo_boundary(actions)
+        macro_undo_record = None
+        if not has_undo_boundary:
+            # 일반 편집 매크로는 내부 단계별 Undo를 쌓지 않고,
+            # 매크로 실행 직전 상태 1개만 저장해서 Ctrl+Z 한 번으로 되돌린다.
+            full_project = any(str(k).startswith("batch_") or str(k).endswith("_batch") for k in actions)
+            macro_undo_record = self.make_project_undo_record(f"매크로 실행: {name}", full_project=full_project)
+
         self.macro_running = True
         self.macro_queue = list(actions)
         self.macro_current = None
         self.macro_waiting_key = None
         self.macro_waiting_kind = None
         self.macro_current_name = name
+        self.macro_executed_any = False
+        self.macro_has_undo_boundary = has_undo_boundary
+        self.macro_undo_record = macro_undo_record
 
         self.log(f"🧩 매크로 실행: {name} / {len(self.macro_queue)}단계")
         QTimer.singleShot(0, self.run_next_macro_step)
@@ -8164,12 +9357,34 @@ class MainWindow(QMainWindow):
 
         if not self.macro_queue:
             name = self.macro_current_name or "매크로"
+            executed_any = bool(getattr(self, "macro_executed_any", False))
+            has_boundary = bool(getattr(self, "macro_has_undo_boundary", False))
+            macro_undo_record = getattr(self, "macro_undo_record", None)
             self.log(f"✅ 매크로 완료: {name}")
             self.macro_running = False
             self.macro_current = None
             self.macro_waiting_key = None
             self.macro_waiting_kind = None
             self.macro_current_name = ""
+            self.macro_executed_any = False
+            self.macro_has_undo_boundary = False
+            self.macro_undo_record = None
+            if executed_any:
+                if has_boundary:
+                    self.break_undo_chain("macro", name)
+                elif macro_undo_record:
+                    old_allow = getattr(self, "_macro_allow_undo_append", False)
+                    self._macro_allow_undo_append = True
+                    try:
+                        self.append_project_undo_record(macro_undo_record)
+                    finally:
+                        self._macro_allow_undo_append = old_allow
+                    self.update_undo_redo_buttons()
+                    self.log(
+                        f"↶ Macro undo snapshot saved: {name}"
+                        if getattr(self, "ui_language", LANG_KO) == LANG_EN else
+                        f"↶ 매크로 Undo 기록 생성: {name}"
+                    )
             return
 
         key = self.macro_queue.pop(0)
@@ -8193,6 +9408,7 @@ class MainWindow(QMainWindow):
         self.log(f"🧩 [{self.macro_current_name}] 단계 실행: {action.text()}")
 
         try:
+            self.macro_executed_any = True
             action.trigger()
             QApplication.processEvents()
         except Exception as e:
@@ -8249,6 +9465,8 @@ class MainWindow(QMainWindow):
         self.macro_waiting_key = None
         self.macro_waiting_kind = None
         self.macro_current_name = ""
+        self.macro_has_undo_boundary = False
+        self.macro_undo_record = None
 
     def current_transform_data_item(self):
         curr = self.data.get(self.idx)
@@ -8262,31 +9480,594 @@ class MainWindow(QMainWindow):
     def is_text_transform_active(self):
         return self.current_transform_data_item() is not None
 
-    def push_page_text_undo(self, reason="텍스트 작업"):
-        curr = self.data.get(self.idx)
-        if not curr:
+    def view_state_key(self, page_idx=None, mode=None):
+        if page_idx is None:
+            page_idx = getattr(self, "idx", 0)
+        if mode is None:
+            try:
+                mode = self.cb_mode.currentIndex()
+            except Exception:
+                mode = getattr(self, "last_mode", 0)
+        return f"{int(page_idx)}:{int(mode)}"
+
+    def capture_view_state(self):
+        """현재 뷰의 확대율/이동 위치를 JSON 저장 가능한 값으로 캡처한다."""
+        try:
+            tr = self.view.transform()
+            return {
+                "transform": [
+                    float(tr.m11()), float(tr.m12()), float(tr.m13()),
+                    float(tr.m21()), float(tr.m22()), float(tr.m23()),
+                    float(tr.m31()), float(tr.m32()), float(tr.m33()),
+                ],
+                "h_scroll": int(self.view.horizontalScrollBar().value()),
+                "v_scroll": int(self.view.verticalScrollBar().value()),
+            }
+        except Exception:
+            return {}
+
+    def apply_view_state(self, state):
+        if getattr(self, "_app_is_closing", False):
             return False
-        stack = self.page_text_undo_stacks.setdefault(self.idx, [])
-        stack.append({
-            'data': copy.deepcopy(curr.get('data', [])),
-            'reason': str(reason),
-        })
-        if len(stack) > 50:
-            stack.pop(0)
+        if not isinstance(state, dict) or not state:
+            return False
+        vals = state.get("transform") or []
+        try:
+            if len(vals) == 9:
+                self.view.setTransform(QTransform(*[float(x) for x in vals]))
+            if "h_scroll" in state:
+                self.view.horizontalScrollBar().setValue(int(state.get("h_scroll") or 0))
+            if "v_scroll" in state:
+                self.view.verticalScrollBar().setValue(int(state.get("v_scroll") or 0))
+            return True
+        except Exception:
+            return False
+
+    def restore_current_view_state_later(self, page_idx=None, mode=None):
+        try:
+            key = self.view_state_key(self.idx if page_idx is None else page_idx, self.cb_mode.currentIndex() if mode is None else mode)
+            state = copy.deepcopy((getattr(self, "project_ui_view_states", {}) or {}).get(key) or {})
+            if not state:
+                return False
+            self.apply_view_state(state)
+            QTimer.singleShot(0, lambda st=copy.deepcopy(state): self.apply_view_state(st))
+            QTimer.singleShot(30, lambda st=copy.deepcopy(state): self.apply_view_state(st))
+            QTimer.singleShot(80, lambda st=copy.deepcopy(state): self.apply_view_state(st))
+            return True
+        except Exception:
+            return False
+
+    def remember_current_view_state(self):
+        if not hasattr(self, "view") or not hasattr(self, "cb_mode"):
+            return
+        try:
+            key = self.view_state_key(self.idx, self.cb_mode.currentIndex())
+            self.project_ui_view_states[key] = self.capture_view_state()
+        except Exception:
+            pass
+
+    def restore_project_ui_state(self, ui_state, refresh=False):
+        if not isinstance(ui_state, dict):
+            return False
+        old_restore = getattr(self, "_project_undo_restore_lock", False)
+        self._project_undo_restore_lock = True
+        try:
+            if hasattr(self, "cb_show_final_text") and "show_final_text" in ui_state:
+                self.cb_show_final_text.blockSignals(True)
+                try:
+                    self.cb_show_final_text.setChecked(bool(ui_state.get("show_final_text")))
+                    self._last_show_final_text_checked = bool(ui_state.get("show_final_text"))
+                finally:
+                    self.cb_show_final_text.blockSignals(False)
+            if hasattr(self, "act_final_paint_above_text") and "final_paint_above_text" in ui_state:
+                val = bool(ui_state.get("final_paint_above_text"))
+                self.final_paint_above_text = val
+                self.act_final_paint_above_text.blockSignals(True)
+                try:
+                    self.act_final_paint_above_text.setChecked(val)
+                    self.act_final_paint_above_text.setText("T↑" if val else "T↓")
+                    self._last_final_paint_above_text = val
+                finally:
+                    self.act_final_paint_above_text.blockSignals(False)
+            if isinstance(ui_state.get("view_states"), dict):
+                self.project_ui_view_states = copy.deepcopy(ui_state.get("view_states") or {})
+            if refresh and hasattr(self, "cb_mode") and self.cb_mode.currentIndex() == 4:
+                old_suppress = getattr(self, "_suppress_mode_undo", False)
+                self._suppress_mode_undo = True
+                try:
+                    self.mode_chg(4)
+                finally:
+                    self._suppress_mode_undo = old_suppress
+            return True
+        finally:
+            self._project_undo_restore_lock = old_restore
+
+    def current_project_ui_state(self):
+        self.remember_current_view_state()
+        try:
+            mode = int(self.cb_mode.currentIndex())
+        except Exception:
+            mode = int(getattr(self, "last_mode", 0) or 0)
+        return {
+            "current_mode": mode,
+            "view_states": copy.deepcopy(getattr(self, "project_ui_view_states", {}) or {}),
+            "show_final_text": bool(self.cb_show_final_text.isChecked()) if hasattr(self, "cb_show_final_text") else True,
+            "final_paint_above_text": bool(getattr(self, "final_paint_above_text", False)),
+        }
+
+    def save_project_store(self, store, paths=None, data=None, idx=None):
+        """ProjectStore.save() 호출 전에 UI 상태를 같이 넣는 공통 저장 함수."""
+        if store is None:
+            return False
+        try:
+            store.ui_state = self.current_project_ui_state()
+        except Exception:
+            store.ui_state = getattr(store, "ui_state", {}) or {}
+        store.save(paths if paths is not None else self.paths, data if data is not None else self.data, self.idx if idx is None else idx)
         return True
 
-    def undo_page_text(self):
-        curr = self.data.get(self.idx)
-        stack = self.page_text_undo_stacks.get(self.idx) or []
-        if not curr or not stack:
-            return False
-        snapshot = stack.pop()
-        curr['data'] = copy.deepcopy(snapshot.get('data', []))
-        self.auto_save_project()
-        if self.cb_mode.currentIndex() == 4:
-            self.mode_chg(4)
-        self.log(f"↩️ {snapshot.get('reason', '텍스트 작업')} 되돌림")
+    def undo_boundary_log_text(self, event, kind, name=""):
+        """Undo 경계 생성/차단 로그 문구를 현재 UI 언어에 맞춰 돌려준다."""
+        kind = str(kind or "action")
+        name = str(name or "").strip()
+        is_en = getattr(self, "ui_language", LANG_KO) == LANG_EN
+
+        boundary_labels = {
+            "macro": ("매크로", "macro"),
+            "font_preset": ("글꼴 프리셋", "font preset"),
+            "analysis": ("분석 결과", "analysis results"),
+            "reanalyze": ("텍스트 마스크 재분석 결과", "text mask re-analysis results"),
+            "translation": ("번역 결과", "translation results"),
+            "inpaint": ("인페인팅 결과", "inpainting results"),
+            "batch_analysis": ("일괄 분석 결과", "batch analysis results"),
+            "batch_translation": ("일괄 번역 결과", "batch translation results"),
+            "batch_inpaint": ("일괄 인페인팅 결과", "batch inpainting results"),
+        }
+        ko_label, en_label = boundary_labels.get(kind, ("작업", "action"))
+        ko_name = name or ko_label
+        en_name = name or en_label
+
+        if kind == "macro":
+            if event == "set":
+                return (
+                    f"🧱 Undo boundary set: macro '{en_name}' was executed, so previous undo history was cleared."
+                    if is_en else
+                    f"🧱 Undo 경계 생성: 매크로 '{ko_name}' 실행으로 이전 되돌리기 내역을 끊었습니다."
+                )
+            return (
+                f"⛔ Cannot undo: macro '{en_name}' created an undo boundary. To prevent state conflicts, actions before that point cannot be restored."
+                if is_en else
+                f"⛔ 되돌릴 수 없습니다: 매크로 '{ko_name}' 실행 이후 Undo 경계가 생겼습니다. 상태 꼬임 방지를 위해 그 이전으로는 돌아가지 않습니다."
+            )
+
+        api_boundary_kinds = {
+            "analysis", "reanalyze", "translation", "inpaint",
+            "batch_analysis", "batch_translation", "batch_inpaint",
+        }
+        if kind in api_boundary_kinds:
+            if event == "set":
+                return (
+                    f"🧱 Undo boundary set: {en_label} were applied, so previous undo history was cleared."
+                    if is_en else
+                    f"🧱 Undo 경계 생성: {ko_label} 반영으로 이전 되돌리기 내역을 끊었습니다."
+                )
+            return (
+                f"⛔ Cannot undo: {en_label} created an undo boundary. To prevent state conflicts, actions before that point cannot be restored."
+                if is_en else
+                f"⛔ 되돌릴 수 없습니다: {ko_label} 반영 이후 Undo 경계가 생겼습니다. 상태 꼬임 방지를 위해 그 이전으로는 돌아가지 않습니다."
+            )
+
+        if event == "set":
+            return (
+                "🧱 Undo boundary set: previous undo history was cleared to prevent state conflicts."
+                if is_en else
+                "🧱 Undo 경계 생성: 상태 꼬임 방지를 위해 이전 되돌리기 내역을 끊었습니다."
+            )
+        return (
+            "⛔ Cannot undo: an undo boundary was created. To prevent state conflicts, actions before that point cannot be restored."
+            if is_en else
+            "⛔ 되돌릴 수 없습니다: Undo 경계가 생겼습니다. 상태 꼬임 방지를 위해 그 이전으로는 돌아가지 않습니다."
+        )
+
+    def break_undo_chain(self, kind="action", name=""):
+        """매크로/글꼴 프리셋처럼 Undo 기록을 남기지 않는 작업 뒤에 과거 Undo를 차단한다."""
+        self.undo_boundary = {"kind": str(kind or "action"), "name": str(name or "")}
+        self.project_undo_stack = []
+        self.project_redo_stack = []
+        self.page_text_undo_stacks = {}
+        self._deferred_undo_records = {}
+        try:
+            self.view.history.clear()
+        except Exception:
+            pass
+        self.log(self.undo_boundary_log_text("set", kind, name))
+        self.update_undo_redo_buttons()
         return True
+
+    def log_undo_boundary_blocked(self):
+        boundary = getattr(self, "undo_boundary", None)
+        if not boundary:
+            return False
+        self.log(self.undo_boundary_log_text("blocked", boundary.get("kind"), boundary.get("name")))
+        return True
+
+    def set_work_mode_without_undo(self, mode):
+        try:
+            mode = int(mode)
+        except Exception:
+            mode = 0
+        if not hasattr(self, "cb_mode") or self.cb_mode.count() <= 0:
+            self.last_mode = mode
+            self._current_work_mode = mode
+            return
+        mode = max(0, min(mode, self.cb_mode.count() - 1))
+        self.cb_mode.blockSignals(True)
+        try:
+            self.cb_mode.setCurrentIndex(mode)
+        finally:
+            self.cb_mode.blockSignals(False)
+        self.last_mode = mode
+        self._current_work_mode = mode
+
+    def copy_page_data_for_undo(self, page_idx=None):
+        if page_idx is None:
+            page_idx = self.idx
+        curr = self.data.get(page_idx)
+        if not isinstance(curr, dict):
+            return None
+        out = {}
+        for k, v in curr.items():
+            if k == 'ori':
+                out[k] = v
+            elif isinstance(v, np.ndarray):
+                out[k] = v.copy()
+            else:
+                out[k] = copy.deepcopy(v)
+        return out
+
+    def copy_project_data_for_undo(self):
+        """일괄 텍스트 작업용 전체 프로젝트 스냅샷.
+
+        번역문 일괄 불러오기/일괄 지우기/텍스트 정리처럼 여러 페이지를 한 번에
+        바꾸는 작업은 현재 페이지만 저장하면 Ctrl+Z 복원이 깨진다.
+        이 경우 변경 전 self.data 전체를 저장해 하나의 Undo 단계로 되돌린다.
+        """
+        out = {}
+        try:
+            keys = list((self.data or {}).keys())
+        except Exception:
+            keys = []
+        for page_idx in keys:
+            page_data = self.copy_page_data_for_undo(page_idx)
+            if page_data is not None:
+                out[page_idx] = page_data
+        return out
+
+    def append_project_undo_record(self, rec, clear_redo=True):
+        if not rec:
+            return False
+        if getattr(self, "_project_undo_restore_lock", False):
+            return False
+        # 매크로 실행 중에는 단계별 Undo를 쌓지 않는다.
+        # 일반 매크로는 완료 시점에 매크로 1개짜리 Undo만 저장하고,
+        # 분석/번역/인페인팅 포함 매크로는 Undo 경계로 끊는다.
+        if getattr(self, "macro_running", False) and not getattr(self, "_macro_allow_undo_append", False):
+            return False
+        if not hasattr(self, "project_undo_stack") or self.project_undo_stack is None:
+            self.project_undo_stack = []
+        self.project_undo_stack.append(rec)
+        # Undo 스택은 가볍게 20단계만 유지한다.
+        # 텍스트 라인/탭 이동까지 모두 스택에 넣기 때문에 오래된 기록은 FIFO로 버린다.
+        if len(self.project_undo_stack) > 20:
+            self.project_undo_stack.pop(0)
+        if clear_redo:
+            # 새 작업이 들어오면 기존 Redo 흐름은 더 이상 유효하지 않다.
+            self.project_redo_stack = []
+        self.update_undo_redo_buttons()
+        return True
+
+    def append_project_redo_record(self, rec):
+        if not rec:
+            return False
+        if not hasattr(self, "project_redo_stack") or self.project_redo_stack is None:
+            self.project_redo_stack = []
+        self.project_redo_stack.append(rec)
+        if len(self.project_redo_stack) > 20:
+            self.project_redo_stack.pop(0)
+        self.update_undo_redo_buttons()
+        return True
+
+    def make_project_undo_record(self, reason="작업", page_idx=None, full_project=False):
+        if page_idx is None:
+            page_idx = self.idx
+        try:
+            mode = int(self.cb_mode.currentIndex())
+        except Exception:
+            mode = int(getattr(self, "last_mode", 0) or 0)
+        rec = {
+            "reason": str(reason or "작업"),
+            "page_idx": int(page_idx),
+            "mode": mode,
+            "view_state": self.capture_view_state(),
+            "magic_wand_state": self.capture_magic_wand_state(),
+            "ui_state": self.current_project_ui_state(),
+        }
+        if full_project:
+            rec["project_data"] = self.copy_project_data_for_undo()
+        else:
+            rec["page_data"] = self.copy_page_data_for_undo(page_idx)
+        return rec
+
+    def make_ui_undo_record(self, reason="화면 작업", page_idx=None, mode=None):
+        """탭/페이지/줌/화면 이동용 경량 Undo 기록.
+
+        이 작업들은 data 자체를 바꾸지 않으므로 이미지/마스크/텍스트 전체를
+        복사하지 않는다. 이전 구현처럼 page_data를 매번 복사하면 탭 이동이나
+        최종화면 전환이 무거워지고, Ctrl+Z 연속 동작도 끊기는 원인이 된다.
+        """
+        if page_idx is None:
+            page_idx = self.idx
+        try:
+            current_mode = int(self.cb_mode.currentIndex())
+        except Exception:
+            current_mode = int(getattr(self, "last_mode", 0) or 0)
+        if mode is None:
+            mode = current_mode
+        return {
+            "reason": str(reason or "화면 작업"),
+            "page_idx": int(page_idx),
+            "mode": int(mode),
+            "view_state": self.capture_view_state(),
+            "magic_wand_state": self.capture_magic_wand_state(),
+            "ui_state": self.current_project_ui_state(),
+            "ui_only": True,
+        }
+
+    def is_ui_only_undo_reason(self, reason):
+        text = str(reason or "")
+        return text in ("작업 탭 변경", "페이지 이동", "화면 이동", "화면 확대/축소")
+
+    def push_project_undo(self, reason="작업", page_idx=None, full_project=False):
+        if getattr(self, "_project_undo_restore_lock", False):
+            return False
+        # 매크로 실행 중 발생한 단계별 작업은 Ctrl+Z 스택에 쌓지 않는다.
+        # 매크로는 여러 기능을 연쇄 실행하므로 Undo 기록에 섞이면 복구 순서가 꼬일 수 있다.
+        if getattr(self, "macro_running", False) or getattr(self, "_suppress_project_undo", False):
+            return False
+        if getattr(self, "is_loading_project", False) or getattr(self, "is_page_loading", False) or getattr(self, "is_batch_running", False):
+            return False
+        if not self.paths or page_idx is None and self.idx not in self.data:
+            return False
+        target_page = self.idx if page_idx is None else page_idx
+        if (not full_project) and self.is_ui_only_undo_reason(reason):
+            rec = self.make_ui_undo_record(reason, target_page)
+        else:
+            rec = self.make_project_undo_record(reason, target_page, full_project=full_project)
+        return self.append_project_undo_record(rec)
+
+    def begin_deferred_project_undo(self, key, reason="작업"):
+        if not key:
+            return None
+        if getattr(self, "macro_running", False) or getattr(self, "_suppress_project_undo", False):
+            return None
+        if getattr(self, "_project_undo_restore_lock", False) or getattr(self, "is_page_loading", False) or getattr(self, "is_batch_running", False):
+            return None
+        if self.is_ui_only_undo_reason(reason):
+            rec = self.make_ui_undo_record(reason)
+        else:
+            rec = self.make_project_undo_record(reason)
+        self._deferred_undo_records[str(key)] = rec
+        return rec
+
+    def finish_deferred_project_undo(self, key, force=False, changed=None, autosave=True):
+        rec = self._deferred_undo_records.pop(str(key), None)
+        if getattr(self, "macro_running", False) or getattr(self, "_suppress_project_undo", False):
+            if autosave:
+                self.auto_save_project()
+            return False
+        if not rec:
+            return False
+        if changed is None:
+            changed = True
+        if not force and not changed:
+            return False
+        self.append_project_undo_record(rec)
+        if autosave:
+            self.auto_save_project()
+        return True
+
+    def copy_text_line_state_for_undo(self, page_idx=None, include_masks=False):
+        """원문/번역문/텍스트행 삭제/재정렬용 경량 스냅샷.
+
+        일반 텍스트 라인 수정은 이미지/전체 마스크를 복사할 필요가 없다.
+        현재 페이지의 data 리스트만 복사해서 Ctrl+Z 복원을 가볍게 만든다.
+        삭제처럼 마스크 슬롯을 같이 건드리는 작업만 include_masks=True로 필요한
+        마스크 슬롯을 추가 보존한다.
+        """
+        if page_idx is None:
+            page_idx = self.idx
+        curr = self.data.get(page_idx)
+        if not isinstance(curr, dict):
+            return None
+        state = {
+            "data": copy.deepcopy(curr.get("data", []) or []),
+        }
+        if include_masks:
+            for key in ("mask_merge", "mask_inpaint", "mask_merge_off", "mask_inpaint_off"):
+                value = curr.get(key)
+                state[key] = value.copy() if isinstance(value, np.ndarray) else copy.deepcopy(value)
+            state["mask_toggle_enabled"] = bool(curr.get("mask_toggle_enabled", False))
+        return state
+
+    def make_text_line_undo_record(self, reason="텍스트 라인 변경", page_idx=None, include_masks=False):
+        if page_idx is None:
+            page_idx = self.idx
+        try:
+            mode = int(self.cb_mode.currentIndex())
+        except Exception:
+            mode = int(getattr(self, "last_mode", 0) or 0)
+        return {
+            "reason": str(reason or "텍스트 라인 변경"),
+            "page_idx": int(page_idx),
+            "mode": mode,
+            "view_state": self.capture_view_state(),
+            "magic_wand_state": self.capture_magic_wand_state(),
+            "ui_state": self.current_project_ui_state(),
+            "text_line_state": self.copy_text_line_state_for_undo(page_idx, include_masks=include_masks),
+        }
+
+    def push_text_line_undo(self, reason="텍스트 라인 변경", page_idx=None, include_masks=False):
+        if getattr(self, "_project_undo_restore_lock", False):
+            return False
+        if getattr(self, "macro_running", False) or getattr(self, "_suppress_project_undo", False):
+            return False
+        if getattr(self, "is_loading_project", False) or getattr(self, "is_page_loading", False) or getattr(self, "is_batch_running", False):
+            return False
+        if not self.paths or (page_idx is None and self.idx not in self.data):
+            return False
+        rec = self.make_text_line_undo_record(reason, self.idx if page_idx is None else page_idx, include_masks=include_masks)
+        return self.append_project_undo_record(rec)
+
+    def make_current_undo_record_like(self, rec):
+        """Undo/Redo 왕복용 현재 상태 스냅샷을 기존 기록과 같은 가벼운 단위로 만든다."""
+        reason = str((rec or {}).get("reason") or "작업")
+        try:
+            page_idx = int(getattr(self, "idx", 0) or 0)
+        except Exception:
+            page_idx = 0
+
+        text_line_state = (rec or {}).get("text_line_state")
+        if isinstance(text_line_state, dict):
+            include_masks = any(k in text_line_state for k in ("mask_merge", "mask_inpaint", "mask_merge_off", "mask_inpaint_off", "mask_toggle_enabled"))
+            return self.make_text_line_undo_record(reason, page_idx=page_idx, include_masks=include_masks)
+        if (rec or {}).get("ui_only"):
+            try:
+                mode = int(self.cb_mode.currentIndex())
+            except Exception:
+                mode = int(getattr(self, "last_mode", 0) or 0)
+            return self.make_ui_undo_record(reason, page_idx=page_idx, mode=mode)
+        if isinstance((rec or {}).get("project_data"), dict):
+            return self.make_project_undo_record(reason, page_idx=page_idx, full_project=True)
+        return self.make_project_undo_record(reason, page_idx=page_idx, full_project=False)
+
+    def restore_project_history_record(self, rec):
+        """Undo/Redo 기록 1개를 실제 작업 상태로 복원한다."""
+        page_idx = int(rec.get("page_idx", self.idx) or 0)
+        if page_idx < 0 or page_idx >= len(self.paths):
+            return False
+
+        self._project_undo_restore_lock = True
+        self._text_undo_restore_lock = True
+        try:
+            text_line_state = rec.get("text_line_state")
+            if isinstance(text_line_state, dict):
+                curr = self.data.get(page_idx)
+                if isinstance(curr, dict):
+                    curr["data"] = copy.deepcopy(text_line_state.get("data", []) or [])
+                    for key in ("mask_merge", "mask_inpaint", "mask_merge_off", "mask_inpaint_off"):
+                        if key in text_line_state:
+                            value = text_line_state.get(key)
+                            curr[key] = value.copy() if isinstance(value, np.ndarray) else copy.deepcopy(value)
+                    if "mask_toggle_enabled" in text_line_state:
+                        curr["mask_toggle_enabled"] = bool(text_line_state.get("mask_toggle_enabled"))
+            elif not rec.get("ui_only"):
+                project_data = rec.get("project_data")
+                if isinstance(project_data, dict):
+                    restored = {}
+                    for k, v in project_data.items():
+                        restored[k] = self.copy_undo_page_data(v) if isinstance(v, dict) else copy.deepcopy(v)
+                    self.data = restored
+                else:
+                    page_data = rec.get("page_data")
+                    if isinstance(page_data, dict):
+                        self.data[page_idx] = self.copy_undo_page_data(page_data)
+
+            self.idx = page_idx
+            mode = int(rec.get("mode", 0) or 0)
+            self.set_work_mode_without_undo(mode)
+            self.restore_project_ui_state(rec.get("ui_state"), refresh=False)
+
+            prev_loading = self.is_page_loading
+            self.is_page_loading = True
+            try:
+                self.load()
+            finally:
+                self.is_page_loading = prev_loading
+
+            self.restore_project_ui_state(rec.get("ui_state"), refresh=(mode == 4))
+
+            state = copy.deepcopy(rec.get("view_state") or {})
+            if state:
+                self.apply_view_state(state)
+                QTimer.singleShot(0, lambda st=state: self.apply_view_state(st))
+                QTimer.singleShot(30, lambda st=state: self.apply_view_state(st))
+                QTimer.singleShot(80, lambda st=state: self.apply_view_state(st))
+
+            try:
+                self.view.history.clear()
+            except Exception:
+                pass
+            try:
+                self.restore_magic_wand_state(rec.get("magic_wand_state"))
+            except Exception:
+                pass
+            self.page_text_undo_stacks = {}
+            self.auto_save_project()
+        finally:
+            self._text_undo_restore_lock = False
+            self._project_undo_restore_lock = False
+        return True
+
+    def undo_project_action(self):
+        stack = getattr(self, "project_undo_stack", None) or []
+        if not stack:
+            self.update_undo_redo_buttons()
+            return False
+        rec = stack.pop()
+        redo_rec = self.make_current_undo_record_like(rec)
+        if not self.restore_project_history_record(rec):
+            self.update_undo_redo_buttons()
+            return False
+        self.append_project_redo_record(redo_rec)
+        self.log(f"↩️ {rec.get('reason', '작업')} 되돌림")
+        self.update_undo_redo_buttons()
+        return True
+
+    def redo_project_action(self):
+        stack = getattr(self, "project_redo_stack", None) or []
+        if not stack:
+            self.update_undo_redo_buttons()
+            return False
+        rec = stack.pop()
+        undo_rec = self.make_current_undo_record_like(rec)
+        if not self.restore_project_history_record(rec):
+            self.update_undo_redo_buttons()
+            return False
+        self.append_project_undo_record(undo_rec, clear_redo=False)
+        self.log(f"↷ {rec.get('reason', '작업')} 재실행")
+        self.update_undo_redo_buttons()
+        return True
+
+    def copy_undo_page_data(self, page_data):
+        out = {}
+        for k, v in (page_data or {}).items():
+            if k == 'ori':
+                out[k] = v
+            elif isinstance(v, np.ndarray):
+                out[k] = v.copy()
+            else:
+                out[k] = copy.deepcopy(v)
+        return out
+
+    def push_page_text_undo(self, reason="텍스트 작업"):
+        # v1.6.3: 페이지를 넘긴 뒤에도 이전 페이지 텍스트 작업을 되돌릴 수 있도록
+        # 페이지 전용 스택 대신 전역 작업 스택에 현재 페이지 상태를 저장한다.
+        return self.push_project_undo(reason)
+
+    def undo_page_text(self):
+        # 구버전 호출 호환용. 실제 Ctrl+Z는 handle_general_undo()에서
+        # undo_project_action()을 먼저 사용한다.
+        return self.undo_project_action()
 
     def end_active_text_transform(self, refresh=True):
         active = self.current_transform_data_item()
@@ -8302,13 +10083,75 @@ class MainWindow(QMainWindow):
         self.log("🔷 텍스트 변형 모드 종료")
         return True
 
+    def can_general_undo(self):
+        try:
+            if getattr(self, "project_undo_stack", None):
+                return True
+            if getattr(getattr(self, "view", None), "history", None):
+                return True
+            if getattr(getattr(self, "view", None), "draw_mode", None) == 'magic_wand' and getattr(self, 'magic_wand_history', None):
+                return True
+        except Exception:
+            pass
+        return False
+
+    def can_general_redo(self):
+        return bool(getattr(self, "project_redo_stack", None))
+
+    def set_history_button_tooltips(self):
+        def shortcut_text(key, fallback=""):
+            try:
+                seq = self.shortcut_settings.seq(key)
+                txt = seq.toString(QKeySequence.SequenceFormat.NativeText)
+                return txt or fallback
+            except Exception:
+                return fallback
+        if hasattr(self, "btn_quick_undo"):
+            title = self.tr_ui("작업 취소")
+            desc = self.tr_msg("되돌릴 수 있는 작업이 있으면 이전 상태로 돌아갑니다.")
+            self.btn_quick_undo.setToolTip(f"{title} ({shortcut_text('paint_undo', 'Ctrl+Z')})\n{desc}")
+        if hasattr(self, "btn_quick_redo"):
+            title = self.tr_ui("작업 재실행")
+            desc = self.tr_msg("되돌린 작업을 다시 적용합니다.")
+            self.btn_quick_redo.setToolTip(f"{title} ({shortcut_text('paint_redo', 'Ctrl+Y')})\n{desc}")
+
+    def history_button_style(self, enabled):
+        if enabled:
+            return "background:#3b465a;color:#ffffff;border:1px solid #7f8ba3;font-weight:bold;"
+        return "background:#2a2d34;color:#777b84;border:1px solid #444852;font-weight:bold;"
+
+    def update_undo_redo_buttons(self):
+        try:
+            can_undo = self.can_general_undo()
+            can_redo = self.can_general_redo()
+            if hasattr(self, "btn_quick_undo"):
+                self.btn_quick_undo.setEnabled(can_undo)
+                self.btn_quick_undo.setStyleSheet(self.history_button_style(can_undo))
+            if hasattr(self, "btn_quick_redo"):
+                self.btn_quick_redo.setEnabled(can_redo)
+                self.btn_quick_redo.setStyleSheet(self.history_button_style(can_redo))
+            self.set_history_button_tooltips()
+        except Exception:
+            pass
+
     def handle_general_undo(self):
-        if self.cb_mode.currentIndex() == 4 and self.undo_page_text():
+        if self.undo_project_action():
+            return
+        if self.log_undo_boundary_blocked():
+            self.update_undo_redo_buttons()
             return
         if getattr(self.view, 'draw_mode', None) == 'magic_wand' and getattr(self, 'magic_wand_history', None):
             self.undo_magic_wand_selection()
+            self.update_undo_redo_buttons()
             return
         self.view.undo()
+        self.update_undo_redo_buttons()
+
+    def handle_general_redo(self):
+        if self.redo_project_action():
+            return
+        self.log("⚠️ 다시 실행할 내역이 없습니다." if self.ui_language == LANG_KO else "⚠️ There is no action to redo.")
+        self.update_undo_redo_buttons()
 
     def open_api_settings_dialog(self):
         dlg = ApiSettingsDialog(self.api_settings, self)
@@ -8362,6 +10205,45 @@ class MainWindow(QMainWindow):
         else:
             self.log("📚 단어장 캐시 초기화 완료")
 
+    def capture_magic_wand_state(self):
+        """요술봉 미리보기 상태를 전역 Undo 스택에 같이 저장한다."""
+        try:
+            active = bool(getattr(getattr(self, 'view', None), 'draw_mode', None) == 'magic_wand')
+        except Exception:
+            active = False
+        return {
+            "active": active,
+            "mask": self.magic_wand_mask.copy() if isinstance(getattr(self, 'magic_wand_mask', None), np.ndarray) else None,
+            "seed": tuple(self.magic_wand_seed) if getattr(self, 'magic_wand_seed', None) else None,
+            "seeds": [tuple(x) for x in (getattr(self, 'magic_wand_seeds', []) or [])],
+        }
+
+    def restore_magic_wand_state(self, state):
+        """Undo 복원 후 요술봉 선택/확장 상태를 화면에 다시 그린다."""
+        if not isinstance(state, dict):
+            self.clear_magic_wand_selection()
+            return False
+        mask = state.get('mask')
+        self.magic_wand_mask = mask.copy() if isinstance(mask, np.ndarray) else None
+        self.magic_wand_seeds = [tuple(x) for x in (state.get('seeds') or [])]
+        self.magic_wand_seed = tuple(state.get('seed')) if state.get('seed') else (self.magic_wand_seeds[-1] if self.magic_wand_seeds else None)
+        if state.get('active') and self.cb_mode.currentIndex() in [2, 3]:
+            try:
+                self.set_tool('magic_wand')
+            except Exception:
+                pass
+        if self.magic_wand_mask is not None:
+            try:
+                self.view.draw_magic_wand_preview(self.magic_wand_mask)
+            except Exception:
+                pass
+        else:
+            try:
+                self.view.clear_magic_wand_preview()
+            except Exception:
+                pass
+        return True
+
     def push_magic_wand_history(self):
         mask = self.magic_wand_mask.copy() if isinstance(self.magic_wand_mask, np.ndarray) else None
         seeds = list(getattr(self, "magic_wand_seeds", []) or [])
@@ -8410,7 +10292,10 @@ class MainWindow(QMainWindow):
             return
 
         tol = int(self.sb_magic_tolerance.value()) if hasattr(self, "sb_magic_tolerance") else 20
-        self.push_magic_wand_history()
+        try:
+            self.push_project_undo("요술봉 선택")
+        except Exception:
+            self.push_magic_wand_history()
         self.magic_wand_seed = (int(x), int(y))
         if not hasattr(self, "magic_wand_seeds"):
             self.magic_wand_seeds = []
@@ -8453,6 +10338,10 @@ class MainWindow(QMainWindow):
         seeds = list(getattr(self, "magic_wand_seeds", []) or [])
         if not seeds:
             return
+        try:
+            self.push_project_undo("요술봉 허용범위 변경")
+        except Exception:
+            pass
         img = self.current_magic_source_image()
         if img is None:
             return
@@ -8475,7 +10364,10 @@ class MainWindow(QMainWindow):
             self.view.draw_magic_wand_preview(self.magic_wand_mask)
             return
 
-        self.push_magic_wand_history()
+        try:
+            self.push_project_undo("요술봉 영역확장")
+        except Exception:
+            self.push_magic_wand_history()
         kernel_size = amount * 2 + 1
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
         self.magic_wand_mask = cv2.dilate(self.magic_wand_mask, kernel, iterations=1)
@@ -8495,14 +10387,15 @@ class MainWindow(QMainWindow):
             self.log("⚠️ 현재 탭에 마스크 레이어가 없습니다.")
             return
 
+        try:
+            self.commit_current_page_ui_to_data(include_mask=True)
+            self.push_project_undo("요술봉 마스킹 칠하기")
+        except Exception:
+            pass
+
         before = self.view.get_mask_np()
         if before is None:
             before = np.zeros_like(self.magic_wand_mask, dtype=np.uint8)
-
-        if self.view.user_mask_item:
-            self.view.history.append(self.view.user_mask_item.pixmap().copy())
-            if len(self.view.history) > 20:
-                self.view.history.pop(0)
 
         combined = cv2.bitwise_or(before, self.magic_wand_mask.astype(np.uint8))
         color = QColor(0, 0, 255, 150) if self.cb_mode.currentIndex() == 3 else QColor(255, 0, 0, 150)
@@ -8742,6 +10635,19 @@ class MainWindow(QMainWindow):
         if not curr_data or 'data' not in curr_data:
             return
 
+        try:
+            changed_for_undo = False
+            if row == 0:
+                changed_for_undo = any(bool(x.get('use_inpaint', True)) != bool(is_checked) for x in curr_data.get('data', []))
+            else:
+                data_index = row - 1
+                if 0 <= data_index < len(curr_data.get('data', [])):
+                    changed_for_undo = bool(curr_data['data'][data_index].get('use_inpaint', True)) != bool(is_checked)
+            if changed_for_undo:
+                self.push_project_undo('체크 상태 변경')
+        except Exception:
+            pass
+
         self._table_check_lock = True
         self.tab.blockSignals(True)
         try:
@@ -8859,8 +10765,12 @@ class MainWindow(QMainWindow):
                 self.tab.setItem(row, 1, check_item)
                 self.tab.setCellWidget(row, 1, self.make_center_check_widget(row, is_checked))
 
-                self.tab.setItem(row, 2, QTableWidgetItem(x.get('text', '')))
-                self.tab.setItem(row, 3, QTableWidgetItem(x.get('translated_text', '')))
+                text_item = QTableWidgetItem(x.get('text', ''))
+                text_item.setData(Qt.ItemDataRole.UserRole, str(x.get('text', '') or ''))
+                trans_item = QTableWidgetItem(x.get('translated_text', ''))
+                trans_item.setData(Qt.ItemDataRole.UserRole, str(x.get('translated_text', '') or ''))
+                self.tab.setItem(row, 2, text_item)
+                self.tab.setItem(row, 3, trans_item)
 
                 self.set_table_row_visual(row, is_checked)
         finally:
@@ -8884,11 +10794,13 @@ class MainWindow(QMainWindow):
         self.commit_current_page_ui_to_data()
 
         target_idx = self.idx
+        self.prepare_text_mask_slots_for_fresh_analysis(target_idx)
+        self.begin_busy_state("분석")
         self.w = AnalysisWorker(self.engine, self.get_inpainting_input_path(target_idx))
         self.w.log.connect(self.log)
         self.w.finished.connect(
             lambda o, d, mm, mi, page_idx=target_idx:
-                self.anal_end_for_page(page_idx, o, d, mm, mi)
+                self.anal_end_for_page(page_idx, o, d, mm, mi, preserve_text_mask=False)
         )
         self.w.start()
 
@@ -8917,6 +10829,7 @@ class MainWindow(QMainWindow):
             if not self.check_ocr_api_or_alert():
                 return
 
+            self.begin_busy_state("텍스트 마스크 재분석")
             self.w = AnalysisWorker(
                 self.engine,
                 self.get_inpainting_input_path(target_idx),
@@ -8926,7 +10839,7 @@ class MainWindow(QMainWindow):
             self.w.log.connect(self.log)
             self.w.finished.connect(
                 lambda o, d, mm, mi, page_idx=target_idx:
-                    self.anal_end_for_page(page_idx, o, d, mm, mi)
+                    self.anal_end_for_page(page_idx, o, d, mm, mi, preserve_text_mask=True)
             )
             self.w.start()
 
@@ -8937,12 +10850,43 @@ class MainWindow(QMainWindow):
             self.log((f"💾 Painting mask saved for page {target_idx + 1}" if self.ui_language == LANG_EN else f"💾 {target_idx + 1}페이지 페인팅 마스크 저장됨"))
             self.auto_save_project()
 
-    def anal_end_for_page(self, page_idx, o, d, mm, mi):
+    def prepare_text_mask_slots_for_fresh_analysis(self, page_idx):
+        """
+        일반 [분석]은 기존 텍스트 마스크를 기준으로 누적하지 않는다.
+        재분석은 사용자가 칠한 마스크를 기준으로 보존해야 하지만,
+        일반 분석은 OCR 결과로 mask_merge / mask_inpaint를 새로 만들기 때문에
+        이전 텍스트 마스크가 화면/저장 슬롯에 남지 않도록 먼저 비운다.
+        """
+        curr = self.data.get(page_idx)
+        if not curr:
+            return
+        try:
+            curr['mask_merge'] = None
+            curr['mask_inpaint'] = None
+            # 텍스트 마스크는 ON/OFF 슬롯을 사용하지 않지만, 예전 버전/작업 캐시에서
+            # 남아 있을 수 있는 보조 슬롯까지 같이 지워야 전체 분석이 항상 새 상태가 된다.
+            curr['mask_merge_off'] = None
+            # 수동 페인팅 OFF 마스크는 사용자가 직접 만든 페인팅 마스크이므로 여기서는 보존한다.
+            # 일반 분석으로 새로 만들어지는 것은 텍스트 마스크와 분석 기반 인페인팅 마스크다.
+            curr['mask_toggle_enabled'] = True
+            if page_idx == getattr(self, 'idx', -1) and self.cb_mode.currentIndex() == 2:
+                try:
+                    self.view.set_user_mask_np(None)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def anal_end_for_page(self, page_idx, o, d, mm, mi, preserve_text_mask=False):
         """
         분석/재분석 결과를 시작 당시의 page_idx에만 반영한다.
         self.idx를 직접 쓰면 작업 도중 페이지 이동 시 다른 페이지를 덮어쓸 수 있다.
+
+        preserve_text_mask=False: 일반 분석. 기존 텍스트 마스크 슬롯을 버리고 새 OCR 마스크로 교체한다.
+        preserve_text_mask=True: 텍스트 마스크 재분석. 사용자가 칠한 재분석 마스크를 보존한다.
         """
         if page_idx < 0 or page_idx >= len(self.paths):
+            self.end_busy_state("분석")
             return
 
         if page_idx not in self.data:
@@ -8961,19 +10905,46 @@ class MainWindow(QMainWindow):
                 'final_paint_above': None,
             }
 
-        self.data[page_idx].update({
-            'ori': o,
-            'data': d,
-            'mask_merge': mm,
-            'mask_inpaint': mi,
-            'mask_toggle_enabled': True,
-        })
-        if self.data[page_idx].get('mask_merge_off') is None:
-            self.data[page_idx]['mask_merge_off'] = None
-        if self.data[page_idx].get('mask_inpaint_off') is None:
-            self.data[page_idx]['mask_inpaint_off'] = None
+        old_inpaint_off = self.data[page_idx].get('mask_inpaint_off')
 
-        self.log(f"✅ {page_idx + 1}페이지 분석 결과 반영 완료")
+        if preserve_text_mask:
+            # 재분석은 사용자가 칠한 텍스트 마스크를 기준으로 OCR을 다시 거는 작업이다.
+            # 따라서 워커가 반환한 mm(=재분석에 사용한 마스크)을 그대로 유지한다.
+            self.data[page_idx].update({
+                'ori': o,
+                'data': d,
+                'mask_merge': mm,
+                'mask_inpaint': mi,
+                'mask_toggle_enabled': True,
+            })
+            if self.data[page_idx].get('mask_merge_off') is None:
+                self.data[page_idx]['mask_merge_off'] = None
+            if self.data[page_idx].get('mask_inpaint_off') is None:
+                self.data[page_idx]['mask_inpaint_off'] = old_inpaint_off
+            self.log((
+                f"✅ Text mask re-analysis applied to page {page_idx + 1} (manual mask preserved)"
+                if self.ui_language == LANG_EN
+                else f"✅ {page_idx + 1}페이지 텍스트 마스크 재분석 반영 완료 (재분석 마스크 보존)"
+            ))
+        else:
+            # 일반 분석은 새 OCR 결과를 기준으로 텍스트 마스크를 다시 만드는 작업이다.
+            # 이전 mask_merge/mask_inpaint가 남으면 분석을 반복해도 이전 상태가 섞여 보일 수 있으므로
+            # 텍스트 마스크 계열은 명시적으로 새 결과로 교체한다.
+            self.data[page_idx].update({
+                'ori': o,
+                'data': d,
+                'mask_merge': mm.copy() if isinstance(mm, np.ndarray) else mm,
+                'mask_inpaint': mi.copy() if isinstance(mi, np.ndarray) else mi,
+                'mask_merge_off': None,
+                # OFF 페인팅 마스크는 수동 페인팅 작업물이라 일반 OCR 분석으로 덮지 않는다.
+                'mask_inpaint_off': old_inpaint_off,
+                'mask_toggle_enabled': True,
+            })
+            self.log((
+                f"✅ Analysis applied to page {page_idx + 1} (text mask rebuilt)"
+                if self.ui_language == LANG_EN
+                else f"✅ {page_idx + 1}페이지 분석 결과 반영 완료 (텍스트 마스크 새로 생성)"
+            ))
 
         # 현재 보고 있는 페이지가 작업 완료된 페이지일 때만 화면 갱신
         if page_idx == self.idx:
@@ -8992,6 +10963,12 @@ class MainWindow(QMainWindow):
         self.data[page_idx]['mask_toggle_enabled'] = True
 
         self.auto_save_project()
+
+        # 분석/재분석은 OCR/API 결과가 반영되는 작업 경계다.
+        # 결과 반영 이후에는 이전 편집 Undo로 돌아가면 마스크/텍스트 상태가 꼬일 수 있으므로
+        # 성공적으로 데이터에 적용된 뒤 Undo 체인을 끊는다.
+        self.break_undo_chain("reanalyze" if preserve_text_mask else "analysis")
+        self.end_busy_state("텍스트 마스크 재분석" if preserve_text_mask else "분석")
         self.macro_mark_current_step_done("work_analyze")
 
     def _show_api_missing_and_open_settings(self, category, provider_name, detail_ko=None, detail_en=None):
@@ -9178,6 +11155,7 @@ class MainWindow(QMainWindow):
             provider = self.cb_trans_provider.currentData()
             if not self.check_translation_api_key_or_alert(provider):
                 return
+            self.begin_busy_state("번역")
             chunk_size = self.get_current_translation_chunk_size()
             self.log(
                 f"🌐 번역 엔진: {self.cb_trans_provider.currentText()} / "
@@ -9215,11 +11193,17 @@ class MainWindow(QMainWindow):
             self.log("✅ 번역 완료")
             self.auto_save_project()
 
+            # 번역은 외부/API 결과를 텍스트 라인에 반영하는 작업 경계다.
+            # 성공 반영 후 이전 Undo 스택을 끊어 번역 전 편집 상태로 돌아가지 않게 한다.
+            self.break_undo_chain("translation")
+
         except Exception as e:
             import traceback
             traceback.print_exc()
             self.log(f"❌ 번역 중 에러 발생: {e}")
             QMessageBox.critical(self, self.tr_ui("번역 오류"), f"{self.tr_ui("에러가 발생했습니다:")}\n{e}")
+        finally:
+            self.end_busy_state("번역")
 
     def clip_mask_to_checked_text_boxes(self, mask, data):
         """
@@ -9301,6 +11285,7 @@ class MainWindow(QMainWindow):
             return
 
         self.log(f"🧾 인페인팅 입력: {input_path}")
+        self.begin_busy_state("인페인팅")
         self.iw = InpaintWorker(self.engine, input_path, inpaint_data, inpaint_mask)
         self.iw.log.connect(self.log)
         self.iw.finished.connect(self.inpaint_end)
@@ -9309,6 +11294,7 @@ class MainWindow(QMainWindow):
     def inpaint_end(self, bg):
         if not bg:
             self.log("⚠️ 식질 실패: 결과물이 비어있습니다.")
+            self.end_busy_state("인페인팅")
             self.macro_mark_current_step_done("work_inpaint")
             return
 
@@ -9335,6 +11321,11 @@ class MainWindow(QMainWindow):
 
         self.auto_save_project()
         self.refresh_text_only()
+
+        # 인페인팅은 배경 이미지와 최종 페인팅 레이어 기준을 바꾸는 작업 경계다.
+        # 성공 반영 후 이전 Undo 스택을 끊어 인페인팅 전 상태로 되돌아가지 않게 한다.
+        self.break_undo_chain("inpaint")
+        self.end_busy_state("인페인팅")
         self.macro_mark_current_step_done("work_inpaint")
 
     # =========================================================
@@ -9369,6 +11360,31 @@ class MainWindow(QMainWindow):
                 self.view.scene.removeItem(item)
         self.view.draw_static_boxes(curr.get('data', []))
 
+    def refresh_after_text_line_change(self, autosave=True):
+        """텍스트 라인/ID/체크 상태가 바뀐 뒤 현재 탭 표시를 즉시 갱신한다.
+
+        분석도/텍스트 마스크/페인팅 마스크 탭은 왼쪽 번호 박스가 scene에
+        따로 그려져 있으므로 data의 id만 바꿔서는 화면 번호가 갱신되지 않는다.
+        최종결과 탭은 TypesettingItem을 다시 만들어야 선택/변형 영역까지 맞는다.
+        """
+        try:
+            mode = int(self.cb_mode.currentIndex())
+        except Exception:
+            mode = 0
+
+        if mode in (1, 2, 3):
+            self.refresh_boxes_only()
+        elif mode == 4:
+            old_suppress = getattr(self, "_suppress_mode_undo", False)
+            self._suppress_mode_undo = True
+            try:
+                self.mode_chg(4)
+            finally:
+                self._suppress_mode_undo = old_suppress
+
+        if autosave:
+            self.auto_save_project()
+
     def refresh_text_only(self):
         curr = self.data.get(self.idx)
         if not curr:
@@ -9399,17 +11415,33 @@ class MainWindow(QMainWindow):
         row = item.row()
         col = item.column()
 
-        # 번역/원문 텍스트를 수정하면 즉시 데이터와 최종 화면에 반영한다.
+        # 텍스트 라인 수정은 현재 페이지 data 리스트만 저장하는 경량 Undo로 처리한다.
+        # 비교 기준은 curr_data가 아니라 셀 생성 시 UserRole에 넣어둔 직전 텍스트다.
+        # 이렇게 해야 표 편집/동기화 순서가 꼬여도 수정 전 상태를 안정적으로 잡을 수 있다.
         if row > 0 and col in (2, 3):
             data_index = row - 1
             if 0 <= data_index < len(curr_data['data']):
-                if col == 2:
-                    curr_data['data'][data_index]['text'] = item.text()
-                else:
-                    curr_data['data'][data_index]['translated_text'] = item.text()
-                if self.cb_mode.currentIndex() == 4:
-                    self.mode_chg(4)
-                self.auto_save_project()
+                key = 'text' if col == 2 else 'translated_text'
+                new_text = str(item.text() or '')
+                role_old = item.data(Qt.ItemDataRole.UserRole)
+                old_text = str(role_old if role_old is not None else curr_data['data'][data_index].get(key, '') or '')
+                if new_text != old_text:
+                    self.push_text_line_undo('원문 텍스트 수정' if col == 2 else '번역문 텍스트 수정')
+                    curr_data['data'][data_index][key] = new_text
+                    item.setData(Qt.ItemDataRole.UserRole, new_text)
+                    if col == 3:
+                        try:
+                            self.shrink_text_rect_to_content(curr_data['data'][data_index])
+                        except Exception:
+                            pass
+                    if self.cb_mode.currentIndex() == 4:
+                        old_suppress = getattr(self, "_suppress_mode_undo", False)
+                        self._suppress_mode_undo = True
+                        try:
+                            self.mode_chg(4)
+                        finally:
+                            self._suppress_mode_undo = old_suppress
+                    self.auto_save_project()
             return
 
         if col != 1:
@@ -9455,6 +11487,34 @@ class MainWindow(QMainWindow):
     # 화면 모드 / 페이지 이동 / 출력 / 배치
     # =========================================================
     def mode_chg(self, i):
+        # cb_mode.currentIndexChanged는 콤보박스 값이 이미 바뀐 뒤 들어오므로,
+        # 직전 탭은 cb_mode가 아니라 별도 추적값(_current_work_mode)을 기준으로 잡는다.
+        old_mode_for_undo = int(getattr(self, "_current_work_mode", getattr(self, "last_mode", 0)) or 0)
+        new_mode_for_undo = int(i)
+        # 마스크 토글처럼 "같은 탭을 새 마스크 슬롯으로 다시 그리기" 위한 내부 갱신은
+        # 사용자가 탭을 이동한 작업이 아니므로 Undo 스택에 탭 변경으로 기록하면 안 된다.
+        suppress_mode_undo = bool(
+            getattr(self, "_suppress_mode_undo", False)
+            or getattr(self, "_mask_toggle_refreshing", False)
+        )
+        track_mode_change = (
+            old_mode_for_undo != new_mode_for_undo
+            and not suppress_mode_undo
+            and not getattr(self, "is_loading_project", False)
+            and not getattr(self, "is_page_loading", False)
+            and not getattr(self, "is_batch_running", False)
+            and not getattr(self, "_project_undo_restore_lock", False)
+            and bool(getattr(self, "paths", []))
+        )
+        if track_mode_change:
+            try:
+                self.project_ui_view_states[self.view_state_key(self.idx, old_mode_for_undo)] = self.capture_view_state()
+                rec = self.make_ui_undo_record("작업 탭 변경", self.idx, mode=old_mode_for_undo)
+                rec["view_state"] = copy.deepcopy(self.project_ui_view_states.get(self.view_state_key(self.idx, old_mode_for_undo)) or {})
+                self.append_project_undo_record(rec)
+            except Exception:
+                pass
+
         if getattr(self, "inline_text_editor", None) is not None:
             self.finish_inline_text_edit(commit=True, refresh=False)
 
@@ -9463,6 +11523,7 @@ class MainWindow(QMainWindow):
         if (
             not self.is_page_loading
             and not self.is_batch_running
+            and not getattr(self, "_skip_mode_mask_commit", False)
             and self.last_mode in [2, 3]
         ):
             curr = self.data.get(self.idx)
@@ -9483,6 +11544,19 @@ class MainWindow(QMainWindow):
                 if hasattr(self.view, "get_final_paint_above_png_bytes"):
                     curr['final_paint_above'] = self.view.get_final_paint_above_png_bytes()
                 self.auto_save_project()
+
+        # 사용자가 작업 탭을 바꾸면 브러시/지우개/요술봉/텍스트 입력 같은 도구는
+        # 새 탭에서 그대로 이어지면 오작동하기 쉽다. 탭 이동은 항상 이동 모드로 정리한다.
+        auto_move_on_tab_change = (
+            old_mode_for_undo != new_mode_for_undo
+            and not suppress_mode_undo
+            and not getattr(self, "is_loading_project", False)
+            and not getattr(self, "is_page_loading", False)
+            and not getattr(self, "is_batch_running", False)
+            and not getattr(self, "_project_undo_restore_lock", False)
+        )
+        if auto_move_on_tab_change and getattr(self.view, "draw_mode", None):
+            self.set_tool(None)
 
         preserve_view_state = (not self.is_page_loading) and bool(self.view.scene.items())
         saved_transform = self.view.transform() if preserve_view_state else None
@@ -9510,6 +11584,7 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(80, _restore)
 
         self.last_mode = i
+        self._current_work_mode = i
         self.update_paint_toolbar_visibility()
 
         curr = self.data.get(self.idx)
@@ -9562,25 +11637,40 @@ class MainWindow(QMainWindow):
 
         restore_view_state_later()
 
+        if track_mode_change:
+            try:
+                self.remember_current_view_state()
+                self.auto_save_project()
+            except Exception:
+                pass
+
     def prev(self):
         if not self.paths:
             return
 
         self.commit_current_page_ui_to_data()
+        self.remember_current_view_state()
+        self.push_project_undo('페이지 이동')
         self.auto_save_project()
 
         self.idx = (self.idx - 1) % len(self.paths)
         self.load()
+        self.restore_current_view_state_later()
+        self.auto_save_project()
 
     def next(self):
         if not self.paths:
             return
 
         self.commit_current_page_ui_to_data()
+        self.remember_current_view_state()
+        self.push_project_undo('페이지 이동')
         self.auto_save_project()
 
         self.idx = (self.idx + 1) % len(self.paths)
         self.load()
+        self.restore_current_view_state_later()
+        self.auto_save_project()
 
     def jump_page(self):
         if not self.paths:
@@ -9594,10 +11684,245 @@ class MainWindow(QMainWindow):
             len(self.paths),
         )
         if ok:
+            if num - 1 == self.idx:
+                return
             self.commit_current_page_ui_to_data()
+            self.remember_current_view_state()
+            self.push_project_undo('페이지 이동')
             self.auto_save_project()
             self.idx = num - 1
             self.load()
+            self.restore_current_view_state_later()
+            self.auto_save_project()
+
+    def qt_pixmap_from_image_source(self, img):
+        """출력용 Qt 렌더에 사용할 QPixmap을 만든다.
+        viewer._np2pix와 같은 기준으로 BGR(OpenCV) 이미지를 Qt 화면 색상에 맞춘다.
+        """
+        try:
+            if img is None:
+                return QPixmap()
+
+            if isinstance(img, (bytes, bytearray)):
+                qimg = QImage.fromData(bytes(img))
+                if not qimg.isNull():
+                    return QPixmap.fromImage(qimg)
+                return QPixmap()
+
+            if isinstance(img, str):
+                qimg = QImage(img)
+                if not qimg.isNull():
+                    return QPixmap.fromImage(qimg)
+                # 한글/특수 경로 방어: cv2로 읽어서 다시 넘긴다.
+                try:
+                    arr = np.fromfile(img, np.uint8)
+                    decoded = cv2.imdecode(arr, cv2.IMREAD_UNCHANGED)
+                    if decoded is not None:
+                        return self.qt_pixmap_from_image_source(decoded)
+                except Exception:
+                    pass
+                return QPixmap()
+
+            if isinstance(img, QImage):
+                return QPixmap.fromImage(img)
+
+            if isinstance(img, QPixmap):
+                return img
+
+            if isinstance(img, np.ndarray):
+                if img.ndim == 2:
+                    h, w = img.shape[:2]
+                    qimg = QImage(img.data, w, h, w, QImage.Format.Format_Grayscale8).copy()
+                    return QPixmap.fromImage(qimg)
+
+                if img.ndim == 3:
+                    h, w, c = img.shape
+                    if c == 3:
+                        # OpenCV BGR → Qt RGB. viewer._np2pix와 동일한 처리.
+                        qimg = QImage(img.data, w, h, c * w, QImage.Format.Format_RGB888).rgbSwapped().copy()
+                        return QPixmap.fromImage(qimg)
+                    if c == 4:
+                        # RGBA 계열 페인트 레이어 등은 viewer 기준과 맞춰 그대로 처리한다.
+                        qimg = QImage(img.data, w, h, c * w, QImage.Format.Format_RGBA8888).copy()
+                        return QPixmap.fromImage(qimg)
+        except Exception:
+            pass
+        return QPixmap()
+
+    def render_current_final_scene_to_image_qt(self, result_path):
+        """현재 최종화면에 실제로 떠 있는 QGraphicsScene을 그대로 PNG로 저장한다.
+
+        Result 출력은 화면에서 보이는 최종 결과와 같아야 한다.
+        이전 방식은 data를 기준으로 TypesettingItem을 다시 만들어 렌더했기 때문에,
+        텍스트 편집/영역 재설정/변형 직후의 화면 상태와 몇 픽셀 어긋날 수 있었다.
+        최종화면 탭에서 출력할 때는 현재 scene 자체를 렌더해서 화면 기준을 최우선으로 맞춘다.
+        """
+        try:
+            if not hasattr(self, 'cb_mode') or self.cb_mode.currentIndex() != 4:
+                return False
+            scene = self._safe_graphics_scene()
+            if scene is None:
+                return False
+
+            rect = scene.sceneRect()
+            if rect.isNull() or rect.width() <= 0 or rect.height() <= 0:
+                rect = scene.itemsBoundingRect()
+            if rect.isNull() or rect.width() <= 0 or rect.height() <= 0:
+                return False
+
+            w = max(1, int(round(rect.width())))
+            h = max(1, int(round(rect.height())))
+
+            # 출력 PNG에는 선택 박스/점선/변형 핸들이 찍히면 안 된다.
+            # 현재 scene을 그대로 쓰되, 렌더 순간에만 보조 가이드를 숨긴다.
+            text_items = []
+            old_suppress = []
+            try:
+                for it in scene.items():
+                    if isinstance(it, TypesettingItem):
+                        text_items.append(it)
+                        old_suppress.append(bool(getattr(it, 'suppress_guides', False)))
+                        it.suppress_guides = True
+                        it.update()
+            except RuntimeError:
+                return False
+
+            out = QImage(w, h, QImage.Format.Format_RGB32)
+            out.fill(Qt.GlobalColor.white)
+            painter = QPainter(out)
+            try:
+                try:
+                    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                    painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+                    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+                except Exception:
+                    pass
+                scene.render(painter, QRectF(0, 0, w, h), rect)
+            finally:
+                painter.end()
+                for it, old in zip(text_items, old_suppress):
+                    try:
+                        it.suppress_guides = old
+                        it.update()
+                    except RuntimeError:
+                        pass
+                    except Exception:
+                        pass
+
+            try:
+                os.makedirs(os.path.dirname(result_path), exist_ok=True)
+            except Exception:
+                pass
+            if out.save(result_path, 'PNG'):
+                return True
+
+            try:
+                tmp_path = os.path.join(os.path.dirname(result_path), '__ysb_current_scene_result_tmp.png')
+                if out.save(tmp_path, 'PNG'):
+                    shutil.move(tmp_path, result_path)
+                    return True
+            except Exception:
+                pass
+            return False
+        except Exception as e:
+            try:
+                self.log(f"⚠️ 현재 최종화면 기준 출력 실패: {e}")
+            except Exception:
+                pass
+            return False
+
+    def render_final_result_image_qt(self, result_path, bg_image, paint_above_data=None):
+        """최종 PNG를 Qt 최종화면과 같은 렌더러로 다시 저장한다.
+
+        엔진의 PIL 렌더는 검수용으로 충분하지만, QGraphicsPath 기반 최종화면과
+        폰트 메트릭/기준선이 달라 텍스트 좌표가 몇 픽셀씩 어긋날 수 있다.
+        그래서 Result_XXXX.png는 실제 최종화면과 같은 TypesettingItem을
+        오프스크린 QGraphicsScene에 올려 다시 렌더한다.
+        """
+        curr = self.data.get(self.idx)
+        if not curr:
+            return False
+
+        bg_pix = self.qt_pixmap_from_image_source(bg_image)
+        if bg_pix.isNull() or bg_pix.width() <= 0 or bg_pix.height() <= 0:
+            return False
+
+        scene = QGraphicsScene()
+        bg_item = scene.addPixmap(bg_pix)
+        bg_item.setZValue(0)
+        scene.setSceneRect(QRectF(0, 0, bg_pix.width(), bg_pix.height()))
+
+        visible_items = []
+        for d in curr.get('data', []):
+            if not d.get('use_inpaint', True):
+                continue
+            if not str(d.get('translated_text', '') or '').strip() and not d.get('force_show'):
+                continue
+            visible_items.append(d)
+
+        total_items = len(visible_items)
+        for order_idx, d in enumerate(visible_items):
+            item = TypesettingItem(
+                d,
+                self.cb_font.currentFont().family(),
+                self.sb_font_size.value(),
+                self.sb_strk.value(),
+                None,
+                text_color=self.default_text_color,
+                stroke_color=self.default_stroke_color,
+                align=self.default_align,
+            )
+            # 출력 PNG에는 작업용 점선 박스/선택 박스/변형 핸들을 찍지 않는다.
+            item.suppress_guides = True
+            item.setSelected(False)
+            item.setZValue(30 + (total_items - order_idx))
+            scene.addItem(item)
+
+        if paint_above_data is not None and hasattr(self, "view") and hasattr(self.view, "_paint_qimage_from_data"):
+            try:
+                above_qimg = self.view._paint_qimage_from_data(paint_above_data, bg_pix.width(), bg_pix.height())
+                if not above_qimg.isNull():
+                    above_item = scene.addPixmap(QPixmap.fromImage(above_qimg))
+                    above_item.setZValue(80)
+            except Exception:
+                pass
+
+        out = QImage(bg_pix.width(), bg_pix.height(), QImage.Format.Format_RGB32)
+        out.fill(Qt.GlobalColor.white)
+        painter = QPainter(out)
+        try:
+            try:
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+                painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            except Exception:
+                pass
+            scene.render(
+                painter,
+                QRectF(0, 0, bg_pix.width(), bg_pix.height()),
+                QRectF(0, 0, bg_pix.width(), bg_pix.height()),
+            )
+        finally:
+            painter.end()
+            scene.clear()
+
+        try:
+            os.makedirs(os.path.dirname(result_path), exist_ok=True)
+        except Exception:
+            pass
+
+        if out.save(result_path, "PNG"):
+            return True
+
+        # 일부 환경에서 한글 경로 저장이 실패할 때를 대비한 임시 파일 우회.
+        try:
+            tmp_path = os.path.join(os.path.dirname(result_path), "__ysb_qt_result_tmp.png")
+            if out.save(tmp_path, "PNG"):
+                shutil.move(tmp_path, result_path)
+                return True
+        except Exception:
+            pass
+        return False
 
     def export_result(self):
         curr = self.data.get(self.idx)
@@ -9623,8 +11948,24 @@ class MainWindow(QMainWindow):
         p = self.engine.export_project_result(curr['data'], self.paths[self.idx], export_bg, self.cb_font.currentFont().family(), self.sb_strk.value(), self.sb_font_size.value(), output_root=self.get_output_root())
         result_path = os.path.join(self.get_output_root(), "Result", f"Result_{Path(self.paths[self.idx]).stem}.png")
 
+        # Result PNG는 포토샵 스크립트용 엔진 렌더(PIL)가 아니라 Qt 렌더로 다시 저장한다.
+        # 최종화면 탭에서 출력하는 경우에는 data로 다시 조립하지 않고,
+        # 현재 화면에 실제로 떠 있는 QGraphicsScene을 그대로 렌더한다.
+        # 이렇게 해야 글꼴/영역 재설정/변형 직후의 화면과 출력 PNG가 1:1에 가깝게 맞는다.
+        qt_result_rendered = False
+        if self.cb_mode.currentIndex() == 4:
+            qt_result_rendered = self.render_current_final_scene_to_image_qt(result_path)
+            if qt_result_rendered:
+                self.log("🖼️ 현재 최종화면 기준으로 최종 이미지 재저장")
+
+        if not qt_result_rendered:
+            qt_result_rendered = self.render_final_result_image_qt(result_path, export_bg, curr.get('final_paint_above'))
+            if qt_result_rendered:
+                self.log("🖼️ 최종 이미지 Qt 재구성 렌더 기준으로 재저장")
+
         # 텍스트 위 페인팅 레이어는 텍스트 렌더링 이후 최종 PNG 위에 다시 합성한다.
-        if curr.get('final_paint_above') and os.path.exists(result_path):
+        # 단, Qt 렌더가 성공한 경우에는 위 페인팅까지 함께 렌더했으므로 중복 합성하지 않는다.
+        if curr.get('final_paint_above') and (not qt_result_rendered) and os.path.exists(result_path):
             try:
                 result_img = cv2.imdecode(np.fromfile(result_path, np.uint8), cv2.IMREAD_COLOR)
                 if result_img is not None:
@@ -9697,6 +12038,7 @@ class MainWindow(QMainWindow):
 
         self.is_batch_running = True
         self.current_batch_mode = mode
+        self.begin_busy_state(title)
         self.set_project_action_interlock(True)
 
         self.bw = UniversalBatchWorker(self, mode)
@@ -9751,6 +12093,9 @@ class MainWindow(QMainWindow):
 
         # ON 강제 조건 3: 일괄 분석으로 결과가 들어온 페이지는 분석 마스크 사용 상태로 저장한다.
         if getattr(self, "current_batch_mode", None) == "analyze":
+            # 일반 일괄 분석도 개별 분석과 동일하게 이전 텍스트 마스크를 누적하지 않는다.
+            # worker payload의 mask_merge / mask_inpaint가 새 기준이며, 이전 보조 텍스트 마스크는 비운다.
+            self.data[i]['mask_merge_off'] = None
             self.data[i]['mask_toggle_enabled'] = True
 
     def on_batch_finished(self, mode):
@@ -9783,7 +12128,23 @@ class MainWindow(QMainWindow):
             else:
                 self.mode_chg(4)
 
+        # 일괄 분석/번역/인페인팅은 여러 페이지에 외부/API 결과를 반영하는 작업 경계다.
+        # 성공적으로 전체 흐름이 끝난 뒤 이전 Undo 스택을 끊는다.
+        batch_boundary_kind = {
+            "analyze": "batch_analysis",
+            "translate": "batch_translation",
+            "inpaint": "batch_inpaint",
+        }.get(mode)
+        if batch_boundary_kind:
+            self.break_undo_chain(batch_boundary_kind)
+
         self.current_batch_mode = None
+        self.end_busy_state({
+            "analyze": "일괄 분석",
+            "translate": "일괄 번역",
+            "inpaint": "일괄 인페인팅",
+            "export": "일괄 출력",
+        }.get(mode, "일괄 작업"))
         self.macro_mark_current_step_done(self.macro_batch_key_for_mode(mode))
 
     def _event_matches_shortcut(self, event, key_name):
@@ -9830,9 +12191,19 @@ class MainWindow(QMainWindow):
                 event.accept()
                 return
 
-        # 텍스트 편집 중에는 텍스트 입력 전용 단축키가 우선이다.
+        # 텍스트 편집 중에도 Ctrl+Z는 YSB 전역 Undo로 처리한다.
+        # 일반 글자 입력/복사/붙여넣기 등은 기존 편집기 동작을 우선한다.
         fw = QApplication.focusWidget()
         if isinstance(fw, (QTextEdit, QLineEdit)):
+            mods_for_edit = event.modifiers()
+            if (mods_for_edit & Qt.KeyboardModifier.ControlModifier) and key == Qt.Key.Key_Z:
+                self.handle_global_undo_shortcut()
+                event.accept()
+                return
+            if (mods_for_edit & Qt.KeyboardModifier.ControlModifier) and key == Qt.Key.Key_Y:
+                self.handle_general_redo()
+                event.accept()
+                return
             super().keyPressEvent(event)
             return
 
@@ -9917,7 +12288,7 @@ class MainWindow(QMainWindow):
             "paint_magic_tolerance_inc", "paint_magic_tolerance_dec",
             "paint_magic_expand_inc", "paint_magic_expand_dec",
             "paint_brush", "paint_erase", "paint_move",
-            "paint_zoom_out", "paint_zoom_in", "paint_reanalyze", "paint_undo",
+            "paint_zoom_out", "paint_zoom_in", "paint_reanalyze", "paint_undo", "paint_redo",
             "final_paint_color", "final_paint_to_background", "final_text_tool",
             "final_paint_above_toggle", "final_paint_opacity_inc", "final_paint_opacity_dec",
         ]
@@ -9964,12 +12335,14 @@ class MainWindow(QMainWindow):
                     self.apply_style_to_selected(font_family=font.family())
                 return
             if self._event_matches_shortcut(event, "item_font_inc"):
+                self.push_page_text_undo('텍스트 글자 크기 증가')
                 for item in self.selected_text_items():
                     item.data['font_size'] = int(item.data.get('font_size', self.sb_font_size.value()) or self.sb_font_size.value()) + 1
                 ids = [item.data.get('id') for item in self.selected_text_items()]
                 self.mode_chg(4); self.reselect_text_items(ids); self.auto_save_project()
                 return
             if self._event_matches_shortcut(event, "item_font_dec"):
+                self.push_page_text_undo('텍스트 글자 크기 감소')
                 for item in self.selected_text_items():
                     item.data['font_size'] = max(1, int(item.data.get('font_size', self.sb_font_size.value()) or self.sb_font_size.value()) - 1)
                 ids = [item.data.get('id') for item in self.selected_text_items()]
@@ -9985,12 +12358,14 @@ class MainWindow(QMainWindow):
                 self.apply_style_to_selected(align="right")
                 return
             if self._event_matches_shortcut(event, "item_stroke_inc"):
+                self.push_page_text_undo('텍스트 획 증가')
                 for item in self.selected_text_items():
                     item.data['stroke_width'] = int(item.data.get('stroke_width', self.sb_strk.value()) or 0) + 1
                 ids = [item.data.get('id') for item in self.selected_text_items()]
                 self.mode_chg(4); self.reselect_text_items(ids); self.auto_save_project()
                 return
             if self._event_matches_shortcut(event, "item_stroke_dec"):
+                self.push_page_text_undo('텍스트 획 감소')
                 for item in self.selected_text_items():
                     item.data['stroke_width'] = max(0, int(item.data.get('stroke_width', self.sb_strk.value()) or 0) - 1)
                 ids = [item.data.get('id') for item in self.selected_text_items()]
@@ -10046,20 +12421,40 @@ class MainWindow(QMainWindow):
         if self._event_matches_shortcut(event, "paint_undo"):
             self.handle_general_undo()
             return
+        if self._event_matches_shortcut(event, "paint_redo"):
+            self.handle_general_redo()
+            return
 
         super().keyPressEvent(event)
 
 
+_handling_fatal_exception = False
+
 def exception_hook(exctype, value, traceback):
+    global _handling_fatal_exception
     import traceback as tb
     error_msg = "".join(tb.format_exception(exctype, value, traceback))
     print(error_msg)
-    msg_box = QMessageBox()
-    msg_box.setIcon(QMessageBox.Icon.Critical)
-    msg_box.setText("치명적인 오류 발생!")
-    msg_box.setInformativeText(str(value))
-    msg_box.setDetailedText(error_msg)
-    msg_box.exec()
+
+    # 예외 표시 중 Qt 이벤트가 다시 들어와 같은 예외를 반복 발생시키면
+    # CMD에 무한히 쌓이고 프로그램 종료가 늦어진다. 한 번만 다이얼로그를 띄운다.
+    if _handling_fatal_exception:
+        try:
+            sys.__stderr__.write(error_msg + "\n")
+        except Exception:
+            pass
+        sys.exit(1)
+
+    _handling_fatal_exception = True
+    try:
+        msg_box = QMessageBox()
+        msg_box.setIcon(QMessageBox.Icon.Critical)
+        msg_box.setText("치명적인 오류 발생!")
+        msg_box.setInformativeText(str(value))
+        msg_box.setDetailedText(error_msg)
+        msg_box.exec()
+    except Exception:
+        pass
     sys.exit(1)
 
 

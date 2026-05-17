@@ -2,14 +2,14 @@
 setlocal EnableExtensions
 cd /d "%~dp0"
 
-title YSB Tool v1.6 EXE Build
+title YSB Tool v1.7.0 EXE Build
 
 rem ==========================================================
-rem YSB Tool v1.6 onefile build BAT
+rem YSB Tool v1.7.0 onefile build BAT
 rem Saved as CP949/ANSI without UTF-8 BOM.
 rem ==========================================================
 
-set "APP_NAME=역식붕이 툴 v1.6"
+set "APP_NAME=역식붕이 툴 v1.7.0"
 
 rem 0 = no PyInstaller boot splash [recommended]
 rem 1 = use PyInstaller boot splash
@@ -23,7 +23,7 @@ set "SPLASH_FILE=ysb_splash.png"
 set "BOOT_SPLASH_FILE=ysb_splash_boot.png"
 
 echo ==========================================
-echo  YSB Tool v1.6 onefile EXE build
+echo  YSB Tool v1.7.0 onefile EXE build
 echo ==========================================
 echo.
 echo APP_NAME=%APP_NAME%

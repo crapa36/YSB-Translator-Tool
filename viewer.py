@@ -32,6 +32,9 @@ class MuleImageViewer(QGraphicsView):
         self.magic_preview_items = []
         self.paste_preview_items = []
         self._active_transform_item = None
+        self._view_pan_undo_key = None
+        self._view_pan_start_state = None
+        self._paint_undo_key = None
 
     def _active_transform_item_obj(self):
         active = self.main.current_transform_data_item() if hasattr(self.main, 'current_transform_data_item') else None
@@ -73,9 +76,41 @@ class MuleImageViewer(QGraphicsView):
             return Qt.CursorShape.SizeBDiagCursor
         return Qt.CursorShape.ArrowCursor
 
+    def _begin_view_pan_undo(self):
+        try:
+            if getattr(self, "draw_mode", None) is not None:
+                return
+            if self._view_pan_undo_key:
+                return
+            key = f"view_pan_{id(self)}"
+            self._view_pan_start_state = self.main.capture_view_state() if hasattr(self.main, "capture_view_state") else None
+            if hasattr(self.main, "begin_deferred_project_undo"):
+                self.main.begin_deferred_project_undo(key, "화면 이동")
+            self._view_pan_undo_key = key
+        except Exception:
+            self._view_pan_undo_key = None
+            self._view_pan_start_state = None
+
+    def _finish_view_pan_undo(self):
+        key = self._view_pan_undo_key
+        if not key:
+            return
+        self._view_pan_undo_key = None
+        try:
+            now = self.main.capture_view_state() if hasattr(self.main, "capture_view_state") else None
+            changed = bool(now and self._view_pan_start_state and now != self._view_pan_start_state)
+            if hasattr(self.main, "finish_deferred_project_undo"):
+                self.main.finish_deferred_project_undo(key, changed=changed, autosave=changed)
+            if changed and hasattr(self.main, "remember_current_view_state"):
+                self.main.remember_current_view_state()
+        finally:
+            self._view_pan_start_state = None
+
     def undo(self):
         if not self.history:
             self.main.log("⚠️ 실행 취소할 내역이 없습니다.")
+            if hasattr(self.main, "update_undo_redo_buttons"):
+                self.main.update_undo_redo_buttons()
             return
 
         record = self.history.pop()
@@ -94,6 +129,8 @@ class MuleImageViewer(QGraphicsView):
                     self.final_paint_img = last_pixmap.toImage()
                 self.main.log("↩️ 최종 페인팅 실행 취소됨")
                 self.main.on_final_paint_edited()
+                if hasattr(self.main, "update_undo_redo_buttons"):
+                    self.main.update_undo_redo_buttons()
                 return
 
         if target_item is not None:
@@ -102,6 +139,8 @@ class MuleImageViewer(QGraphicsView):
                 self.user_mask_img = last_pixmap.toImage()
                 self.main.log("↩️ 실행 취소됨")
                 self.main.on_view_mask_edited()
+                if hasattr(self.main, "update_undo_redo_buttons"):
+                    self.main.update_undo_redo_buttons()
             return
 
         if self.user_mask_item:
@@ -109,6 +148,8 @@ class MuleImageViewer(QGraphicsView):
             self.user_mask_item.setPixmap(last_pixmap)
             self.main.log("↩️ 실행 취소됨")
             self.main.on_view_mask_edited()
+            if hasattr(self.main, "update_undo_redo_buttons"):
+                self.main.update_undo_redo_buttons()
 
 
     def set_image(self, img, fit=True):
@@ -121,6 +162,8 @@ class MuleImageViewer(QGraphicsView):
         self.magic_preview_items = []
         self.clear_paste_preview()
         self.history.clear()
+        if hasattr(self.main, "update_undo_redo_buttons"):
+            self.main.update_undo_redo_buttons()
         if img is None:
             return
 
@@ -697,9 +740,20 @@ class MuleImageViewer(QGraphicsView):
                 target_item = self.user_mask_item
 
             if target_item:
+                try:
+                    self._paint_undo_key = f"paint_{id(self)}"
+                    reason = "최종 페인팅" if final_mode else "마스크 브러시"
+                    if hasattr(self.main, "begin_deferred_project_undo"):
+                        self.main.begin_deferred_project_undo(self._paint_undo_key, reason)
+                except Exception:
+                    self._paint_undo_key = None
                 self.history.append((target_item, target_item.pixmap().copy()))
                 if len(self.history) > 20:
                     self.history.pop(0)
+                if hasattr(self.main, "project_redo_stack"):
+                    self.main.project_redo_stack = []
+                if hasattr(self.main, "update_undo_redo_buttons"):
+                    self.main.update_undo_redo_buttons()
             self.last_pt = self.mapToScene(e.pos())
             return
         elif (
@@ -712,6 +766,7 @@ class MuleImageViewer(QGraphicsView):
             clicked = self.itemAt(e.pos())
             if not isinstance(clicked, TypesettingItem):
                 selected = [x for x in self.scene.selectedItems() if isinstance(x, TypesettingItem)]
+                self._begin_view_pan_undo()
                 self.scene.blockSignals(True)
                 try:
                     super().mousePressEvent(e)
@@ -723,6 +778,8 @@ class MuleImageViewer(QGraphicsView):
                     self.main.on_scene_selection_changed()
                 return
 
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._begin_view_pan_undo()
         super().mousePressEvent(e)
 
 
@@ -821,13 +878,30 @@ class MuleImageViewer(QGraphicsView):
                 self.main.on_final_paint_edited()
             elif self.user_mask_item:
                 self.main.on_view_mask_edited()
+            if self._paint_undo_key and hasattr(self.main, "finish_deferred_project_undo"):
+                self.main.finish_deferred_project_undo(self._paint_undo_key, force=True, autosave=False)
+            self._paint_undo_key = None
 
         super().mouseReleaseEvent(e)
+        self._finish_view_pan_undo()
         
 
     def wheelEvent(self, e):
         if e.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            try:
+                if hasattr(self.main, "push_project_undo"):
+                    self.main.push_project_undo("화면 확대/축소")
+            except Exception:
+                pass
             factor = 1.25 if e.angleDelta().y() > 0 else 0.8
             self.scale(factor, factor)
+            try:
+                if hasattr(self.main, "remember_current_view_state"):
+                    self.main.remember_current_view_state()
+                if hasattr(self.main, "auto_save_project"):
+                    self.main.auto_save_project()
+            except Exception:
+                pass
+            e.accept()
         else:
             super().wheelEvent(e)
