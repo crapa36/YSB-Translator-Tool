@@ -68,171 +68,161 @@ def resolve_ui_theme(widget=None):
 
 
 def shortcut_dialog_qss(theme=THEME_DARK):
+    """단축키/매크로/프리셋 계열 창 공통 몽글 카드 스타일."""
     if str(theme).lower() == THEME_LIGHT:
         return """
-            QDialog, QWidget {
-                background-color: #f6f7f9;
-                color: #202124;
-            }
-            QLabel {
-                color: #202124;
-            }
+            QDialog, QWidget { background-color:#f4f6fa; color:#22252b; }
+            QLabel { color:#22252b; }
             QTabWidget::pane {
-                border: 1px solid #d5d8df;
-                background: #f6f7f9;
-                top: -1px;
+                border:1px solid #dfe5ef;
+                border-radius:0px;
+                background:#ffffff;
+                top:-1px;
             }
             QTabBar::tab {
-                background: #eef1f6;
-                color: #202124;
-                border: 1px solid #d5d8df;
-                border-bottom: none;
-                padding: 7px 14px;
-                min-width: 100px;
+                background:#edf1f7;
+                color:#4b5563;
+                border:1px solid #d9e0ea;
+                border-bottom:none;
+                border-top-left-radius:10px;
+                border-top-right-radius:10px;
+                padding:4px 10px;
+                min-width:100px;
             }
-            QTabBar::tab:selected {
-                background: #ffffff;
-                color: #111111;
-                font-weight: bold;
+            QTabBar::tab:selected { background:#ffffff; color:#1f232b; font-weight:700; }
+            QTabBar::tab:!selected { background:#edf1f7; color:#667085; }
+            QTabBar::tab:hover { background:#edf4ff; color:#111827; }
+            QScrollArea, QListWidget, QTableWidget, QTreeWidget {
+                background:#ffffff;
+                color:#22252b;
+                border:1px solid #dfe5ef;
+                border-radius:0px;
+                alternate-background-color:#f7f9fd;
+                selection-background-color:#dbeafe;
+                selection-color:#111827;
             }
-            QTabBar::tab:!selected {
-                background: #eef1f6;
-                color: #404651;
+            QLineEdit, QTextEdit, QPlainTextEdit, QKeySequenceEdit, QComboBox, QSpinBox, QDoubleSpinBox {
+                background-color:#ffffff;
+                color:#22252b;
+                border:1px solid #cfd7e5;
+                border-radius:0px;
+                padding:3px 6px;
+                selection-background-color:#dbeafe;
+                selection-color:#111827;
             }
-            QTabBar::tab:hover {
-                background: #e4f0ff;
-                color: #000000;
+            QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QKeySequenceEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {
+                border:1px solid #8fb4e8;
             }
-            QScrollArea, QListWidget {
-                background: #ffffff;
-                color: #202124;
-                border: 1px solid #c8ccd5;
+QCheckBox, QRadioButton { color:#22252b; spacing:9px; }
+            QCheckBox::indicator, QRadioButton::indicator {
+                width:15px; height:15px;
+                border:1px solid #aab4c3;
+                background:#ffffff;
+                border-radius:0px;
             }
-            QLineEdit, QTextEdit, QPlainTextEdit, QKeySequenceEdit {
-                background-color: #ffffff;
-                color: #202124;
-                border: 1px solid #b8bdc8;
-                padding: 3px;
-                selection-background-color: #b8d7ff;
-                selection-color: #000000;
-            }
-            QCheckBox {
-                color: #202124;
-                spacing: 6px;
-            }
-            QCheckBox::indicator {
-                width: 15px;
-                height: 15px;
-                border: 1px solid #8d96a4;
-                background: #ffffff;
-            }
-            QCheckBox::indicator:checked {
-                background: #4b8de8;
-            }
+            QRadioButton::indicator { border-radius:0px; }
+            QCheckBox::indicator:checked, QRadioButton::indicator:checked { background:#7aa8e8; border:1px solid #7aa8e8; }
             QPushButton {
-                background-color: #ffffff;
-                color: #202124;
-                border: 1px solid #aeb4bf;
-                padding: 5px 10px;
+                background-color:#f8fafc;
+                color:#22252b;
+                border:1px solid #cfd7e5;
+                border-radius:0px;
+                padding:4px 10px;
             }
-            QPushButton:hover {
-                background-color: #e9eef7;
-            }
-            QDialogButtonBox QPushButton {
-                min-width: 58px;
-            }
+            QPushButton:hover { background-color:#edf4ff; border-color:#aac4e8; }
+            QPushButton:pressed { background-color:#e3edf9; }
+            QDialogButtonBox QPushButton { min-width:64px; }
+            QScrollBar:vertical { background:#eef2f8; width:12px; margin:0; border:0; border-radius:0px; }
+            QScrollBar::handle:vertical { background:#cbd5e1; min-height:30px; border-radius:0px; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }
+            QToolTip { background:#ffffff; color:#111827; border:1px solid #cfd7e5; border-radius:0px; padding:5px; }
         """
     return """
-        QDialog, QWidget {
-            background-color: #1f1f22;
-            color: #f2f2f2;
-        }
-        QLabel {
-            color: #f2f2f2;
-        }
+        QDialog, QWidget { background-color:#202226; color:#f2f4f8; }
+        QLabel { color:#f2f4f8; }
         QTabWidget::pane {
-            border: 1px solid #5a5d66;
-            background: #1f1f22;
-            top: -1px;
+            border:1px solid #3b414c;
+            border-radius:0px;
+            background:#24282f;
+            top:-1px;
         }
         QTabBar::tab {
-            background: #2d3038;
-            color: #f2f2f2;
-            border: 1px solid #5a5d66;
-            border-bottom: none;
-            padding: 7px 14px;
-            min-width: 100px;
+            background:#2a2e36;
+            color:#b5bfce;
+            border:1px solid #3b414c;
+            border-bottom:none;
+            border-top-left-radius:10px;
+            border-top-right-radius:10px;
+            padding:4px 10px;
+            min-width:100px;
         }
-        QTabBar::tab:selected {
-            background: #3d414d;
-            color: #ffffff;
-            font-weight: bold;
+        QTabBar::tab:selected { background:#333842; color:#ffffff; font-weight:700; }
+        QTabBar::tab:!selected { background:#2a2e36; color:#b5bfce; }
+        QTabBar::tab:hover { background:#38404c; color:#ffffff; }
+        QScrollArea, QListWidget, QTableWidget, QTreeWidget {
+            background:#24282f;
+            color:#f2f4f8;
+            border:1px solid #3b414c;
+            border-radius:0px;
+            alternate-background-color:#282d35;
+            selection-background-color:#3d587d;
+            selection-color:#ffffff;
         }
-        QTabBar::tab:!selected {
-            background: #25272d;
-            color: #bfc3cc;
+        QLineEdit, QTextEdit, QPlainTextEdit, QKeySequenceEdit, QComboBox, QSpinBox, QDoubleSpinBox {
+            background-color:#1f2228;
+            color:#f5f7fb;
+            border:1px solid #434a56;
+            border-radius:0px;
+            padding:3px 6px;
+            selection-background-color:#4c6f9f;
+            selection-color:#ffffff;
         }
-        QTabBar::tab:hover {
-            background: #464b58;
-            color: #ffffff;
+        QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QKeySequenceEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {
+            border:1px solid #7ea2d6;
+            background:#222630;
         }
-        QScrollArea, QListWidget {
-            background: #1f1f22;
-            color: #f2f2f2;
-            border: 1px solid #5a5d66;
+QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
+        QCheckBox::indicator, QRadioButton::indicator {
+            width:15px; height:15px;
+            border:1px solid #6f7786;
+            background:#1f2228;
+            border-radius:0px;
         }
-        QLineEdit, QTextEdit, QPlainTextEdit, QKeySequenceEdit {
-            background-color: #2d2f34;
-            color: #f5f5f5;
-            border: 1px solid #53565f;
-            padding: 3px;
-            selection-background-color: #4b79ff;
-            selection-color: #ffffff;
-        }
-        QCheckBox {
-            color: #f2f2f2;
-            spacing: 6px;
-        }
-        QCheckBox::indicator {
-            width: 15px;
-            height: 15px;
-            border: 1px solid #72757f;
-            background: #2d2f34;
-        }
-        QCheckBox::indicator:checked {
-            background: #5da9ff;
-        }
+        QRadioButton::indicator { border-radius:0px; }
+        QCheckBox::indicator:checked, QRadioButton::indicator:checked { background:#78a6e6; border:1px solid #78a6e6; }
         QPushButton {
-            background-color: #353841;
-            color: #f2f2f2;
-            border: 1px solid #5a5d66;
-            padding: 5px 10px;
+            background-color:#333843;
+            color:#f2f4f8;
+            border:1px solid #555d6c;
+            border-radius:0px;
+            padding:4px 10px;
         }
-        QPushButton:hover {
-            background-color: #424652;
-        }
-        QDialogButtonBox QPushButton {
-            min-width: 58px;
-        }
+        QPushButton:hover { background-color:#3d4654; border-color:#718098; }
+        QPushButton:pressed { background-color:#2b303a; }
+        QDialogButtonBox QPushButton { min-width:64px; }
+        QScrollBar:vertical { background:#20242b; width:12px; margin:0; border:0; border-radius:0px; }
+        QScrollBar::handle:vertical { background:#424a57; min-height:30px; border-radius:0px; }
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }
+        QToolTip { background:#1f2430; color:#ffffff; border:1px solid #4b5563; border-radius:0px; padding:5px; }
     """
 
 
 def disabled_key_edit_qss(theme=THEME_DARK):
     if str(theme).lower() == THEME_LIGHT:
-        return "QKeySequenceEdit { background:#fff1f1; color:#8a8f99; border:1px solid #e1b7b7; }"
-    return "QKeySequenceEdit { background:#4a2f2f; color:#bdbdbd; border:1px solid #8a5555; }"
+        return "QKeySequenceEdit { background:#f4f1f1; color:#8a8f99; border:1px solid #dccaca; border-radius:0px; padding:3px 6px; }"
+    return "QKeySequenceEdit { background:#342c2f; color:#aeb4bf; border:1px solid #5b464b; border-radius:0px; padding:3px 6px; }"
 
 
 def disabled_line_edit_qss(theme=THEME_DARK):
     if str(theme).lower() == THEME_LIGHT:
-        return "QLineEdit { background:#fff1f1; color:#8a8f99; border:1px solid #e1b7b7; }"
-    return "QLineEdit { background:#3b3030; color:#bdbdbd; border:1px solid #6a4a4a; }"
+        return "QLineEdit { background:#f4f1f1; color:#8a8f99; border:1px solid #dccaca; border-radius:0px; padding:3px 6px; }"
+    return "QLineEdit { background:#342c2f; color:#aeb4bf; border:1px solid #5b464b; border-radius:0px; padding:3px 6px; }"
 
 
 def disabled_button_qss(theme=THEME_DARK):
     if str(theme).lower() == THEME_LIGHT:
-        return "QPushButton { background:#fff1f1; color:#8a8f99; border:1px solid #e1b7b7; }"
-    return "QPushButton { background:#3b3030; color:#bdbdbd; border:1px solid #6a4a4a; }"
+        return "QPushButton { background:#f4f1f1; color:#8a8f99; border:1px solid #dccaca; border-radius:0px; padding:4px 10px; }"
+    return "QPushButton { background:#342c2f; color:#aeb4bf; border:1px solid #5b464b; border-radius:0px; padding:4px 10px; }"
 
 TEXT_SYMBOLS = {
     "ellipsis": ("말줄임표(…)", "…"),
@@ -264,6 +254,9 @@ DEFAULT_SHORTCUTS = {
     "paint_magic_expand_inc": "Ctrl+Shift+'",
     "paint_magic_expand_dec": "Ctrl+Shift+;",
     "paint_magic_fill": "Alt+D",
+    "paint_mask_wrap": "W",
+    "paint_mask_wrap_rect": "R",
+    "paint_mask_wrap_free": "F",
     "paint_mask_toggle": "Ctrl+M",
     "final_paint_color": "C",
     "final_paint_to_background": "Alt+P",
@@ -273,6 +266,8 @@ DEFAULT_SHORTCUTS = {
     "final_paint_opacity_dec": "Alt+A",
 
     # 1-2. 글꼴 상세 옵션
+    "text_font_size": "Ctrl+Alt+A",
+    "text_stroke_size": "Ctrl+Alt+S",
     "text_line_spacing": "Ctrl+Alt+Q",
     "text_letter_spacing": "Ctrl+Alt+W",
     "text_char_width": "Ctrl+Alt+E",
@@ -299,11 +294,14 @@ DEFAULT_SHORTCUTS = {
     "project_new": "Ctrl+N",
     "project_open": "Ctrl+O",
     "project_open_json": "Ctrl+Alt+O",
+    "project_show_launcher": "Ctrl+Alt+Home",
     "project_save": "Ctrl+S",
     "project_save_as": "Ctrl+Shift+S",
     "project_recover_last_work": "Ctrl+Alt+Shift+B",
 
-    # 3-2. 옵션
+    # 3-2. 설정 / 옵션
+    "option_settings_overview": "Ctrl+Alt+S",
+
     "option_auto_save_mode": "Ctrl+Alt+1",
     "option_theme_settings": "Ctrl+Alt+Shift+F9",
     "option_language_settings": "Ctrl+Alt+Shift+L",
@@ -314,15 +312,24 @@ DEFAULT_SHORTCUTS = {
     "option_item_text_preset_settings": "Ctrl+Alt+6",
     "option_translation_prompt": "Ctrl+Alt+7",
     "option_glossary": "Ctrl+Alt+8",
+    "option_analysis_mask_settings": "Ctrl+Alt+Shift+M",
     "option_workspace_location": "Ctrl+Alt+9",
     "option_cleanup_temp_files": "Ctrl+Alt+Shift+D",
     "option_register_ysb": "Ctrl+Alt+0",
     "option_unregister_ysbt": "Ctrl+Alt+Shift+0",
 
+    # 3-3. 클라우드
+    "cloud_register": "Ctrl+Alt+Shift+1",
+    "cloud_unregister": "Ctrl+Alt+Shift+2",
+    "cloud_cache_backup": "Ctrl+Alt+Shift+3",
+    "cloud_cache_restore": "Ctrl+Alt+Shift+4",
+    "cloud_project_backup": "Ctrl+Alt+Shift+5",
+
     # 4. 작업 옵션
     "work_tab_cycle": "Tab",
     "work_page_prev": "Alt+Left",
     "work_page_next": "Alt+Right",
+    "work_open_current_project_folder": "Ctrl+Alt+Shift+F",
     "work_analyze": "Ctrl+F5",
     "work_text_number_width": "Ctrl+Shift+W",
     "work_translate": "Ctrl+F6",
@@ -384,6 +391,9 @@ GROUPS = [
         ("paint_magic_expand_inc", "요술봉 확장범위 증가"),
         ("paint_magic_expand_dec", "요술봉 확장범위 감소"),
         ("paint_magic_fill", "마스킹 칠하기"),
+        ("paint_mask_wrap", "마스크 랩핑"),
+        ("paint_mask_wrap_rect", "마스크 랩핑 사각형"),
+        ("paint_mask_wrap_free", "마스크 랩핑 자유형"),
         ("paint_mask_toggle", "페인팅 마스크 ON/OFF"),
         ("final_paint_color", "최종 페인팅 색상"),
         ("final_paint_to_background", "최종 페인팅을 배경으로 반영"),
@@ -391,6 +401,17 @@ GROUPS = [
         ("final_paint_above_toggle", "텍스트 위 페인팅 ON/OFF"),
         ("final_paint_opacity_inc", "최종 브러시 불투명도 증가"),
         ("final_paint_opacity_dec", "최종 브러시 불투명도 감소"),
+    ]),
+    ("글꼴 상세 옵션", [
+        ("text_font_size", "글꼴 크기"),
+        ("text_stroke_size", "획 크기"),
+        ("text_line_spacing", "행간"),
+        ("text_letter_spacing", "자간"),
+        ("text_char_width", "너비"),
+        ("text_char_height", "높이"),
+        ("text_bold_toggle", "굵게"),
+        ("text_italic_toggle", "기울이기"),
+        ("text_strike_toggle", "취소선"),
     ]),
     ("텍스트 입력 옵션", [
         ("text_linebreak", "줄내림"),
@@ -406,24 +427,34 @@ GROUPS = [
         ("text_middle_dot", "가운뎃점(·)"),
     ]),
     ("프로젝트 옵션", [
-        ("project_new", "새 프로젝트"),
-        ("project_open", "프로젝트 열기"),
-        ("project_open_json", "JSON 파일로 열기"),
-        ("project_save", "프로젝트 저장"),
-        ("project_save_as", "다른 이름으로 저장"),
-        ("project_recover_last_work", "마지막 작업 복구"),
+        ("project_new", "새로 만들기"),
+        ("project_open", "열기"),
+        ("project_open_json", "JSON으로 열기"),
+        ("project_save", "저장하기"),
+        ("project_save_as", "다른 이름으로 저장하기"),
+        ("project_recover_last_work", "복구하기"),
+        ("project_show_launcher", "홈화면으로 가기"),
+        ("option_settings_overview", "설정 / 옵션"),
     ]),
-    ("옵션", [
+    ("클라우드", [
+        ("cloud_register", "클라우드 등록"),
+        ("cloud_unregister", "클라우드 등록 해제"),
+        ("cloud_cache_backup", "클라우드로 캐시 백업"),
+        ("cloud_cache_restore", "클라우드에서 캐시 불러오기"),
+        ("cloud_project_backup", "현재 프로젝트 클라우드에 백업하기"),
+    ]),
+    ("설정 / 옵션", [
         ("option_auto_save_mode", "자동저장 모드"),
         ("option_theme_settings", "테마 설정"),
         ("option_language_settings", "언어 설정"),
         ("option_api_settings", "API 관리"),
         ("option_translation_prompt", "번역 프롬프트 입력"),
         ("option_glossary", "단어장"),
+        ("option_analysis_mask_settings", "분석 마스크 확장 비율"),
         ("option_workspace_location", "작업 폴더 위치 변경"),
         ("option_cleanup_temp_files", "임시 파일 관리"),
         ("option_register_ysb", ".ysbt 확장자 연결 등록"),
-        ("option_unregister_ysbt", ".ysbt/.ysb 확장자 연결 해제"),
+        ("option_unregister_ysbt", ".ysbt 확장자 연결 해제"),
         ("option_shortcut_settings", "단축키 통합 관리"),
         ("option_macro_settings", "매크로 관리"),
         ("option_text_preset_settings", "페이지 글꼴 프리셋 관리"),
@@ -433,6 +464,7 @@ GROUPS = [
         ("work_tab_cycle", "작업탭 변경"),
         ("work_page_prev", "이전 페이지"),
         ("work_page_next", "다음 페이지"),
+        ("work_open_current_project_folder", "현재 프로젝트의 작업 폴더로 이동하기"),
         ("work_analyze", "개별 분석"),
         ("work_text_number_width", "텍스트 넘버 크기 변경"),
         ("work_translate", "개별 번역"),
@@ -865,42 +897,42 @@ class MacroFunctionSelectDialog(QDialog):
 
             if self._ui_theme == THEME_LIGHT:
                 if status == "단축키 ON":
-                    bg = "#e8f1ff"
-                    border = "#6fa8ff"
-                    hover = "#d7e8ff"
+                    bg = "#edf4ff"
+                    border = "#aac4e8"
+                    hover = "#dbeafe"
                     color = "#202124"
                 elif status == "단축키 OFF":
-                    bg = "#fff7df"
-                    border = "#d2b45d"
-                    hover = "#fff0bf"
+                    bg = "#f7f2e4"
+                    border = "#d1bd83"
+                    hover = "#f3ead0"
                     color = "#5b4a12"
                 else:
-                    bg = "#f0f2f5"
-                    border = "#b8bdc8"
-                    hover = "#e4e8ef"
+                    bg = "#f4f6fa"
+                    border = "#d2d9e5"
+                    hover = "#edf1f7"
                     color = "#404651"
             elif status == "단축키 ON":
-                bg = "#2f425f"
-                border = "#6d93d8"
-                hover = "#4b5f86"
+                bg = "#2f435d"
+                border = "#6f8ebf"
+                hover = "#3d587d"
                 color = "#ffffff"
             elif status == "단축키 OFF":
-                bg = "#3b3a30"
-                border = "#8a7d55"
-                hover = "#514f3f"
+                bg = "#37342c"
+                border = "#756a4b"
+                hover = "#474230"
                 color = "#efe5bd"
             else:
-                bg = "#34363c"
-                border = "#70737d"
-                hover = "#464953"
+                bg = "#2f343d"
+                border = "#555d6c"
+                hover = "#3d4654"
                 color = "#d8d8d8"
 
             btn.setStyleSheet(
                 "QPushButton {"
                 f"background:{bg};"
                 f"border:1px solid {border};"
-                "border-radius:8px;"
-                "padding:5px 9px;"
+                "border-radius:0px;"
+                "padding:7px 11px;"
                 f"color:{color};"
                 "}"
                 f"QPushButton:hover {{ background:{hover}; }}"

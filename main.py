@@ -8,6 +8,13 @@ import copy
 import json
 import re
 import time
+import subprocess
+import zipfile
+import tempfile
+import io
+import base64
+import hashlib
+import hmac
 
 import cv2
 import numpy as np
@@ -25,7 +32,8 @@ from graphics_items import TypesettingItem, build_typesetting_text_path
 from delegates import MultilineDelegate
 from workers import UniversalBatchWorker, AnalysisWorker, InpaintWorker
 from cache_utils import get_cache_dir, get_cache_file
-from workspace_manager import get_workspace_root, temp_dir, workspaces_dir, default_package_dir, schedule_workspace_root_change, load_workspace_config, set_workspace_root, default_workspace_root, APP_FOLDER_NAME, configured_workspace_root_raw, configured_workspace_root_exists
+from launcher import LauncherWidget, RecentProjectStore
+from workspace_manager import get_workspace_root, temp_dir, workspaces_dir, default_package_dir, schedule_workspace_root_change, load_workspace_config, set_workspace_root, default_workspace_root, APP_FOLDER_NAME, configured_workspace_root_raw, configured_workspace_root_exists, app_config_dir
 
 
 def resource_path(relative_path):
@@ -74,6 +82,14 @@ THEME_LIGHT = "light"
 UI_LANGUAGE_KEY = "ui_language"
 LANG_KO = "ko"
 LANG_EN = "en"
+ANALYSIS_TEXT_MASK_EXPAND_RATIO_KEY = "analysis_text_mask_expand_ratio"
+ANALYSIS_PAINT_MASK_EXPAND_RATIO_KEY = "analysis_paint_mask_expand_ratio"
+ANALYSIS_TEXT_MASK_MIN_EXPAND_PX_KEY = "analysis_text_mask_min_expand_px"
+ANALYSIS_PAINT_MASK_MIN_EXPAND_PX_KEY = "analysis_paint_mask_min_expand_px"
+DEFAULT_ANALYSIS_TEXT_MASK_EXPAND_RATIO = 0.20
+DEFAULT_ANALYSIS_PAINT_MASK_EXPAND_RATIO = 0.10
+DEFAULT_ANALYSIS_TEXT_MASK_MIN_EXPAND_PX = 5
+DEFAULT_ANALYSIS_PAINT_MASK_MIN_EXPAND_PX = 1
 
 # UI/log/message translation table is centralized in lang_text.py.
 # Add new user-visible Korean/English strings there, not directly in this file.
@@ -243,8 +259,37 @@ def save_app_options(options):
         pass
 
 
+def clamp_analysis_mask_ratio(value, default_value):
+    """분석 마스크 확장 비율을 안전 범위로 보정한다.
+    0.00은 확장 없음, 2.00은 매우 강한 확장이다.
+    """
+    try:
+        v = float(value)
+    except Exception:
+        v = float(default_value)
+    if v < 0.0:
+        v = 0.0
+    if v > 2.0:
+        v = 2.0
+    return round(v, 3)
 
-APP_VERSION = "v1.7.1"
+
+def clamp_analysis_mask_min_px(value, default_value):
+    """분석 마스크 최소 확장 크기를 px 단위로 보정한다.
+    0px은 최소 확장 강제를 끈 상태다.
+    """
+    try:
+        v = int(round(float(value)))
+    except Exception:
+        v = int(default_value)
+    if v < 0:
+        v = 0
+    if v > 100:
+        v = 100
+    return v
+
+
+APP_VERSION = "v1.8.0"
 APP_NAME_KO = "역식붕이 툴"
 APP_NAME_EN = "YSB Tool"
 
@@ -254,10 +299,20 @@ LEGACY_YSB_EXTENSION = ".ysb"
 LEGACY_YSB_PROG_ID = "YSBTranslator.Project"
 
 DARK_MESSAGEBOX_QSS = """
-QMessageBox { background-color: #1f1f22; color: #f2f2f2; }
-QMessageBox QLabel { color: #f2f2f2; }
-QMessageBox QPushButton { background-color: #343841; color: #f2f2f2; border: 1px solid #555b66; padding: 5px 14px; min-width: 52px; }
-QMessageBox QPushButton:hover { background-color: #434957; }
+QMessageBox { background-color:#24272d; color:#f2f4f8; }
+QMessageBox QLabel { color:#f2f4f8; line-height:1.35em; }
+QMessageBox QPushButton {
+    background-color:#30343d;
+    color:#f2f4f8;
+    border:1px solid #586173;
+    border-radius:0px;
+    padding:4px 10px;
+    min-width:56px;
+    min-height:22px;
+}
+QMessageBox QPushButton:hover { background-color:#3a404b; border-color:#74839a; }
+QMessageBox QPushButton:pressed { background-color:#2b3038; }
+QMessageBox QToolTip { background-color:#1f2430; color:#ffffff; border:1px solid #4b5563; border-radius:0px; padding:5px; }
 """
 
 
@@ -325,6 +380,137 @@ def styled_question(parent, title, text, buttons=None, defaultButton=None, defau
         return QMessageBox.StandardButton.No
     return QMessageBox.StandardButton.Yes if result == int(QDialog.DialogCode.Accepted) else QMessageBox.StandardButton.No
 
+
+def workspace_restart_confirmation(parent, current_path, target_path, lang=None):
+    """작업 폴더 위치 변경 시 재기동 여부를 묻는다.
+
+    확인하면 변경을 예약하고 재기동한다. 취소하면 변경하지 않고 이전 설정값으로 되돌린다.
+    Y/N 단축키와 Enter 기본값을 지원한다.
+    """
+    lang = normalize_ui_language(lang or _messagebox_ui_language(parent))
+    title = translate_ui_text("작업 폴더 위치 변경", lang)
+    text = (
+        f"{translate_ui_text('폴더 위치 변경으로 프로그램을 재기동합니다.\n취소할 시 이전 설정한 폴더 위치값으로 원복합니다.', lang)}\n\n"
+        f"{translate_ui_text('현재 위치', lang)}:\n{current_path}\n\n"
+        f"{translate_ui_text('변경 위치', lang)}:\n{target_path}"
+    )
+    msg = QMessageBox(parent)
+    msg.setIcon(QMessageBox.Icon.Question)
+    msg.setWindowTitle(title)
+    msg.setText(text)
+    msg.setStyleSheet(DARK_MESSAGEBOX_QSS)
+    yes_button = msg.addButton(translate_ui_text("재기동(Y)", lang), QMessageBox.ButtonRole.YesRole)
+    no_button = msg.addButton(translate_ui_text("취소(N)", lang), QMessageBox.ButtonRole.NoRole)
+    yes_button.setShortcut(QKeySequence("Y"))
+    no_button.setShortcut(QKeySequence("N"))
+    yes_button.setToolTip(translate_ui_text("Enter 또는 Y 키로 재기동합니다.", lang))
+    no_button.setToolTip(translate_ui_text("N 키로 취소하고 이전 설정값으로 되돌립니다.", lang))
+    msg.setDefaultButton(yes_button)
+    msg.setEscapeButton(no_button)
+    try:
+        yes_button.setAutoDefault(True)
+        no_button.setAutoDefault(False)
+    except Exception:
+        pass
+    msg.exec()
+    return msg.clickedButton() is yes_button
+
+
+def _restart_python_executable():
+    """재기동에 사용할 Python 실행 파일을 고른다.
+
+    콘솔 창이 잠깐 떴다가 사라지는 현상을 줄이기 위해 Windows에서는
+    같은 폴더의 pythonw.exe가 있으면 우선 사용한다.
+    """
+    exe = Path(sys.executable)
+    if is_windows() and exe.name.lower() == "python.exe":
+        pythonw = exe.with_name("pythonw.exe")
+        if pythonw.exists():
+            return str(pythonw)
+    return str(exe)
+
+
+def restart_application_detached():
+    """현재 프로세스를 종료하고 새 프로세스를 지연 실행한다.
+
+    hotfix20:
+    - cmd.exe /C timeout 방식 폐기
+    - source 실행에서는 __file__ 기준 absolute main.py를 재실행
+    - app_dir를 작업 디렉터리로 지정
+    - Windows에서는 pythonw.exe를 우선 사용해 검은 콘솔창 노출을 줄임
+    - 재시작 실패 원인을 확인할 수 있게 restart_stdout.log / restart_stderr.log를 남김
+    """
+    app = QApplication.instance()
+    try:
+        if getattr(sys, "frozen", False):
+            launch_program = sys.executable
+            launch_args = []
+            app_dir = str(Path(sys.executable).resolve().parent)
+        else:
+            launch_program = _restart_python_executable()
+            script_path = str(Path(__file__).resolve())
+            launch_args = [script_path]
+            app_dir = str(Path(__file__).resolve().parent)
+
+        if is_windows():
+            try:
+                restart_dir = app_config_dir() / "restart_logs"
+                restart_dir.mkdir(parents=True, exist_ok=True)
+                stdout_path = str(restart_dir / "restart_stdout.log")
+                stderr_path = str(restart_dir / "restart_stderr.log")
+            except Exception:
+                stdout_path = os.devnull
+                stderr_path = os.devnull
+
+            helper_python = _restart_python_executable()
+            helper_code = (
+                "import os, subprocess, sys, time\\n"
+                "time.sleep(1.5)\\n"
+                "program = sys.argv[1]\\n"
+                "cwd = sys.argv[2]\\n"
+                "stdout_path = sys.argv[3]\\n"
+                "stderr_path = sys.argv[4]\\n"
+                "args = sys.argv[5:]\\n"
+                "flags = 0\\n"
+                "for name in ('CREATE_NEW_PROCESS_GROUP','DETACHED_PROCESS'):\\n"
+                "    flags |= int(getattr(subprocess, name, 0))\\n"
+                "try:\\n"
+                "    out = open(stdout_path, 'a', encoding='utf-8', errors='replace') if stdout_path else subprocess.DEVNULL\\n"
+                "    err = open(stderr_path, 'a', encoding='utf-8', errors='replace') if stderr_path else subprocess.DEVNULL\\n"
+                "    out.write('\\n--- YSB restart launch ---\\n') if hasattr(out, 'write') else None\\n"
+                "    err.write('\\n--- YSB restart launch ---\\n') if hasattr(err, 'write') else None\\n"
+                "    subprocess.Popen([program] + args, cwd=cwd, stdout=out, stderr=err, stdin=subprocess.DEVNULL, close_fds=False, creationflags=flags)\\n"
+                "except Exception as e:\\n"
+                "    try:\\n"
+                "        with open(stderr_path, 'a', encoding='utf-8', errors='replace') as f:\\n"
+                "            f.write('restart helper failed: %r\\n' % (e,))\\n"
+                "    except Exception:\\n"
+                "        pass\\n"
+            )
+            creationflags = 0
+            for flag_name in ("CREATE_NO_WINDOW", "DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP"):
+                creationflags |= int(getattr(subprocess, flag_name, 0))
+            subprocess.Popen(
+                [helper_python, "-c", helper_code, launch_program, app_dir, stdout_path, stderr_path] + list(launch_args),
+                cwd=app_dir,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=False,
+                creationflags=creationflags,
+            )
+        else:
+            # Unix 계열은 Qt의 startDetached가 가장 단순하고 안정적이다.
+            QProcess.startDetached(launch_program, launch_args, app_dir)
+    except Exception:
+        # 재기동 실행에 실패해도 현재 앱은 닫지 않는다.
+        return False
+    try:
+        if app:
+            app.quit()
+    except Exception:
+        pass
+    return True
 
 QMessageBox.question = staticmethod(styled_question)
 
@@ -580,6 +766,10 @@ class WorkspaceSetupDialog(QDialog):
         self.btn_browse = QPushButton(translate_ui_text("찾아보기", self.ui_language))
         self.btn_browse.clicked.connect(self.browse_folder)
         row.addWidget(self.btn_browse)
+        self.btn_reset_default = QPushButton(translate_ui_text("기본값으로\n변경", self.ui_language))
+        self.btn_reset_default.setToolTip(translate_ui_text("Windows 실제 문서 폴더 아래 YSB_Translator로 되돌립니다.", self.ui_language))
+        self.btn_reset_default.clicked.connect(self.reset_to_default_workspace)
+        row.addWidget(self.btn_reset_default)
         layout.addLayout(row)
 
         option_row = QHBoxLayout()
@@ -622,13 +812,13 @@ class WorkspaceSetupDialog(QDialog):
         if self.ui_language == LANG_EN:
             return (
                 "The workspace folder stores cache, temporary work, and actual project workspace folders.\n"
-                "The default is the YSB_Translator folder under Documents. If the selected folder is not YSB_Translator, the program creates and uses a YSB_Translator folder inside it.\n\n"
+                "The default is the YSB_Translator folder under the actual Windows Documents known folder. If the selected folder is not YSB_Translator, the program creates and uses a YSB_Translator folder inside it. Use Restore Default to return to that actual Documents location.\n\n"
                 "Registering the .ysbt association lets you open .ysbt project files by double-clicking them. This setting applies only to the current Windows user account and can be removed from Options.\n"
                 "The workspace folder setting is saved in workspace_config.json under the Windows user settings folder."
             )
         return (
             "작업 폴더는 캐시, 임시 작업, 실제 프로젝트 작업 폴더를 저장하는 기준 위치입니다.\n"
-            "기본값은 문서 폴더 아래의 YSB_Translator 폴더입니다. 선택한 폴더가 YSB_Translator가 아니면 그 안에 YSB_Translator 폴더를 만들어 사용합니다.\n\n"
+            "기본값은 Windows의 실제 문서 폴더 아래 YSB_Translator 폴더입니다. 선택한 폴더가 YSB_Translator가 아니면 그 안에 YSB_Translator 폴더를 만들어 사용합니다. 기본값으로 변경을 누르면 이 실제 문서 위치로 되돌립니다.\n\n"
             ".ysbt 확장자 연결을 등록하면 .ysbt 프로젝트 파일을 더블클릭했을 때 역식붕이 툴로 바로 열 수 있습니다. 이 설정은 현재 Windows 사용자 계정에만 적용되며, 옵션에서 해제할 수 있습니다.\n"
             "작업 폴더 위치 설정은 Windows 사용자 설정 폴더의 workspace_config.json에 저장됩니다."
         )
@@ -641,6 +831,8 @@ class WorkspaceSetupDialog(QDialog):
             self.reason_label.setText(translate_ui_text(self.reason_text, self.ui_language))
         self.lbl_workspace_path.setText(translate_ui_text("작업 폴더 위치", self.ui_language))
         self.btn_browse.setText(translate_ui_text("찾아보기", self.ui_language))
+        self.btn_reset_default.setText(translate_ui_text("기본값으로\n변경", self.ui_language))
+        self.btn_reset_default.setToolTip(translate_ui_text("Windows 실제 문서 폴더 아래 YSB_Translator로 되돌립니다.", self.ui_language))
         self.lbl_language.setText("Language")
         self.cb_language.blockSignals(True)
         self.cb_language.setItemText(0, translate_ui_text("한국어", self.ui_language))
@@ -652,6 +844,14 @@ class WorkspaceSetupDialog(QDialog):
         self.desc_label.setText(self.workspace_desc_text())
         self.btn_ok.setText(translate_ui_text("확인", self.ui_language))
         self.btn_close.setText(translate_ui_text("닫기", self.ui_language))
+
+    def reset_to_default_workspace(self):
+        """작업 폴더 입력칸을 실제 Windows 문서 폴더 기준 기본값으로 되돌린다.
+
+        이 버튼은 즉시 저장하지 않는다. 확인을 눌러야 기존 저장 규칙에 따라
+        실제 저장/이동 예약이 진행된다.
+        """
+        self.ed_path.setText(str(default_workspace_root()))
 
     def browse_folder(self):
         current = self.ed_path.text().strip() or str(default_workspace_root())
@@ -719,7 +919,20 @@ class WorkspaceSetupDialog(QDialog):
             QMessageBox.warning(self, "Path Error" if self.ui_language == LANG_EN else "경로 오류", "The workspace folder path is invalid." if self.ui_language == LANG_EN else "작업 폴더 경로가 올바르지 않습니다.")
             return
 
-        # 언어 설정은 첫 기동 설정창/작업 폴더 설정창에서도 함께 저장한다.
+        try:
+            current = Path(load_workspace_config().get("workspace_root") or get_workspace_root()).resolve()
+            target_resolved = target.resolve()
+        except Exception:
+            current = Path(str(get_workspace_root()))
+            target_resolved = target
+
+        restart_needed = (not self.first_run) and (current != target_resolved)
+        if restart_needed:
+            if not workspace_restart_confirmation(self, current, target, self.ui_language):
+                self.ed_path.setText(str(current))
+                return
+
+        # 언어 설정은 사용자가 확인/재기동 흐름을 승인한 뒤에만 저장한다.
         try:
             opts = load_app_options()
             opts[UI_LANGUAGE_KEY] = normalize_ui_language(getattr(self, "ui_language", LANG_KO))
@@ -736,16 +949,12 @@ class WorkspaceSetupDialog(QDialog):
                 self.saved_workspace_root = str(target)
                 QMessageBox.information(self, translate_ui_text("설정 완료", self.ui_language), f"{translate_ui_text('작업 폴더를 설정했습니다.', self.ui_language)}\n\n{target}")
             else:
-                current = Path(get_workspace_root()).resolve()
-                target_resolved = target.resolve()
-                if current != target_resolved:
+                if restart_needed:
                     schedule_workspace_root_change(target)
                     self.saved_workspace_root = str(target)
-                    QMessageBox.information(
-                        self,
-                        translate_ui_text("이동 예약 완료", self.ui_language),
-                        f"{translate_ui_text('작업 폴더 위치 변경이 예약되었습니다.\n프로그램을 재실행하면 아래 위치로 이동됩니다.', self.ui_language)}\n\n{target}",
-                    )
+                    self.accept()
+                    restart_application_detached()
+                    return
                 else:
                     # 경로가 같으면 구조만 보장한다.
                     set_workspace_root(target)
@@ -1228,8 +1437,15 @@ class TranslationPromptDialog(QDialog):
         self._ui_language = getattr(parent, "ui_language", LANG_KO) if parent is not None else LANG_KO
         self.setWindowTitle(translate_ui_text("번역 프롬프트 입력", self._ui_language))
         self.resize(760, 520)
+        try:
+            if parent is not None and hasattr(parent, "settings_dialog_style"):
+                self.setStyleSheet(parent.settings_dialog_style())
+        except Exception:
+            pass
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
 
         if self._ui_language == LANG_EN:
             prompt_help_text = (
@@ -1241,7 +1457,12 @@ class TranslationPromptDialog(QDialog):
                 "AI 번역 API에 함께 전달할 프롬프트를 입력합니다.\n"
                 "확인을 누르면 옵션 캐시에 저장되고, 닫기를 누르면 저장하지 않고 나갑니다."
             )
+        title = QLabel(translate_ui_text("번역 프롬프트 입력", self._ui_language))
+        title.setObjectName("SettingsDialogTitle")
+        layout.addWidget(title)
+
         info = QLabel(prompt_help_text)
+        info.setObjectName("SettingsDescription")
         info.setWordWrap(True)
         layout.addWidget(info)
 
@@ -1269,21 +1490,34 @@ class GlossaryDialog(QDialog):
         self._ui_language = normalize_ui_language(getattr(parent, "ui_language", current_ui_language()))
         self.setWindowTitle(translate_ui_text("단어장", self._ui_language))
         self.resize(760, 520)
+        try:
+            if parent is not None and hasattr(parent, "settings_dialog_style"):
+                self.setStyleSheet(parent.settings_dialog_style())
+        except Exception:
+            pass
 
         self.glossary_text = str(glossary_text or "")
         self.glossary_path = str(glossary_path or "")
         self.changed = False
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        title = QLabel(self.tr_ui("단어장"))
+        title.setObjectName("SettingsDialogTitle")
+        layout.addWidget(title)
 
         info = QLabel(self.tr_msg(
             "번역 참고 자료로 사용할 TXT 파일을 캐시에 저장합니다.\n"
             "배경 설명, 단어 해설, 1대1 대체 규칙 등을 넣어둘 수 있습니다."
         ))
+        info.setObjectName("SettingsDescription")
         info.setWordWrap(True)
         layout.addWidget(info)
 
         self.status_label = QLabel()
+        self.status_label.setObjectName("SettingsDescription")
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
 
@@ -1386,9 +1620,744 @@ class GlossaryDialog(QDialog):
         return self.glossary_text, self.glossary_path, self.changed
 
 
+
+
+
+class EnterCommitFilter(QObject):
+    """프리셋/설정 창의 단일 입력칸에서 Enter가 옆 버튼을 누르지 않도록 막는다.
+    ESC는 폰트/입력 위젯에 포커스가 있을 때 먼저 포커스만 빼고, 창 닫기 같은 기본 동작은 막는다.
+    """
+
+    def __init__(self, parent_dialog=None, fallback_widget=None, accept_dialog=False, parent=None):
+        super().__init__(parent)
+        self.parent_dialog = parent_dialog
+        self.fallback_widget = fallback_widget
+        self.accept_dialog = bool(accept_dialog)
+
+    def _find_parent(self, obj, cls):
+        try:
+            p = obj
+            for _ in range(6):
+                if p is None or not hasattr(p, "parent"):
+                    return None
+                p = p.parent()
+                if isinstance(p, cls):
+                    return p
+        except Exception:
+            return None
+        return None
+
+    def _is_font_or_input_focus(self, obj):
+        try:
+            if isinstance(obj, (QLineEdit, QAbstractSpinBox, QComboBox, QFontComboBox, QListWidget, QKeySequenceEdit)):
+                return True
+            if self._find_parent(obj, QFontComboBox) is not None:
+                return True
+            if self._find_parent(obj, QComboBox) is not None:
+                return True
+            if self._find_parent(obj, QAbstractSpinBox) is not None:
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _escape_focus(self, obj):
+        try:
+            combo = obj if isinstance(obj, QComboBox) else self._find_parent(obj, QComboBox)
+            if combo is not None:
+                try:
+                    combo.hidePopup()
+                except Exception:
+                    pass
+                try:
+                    line = combo.lineEdit()
+                    if line is not None:
+                        line.clearFocus()
+                except Exception:
+                    pass
+                try:
+                    combo.clearFocus()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            spin = obj if isinstance(obj, QAbstractSpinBox) else self._find_parent(obj, QAbstractSpinBox)
+            if spin is not None:
+                try:
+                    spin.interpretText()
+                except Exception:
+                    pass
+                try:
+                    line = spin.lineEdit()
+                    if line is not None:
+                        line.clearFocus()
+                except Exception:
+                    pass
+                try:
+                    spin.clearFocus()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            obj.clearFocus()
+        except Exception:
+            pass
+        target = self.fallback_widget or self.parent_dialog
+        try:
+            if target is not None:
+                target.setFocus(Qt.FocusReason.OtherFocusReason)
+        except Exception:
+            pass
+
+    def eventFilter(self, obj, event):
+        try:
+            if event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
+                if self._is_font_or_input_focus(obj):
+                    self._escape_focus(obj)
+                    event.accept()
+                    return True
+
+            if event.type() == QEvent.Type.KeyPress and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                if event.modifiers() & (
+                    Qt.KeyboardModifier.ControlModifier
+                    | Qt.KeyboardModifier.ShiftModifier
+                    | Qt.KeyboardModifier.AltModifier
+                ):
+                    return False
+
+                if self.accept_dialog and self.parent_dialog is not None:
+                    self.parent_dialog.accept()
+                    event.accept()
+                    return True
+
+                try:
+                    spin = obj if isinstance(obj, QAbstractSpinBox) else self._find_parent(obj, QAbstractSpinBox)
+                    if spin is not None:
+                        spin.interpretText()
+                        spin.clearFocus()
+                except Exception:
+                    pass
+
+                try:
+                    obj.clearFocus()
+                except Exception:
+                    pass
+
+                target = self.fallback_widget or self.parent_dialog
+                try:
+                    if target is not None:
+                        target.setFocus(Qt.FocusReason.OtherFocusReason)
+                except Exception:
+                    pass
+
+                event.accept()
+                return True
+        except Exception:
+            pass
+        return super().eventFilter(obj, event)
+
+
+class FontSelectDialog(QDialog):
+    """YSB 전용 글꼴 선택 창.
+    검색/목록/스타일/미리보기를 한 화면에서 제공한다.
+    """
+
+    def __init__(self, current_family="", current_size=24, current_bold=False, current_italic=False, parent=None):
+        super().__init__(parent)
+        self._ui_language = normalize_ui_language(getattr(parent, "ui_language", current_ui_language()))
+        self.parent_window = parent
+        self.selected_family = str(current_family or "")
+        self.selected_style = ""
+        self.current_size = int(current_size or 24)
+        self.current_bold = bool(current_bold)
+        self.current_italic = bool(current_italic)
+        self.all_families = []
+        self.filtered_families = []
+        self.font_db = None
+
+        self.setWindowTitle(translate_ui_text("글꼴 선택", self._ui_language))
+        self.resize(820, 600)
+        try:
+            if parent is not None and hasattr(parent, "settings_dialog_style"):
+                self.setStyleSheet(parent.settings_dialog_style())
+            if parent is not None and hasattr(parent, "apply_native_title_bar_theme"):
+                parent.schedule_native_title_bar_theme(self, dark=not parent.is_light_theme())
+        except Exception:
+            pass
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(14, 14, 14, 14)
+        root.setSpacing(10)
+
+        title = QLabel(translate_ui_text("글꼴 선택", self._ui_language), self)
+        title.setObjectName("SettingsDialogTitle")
+        root.addWidget(title)
+
+        info = QLabel(
+            translate_ui_text(
+                "글꼴 이름을 검색하거나 목록에서 선택합니다. 오른쪽에서 스타일과 미리보기를 확인한 뒤 확인을 누르면 적용됩니다.",
+                self._ui_language,
+            ),
+            self,
+        )
+        info.setObjectName("SettingsDescription")
+        info.setWordWrap(True)
+        root.addWidget(info)
+
+        top = QHBoxLayout()
+        top.setSpacing(12)
+
+        left_top = QVBoxLayout()
+        left_top.setSpacing(4)
+        search_label = QLabel(translate_ui_text("검색", self._ui_language), self)
+        self.search_edit = QLineEdit(self)
+        self.search_edit.setPlaceholderText(translate_ui_text("예: Gothic, Myeongjo, Noto", self._ui_language))
+        self.search_edit.setToolTip(translate_ui_text("글꼴 이름을 입력하면 아래 목록이 즉시 줄어듭니다.", self._ui_language))
+        self.search_edit.textChanged.connect(self.filter_fonts)
+        left_top.addWidget(search_label)
+        left_top.addWidget(self.search_edit)
+        top.addLayout(left_top, 2)
+
+        right_top = QVBoxLayout()
+        right_top.setSpacing(4)
+        style_label = QLabel(translate_ui_text("폰트 스타일", self._ui_language), self)
+        self.style_combo = QComboBox(self)
+        self.style_combo.setToolTip(translate_ui_text("Regular, Bold, DemiBold 같은 글꼴 스타일을 선택합니다.", self._ui_language))
+        self.style_combo.currentIndexChanged.connect(self.on_style_changed)
+        right_top.addWidget(style_label)
+        right_top.addWidget(self.style_combo)
+        top.addLayout(right_top, 1)
+
+        root.addLayout(top)
+
+        mid = QHBoxLayout()
+        mid.setSpacing(12)
+
+        left = QVBoxLayout()
+        left.setSpacing(6)
+        list_label = QLabel(translate_ui_text("글꼴 목록", self._ui_language), self)
+        self.font_list = QListWidget(self)
+        self.font_list.setToolTip(translate_ui_text("목록에서 글꼴을 선택합니다. 더블클릭하면 바로 적용합니다.", self._ui_language))
+        self.font_list.itemSelectionChanged.connect(self.on_font_selection_changed)
+        self.font_list.itemDoubleClicked.connect(lambda _item: self.accept())
+        left.addWidget(list_label)
+        left.addWidget(self.font_list, 1)
+        mid.addLayout(left, 1)
+
+        right = QVBoxLayout()
+        right.setSpacing(6)
+
+        selected_label_title = QLabel(translate_ui_text("선택한 글꼴", self._ui_language), self)
+        self.selected_label = QLabel("-", self)
+        self.selected_label.setObjectName("SettingsPath")
+        right.addWidget(selected_label_title)
+        right.addWidget(self.selected_label)
+
+        preview_label = QLabel(translate_ui_text("미리보기", self._ui_language), self)
+        self.preview_edit = QTextEdit(self)
+        self.preview_edit.setReadOnly(False)
+        self.preview_edit.setPlainText(
+            "가나다라마바사아자차카타파하\n"
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ\n"
+            "abcdefghijklmnopqrstuvwxyz\n"
+            "0123456789\n"
+            "쿠っ…貴方たちっ"
+        )
+        self.preview_edit.setMinimumWidth(340)
+        right.addWidget(preview_label)
+        right.addWidget(self.preview_edit, 1)
+
+        size_row = QHBoxLayout()
+        size_row.addWidget(QLabel(translate_ui_text("미리보기 크기", self._ui_language), self))
+        self.size_spin = QSpinBox(self)
+        self.size_spin.setRange(8, 120)
+        self.size_spin.setValue(max(8, min(120, self.current_size)))
+        self.size_spin.valueChanged.connect(self.update_preview)
+        size_row.addWidget(self.size_spin)
+        size_row.addStretch()
+        right.addLayout(size_row)
+
+        mid.addLayout(right, 1)
+        root.addLayout(mid, 1)
+
+        buttons = QDialogButtonBox(self)
+        self.ok_btn = buttons.addButton(translate_ui_text("확인", self._ui_language), QDialogButtonBox.ButtonRole.AcceptRole)
+        self.cancel_btn = buttons.addButton(translate_ui_text("닫기", self._ui_language), QDialogButtonBox.ButtonRole.RejectRole)
+        self.ok_btn.setDefault(True)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+        self.install_font_dialog_enter_accept()
+
+        self.load_fonts()
+        self.select_initial_font()
+        self.search_edit.setFocus()
+
+    def tr_ui(self, text):
+        return translate_ui_text(text, self._ui_language)
+
+    def is_plain_enter_event(self, event):
+        try:
+            return (
+                event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+                and not (
+                    event.modifiers()
+                    & (
+                        Qt.KeyboardModifier.ControlModifier
+                        | Qt.KeyboardModifier.ShiftModifier
+                        | Qt.KeyboardModifier.AltModifier
+                    )
+                )
+            )
+        except Exception:
+            return False
+
+    def accept_by_enter(self):
+        # 검색창/미리보기/스핀박스/목록 어디에 포커스가 있어도 Enter는 확인과 동일하게 처리한다.
+        try:
+            if self.size_spin is not None:
+                self.size_spin.interpretText()
+        except Exception:
+            pass
+        self.accept()
+
+    def install_font_dialog_enter_accept(self):
+        self._enter_accept_filter = EnterCommitFilter(parent_dialog=self, accept_dialog=True, parent=self)
+        for _w in (self.search_edit, self.style_combo, self.font_list, self.preview_edit, self.size_spin):
+            try:
+                _w.installEventFilter(self._enter_accept_filter)
+            except Exception:
+                pass
+
+        # 위 필터를 child 위젯이 먹지 못하는 경우 대비: 직접 시그널/단축키를 추가한다.
+        try:
+            self.search_edit.returnPressed.connect(self.accept_by_enter)
+        except Exception:
+            pass
+        try:
+            line = self.size_spin.lineEdit()
+            if line is not None:
+                line.installEventFilter(self._enter_accept_filter)
+                line.returnPressed.connect(self.accept_by_enter)
+        except Exception:
+            pass
+
+        for seq in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            try:
+                sc = QShortcut(QKeySequence(seq), self)
+                sc.setContext(Qt.ShortcutContext.ApplicationShortcut)
+                sc.activated.connect(self.accept_by_enter)
+                if not hasattr(self, "_enter_accept_shortcuts"):
+                    self._enter_accept_shortcuts = []
+                self._enter_accept_shortcuts.append(sc)
+            except Exception:
+                pass
+
+        # QComboBox는 Enter를 자체적으로 삼키거나 팝업 창으로 이벤트를 넘길 수 있다.
+        # 그래서 글꼴 선택창이 떠 있는 동안 QApplication 레벨에서도 Enter를 잡는다.
+        try:
+            self.installEventFilter(self)
+            for child in self.findChildren(QWidget):
+                child.installEventFilter(self)
+            app = QApplication.instance()
+            if app is not None:
+                app.installEventFilter(self)
+                self._app_enter_filter_installed = True
+        except Exception:
+            self._app_enter_filter_installed = False
+
+    def _font_dialog_focus_escape_target(self, obj=None):
+        try:
+            fw = QApplication.focusWidget()
+        except Exception:
+            fw = None
+        for target in (obj if isinstance(obj, QWidget) else None, fw):
+            if target is None:
+                continue
+            try:
+                if target is self:
+                    continue
+                if isinstance(target, (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox, QComboBox, QFontComboBox, QListWidget, QKeySequenceEdit)):
+                    return target
+                p = target
+                for _ in range(8):
+                    p = p.parent() if p is not None and hasattr(p, "parent") else None
+                    if isinstance(p, (QAbstractSpinBox, QComboBox, QFontComboBox, QListWidget, QKeySequenceEdit)):
+                        return p
+            except Exception:
+                pass
+        return None
+
+    def escape_font_dialog_focus(self, obj=None):
+        target = self._font_dialog_focus_escape_target(obj)
+        if target is None:
+            return False
+        try:
+            if isinstance(target, QComboBox):
+                target.hidePopup()
+        except Exception:
+            pass
+        try:
+            if isinstance(target, QAbstractSpinBox):
+                target.interpretText()
+        except Exception:
+            pass
+        try:
+            line = target.lineEdit()
+            if line is not None:
+                try:
+                    line.deselect()
+                except Exception:
+                    pass
+                line.clearFocus()
+        except Exception:
+            pass
+        try:
+            if hasattr(target, "deselect"):
+                target.deselect()
+            target.clearFocus()
+        except Exception:
+            pass
+        try:
+            self.setFocus(Qt.FocusReason.OtherFocusReason)
+            QTimer.singleShot(0, lambda: self.setFocus(Qt.FocusReason.OtherFocusReason))
+        except Exception:
+            pass
+        return True
+
+    def eventFilter(self, obj, event):
+        if event.type() in (QEvent.Type.ShortcutOverride, QEvent.Type.KeyPress) and event.key() == Qt.Key.Key_Escape:
+            try:
+                active_modal = QApplication.activeModalWidget()
+                active_window = QApplication.activeWindow()
+                belongs_to_this_dialog = isinstance(obj, QWidget) and ((obj.window() is self) or (obj.parentWidget() is self))
+                if active_modal is self or active_window is self or belongs_to_this_dialog:
+                    if self.escape_font_dialog_focus(obj):
+                        event.accept()
+                        return True
+            except Exception:
+                pass
+
+        if event.type() in (QEvent.Type.ShortcutOverride, QEvent.Type.KeyPress) and self.is_plain_enter_event(event):
+            try:
+                # QApplication 레벨 필터이므로 다른 창의 Enter까지 먹지 않게,
+                # 현재 글꼴 선택창이 모달/활성 상태일 때만 처리한다.
+                active_modal = QApplication.activeModalWidget()
+                active_window = QApplication.activeWindow()
+                belongs_to_this_dialog = False
+                if obj is self:
+                    belongs_to_this_dialog = True
+                elif isinstance(obj, QWidget):
+                    belongs_to_this_dialog = (obj.window() is self) or (obj.parentWidget() is self)
+                if active_modal is self or active_window is self or belongs_to_this_dialog:
+                    self.accept_by_enter()
+                    event.accept()
+                    return True
+            except Exception:
+                self.accept_by_enter()
+                event.accept()
+                return True
+        return super().eventFilter(obj, event)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            if self.escape_font_dialog_focus(QApplication.focusWidget()):
+                event.accept()
+                return
+        if self.is_plain_enter_event(event):
+            self.accept_by_enter()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def done(self, result):
+        try:
+            app = QApplication.instance()
+            if app is not None and getattr(self, "_app_enter_filter_installed", False):
+                app.removeEventFilter(self)
+        except Exception:
+            pass
+        super().done(result)
+
+    def load_fonts(self):
+        # Qt6/PyQt6 환경에서는 QFontDatabase 인스턴스 생성 방식이 흔들릴 수 있다.
+        # 먼저 정적 메서드로 읽고, 실패하면 인스턴스 방식으로 한 번 더 시도한다.
+        families = []
+        self.font_db = None
+
+        try:
+            families = list(QFontDatabase.families())
+        except Exception:
+            families = []
+
+        if not families:
+            try:
+                self.font_db = QFontDatabase()
+                families = list(self.font_db.families())
+            except Exception:
+                self.font_db = None
+                families = []
+
+        # 최후 fallback: 현재 QApplication 기본 폰트라도 목록에 넣어 빈 창을 피한다.
+        if not families:
+            try:
+                families = [QApplication.font().family()]
+            except Exception:
+                families = []
+
+        families = sorted({str(x) for x in families if str(x).strip()}, key=lambda s: s.lower())
+        self.all_families = families
+        self.filtered_families = list(families)
+        self.populate_list(families)
+        self.setup_completer()
+
+    def setup_completer(self):
+        try:
+            completer = QCompleter(self.all_families, self)
+            completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+            try:
+                completer.setFilterMode(Qt.MatchFlag.MatchContains)
+            except Exception:
+                pass
+            completer.activated.connect(self.on_completer_activated)
+            self.search_edit.setCompleter(completer)
+            self.completer = completer
+        except Exception:
+            self.completer = None
+
+    def on_completer_activated(self, text):
+        fam = str(text or "")
+        if not fam:
+            return
+        self.search_edit.blockSignals(True)
+        try:
+            self.search_edit.setText(fam)
+        finally:
+            self.search_edit.blockSignals(False)
+        self.filtered_families = [f for f in self.all_families if f == fam]
+        self.populate_list(self.filtered_families)
+        self.select_family(fam)
+
+    def populate_list(self, families):
+        current = self.selected_family
+        self.font_list.blockSignals(True)
+        try:
+            self.font_list.clear()
+            for fam in families:
+                item = QListWidgetItem(fam)
+                item.setData(Qt.ItemDataRole.UserRole, fam)
+                self.font_list.addItem(item)
+            if current:
+                for i in range(self.font_list.count()):
+                    if self.font_list.item(i).data(Qt.ItemDataRole.UserRole) == current:
+                        self.font_list.setCurrentRow(i)
+                        break
+        finally:
+            self.font_list.blockSignals(False)
+        if self.font_list.currentRow() < 0 and self.font_list.count() > 0:
+            self.font_list.setCurrentRow(0)
+        if self.font_list.count() == 0:
+            self.selected_family = ""
+            self.selected_label.setText(self.tr_ui("검색 결과 없음"))
+            self.style_combo.clear()
+            self.preview_edit.setFont(QFont())
+            return
+        self.on_font_selection_changed()
+
+    def filter_fonts(self, text):
+        query = str(text or "").strip().lower()
+        if not query:
+            self.filtered_families = list(self.all_families)
+        else:
+            tokens = [t for t in query.replace("_", " ").replace("-", " ").split() if t]
+
+            def score(name):
+                low = name.lower()
+                if query in low:
+                    return (0, low.index(query), len(name), low)
+                if tokens and all(t in low for t in tokens):
+                    return (1, sum(low.index(t) for t in tokens if t in low), len(name), low)
+                compact = low.replace(" ", "")
+                qcompact = query.replace(" ", "")
+                if qcompact and qcompact in compact:
+                    return (2, compact.index(qcompact), len(name), low)
+                pos = -1
+                ok = True
+                total = 0
+                for ch in query:
+                    pos = low.find(ch, pos + 1)
+                    if pos < 0:
+                        ok = False
+                        break
+                    total += pos
+                if ok:
+                    return (3, total, len(name), low)
+                return None
+
+            ranked = []
+            for fam in self.all_families:
+                sc = score(fam)
+                if sc is not None:
+                    ranked.append((sc, fam))
+            ranked.sort(key=lambda x: x[0])
+            self.filtered_families = [fam for _sc, fam in ranked]
+        self.populate_list(self.filtered_families)
+
+    def select_initial_font(self):
+        if not self.all_families:
+            return
+        target = self.selected_family or ""
+        if target and self.select_family(target):
+            return
+        self.font_list.setCurrentRow(0)
+        self.on_font_selection_changed()
+
+    def select_family(self, family):
+        target_low = str(family or "").lower()
+        if not target_low:
+            return False
+        for i in range(self.font_list.count()):
+            fam = str(self.font_list.item(i).data(Qt.ItemDataRole.UserRole) or "")
+            if fam.lower() == target_low:
+                self.font_list.setCurrentRow(i)
+                self.font_list.scrollToItem(self.font_list.item(i))
+                self.on_font_selection_changed()
+                return True
+        return False
+
+    def styles_for_family(self, family):
+        styles = []
+        try:
+            styles = list(QFontDatabase.styles(family))
+        except Exception:
+            styles = []
+
+        if not styles:
+            try:
+                if self.font_db is not None:
+                    styles = list(self.font_db.styles(family))
+            except Exception:
+                styles = []
+
+        if not styles:
+            styles = ["Regular", "Bold", "DemiBold", "Light", "Italic", "Bold Italic"]
+
+        # 중복 제거
+        out = []
+        seen = set()
+        for st in styles:
+            st = str(st or "").strip()
+            if not st:
+                continue
+            key = st.lower()
+            if key not in seen:
+                seen.add(key)
+                out.append(st)
+        return out or ["Regular"]
+
+    def choose_preferred_style(self, styles):
+        if self.selected_style in styles:
+            return self.selected_style
+        low_map = {s.lower(): s for s in styles}
+        if self.current_bold and self.current_italic:
+            for key in ("bold italic", "demibold italic", "semi bold italic"):
+                if key in low_map:
+                    return low_map[key]
+        if self.current_bold:
+            for key in ("bold", "demibold", "semi bold", "medium"):
+                if key in low_map:
+                    return low_map[key]
+        if self.current_italic:
+            for key in ("italic", "regular italic", "light italic"):
+                if key in low_map:
+                    return low_map[key]
+        for key in ("regular", "normal", "medium"):
+            if key in low_map:
+                return low_map[key]
+        return styles[0] if styles else ""
+
+    def update_style_combo(self):
+        fam = self.selected_family or ""
+        styles = self.styles_for_family(fam)
+        chosen = self.choose_preferred_style(styles)
+        self.style_combo.blockSignals(True)
+        try:
+            self.style_combo.clear()
+            for st in styles:
+                self.style_combo.addItem(st)
+            idx = styles.index(chosen) if chosen in styles else 0
+            self.style_combo.setCurrentIndex(idx)
+            self.selected_style = self.style_combo.currentText()
+        finally:
+            self.style_combo.blockSignals(False)
+
+    def on_font_selection_changed(self):
+        item = self.font_list.currentItem()
+        if item is None:
+            return
+        fam = str(item.data(Qt.ItemDataRole.UserRole) or item.text())
+        self.selected_family = fam
+        self.selected_label.setText(fam)
+        self.update_style_combo()
+        self.update_preview()
+
+    def on_style_changed(self):
+        self.selected_style = self.style_combo.currentText()
+        self.update_preview()
+
+    def font_from_selection(self):
+        fam = self.selected_family or ""
+        style = self.selected_style or self.style_combo.currentText()
+        size = int(self.size_spin.value())
+        if not fam:
+            return QFont()
+        try:
+            if style:
+                return QFontDatabase.font(fam, style, size)
+        except Exception:
+            pass
+        try:
+            if self.font_db is not None and style:
+                return self.font_db.font(fam, style, size)
+        except Exception:
+            pass
+        font = QFont(fam, size)
+        low = style.lower()
+        if any(k in low for k in ("bold", "demibold", "semi bold", "black", "heavy", "extrabold")):
+            font.setBold(True)
+        if "italic" in low or "oblique" in low:
+            font.setItalic(True)
+        return font
+
+    def update_preview(self):
+        if not self.selected_family:
+            return
+        self.preview_edit.setFont(self.font_from_selection())
+
+    def selected_font_family(self):
+        return self.selected_family or ""
+
+    def selected_font_style(self):
+        return self.selected_style or self.style_combo.currentText() or ""
+
+    def selected_is_bold(self):
+        low = self.selected_font_style().lower()
+        return any(k in low for k in ("bold", "demibold", "semi bold", "black", "heavy", "extrabold"))
+
+    def selected_is_italic(self):
+        low = self.selected_font_style().lower()
+        return "italic" in low or "oblique" in low
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        # setup_ui() 도중 일부 도구 초기화가 log()를 호출할 수 있다.
+        # 이 시점에는 아직 로그 위젯이 만들어지지 않았으므로 임시 버퍼에 보관한다.
+        self._pending_log_messages = []
         self.update_window_title()
         self.setWindowIcon(QIcon(resource_path("ysb_icon.ico")))
         self.resize(1600, 950)
@@ -1417,6 +2386,7 @@ class MainWindow(QMainWindow):
 
         self.app_options = load_app_options()
         self.sync_translation_option_cache_to_config()
+        self.sync_analysis_mask_options_to_config()
 
         # 저장본/작업 캐시 분리
         # auto_save_enabled=True  : 변경 즉시 실제 project.json에 저장
@@ -1549,6 +2519,27 @@ class MainWindow(QMainWindow):
     # =========================================================
     # 메뉴 / UI
     # =========================================================
+    def showEvent(self, event):
+        try:
+            super().showEvent(event)
+        finally:
+            self.schedule_native_title_bar_theme(self, dark=not self.is_light_theme())
+
+    def changeEvent(self, event):
+        try:
+            super().changeEvent(event)
+        finally:
+            try:
+                if event.type() in (
+                    QEvent.Type.WindowStateChange,
+                    QEvent.Type.ActivationChange,
+                    QEvent.Type.PaletteChange,
+                    QEvent.Type.StyleChange,
+                ):
+                    self.schedule_native_title_bar_theme(self, dark=not self.is_light_theme())
+            except Exception:
+                pass
+
     def setup_actions(self):
         def make_action(key, text, slot):
             action = QAction(text, self)
@@ -1558,17 +2549,19 @@ class MainWindow(QMainWindow):
             return action
 
         # 프로젝트
-        make_action("project_new", "새 프로젝트 만들기", self.new_project_from_images)
-        make_action("project_open", "프로젝트 열기", self.open_project)
-        make_action("project_open_json", "JSON 파일로 열기", self.open_project_json)
-        make_action("project_save", "프로젝트 저장", self.save_project)
-        make_action("project_save_as", "다른 이름으로 저장", self.save_project_as)
-        make_action("project_recover_last_work", "마지막 작업 복구", self.recover_last_work_project)
+        make_action("project_new", "새로 만들기", self.new_project_from_images)
+        make_action("project_open", "열기", self.open_project)
+        make_action("project_open_json", "JSON으로 열기", self.open_project_json)
+        make_action("project_show_launcher", "홈화면으로 가기", self.show_launcher)
+        make_action("project_save", "저장하기", self.save_project)
+        make_action("project_save_as", "다른 이름으로 저장하기", self.save_project_as)
+        make_action("project_recover_last_work", "복구하기", self.recover_last_work_project)
 
         # 개별 작업
         make_action("work_tab_cycle", "작업탭 변경", self.cycle_work_tab)
         make_action("work_page_prev", "이전 페이지", self.prev)
         make_action("work_page_next", "다음 페이지", self.next)
+        make_action("work_open_current_project_folder", "현재 프로젝트의 작업 폴더로 이동하기", self.open_current_project_work_folder)
         make_action("work_analyze", "개별 분석", self.anal)
         make_action("work_text_number_width", "텍스트 넘버 크기 변경", self.open_text_number_width_dialog)
         make_action("work_translate", "개별 번역", self.trans)
@@ -1599,7 +2592,8 @@ class MainWindow(QMainWindow):
         make_action("batch_reset_text_rects", "일괄 텍스트 기준 영역 재설정", self.reset_text_rects_batch)
         make_action("batch_export", "일괄 출력", lambda: self.run_batch('export'))
 
-        # 옵션
+        # 설정 / 옵션
+        make_action("option_settings_overview", "설정 / 옵션", self.open_settings_overview_dialog)
         self.act_auto_save_mode = make_action("option_auto_save_mode", "자동저장 모드", self.toggle_auto_save_mode)
         self.act_auto_save_mode.setCheckable(True)
         self.act_auto_save_mode.setChecked(self.auto_save_enabled)
@@ -1608,14 +2602,24 @@ class MainWindow(QMainWindow):
         make_action("option_api_settings", "API 관리", self.open_api_settings_dialog)
         make_action("option_translation_prompt", "번역 프롬프트 입력", self.open_translation_prompt_dialog)
         make_action("option_glossary", "단어장", self.open_glossary_dialog)
+        make_action("option_analysis_mask_settings", "분석 마스크 확장 비율", self.open_analysis_mask_settings_dialog)
         make_action("option_workspace_location", "작업 폴더 위치 변경", self.change_workspace_location)
+        make_action("option_workspace_reset_default", "작업 폴더 위치 기본값으로 변경", self.reset_workspace_location_to_default)
         make_action("option_cleanup_temp_files", "임시 파일 관리", self.cleanup_temp_files_dialog)
         make_action("option_register_ysb", ".ysbt 확장자 연결 등록", self.register_ysb_file_association)
-        make_action("option_unregister_ysbt", ".ysbt/.ysb 확장자 연결 해제", self.unregister_ysbt_file_association)
+        make_action("option_unregister_ysbt", ".ysbt 확장자 연결 해제", self.unregister_ysbt_file_association)
         make_action("option_shortcut_settings", "단축키 통합 관리", self.open_shortcut_settings_dialog)
         make_action("option_macro_settings", "매크로 관리", self.open_macro_settings_dialog)
         make_action("option_text_preset_settings", "페이지 글꼴 프리셋 관리", self.open_text_preset_dialog)
         make_action("option_item_text_preset_settings", "개별 글꼴 프리셋 관리", self.open_item_text_preset_dialog)
+
+        # 클라우드
+        make_action("cloud_register", "클라우드 등록", self.cloud_register)
+        make_action("cloud_unregister", "클라우드 등록 해제", self.cloud_unregister)
+        make_action("cloud_cache_backup", "클라우드로 캐시 백업", self.cloud_backup_cache)
+        make_action("cloud_cache_restore", "클라우드에서 캐시 불러오기", self.cloud_restore_cache)
+        make_action("cloud_project_backup", "현재 프로젝트 클라우드에 백업하기", self.cloud_backup_current_project)
+        make_action("cloud_project_restore", "클라우드에서 프로젝트 불러오기", self.cloud_restore_project_from_cloud)
 
         # 토글/보조 작업
         make_action("paint_redo", "작업 재실행", self.handle_general_redo)
@@ -1698,6 +2702,8 @@ class MainWindow(QMainWindow):
         # 요술봉은 마스크 탭 전용. 재분석은 텍스트 마스크 탭 하단의 파란 버튼으로 이동했다.
         if hasattr(self, "act_magic"):
             self.act_magic.setVisible(mask_tabs)
+        if hasattr(self, "act_mask_wrap"):
+            self.act_mask_wrap.setVisible(mask_tabs)
         if hasattr(self, "act_reanal"):
             self.act_reanal.setVisible(False)
         if hasattr(self, "btn_text_mask_reanalyze"):
@@ -1729,16 +2735,36 @@ class MainWindow(QMainWindow):
         if hasattr(self, "cb_show_final_text") and self.cb_show_final_text is not None:
             self.cb_show_final_text.toggle()
 
-    def _tooltip_rich_text(self, title, shortcut_text="", description=""):
+    def _tooltip_rich_text(self, title, shortcut_text="", description="", force_white_in_light=False):
         title = str(title or "")
         shortcut_text = str(shortcut_text or "").strip()
         description = str(description or "").strip()
-        base = 'background-color:#fff8d6; color:#000000; white-space:nowrap; padding:2px 8px;'
-        rows = [f'<div style="color:#000000;"><b>{title}</b></div>']
+
+        is_light = self.is_light_theme()
+        if is_light and force_white_in_light:
+            fg = "#ffffff"
+            sub = "#ffffff"
+            line = "#ffffff"
+        elif is_light:
+            fg = "#111827"
+            sub = "#374151"
+            line = "#cfd7e5"
+        else:
+            fg = "#ffffff"
+            sub = "#e5e7eb"
+            line = "#4b5563"
+
+        # 배경은 QToolTip 자체 스타일을 따른다. 여기서는 글자색만 명확히 지정한다.
+        base = (
+            f'color:{fg};'
+            'padding:1px 4px;'
+            'white-space:normal;'
+        )
+        rows = [f'<div style="color:{fg};"><b>{title}</b></div>']
         if shortcut_text:
-            rows.append(f'<div style="margin-top:2px;color:#333333;">{shortcut_text}</div>')
+            rows.append(f'<div style="margin-top:2px;color:{sub};">{shortcut_text}</div>')
         if description:
-            rows.append(f'<div style="margin-top:4px;color:#333333; border-top:1px solid #c9bd7a; padding-top:3px;">{description}</div>')
+            rows.append(f'<div style="margin-top:4px;color:{sub}; border-top:1px solid {line}; padding-top:3px;">{description}</div>')
         return f'<div style="{base}">' + ''.join(rows) + '</div>'
 
     def install_global_input_filter(self):
@@ -1769,6 +2795,297 @@ class MainWindow(QMainWindow):
             return w.window() is self
         except Exception:
             return False
+
+    def _find_parent_widget_of_type(self, obj, cls):
+        try:
+            p = obj
+            for _ in range(8):
+                if p is None or not hasattr(p, "parent"):
+                    return None
+                p = p.parent()
+                if isinstance(p, cls):
+                    return p
+        except Exception:
+            return None
+        return None
+
+    def current_font_focus_widget(self, obj=None):
+        """메인/프리셋의 글꼴 선택 콤보박스에 포커스가 있는지 확인한다."""
+        try:
+            fw = QApplication.focusWidget()
+        except Exception:
+            fw = None
+        candidates = [obj, fw]
+        for w in candidates:
+            if w is None:
+                continue
+            try:
+                if isinstance(w, QFontComboBox):
+                    return w
+                parent_font_combo = self._find_parent_widget_of_type(w, QFontComboBox)
+                if parent_font_combo is not None:
+                    return parent_font_combo
+            except Exception:
+                pass
+        return None
+
+    def escape_font_focus_first(self, obj=None):
+        """ESC는 글꼴 선택 콤보박스의 포커스를 먼저 빼고, 다른 작업은 하지 않는다."""
+        combo = self.current_font_focus_widget(obj)
+        if combo is None:
+            return False
+        try:
+            combo.hidePopup()
+        except Exception:
+            pass
+        try:
+            combo.clearFocus()
+        except Exception:
+            pass
+        try:
+            line = combo.lineEdit()
+            if line is not None:
+                line.clearFocus()
+        except Exception:
+            pass
+        try:
+            if getattr(self, "view", None) is not None:
+                self.view.setFocus(Qt.FocusReason.OtherFocusReason)
+            else:
+                self.setFocus(Qt.FocusReason.OtherFocusReason)
+        except Exception:
+            pass
+        return True
+
+    def current_single_line_input_widget(self, obj=None):
+        """ESC/Enter 포커스 탈출 대상이 되는 단일 입력 위젯을 찾는다."""
+        try:
+            fw = QApplication.focusWidget()
+        except Exception:
+            fw = None
+
+        for target in (obj, fw):
+            if target is None:
+                continue
+            try:
+                if isinstance(target, (QLineEdit, QAbstractSpinBox, QComboBox, QFontComboBox, QKeySequenceEdit)):
+                    return target
+                # QSpinBox/QComboBox 내부 lineEdit이나 popup child에서 올라가기
+                p = target
+                for _ in range(8):
+                    if p is None or not hasattr(p, "parent"):
+                        break
+                    p = p.parent()
+                    if isinstance(p, (QAbstractSpinBox, QComboBox, QFontComboBox, QKeySequenceEdit)):
+                        return p
+            except Exception:
+                pass
+        return None
+
+    def escape_single_line_input_focus_first(self, obj=None):
+        """ESC는 단일 입력칸 포커스를 먼저 빼고, 다른 작업은 하지 않는다."""
+        target = self.current_single_line_input_widget(obj)
+        if target is None:
+            return False
+
+        # 멀티라인 텍스트 편집은 ESC 포커스 탈출 대상에서 제외한다.
+        if isinstance(target, (QTextEdit, QPlainTextEdit)):
+            return False
+
+        try:
+            if isinstance(target, QComboBox):
+                target.hidePopup()
+        except Exception:
+            pass
+
+        try:
+            if isinstance(target, QAbstractSpinBox):
+                target.interpretText()
+        except Exception:
+            pass
+
+        try:
+            if isinstance(target, QKeySequenceEdit):
+                target.clear()
+        except Exception:
+            pass
+
+        # 내부 lineEdit까지 같이 포커스 제거
+        try:
+            line = target.lineEdit()
+            if line is not None:
+                try:
+                    line.deselect()
+                except Exception:
+                    pass
+                line.clearFocus()
+        except Exception:
+            pass
+
+        try:
+            if hasattr(target, "deselect"):
+                target.deselect()
+            target.clearFocus()
+        except Exception:
+            pass
+
+        def move_focus():
+            try:
+                if getattr(self, "view", None) is not None:
+                    self.view.setFocus(Qt.FocusReason.OtherFocusReason)
+                else:
+                    self.setFocus(Qt.FocusReason.OtherFocusReason)
+            except Exception:
+                pass
+
+        move_focus()
+        # 일부 입력 위젯이 ESC 처리 뒤 포커스를 다시 잡는 경우 대비.
+        try:
+            QTimer.singleShot(0, move_focus)
+            QTimer.singleShot(30, move_focus)
+        except Exception:
+            pass
+        return True
+
+    def finish_single_line_input_by_enter(self, obj=None):
+        """단일 입력칸에서 Enter를 누르면 값을 확정하고 포커스를 작업 화면으로 돌린다.
+        QSpinBox/QDoubleSpinBox는 내부 QLineEdit이 Enter를 삼키거나 다시 포커스를 잡는 경우가 있어
+        즉시 clearFocus + 지연 clearFocus를 같이 수행한다.
+        """
+        try:
+            fw = QApplication.focusWidget()
+        except Exception:
+            fw = None
+
+        def is_input_like(w):
+            if w is None:
+                return False
+            try:
+                if isinstance(w, (QLineEdit, QAbstractSpinBox)):
+                    return True
+                p = w.parent() if hasattr(w, "parent") else None
+                if isinstance(w, QLineEdit) and isinstance(p, QComboBox):
+                    return True
+                for _ in range(4):
+                    p = p.parent() if p is not None and hasattr(p, "parent") else None
+                    if isinstance(p, QAbstractSpinBox):
+                        return True
+            except Exception:
+                pass
+            return False
+
+        # eventFilter로 들어온 obj가 내부 lineEdit일 수 있으므로 obj를 우선 본다.
+        target = obj if is_input_like(obj) else fw
+        if target is None or not is_input_like(target):
+            return False
+
+        spin = None
+        line = None
+        try:
+            if isinstance(target, QAbstractSpinBox):
+                spin = target
+                line = target.lineEdit()
+            else:
+                if isinstance(target, QLineEdit):
+                    line = target
+                p = target
+                for _ in range(5):
+                    if p is None or not hasattr(p, "parent"):
+                        break
+                    p = p.parent()
+                    if isinstance(p, QAbstractSpinBox):
+                        spin = p
+                        try:
+                            line = p.lineEdit()
+                        except Exception:
+                            pass
+                        break
+        except Exception:
+            spin = None
+
+        try:
+            if spin is not None:
+                spin.interpretText()
+        except Exception:
+            pass
+
+        # 우측 표 셀 편집기면 표 에디터를 닫아 itemChanged를 확정한다.
+        try:
+            table = getattr(self, "tab", None)
+            if table is not None and (target is table or table.isAncestorOf(target)):
+                try:
+                    table.commitData(target)
+                except Exception:
+                    pass
+                try:
+                    table.closeEditor(target, QAbstractItemDelegate.EndEditHint.NoHint)
+                except Exception:
+                    pass
+                table.setFocus(Qt.FocusReason.OtherFocusReason)
+                return True
+        except Exception:
+            pass
+
+        def ensure_focus_sink():
+            sink = getattr(self, "_enter_focus_sink", None)
+            try:
+                if sink is None:
+                    sink = QWidget(self)
+                    sink.setObjectName("EnterFocusSink")
+                    sink.setFixedSize(1, 1)
+                    sink.move(-100, -100)
+                    sink.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+                    try:
+                        sink.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+                    except Exception:
+                        pass
+                    sink.show()
+                    self._enter_focus_sink = sink
+                return sink
+            except Exception:
+                return None
+
+        def clear_and_move_focus():
+            # QSpinBox 내부 editor가 Enter 처리 뒤 다시 포커스를 잡는 경우가 있어 여러 대상을 같이 정리한다.
+            for w in (line, target, spin):
+                try:
+                    if w is not None:
+                        if hasattr(w, "deselect"):
+                            w.deselect()
+                        w.clearFocus()
+                except Exception:
+                    pass
+
+            try:
+                if getattr(self, "view", None) is not None:
+                    try:
+                        self.view.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+                    except Exception:
+                        pass
+                    self.view.setFocus(Qt.FocusReason.OtherFocusReason)
+                    return
+            except Exception:
+                pass
+
+            sink = ensure_focus_sink()
+            try:
+                if sink is not None:
+                    sink.setFocus(Qt.FocusReason.OtherFocusReason)
+                    return
+            except Exception:
+                pass
+
+            try:
+                self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+                self.setFocus(Qt.FocusReason.OtherFocusReason)
+            except Exception:
+                pass
+
+        clear_and_move_focus()
+        # Qt가 spinbox keyPressEvent/editingFinished 뒤에 포커스를 다시 잡는 경우 대비.
+        QTimer.singleShot(0, clear_and_move_focus)
+        QTimer.singleShot(30, clear_and_move_focus)
+        return True
 
     def commit_active_text_editors_before_undo(self):
         """Undo 직전 열린 셀/인라인 텍스트 편집을 data에 먼저 확정한다."""
@@ -1806,6 +3123,62 @@ class MainWindow(QMainWindow):
         self.handle_general_undo()
         return True
 
+    def install_enter_escape_for_input(self, widget):
+        """QSpinBox 내부 editor가 Enter를 삼키는 경우까지 대비해 직접 필터/시그널을 붙인다."""
+        if widget is None:
+            return
+        try:
+            widget.installEventFilter(self)
+        except Exception:
+            pass
+
+        def install_line():
+            try:
+                line = widget.lineEdit()
+            except Exception:
+                line = None
+            if line is not None:
+                try:
+                    line.installEventFilter(self)
+                except Exception:
+                    pass
+                try:
+                    line.returnPressed.connect(lambda w=widget: self.finish_single_line_input_by_enter(w))
+                except Exception:
+                    pass
+                try:
+                    line.editingFinished.connect(lambda w=widget: QTimer.singleShot(0, lambda: self.finish_single_line_input_by_enter(w) if QApplication.focusWidget() is line else None))
+                except Exception:
+                    pass
+
+        install_line()
+        QTimer.singleShot(0, install_line)
+
+        try:
+            if isinstance(widget, QLineEdit):
+                widget.returnPressed.connect(lambda w=widget: self.finish_single_line_input_by_enter(w))
+        except Exception:
+            pass
+
+    def install_main_input_enter_escape_filters(self):
+        """메인 상단 조작부 입력칸에서 Enter가 포커스 탈출로 동작하게 한다."""
+        for widget in (
+            getattr(self, "cb_font", None),
+            getattr(self, "sb_font_size", None),
+            getattr(self, "sb_strk", None),
+            getattr(self, "sb_line_spacing", None),
+            getattr(self, "sb_letter_spacing", None),
+            getattr(self, "sb_char_width", None),
+            getattr(self, "sb_char_height", None),
+            getattr(self, "cb_item_text_preset", None),
+            getattr(self, "cb_trans_provider", None),
+            getattr(self, "sb_trans_chunk", None),
+            getattr(self, "sb_final_paint_opacity", None),
+            getattr(self, "sb_magic_tolerance", None),
+            getattr(self, "sb_magic_expand", None),
+        ):
+            self.install_enter_escape_for_input(widget)
+
     def register_delayed_tooltip(self, widget, title, shortcut_text="", description=""):
         if widget is None:
             return
@@ -1828,7 +3201,16 @@ class MainWindow(QMainWindow):
             description = self.tr_msg(description)
         except Exception:
             pass
-        widget.setProperty("delayed_tooltip_html", self._tooltip_rich_text(title, shortcut_text, description))
+        force_white_in_light = False
+        try:
+            force_white_in_light = bool(widget.property("force_white_tooltip_in_light") or widget.property("force_dark_tooltip"))
+        except Exception:
+            force_white_in_light = False
+        widget.setProperty("delayed_tooltip_title", title)
+        widget.setProperty("delayed_tooltip_shortcut", shortcut_text)
+        widget.setProperty("delayed_tooltip_description", description)
+        widget.setProperty("delayed_tooltip_force_white_in_light", force_white_in_light)
+        widget.setProperty("delayed_tooltip_html", self._tooltip_rich_text(title, shortcut_text, description, force_white_in_light=force_white_in_light))
         widget.installEventFilter(self)
 
     def _show_delayed_tooltip(self):
@@ -1839,6 +3221,16 @@ class MainWindow(QMainWindow):
         if not widget.isVisible():
             return
         try:
+            raw_title = widget.property("delayed_tooltip_title")
+            if raw_title:
+                raw_shortcut = widget.property("delayed_tooltip_shortcut") or ""
+                raw_desc = widget.property("delayed_tooltip_description") or ""
+                force_white = bool(widget.property("delayed_tooltip_force_white_in_light"))
+                html = self._tooltip_rich_text(raw_title, raw_shortcut, raw_desc, force_white_in_light=force_white)
+                self._tooltip_html = html
+        except Exception:
+            pass
+        try:
             pos = widget.mapToGlobal(QPoint(widget.width() // 2, widget.height()))
         except Exception:
             pos = QCursor.pos()
@@ -1846,11 +3238,43 @@ class MainWindow(QMainWindow):
 
     def eventFilter(self, obj, event):
         et = event.type()
-        if et == QEvent.Type.KeyPress and self._is_own_window_object(obj):
+        if et == QEvent.Type.Show and isinstance(obj, QDialog):
+            try:
+                p = obj.parent()
+                while p is not None:
+                    if p is self:
+                        self.schedule_native_title_bar_theme(obj, dark=not self.is_light_theme())
+                        break
+                    p = p.parent()
+            except Exception:
+                pass
+        if et in (QEvent.Type.KeyPress, QEvent.Type.ShortcutOverride) and self._is_own_window_object(obj):
             try:
                 key = event.key()
                 mods = event.modifiers()
                 ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
+
+                if key == Qt.Key.Key_Escape and self.escape_single_line_input_focus_first(obj):
+                    event.accept()
+                    return True
+
+                if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and not (
+                    mods & (
+                        Qt.KeyboardModifier.ControlModifier
+                        | Qt.KeyboardModifier.ShiftModifier
+                        | Qt.KeyboardModifier.AltModifier
+                    )
+                ):
+                    # 사용자는 입력을 끝낼 때 습관적으로 Enter를 누른다.
+                    # QLineEdit/스핀박스/편집 가능한 콤보박스에서는 Enter가 옆 버튼을 누르거나
+                    # 다음 위젯을 건드리지 않고, 편집을 확정한 뒤 포커스만 빠지게 한다.
+                    if self.finish_single_line_input_by_enter(obj):
+                        event.accept()
+                        return True
+
+                if et == QEvent.Type.ShortcutOverride:
+                    return False
+
                 if self._event_matches_shortcut(event, "paint_undo") or (ctrl and key == Qt.Key.Key_Z):
                     self.handle_global_undo_shortcut()
                     event.accept()
@@ -1868,7 +3292,7 @@ class MainWindow(QMainWindow):
                         return True
             except Exception:
                 pass
-        if hasattr(obj, "property") and obj.property("delayed_tooltip_html"):
+        if hasattr(obj, "property") and (obj.property("delayed_tooltip_title") or obj.property("delayed_tooltip_html")):
             # QAction/QToolButton 기본 툴팁은 action text를 작게 띄우는 경우가 있다.
             # 예: W, ☐ 같은 "아이콘 확대"처럼 보이는 검은 툴팁.
             # 지연 툴팁 하나만 쓰기 위해 기본 ToolTip 이벤트는 완전히 막는다.
@@ -1877,7 +3301,19 @@ class MainWindow(QMainWindow):
 
             if et == QEvent.Type.Enter:
                 self._tooltip_target = obj
-                self._tooltip_html = obj.property("delayed_tooltip_html") or ""
+                try:
+                    raw_title = obj.property("delayed_tooltip_title")
+                    if raw_title:
+                        self._tooltip_html = self._tooltip_rich_text(
+                            raw_title,
+                            obj.property("delayed_tooltip_shortcut") or "",
+                            obj.property("delayed_tooltip_description") or "",
+                            force_white_in_light=bool(obj.property("delayed_tooltip_force_white_in_light")),
+                        )
+                    else:
+                        self._tooltip_html = obj.property("delayed_tooltip_html") or ""
+                except Exception:
+                    self._tooltip_html = obj.property("delayed_tooltip_html") or ""
                 self._tooltip_timer.start(500)
             elif et in (QEvent.Type.Leave, QEvent.Type.MouseButtonPress, QEvent.Type.Hide, QEvent.Type.FocusOut):
                 if self._tooltip_target is obj:
@@ -1905,6 +3341,7 @@ class MainWindow(QMainWindow):
             if hasattr(self, "act_undo"): action_info.append((self.act_undo, "작업 취소", seq_text("paint_undo")))
             if hasattr(self, "act_redo"): action_info.append((self.act_redo, "작업 재실행", seq_text("paint_redo")))
             if hasattr(self, "act_magic"): action_info.append((self.act_magic, "요술봉 선택", seq_text("paint_magic_select")))
+            if hasattr(self, "act_mask_wrap"): action_info.append((self.act_mask_wrap, "마스크 랩핑", seq_text("paint_mask_wrap"), "영역 안의 떨어진 마스크들을 하나의 채움 영역으로 감싸줍니다."))
             if hasattr(self, "act_final_text_tool"): action_info.append((self.act_final_text_tool, "최종 텍스트 도구", seq_text("final_text_tool"), "최종화면을 클릭하면 텍스트 영역을 만듭니다. 내용 작성 후 Ctrl+Return을 누르거나 다른 곳을 클릭하면 작성이 완료됩니다."))
             if hasattr(self, "act_final_paint_to_bg"): action_info.append((self.act_final_paint_to_bg, "최종 페인팅을 배경으로 반영", seq_text("final_paint_to_background")))
             if hasattr(self, "act_final_paint_above_text"): action_info.append((self.act_final_paint_above_text, "텍스트 위에 페인팅", seq_text("final_paint_above_toggle"), "ON이면 이후 새로 칠하는 브러시가 텍스트보다 위 레이어에 그려집니다."))
@@ -1935,12 +3372,35 @@ class MainWindow(QMainWindow):
             self.register_delayed_tooltip(self.btn_magic_fill, "마스킹 칠하기", seq_text("paint_magic_fill"))
             self.register_delayed_tooltip(self.sb_magic_tolerance, "RGB 허용범위", f"{seq_text('paint_magic_tolerance_inc')} / {seq_text('paint_magic_tolerance_dec')}")
             self.register_delayed_tooltip(self.sb_magic_expand, "영역 확장 범위", f"{seq_text('paint_magic_expand_inc')} / {seq_text('paint_magic_expand_dec')}")
+        if hasattr(self, "mask_wrap_bar"):
+            self.register_delayed_tooltip(self.btn_mask_wrap_rect, "사각형으로 영역 그리기", seq_text("paint_mask_wrap_rect"), "윈도우 캡처처럼 사각형 범위를 잡고 그 안의 마스크들을 하나로 감싸 채웁니다.")
+            self.register_delayed_tooltip(self.btn_mask_wrap_free, "자유형으로 영역 그리기", seq_text("paint_mask_wrap_free"), "드래그한 자유형 범위 안에서만 마스크들을 하나로 감싸 채웁니다.")
+
+        # 툴팁 기본 글자색:
+        # - 다크 테마: 흰색
+        # - 화이트 테마: 검정색
+        # 예외: 화이트 테마에서도 색상 버튼 6종은 글자만 흰색으로 표시한다.
+        for _force_white_tip_widget in (
+            getattr(self, "btn_quick_undo", None),
+            getattr(self, "btn_quick_redo", None),
+            getattr(self, "btn_translate", None),
+            getattr(self, "btn_analyze", None),
+            getattr(self, "btn_text_mask_reanalyze", None),
+            getattr(self, "btn_inpaint", None),
+        ):
+            if _force_white_tip_widget is not None:
+                try:
+                    _force_white_tip_widget.setProperty("force_white_tooltip_in_light", True)
+                except Exception:
+                    pass
 
         # 우측 상단 작업 버튼/옵션
         if hasattr(self, "sb_trans_chunk"):
             self.register_delayed_tooltip(self.sb_trans_chunk, "묶음 수", "", "한 번의 API 요청에 묶어서 보낼 텍스트 줄 수")
         if hasattr(self, "btn_text_mask_reanalyze"):
             self.register_delayed_tooltip(self.btn_text_mask_reanalyze, "텍스트 마스크 재분석", seq_text("paint_reanalyze"), "텍스트 마스크 영역을 기준으로 OCR을 다시 실행합니다.")
+        if hasattr(self, "btn_analyze"):
+            self.register_delayed_tooltip(self.btn_analyze, "분석", seq_text("work_analyze"), "현재 페이지를 분석합니다.")
         if hasattr(self, "btn_translate"):
             self.register_delayed_tooltip(self.btn_translate, "번역", seq_text("work_translate"))
         if hasattr(self, "btn_inpaint"):
@@ -1949,6 +3409,36 @@ class MainWindow(QMainWindow):
             self.register_delayed_tooltip(self.btn_text_cleanup, "텍스트 정리", seq_text("work_clean_text"))
         if hasattr(self, "cb_show_final_text"):
             self.register_delayed_tooltip(self.cb_show_final_text, "텍스트 표시 ON/OFF", seq_text("view_text_toggle"))
+        if hasattr(self, "cb_font"):
+            self.register_delayed_tooltip(self.cb_font, "글꼴", seq_text("item_font_select"), "현재 선택한 텍스트의 글꼴을 바꿉니다.")
+        if hasattr(self, "sb_font_size"):
+            self.register_delayed_tooltip(self.sb_font_size, "글꼴 크기", seq_text("text_font_size"), "현재 선택한 텍스트의 글자 크기를 조절합니다.")
+        if hasattr(self, "sb_strk"):
+            self.register_delayed_tooltip(self.sb_strk, "획 크기", seq_text("text_stroke_size"), "현재 선택한 텍스트의 외곽선 두께를 조절합니다.")
+        if hasattr(self, "sb_line_spacing"):
+            self.register_delayed_tooltip(self.sb_line_spacing, "행간", seq_text("text_line_spacing"), "줄과 줄 사이 간격을 조절합니다.")
+        if hasattr(self, "sb_letter_spacing"):
+            self.register_delayed_tooltip(self.sb_letter_spacing, "자간", seq_text("text_letter_spacing"), "글자와 글자 사이 간격을 조절합니다.")
+        if hasattr(self, "sb_char_width"):
+            self.register_delayed_tooltip(self.sb_char_width, "너비", seq_text("text_char_width"), "문자의 가로 비율을 조절합니다.")
+        if hasattr(self, "sb_char_height"):
+            self.register_delayed_tooltip(self.sb_char_height, "높이", seq_text("text_char_height"), "문자의 세로 비율을 조절합니다.")
+        if hasattr(self, "btn_bold"):
+            self.register_delayed_tooltip(self.btn_bold, "굵게", seq_text("text_bold_toggle"))
+            self.register_delayed_tooltip(self.btn_italic, "기울이기", seq_text("text_italic_toggle"))
+            self.register_delayed_tooltip(self.btn_strike, "취소선", seq_text("text_strike_toggle"))
+        if hasattr(self, "btn_prev_page"):
+            self.register_delayed_tooltip(self.btn_prev_page, "이전 페이지", seq_text("work_page_prev"))
+        if hasattr(self, "btn_next_page"):
+            self.register_delayed_tooltip(self.btn_next_page, "다음 페이지", seq_text("work_page_next"))
+        if hasattr(self, "btn_page"):
+            self.register_delayed_tooltip(self.btn_page, "페이지 이동", "", "현재 페이지 번호를 눌러 원하는 페이지로 바로 이동합니다.")
+        if hasattr(self, "cb_mode"):
+            self.register_delayed_tooltip(self.cb_mode, "작업 탭", seq_text("work_tab_cycle"), "원본, 분석도, 마스크, 최종결과 탭을 전환합니다.")
+        if hasattr(self, "btn_quick_undo"):
+            self.register_delayed_tooltip(self.btn_quick_undo, "뒤로가기", seq_text("paint_undo"), "최근 작업을 되돌립니다.")
+        if hasattr(self, "btn_quick_redo"):
+            self.register_delayed_tooltip(self.btn_quick_redo, "앞으로 가기", seq_text("paint_redo"), "되돌린 작업을 다시 실행합니다.")
         if hasattr(self, "btn_text_color"):
             self.register_delayed_tooltip(self.btn_text_color, "문자 색상", seq_text("item_text_color"))
         if hasattr(self, "btn_stroke_color"):
@@ -1958,22 +3448,2599 @@ class MainWindow(QMainWindow):
             self.register_delayed_tooltip(self.btn_align_center, "가운데 정렬", seq_text("item_align_center"))
             self.register_delayed_tooltip(self.btn_align_right, "오른쪽 정렬", seq_text("item_align_right"))
 
+    def message_box_style(self):
+        """확인/경고/질문창 공통 스타일. 홈/클라우드 쪽의 부드러운 카드 톤에 맞춘다."""
+        if self.is_light_theme():
+            return """
+                QMessageBox { background:#f4f6fa; color:#111827; }
+                QMessageBox QLabel { color:#111827; line-height:1.35em; }
+                QMessageBox QPushButton {
+                    background:#ffffff;
+                    color:#111827;
+                    border:1px solid #cfd7e5;
+                    border-radius:0px;
+                    padding:7px 18px;
+                    min-width:72px;
+                }
+                QMessageBox QPushButton:hover { background:#edf4ff; border-color:#aac4e8; }
+                QMessageBox QPushButton:pressed { background:#e3edf9; }
+                QMessageBox QToolTip { background-color:#ffffff; color:#111827; border:1px solid #cfd7e5; border-radius:0px; padding:5px; }
+            """
+        return """
+            QMessageBox { background:#24272d; color:#f2f4f8; }
+            QMessageBox QLabel { color:#f2f4f8; line-height:1.35em; }
+            QMessageBox QPushButton {
+                background:#333843;
+                color:#f2f4f8;
+                border:1px solid #586173;
+                border-radius:0px;
+                padding:7px 18px;
+                min-width:72px;
+            }
+            QMessageBox QPushButton:hover { background:#3d4654; border-color:#74839a; }
+            QMessageBox QPushButton:pressed { background:#2b3038; }
+            QMessageBox QToolTip { background-color:#1f2430; color:#ffffff; border:1px solid #4b5563; border-radius:0px; padding:5px; }
+        """
+
+    def _message_button_with_shortcut(self, button, key_text):
+        """QMessageBox 버튼에 문자 단축키를 붙인다. 예: Y/N."""
+        try:
+            button.setShortcut(QKeySequence(str(key_text)))
+        except Exception:
+            pass
+        try:
+            button.setAutoDefault(True)
+        except Exception:
+            pass
+        return button
+
+    def ask_yes_no_shortcut(self, title, message, yes_text="예", no_text="아니오", default_yes=True, icon=QMessageBox.Icon.Question, parent=None):
+        """Enter/Y/N이 동작하는 단순 확인창. 버튼에는 반드시 (Y)/(N)을 표시한다."""
+        msg = QMessageBox(parent or self)
+        msg.setIcon(icon)
+        msg.setWindowTitle(self.tr_ui(title))
+        msg.setText(self.tr_ui(message))
+        msg.setStyleSheet(self.message_box_style())
+        btn_yes = msg.addButton(f"{self.tr_ui(yes_text)} (Y)", QMessageBox.ButtonRole.AcceptRole)
+        btn_no = msg.addButton(f"{self.tr_ui(no_text)} (N)", QMessageBox.ButtonRole.RejectRole)
+        self._message_button_with_shortcut(btn_yes, "Y")
+        self._message_button_with_shortcut(btn_no, "N")
+        try:
+            msg.setDefaultButton(btn_yes if default_yes else btn_no)
+        except Exception:
+            pass
+        try:
+            msg.setEscapeButton(btn_no)
+        except Exception:
+            pass
+        msg.exec()
+        return msg.clickedButton() == btn_yes
+
+    def show_ok_notice(self, title, message, parent=None):
+        """확인 버튼 하나만 있는 알림창. Enter로 닫힌다."""
+        msg = QMessageBox(parent or self)
+        msg.setIcon(QMessageBox.Icon.Information)
+        msg.setWindowTitle(self.tr_ui(title))
+        msg.setText(self.tr_ui(message))
+        msg.setStyleSheet(self.message_box_style())
+        btn_ok = msg.addButton(self.tr_ui("확인"), QMessageBox.ButtonRole.AcceptRole)
+        try:
+            msg.setDefaultButton(btn_ok)
+        except Exception:
+            pass
+        msg.exec()
+
+    def _show_launcher_screen_only(self):
+        """프로젝트 상태를 건드리지 않고 런처 화면만 표시한다. 내부 전용."""
+        try:
+            if hasattr(self, "launcher_widget"):
+                self.launcher_widget.refresh()
+            if hasattr(self, "main_stack") and hasattr(self, "launcher_widget"):
+                self.main_stack.setCurrentWidget(self.launcher_widget)
+        except Exception:
+            pass
+
+    def clear_current_project_runtime_state(self):
+        """런처로 돌아가기 위해 현재 프로젝트 세션을 완전히 닫는다."""
+        try:
+            if getattr(self, "inline_text_editor", None) is not None:
+                try:
+                    self.finish_inline_text_edit(commit=True, refresh=False)
+                except Exception:
+                    pass
+            if getattr(self, "project_dir", None) and getattr(self, "paths", None):
+                try:
+                    self.commit_current_page_ui_to_data()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        try:
+            self.cleanup_work_cache()
+        except Exception:
+            pass
+        try:
+            self.delete_temp_project_if_needed()
+        except Exception:
+            pass
+
+        self.paths = []
+        self.data = {}
+        self.idx = 0
+        self.project_store = ProjectStore()
+        self.project_dir = None
+        self.ysbt_package_path = None
+        self.suggested_project_name = None
+        self.is_temp_project = False
+        self.work_project_store = None
+        self.work_project_dir = None
+        self.has_unsaved_changes = False
+        self.page_text_undo_stacks = {}
+        self.project_undo_stack = []
+        self.project_redo_stack = []
+        self.undo_boundary = None
+        self.project_ui_view_states = {}
+        self.magic_wand_mask = None
+        self.magic_wand_seed = None
+        self.magic_wand_seeds = []
+        self.magic_wand_history = []
+        self.text_clipboard = []
+        self.text_paste_pending = False
+
+        try:
+            if hasattr(self, "tab") and self.tab is not None:
+                self.tab.blockSignals(True)
+                self.tab.setRowCount(0)
+                self.tab.blockSignals(False)
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "view") and self.view is not None:
+                self.view.set_image(None)
+        except Exception:
+            try:
+                self.view.scene.clear()
+            except Exception:
+                pass
+        try:
+            self.update_undo_redo_buttons()
+        except Exception:
+            pass
+        try:
+            self.update_window_title()
+        except Exception:
+            pass
+
+    def show_launcher(self):
+        """홈화면으로 이동한다. 홈화면은 열린 프로젝트가 없는 상태여야 한다."""
+        if getattr(self, "is_batch_running", False):
+            QMessageBox.information(
+                self,
+                self.tr_ui("일괄 작업 중"),
+                self.tr_ui("일괄 작업 중에는 홈화면으로 이동할 수 없습니다.\n작업이 끝난 뒤 다시 시도해 주세요."),
+            )
+            return
+
+        if self.has_open_project():
+            # 홈화면은 휴대폰 홈처럼 빈 상태여야 하므로, 현재 파일/프로젝트 세션을 먼저 닫는다.
+            try:
+                if getattr(self, "project_dir", None) and getattr(self, "paths", None):
+                    self.commit_current_page_ui_to_data()
+                    if getattr(self, "auto_save_enabled", False):
+                        self.auto_save_project()
+            except Exception as e:
+                try:
+                    self.log(f"⚠️ 홈화면 이동 전 현재 화면 반영 실패: {e}")
+                except Exception:
+                    pass
+
+            if getattr(self, "has_unsaved_changes", False):
+                if not self.confirm_unsaved_before_switch():
+                    self.log("↩️ 홈화면 이동 취소")
+                    return
+
+            self.clear_current_project_runtime_state()
+            self.log("🏠 프로젝트를 닫고 홈화면으로 이동했습니다.")
+
+        self._show_launcher_screen_only()
+
+    def confirm_open_recent_project(self, path):
+        """최근 프로젝트 카드는 바로 열지 않고 한 번 확인한다."""
+        path = str(path or "")
+        if not path or not os.path.exists(path):
+            QMessageBox.warning(
+                self,
+                self.tr_ui("파일을 찾을 수 없음"),
+                self.tr_msg("최근 프로젝트 파일을 찾을 수 없습니다.\n최근 목록에서 제거하거나 파일 위치를 확인해 주세요."),
+            )
+            return
+        name = Path(path).name
+        message = self.tr_msg("이 최근 프로젝트를 열까요?") + f"\n\n{name}"
+        if not self.ask_yes_no_shortcut("최근 프로젝트 열기", message, yes_text="열기", no_text="취소", default_yes=True):
+            self.log("↩️ 최근 프로젝트 열기 취소")
+            return
+        self.open_project_path(path)
+
+    def show_editor(self):
+        """런처에서 실제 작업 화면으로 전환한다."""
+        try:
+            if hasattr(self, "main_stack") and hasattr(self, "editor_widget"):
+                self.main_stack.setCurrentWidget(self.editor_widget)
+        except Exception:
+            pass
+
+    def refresh_launcher(self):
+        try:
+            if hasattr(self, "launcher_widget"):
+                self.launcher_widget.refresh()
+        except Exception:
+            pass
+
+    def record_current_project_recent(self):
+        """현재 열린 YSBT 프로젝트를 최근 목록에 기록하고 첫 페이지 썸네일을 캐시한다."""
+        try:
+            package_path = getattr(self, "ysbt_package_path", None)
+            if not package_path or not os.path.exists(str(package_path)):
+                return False
+            store = getattr(self, "recent_project_store", None) or RecentProjectStore()
+            self.recent_project_store = store
+            title = self.display_project_name() or Path(package_path).stem
+            thumb = store.make_thumbnail(getattr(self, "paths", []) or [], package_path)
+            store.add_project(
+                package_path,
+                title=title,
+                page_count=len(getattr(self, "paths", []) or []),
+                thumbnail_path=thumb,
+                cloud_backup_status="local_only",
+            )
+            self.refresh_launcher()
+            return True
+        except Exception as e:
+            try:
+                self.log(f"⚠️ 최근 프로젝트 기록 실패: {e}")
+            except Exception:
+                pass
+            return False
+
+    def remove_recent_project_from_launcher(self, path):
+        try:
+            if hasattr(self, "recent_project_store"):
+                self.recent_project_store.remove_project(path)
+            self.refresh_launcher()
+        except Exception:
+            pass
+
+    def reveal_recent_project_in_folder(self, path):
+        try:
+            if not path or not os.path.exists(str(path)):
+                return
+            folder = str(Path(path).parent)
+            QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+        except Exception as e:
+            QMessageBox.warning(self, self.tr_ui("폴더 열기 실패"), str(e))
+
+    def open_current_project_work_folder(self):
+        """현재 열려 있는 프로젝트의 실제 작업 폴더를 탐색기에서 연다."""
+        project_dir = getattr(self, "project_dir", None)
+        if not project_dir:
+            QMessageBox.information(
+                self,
+                self.tr_ui("작업 폴더 열기"),
+                self.tr_ui("현재 열린 프로젝트가 없습니다."),
+            )
+            return
+        folder = os.path.abspath(str(project_dir))
+        if not os.path.isdir(folder):
+            QMessageBox.warning(
+                self,
+                self.tr_ui("작업 폴더 열기 실패"),
+                f"{self.tr_ui('현재 프로젝트 작업 폴더를 찾을 수 없습니다.')}\n\n{folder}",
+            )
+            return
+        try:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+            self.log(f"📁 {self.tr_ui('현재 프로젝트 작업 폴더를 열었습니다.')}: {folder}")
+        except Exception as e:
+            QMessageBox.warning(self, self.tr_ui("작업 폴더 열기 실패"), str(e))
+
+    def cloud_dir(self):
+        path = get_cache_dir() / "cloud"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def cloud_config_path(self):
+        return self.cloud_dir() / "cloud_config.json"
+
+    def cloud_token_path(self):
+        return self.cloud_dir() / "google_drive_token.json"
+
+    def cloud_client_secret_path(self):
+        return self.cloud_dir() / "google_oauth_client_secret.json"
+
+    def load_cloud_config(self):
+        try:
+            p = self.cloud_config_path()
+            if p.exists():
+                with open(p, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+        except Exception:
+            pass
+        return {}
+
+    def save_cloud_config(self, data):
+        data = dict(data or {})
+        self.cloud_dir().mkdir(parents=True, exist_ok=True)
+        with open(self.cloud_config_path(), "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+    def cloud_is_registered(self):
+        return self.cloud_token_path().exists()
+
+    def cloud_status_text(self):
+        cfg = self.load_cloud_config()
+        if self.cloud_is_registered():
+            email = str(cfg.get("account_email") or "").strip()
+            when = str(cfg.get("registered_at") or "").strip()
+            bits = [self.tr_ui("등록됨")]
+            if email:
+                bits.append(email)
+            if when:
+                bits.append(when)
+            return " / ".join(bits)
+        return self.tr_ui("미등록")
+
+    def google_cloud_dependency_error_text(self, missing):
+        missing = list(missing or [])
+        package_hint = "google-auth google-auth-oauthlib google-api-python-client"
+        return (
+            self.tr_ui("Google Drive OAuth 연동에 필요한 파이썬 라이브러리가 없습니다.")
+            + "\n\n"
+            + self.tr_ui("누락 모듈:")
+            + "\n"
+            + "\n".join(f"- {m}" for m in missing)
+            + "\n\n"
+            + self.tr_ui("개발/테스트 환경에서는 아래 명령으로 설치할 수 있습니다.")
+            + f"\n\npip install {package_hint}"
+            + "\n\n"
+            + self.tr_ui("EXE 배포판에서는 빌드 시 위 라이브러리를 함께 포함해야 합니다.")
+        )
+
+    def import_google_oauth_modules(self):
+        missing = []
+        InstalledAppFlow = None
+        Credentials = None
+        Request = None
+        build = None
+        try:
+            from google_auth_oauthlib.flow import InstalledAppFlow as _InstalledAppFlow
+            InstalledAppFlow = _InstalledAppFlow
+        except Exception as e:
+            missing.append(f"google_auth_oauthlib.flow ({e})")
+        try:
+            from google.oauth2.credentials import Credentials as _Credentials
+            Credentials = _Credentials
+        except Exception as e:
+            missing.append(f"google.oauth2.credentials ({e})")
+        try:
+            from google.auth.transport.requests import Request as _Request
+            Request = _Request
+        except Exception as e:
+            missing.append(f"google.auth.transport.requests ({e})")
+        try:
+            from googleapiclient.discovery import build as _build
+            build = _build
+        except Exception as e:
+            missing.append(f"googleapiclient.discovery ({e})")
+        if missing:
+            raise ImportError(self.google_cloud_dependency_error_text(missing))
+        return InstalledAppFlow, Credentials, Request, build
+
+    def cloud_oauth_candidate_paths(self):
+        """OAuth 클라이언트 JSON 후보를 자동 탐색한다.
+        배포판에서는 EXE 옆 cloud_oauth_client.json을 두면 사용자는 로그인만 누르면 된다.
+        """
+        names = [
+            "cloud_oauth_client.json",
+            "google_oauth_client_secret.json",
+            "client_secret.json",
+            "ysb_google_oauth_client.json",
+        ]
+        candidates = []
+        try:
+            candidates.append(self.cloud_client_secret_path())
+        except Exception:
+            pass
+
+        roots = []
+        try:
+            roots.append(Path.cwd())
+        except Exception:
+            pass
+        try:
+            roots.append(Path(__file__).resolve().parent)
+        except Exception:
+            pass
+        try:
+            if getattr(sys, "frozen", False):
+                roots.append(Path(sys.executable).resolve().parent)
+        except Exception:
+            pass
+
+        for root in roots:
+            for name in names:
+                candidates.append(Path(root) / name)
+            try:
+                candidates.extend(sorted(Path(root).glob("client_secret*.json")))
+            except Exception:
+                pass
+
+        for name in names:
+            try:
+                candidates.append(Path(resource_path(name)))
+            except Exception:
+                pass
+
+        out = []
+        seen = set()
+        for p in candidates:
+            try:
+                key = str(Path(p).resolve()).lower()
+            except Exception:
+                key = str(p).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(Path(p))
+        return out
+
+    def is_valid_google_oauth_client_secret(self, path):
+        try:
+            p = Path(path)
+            if not p.exists() or not p.is_file():
+                return False
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return False
+            obj = data.get("installed") or data.get("web") or {}
+            return bool(obj.get("client_id") and obj.get("auth_uri") and obj.get("token_uri"))
+        except Exception:
+            return False
+
+    def find_default_cloud_client_secret(self):
+        for p in self.cloud_oauth_candidate_paths():
+            if self.is_valid_google_oauth_client_secret(p):
+                return str(p)
+        return ""
+
+    def copy_cloud_client_secret(self, src_path):
+        src_path = Path(str(src_path or ""))
+        if not src_path.exists():
+            raise FileNotFoundError(str(src_path))
+        dst = self.cloud_client_secret_path()
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(str(src_path), str(dst))
+        return dst
+
+    def select_cloud_client_secret_json(self, parent=None):
+        path, _ = QFileDialog.getOpenFileName(
+            parent or self,
+            self.tr_ui("Google OAuth 클라이언트 JSON 선택"),
+            "",
+            self.tr_ui("JSON 파일 (*.json);;모든 파일 (*)"),
+        )
+        return path or ""
+
+    def run_google_drive_oauth(self, client_secret_path, parent=None):
+        """Google Drive OAuth 로그인 창을 열고 토큰을 로컬 캐시에 저장한다."""
+        InstalledAppFlow, Credentials, Request, build = self.import_google_oauth_modules()
+
+        client_secret_path = Path(str(client_secret_path or ""))
+        if not client_secret_path.exists():
+            raise FileNotFoundError(str(client_secret_path))
+
+        scopes = ["https://www.googleapis.com/auth/drive.file"]
+        flow = InstalledAppFlow.from_client_secrets_file(str(client_secret_path), scopes=scopes)
+
+        # 브라우저 로그인 + 로컬 리다이렉트 서버.
+        # access_type/prompt는 refresh token을 받기 위한 힌트이며, Google 설정에 따라 무시될 수 있다.
+        creds = flow.run_local_server(
+            port=0,
+            prompt="consent",
+            authorization_prompt_message=self.tr_ui("브라우저에서 Google 계정 로그인을 완료해 주세요: {url}"),
+            success_message=self.tr_ui("YSB Tool 클라우드 등록이 완료되었습니다. 이 창은 닫아도 됩니다."),
+            open_browser=True,
+        )
+
+        # 연결 검증 겸 계정 정보를 최대한 가져온다.
+        account_email = ""
+        try:
+            drive = build("drive", "v3", credentials=creds)
+            about = drive.about().get(fields="user").execute()
+            user = about.get("user") if isinstance(about, dict) else {}
+            account_email = str((user or {}).get("emailAddress") or "")
+        except Exception:
+            account_email = ""
+
+        self.cloud_token_path().parent.mkdir(parents=True, exist_ok=True)
+        with open(self.cloud_token_path(), "w", encoding="utf-8") as f:
+            f.write(creds.to_json())
+
+        # client_secret도 캐시 폴더에 복사해 두면 원본 JSON 위치가 바뀌어도 토큰 갱신에 쓸 수 있다.
+        cached_secret = self.copy_cloud_client_secret(client_secret_path)
+
+        cfg = self.load_cloud_config()
+        cfg.update({
+            "provider": "google_drive",
+            "registered": True,
+            "registered_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "account_email": account_email,
+            "scopes": scopes,
+            "client_secret_path": str(cached_secret),
+            "token_path": str(self.cloud_token_path()),
+        })
+        self.save_cloud_config(cfg)
+        return cfg
+
+    def ensure_google_drive_credentials(self, parent=None):
+        """클라우드 작업 전 등록 여부와 토큰 상태를 확인한다. 실제 Drive API 작업 연결 전 준비 단계."""
+        if not self.cloud_token_path().exists():
+            QMessageBox.information(
+                parent or self,
+                self.tr_ui("클라우드 등록 필요"),
+                self.tr_ui("Google Drive 계정이 아직 등록되어 있지 않습니다.\n먼저 클라우드 등록을 진행해 주세요."),
+            )
+            return None
+        try:
+            InstalledAppFlow, Credentials, Request, build = self.import_google_oauth_modules()
+            creds = Credentials.from_authorized_user_file(str(self.cloud_token_path()), ["https://www.googleapis.com/auth/drive.file"])
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+                with open(self.cloud_token_path(), "w", encoding="utf-8") as f:
+                    f.write(creds.to_json())
+            return creds
+        except Exception as e:
+            QMessageBox.warning(parent or self, self.tr_ui("클라우드 연결 확인 실패"), str(e))
+            return None
+
+    def cloud_refresh_status_widgets(self, *extra_labels):
+        """클라우드 등록/해제 뒤 열린 창의 상태 문구를 즉시 갱신한다."""
+        status = self.cloud_status_text()
+        labels = list(extra_labels or [])
+        for attr in ("_cloud_register_status_label", "_cloud_overview_status_label"):
+            lbl = getattr(self, attr, None)
+            if lbl is not None:
+                labels.append(lbl)
+        for lbl in labels:
+            try:
+                if lbl is not None:
+                    if lbl is getattr(self, "_cloud_overview_status_label", None):
+                        lbl.setText(
+                            self.tr_ui("클라우드 메뉴는 작업환경 캐시 백업/복원과 프로젝트 백업을 관리합니다. 홈화면에서는 프로젝트가 열려 있지 않으므로 현재 프로젝트 백업 항목은 표시하지 않습니다.")
+                            + "\n"
+                            + self.tr_ui("현재 상태")
+                            + ": "
+                            + status
+                        )
+                    else:
+                        lbl.setText(status)
+                    lbl.update()
+                    lbl.repaint()
+            except Exception:
+                pass
+        try:
+            if hasattr(self, "launcher_widget"):
+                self.launcher_widget.repaint()
+        except Exception:
+            pass
+
+    def cloud_prompt_password(self, title, message, confirm=False, parent=None):
+        """API 키 포함 백업/복원용 암호 입력. 확인용 재입력 옵션 지원."""
+        parent = parent or self
+        password, ok = QInputDialog.getText(
+            parent,
+            self.tr_ui(title),
+            self.tr_ui(message),
+            QLineEdit.EchoMode.Password,
+        )
+        if not ok:
+            return None
+        password = str(password or "")
+        if not password:
+            QMessageBox.warning(parent, self.tr_ui(title), self.tr_ui("암호를 비워둘 수 없습니다."))
+            return None
+        if confirm:
+            password2, ok2 = QInputDialog.getText(
+                parent,
+                self.tr_ui(title),
+                self.tr_ui("확인을 위해 암호를 한 번 더 입력하세요."),
+                QLineEdit.EchoMode.Password,
+            )
+            if not ok2:
+                return None
+            if password != str(password2 or ""):
+                QMessageBox.warning(parent, self.tr_ui(title), self.tr_ui("입력한 암호가 서로 다릅니다."))
+                return None
+        return password
+
+    def cloud_crypto_derive_key(self, password, salt, iterations=200000):
+        return hashlib.pbkdf2_hmac("sha256", str(password).encode("utf-8"), salt, int(iterations), dklen=32)
+
+    def cloud_crypto_keystream(self, key, nonce, length):
+        out = bytearray()
+        counter = 0
+        while len(out) < int(length):
+            out.extend(hashlib.sha256(key + nonce + counter.to_bytes(8, "big")).digest())
+            counter += 1
+        return bytes(out[:length])
+
+    def cloud_crypto_xor(self, data, stream):
+        return bytes((a ^ b) for a, b in zip(data, stream))
+
+    def cloud_encrypt_bytes(self, plain_bytes, password):
+        """외부 의존성 없는 1차 암호화 컨테이너.
+        PBKDF2 + SHA256 기반 keystream + HMAC으로 평문 API 캐시 업로드를 막는다.
+        """
+        plain_bytes = bytes(plain_bytes or b"")
+        salt = os.urandom(16)
+        nonce = os.urandom(16)
+        iterations = 200000
+        key = self.cloud_crypto_derive_key(password, salt, iterations=iterations)
+        stream = self.cloud_crypto_keystream(key, nonce, len(plain_bytes))
+        cipher = self.cloud_crypto_xor(plain_bytes, stream)
+        header = b"YSB-CLOUD-ENC-v1"
+        mac = hmac.new(key, header + salt + nonce + cipher, hashlib.sha256).hexdigest()
+        payload = {
+            "format": "YSB-CLOUD-ENC-v1",
+            "kdf": "PBKDF2-HMAC-SHA256",
+            "iterations": iterations,
+            "cipher": "SHA256-CTR-XOR",
+            "salt": base64.b64encode(salt).decode("ascii"),
+            "nonce": base64.b64encode(nonce).decode("ascii"),
+            "hmac": mac,
+            "data": base64.b64encode(cipher).decode("ascii"),
+        }
+        return json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+
+    def cloud_decrypt_bytes(self, encrypted_bytes, password):
+        payload = json.loads(bytes(encrypted_bytes or b"").decode("utf-8"))
+        if payload.get("format") != "YSB-CLOUD-ENC-v1":
+            raise RuntimeError(self.tr_ui("지원하지 않는 암호화 형식입니다."))
+        salt = base64.b64decode(payload.get("salt", ""))
+        nonce = base64.b64decode(payload.get("nonce", ""))
+        cipher = base64.b64decode(payload.get("data", ""))
+        iterations = int(payload.get("iterations", 200000) or 200000)
+        key = self.cloud_crypto_derive_key(password, salt, iterations=iterations)
+        header = b"YSB-CLOUD-ENC-v1"
+        expected = hmac.new(key, header + salt + nonce + cipher, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, str(payload.get("hmac", ""))):
+            raise RuntimeError(self.tr_ui("암호가 틀렸거나 암호화 파일이 손상되었습니다."))
+        stream = self.cloud_crypto_keystream(key, nonce, len(cipher))
+        return self.cloud_crypto_xor(cipher, stream)
+
+    def read_cloud_backup_manifest(self, zip_path):
+        try:
+            with zipfile.ZipFile(zip_path, "r") as z:
+                return json.loads(z.read("manifest.json").decode("utf-8"))
+        except Exception:
+            return {}
+
+    def reload_runtime_caches_after_cloud_restore(self):
+        """클라우드 캐시 복원 후 재시작 없이 즉시 반영 가능한 설정을 다시 읽는다."""
+        try:
+            self.app_options = load_app_options()
+            self.sync_translation_option_cache_to_config()
+            self.sync_analysis_mask_options_to_config()
+
+            self.auto_save_enabled = bool(self.app_options.get("auto_save_enabled", False))
+            try:
+                if hasattr(self, "act_auto_save_mode"):
+                    self.act_auto_save_mode.blockSignals(True)
+                    self.act_auto_save_mode.setChecked(self.auto_save_enabled)
+                    self.act_auto_save_mode.blockSignals(False)
+            except Exception:
+                pass
+
+            self.ui_theme = str(self.app_options.get(UI_THEME_KEY, self.ui_theme) or THEME_DARK).lower()
+            if self.ui_theme not in (THEME_DARK, THEME_LIGHT):
+                self.ui_theme = THEME_DARK
+            self.ui_language = normalize_ui_language(self.app_options.get(UI_LANGUAGE_KEY, self.ui_language))
+
+            self.api_settings = ApiSettingsStore.load()
+            apply_settings_to_config(self.api_settings)
+            try:
+                self.restart_engine(show_error=False)
+            except Exception:
+                pass
+
+            self.shortcut_settings = ShortcutSettingsStore.load()
+            self.apply_shortcuts()
+
+            self.load_text_preset_cache()
+            self.load_item_text_preset_cache()
+
+            self.apply_theme(self.ui_theme)
+            self.apply_language(self.ui_language)
+            self.workspace_root = str(get_workspace_root())
+            self.log("☁️ 클라우드 캐시 복원 후 런타임 설정을 자동 갱신했습니다.")
+            return True
+        except Exception as e:
+            try:
+                self.log(f"⚠️ 클라우드 캐시 자동 갱신 실패: {e}")
+            except Exception:
+                pass
+            return False
+
+    def build_google_drive_service(self, creds):
+        """등록된 OAuth 토큰으로 Google Drive API service를 만든다."""
+        try:
+            InstalledAppFlow, Credentials, Request, build = self.import_google_oauth_modules()
+            return build("drive", "v3", credentials=creds)
+        except Exception as e:
+            raise RuntimeError(f"{self.tr_ui('Google Drive 서비스 생성 실패')}: {e}")
+
+    def import_google_drive_media_modules(self):
+        try:
+            from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+            return MediaFileUpload, MediaIoBaseDownload
+        except Exception as e:
+            raise ImportError(
+                self.tr_ui("Google Drive 파일 업로드/다운로드 모듈을 불러올 수 없습니다.")
+                + f"\n\n{e}"
+            )
+
+    def drive_escape_query_text(self, text_value):
+        return str(text_value or "").replace("\\", "\\\\").replace("'", "\\'")
+
+    def drive_find_folder(self, service, name, parent_id=None):
+        name_q = self.drive_escape_query_text(name)
+        q = f"name = '{name_q}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+        if parent_id:
+            q += f" and '{parent_id}' in parents"
+        result = service.files().list(
+            q=q,
+            spaces="drive",
+            fields="files(id,name)",
+            pageSize=10,
+        ).execute()
+        files = result.get("files", []) if isinstance(result, dict) else []
+        return files[0] if files else None
+
+    def drive_find_or_create_folder(self, service, name, parent_id=None):
+        found = self.drive_find_folder(service, name, parent_id=parent_id)
+        if found:
+            return found.get("id")
+        metadata = {
+            "name": name,
+            "mimeType": "application/vnd.google-apps.folder",
+        }
+        if parent_id:
+            metadata["parents"] = [parent_id]
+        folder = service.files().create(
+            body=metadata,
+            fields="id,name",
+        ).execute()
+        return folder.get("id")
+
+    def ensure_cloud_drive_folders(self, service):
+        root_id = self.drive_find_or_create_folder(service, "YSB_Translator_Backup")
+        cache_id = self.drive_find_or_create_folder(service, "cache_backups", parent_id=root_id)
+        project_id = self.drive_find_or_create_folder(service, "project_backups", parent_id=root_id)
+        cfg = self.load_cloud_config()
+        cfg.update({
+            "drive_root_folder_id": root_id,
+            "drive_cache_folder_id": cache_id,
+            "drive_project_folder_id": project_id,
+            "drive_folder_checked_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        })
+        self.save_cloud_config(cfg)
+        return root_id, cache_id, project_id
+
+    def cloud_backup_manifest(self, backup_type="cache", include_api_keys=False):
+        cfg = self.load_cloud_config()
+        return {
+            "app": "YSB Translator",
+            "backup_type": backup_type,
+            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "include_api_keys": bool(include_api_keys),
+            "ui_language": getattr(self, "ui_language", LANG_KO),
+            "provider": "google_drive",
+            "account_email": cfg.get("account_email", ""),
+            "format_version": 1,
+        }
+
+    def iter_cache_backup_sources(self, include_api_keys=False):
+        """백업할 작업환경 캐시 파일 목록을 (실제경로, ZIP 내부경로)로 반환한다.
+        API 키 제외가 기본이며, cloud/work_sessions 같은 임시성/토큰성 폴더는 제외한다.
+        """
+        cache_root = get_cache_dir()
+        excluded_dirs = {"cloud", "work_sessions", "__pycache__", "recent_thumbnails"}
+        excluded_files = {
+            "google_drive_token.json",
+            "cloud_config.json",
+            "google_oauth_client_secret.json",
+            "api_cache.json",
+            "recent_projects.json",
+        }
+
+        if cache_root.exists():
+            for p in cache_root.rglob("*"):
+                if not p.is_file():
+                    continue
+                try:
+                    rel = p.relative_to(cache_root)
+                except Exception:
+                    continue
+                parts = set(rel.parts)
+                if parts & excluded_dirs:
+                    continue
+                if p.name in excluded_files:
+                    continue
+                yield p, Path("cache") / rel
+
+        # 작업 폴더 위치 설정은 Windows 사용자 설정 폴더에 있으므로 별도 포함한다.
+        try:
+            config_root = app_config_dir()
+            workspace_cfg = config_root / "workspace_config.json"
+            if workspace_cfg.exists():
+                yield workspace_cfg, Path("config") / "workspace_config.json"
+        except Exception:
+            pass
+
+    def create_cache_backup_zip(self, include_api_keys=False, api_password=None):
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        backup_dir = self.cloud_dir() / "local_backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        zip_path = backup_dir / f"YSB_cache_backup_{ts}.zip"
+
+        manifest = self.cloud_backup_manifest("cache", include_api_keys=include_api_keys)
+        if include_api_keys:
+            manifest["api_key_encryption"] = "YSB-CLOUD-ENC-v1"
+        added = 0
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+            for src, arc in self.iter_cache_backup_sources(include_api_keys=include_api_keys):
+                try:
+                    z.write(src, str(arc).replace("\\", "/"))
+                    added += 1
+                except Exception as e:
+                    try:
+                        self.log(f"⚠️ 캐시 백업 항목 제외: {src} / {e}")
+                    except Exception:
+                        pass
+
+            if include_api_keys:
+                api_file = get_cache_file("api_cache.json")
+                if api_file.exists():
+                    if not api_password:
+                        raise RuntimeError(self.tr_ui("API 키 포함 백업에는 암호가 필요합니다."))
+                    encrypted = self.cloud_encrypt_bytes(api_file.read_bytes(), api_password)
+                    z.writestr("secure/api_cache.json.enc", encrypted)
+                    added += 1
+        if added <= 0:
+            raise RuntimeError(self.tr_ui("백업할 캐시 파일을 찾지 못했습니다."))
+        return zip_path, added
+
+    def upload_file_to_drive_folder(self, service, local_path, folder_id, mime_type="application/zip"):
+        MediaFileUpload, MediaIoBaseDownload = self.import_google_drive_media_modules()
+        local_path = Path(local_path)
+        metadata = {
+            "name": local_path.name,
+            "parents": [folder_id],
+        }
+        media = MediaFileUpload(str(local_path), mimetype=mime_type, resumable=True)
+        uploaded = service.files().create(
+            body=metadata,
+            media_body=media,
+            fields="id,name,webViewLink,size,createdTime",
+        ).execute()
+        return uploaded
+
+    def list_drive_files_in_folder(self, service, folder_id, name_prefix=""):
+        q = f"'{folder_id}' in parents and trashed = false"
+        if name_prefix:
+            q += f" and name contains '{self.drive_escape_query_text(name_prefix)}'"
+        files = []
+        page_token = None
+        while True:
+            res = service.files().list(
+                q=q,
+                spaces="drive",
+                fields="nextPageToken, files(id,name,size,createdTime,modifiedTime,webViewLink)",
+                orderBy="modifiedTime desc",
+                pageSize=50,
+                pageToken=page_token,
+            ).execute()
+            files.extend(res.get("files", []) if isinstance(res, dict) else [])
+            page_token = res.get("nextPageToken") if isinstance(res, dict) else None
+            if not page_token:
+                break
+        return files
+
+    def choose_drive_backup_file(self, service, folder_id, title, prefix):
+        files = self.list_drive_files_in_folder(service, folder_id, name_prefix=prefix)
+        if not files:
+            QMessageBox.information(
+                self,
+                self.tr_ui(title),
+                self.tr_ui("클라우드에 백업 파일이 없습니다."),
+            )
+            return None
+
+        labels = []
+        mapping = {}
+        for f in files:
+            size = f.get("size", "")
+            mod = f.get("modifiedTime", "")
+            label = f"{f.get('name', '(no name)')}  /  {mod}  /  {size} bytes"
+            labels.append(label)
+            mapping[label] = f
+
+        choice, ok = QInputDialog.getItem(
+            self,
+            self.tr_ui(title),
+            self.tr_ui("불러올 백업 파일을 선택하세요."),
+            labels,
+            0,
+            False,
+        )
+        if not ok or not choice:
+            return None
+        return mapping.get(choice)
+
+    def download_drive_file(self, service, file_id, local_path):
+        MediaFileUpload, MediaIoBaseDownload = self.import_google_drive_media_modules()
+        request = service.files().get_media(fileId=file_id)
+        local_path = Path(local_path)
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(local_path, "wb") as f:
+            downloader = MediaIoBaseDownload(f, request)
+            done = False
+            while not done:
+                status, done = downloader.next_chunk()
+        return local_path
+
+    def create_local_restore_safety_backup(self):
+        """클라우드 캐시를 덮어쓰기 전에 현재 로컬 캐시를 백업한다."""
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        backup_dir = self.cloud_dir() / "restore_safety_backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        zip_path = backup_dir / f"YSB_local_before_restore_{ts}.zip"
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("manifest.json", json.dumps(self.cloud_backup_manifest("local_before_restore", include_api_keys=False), ensure_ascii=False, indent=2))
+            for src, arc in self.iter_cache_backup_sources(include_api_keys=False):
+                try:
+                    z.write(src, str(arc).replace("\\", "/"))
+                except Exception:
+                    pass
+        return zip_path
+
+    def safe_extract_cache_backup_zip(self, zip_path, apply_api_keys=False, api_password=None):
+        """Drive에서 받은 캐시 백업 ZIP을 현재 캐시 폴더에 적용한다."""
+        zip_path = Path(zip_path)
+        if not zip_path.exists():
+            raise FileNotFoundError(str(zip_path))
+
+        cache_root = get_cache_dir().resolve()
+        config_root = app_config_dir().resolve()
+
+        with zipfile.ZipFile(zip_path, "r") as z:
+            manifest = {}
+            try:
+                manifest = json.loads(z.read("manifest.json").decode("utf-8"))
+            except Exception:
+                manifest = {}
+
+            if manifest.get("include_api_keys") and not apply_api_keys:
+                raise RuntimeError(self.tr_ui("이 백업에는 API 키가 포함되어 있습니다. API 키까지 복원하려면 암호가 필요합니다."))
+            if manifest.get("include_api_keys") and apply_api_keys and not api_password:
+                raise RuntimeError(self.tr_ui("API 키 포함 백업 복원에는 암호가 필요합니다."))
+
+            for info in z.infolist():
+                name = info.filename.replace("\\", "/")
+                if not name or name.endswith("/") or name == "manifest.json":
+                    continue
+                if ".." in Path(name).parts:
+                    continue
+
+                if name.startswith("cache/"):
+                    rel = Path(name[len("cache/"):])
+                    if rel.parts and rel.parts[0] in ("cloud", "work_sessions", "__pycache__"):
+                        continue
+                    if rel.name == "api_cache.json" and not apply_api_keys:
+                        continue
+                    dest = (cache_root / rel).resolve()
+                    if not str(dest).startswith(str(cache_root)):
+                        continue
+                elif name.startswith("config/"):
+                    rel = Path(name[len("config/"):])
+                    if rel.name != "workspace_config.json":
+                        continue
+                    dest = (config_root / rel).resolve()
+                    if not str(dest).startswith(str(config_root)):
+                        continue
+                else:
+                    continue
+
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                with z.open(info, "r") as src, open(dest, "wb") as out:
+                    shutil.copyfileobj(src, out)
+
+            if manifest.get("include_api_keys") and apply_api_keys:
+                try:
+                    encrypted_api = z.read("secure/api_cache.json.enc")
+                except Exception:
+                    encrypted_api = None
+                if not encrypted_api:
+                    raise RuntimeError(self.tr_ui("암호화된 API 설정 파일을 찾지 못했습니다."))
+                plain_api = self.cloud_decrypt_bytes(encrypted_api, api_password)
+                api_dest = (cache_root / "api_cache.json").resolve()
+                api_dest.parent.mkdir(parents=True, exist_ok=True)
+                with open(api_dest, "wb") as f:
+                    f.write(plain_api)
+
+        return True
+
+    def format_drive_upload_result_message(self, uploaded, local_path=None, item_count=None):
+        parts = [self.tr_ui("클라우드 백업이 완료되었습니다.")]
+        if uploaded:
+            name = uploaded.get("name", "")
+            link = uploaded.get("webViewLink", "")
+            if name:
+                parts.append(f"\n{self.tr_ui('파일')}: {name}")
+            if link:
+                parts.append(f"\n{self.tr_ui('링크')}: {link}")
+        if item_count is not None:
+            parts.append(f"\n{self.tr_ui('백업 항목')}: {item_count}")
+        if local_path:
+            parts.append(f"\n{self.tr_ui('로컬 백업 파일')}: {local_path}")
+        return "\n".join(parts)
+
+    def _cloud_action_dialog(self, title, description, action_text=None, action_callback=None, extra_builder=None, min_width=760, min_height=360):
+        """클라우드 메뉴/허브에서 공통으로 쓰는 개별 동작 창.
+        메뉴에서 직접 눌러도 이 전용 창이 뜨고, 허브에서 눌러도 같은 창이 뜬다.
+        """
+        dlg = QDialog(self)
+        dlg.setWindowTitle(self.tr_ui(title))
+        dlg.resize(min_width, min_height)
+        try:
+            dlg.setStyleSheet(self.settings_dialog_style())
+        except Exception:
+            pass
+
+        root = QVBoxLayout(dlg)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(12)
+
+        title_label = QLabel(self.tr_ui(title), dlg)
+        title_label.setObjectName("SettingsDialogTitle")
+        root.addWidget(title_label)
+
+        desc_label = QLabel(self.tr_ui(description), dlg)
+        desc_label.setObjectName("SettingsDescription")
+        desc_label.setWordWrap(True)
+        root.addWidget(desc_label)
+
+        content = QFrame(dlg)
+        content.setObjectName("SettingsBlock")
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(16, 14, 16, 14)
+        content_layout.setSpacing(10)
+        root.addWidget(content, 1)
+
+        context = {}
+        if callable(extra_builder):
+            try:
+                extra_builder(content_layout, dlg, context)
+            except TypeError:
+                extra_builder(content_layout, dlg)
+
+        content_layout.addStretch(1)
+
+        btns = QDialogButtonBox(dlg)
+        if action_text and callable(action_callback):
+            run_btn = btns.addButton(self.tr_ui(action_text), QDialogButtonBox.ButtonRole.AcceptRole)
+            try:
+                run_btn.setAutoDefault(True)
+                run_btn.setDefault(True)
+            except Exception:
+                pass
+            def _run():
+                action_callback(dlg, context)
+            run_btn.clicked.connect(_run)
+        close_btn = btns.addButton(self.tr_ui("닫기"), QDialogButtonBox.ButtonRole.RejectRole)
+        close_btn.clicked.connect(dlg.reject)
+        root.addWidget(btns)
+        dlg.exec()
+
+    def _cloud_info_row(self, layout, title, description):
+        item = QFrame()
+        item.setObjectName("SettingsItem")
+        item_layout = QVBoxLayout(item)
+        item_layout.setContentsMargins(12, 10, 12, 10)
+        item_layout.setSpacing(4)
+        t = QLabel(self.tr_ui(title), item)
+        t.setObjectName("SettingsItemTitle")
+        item_layout.addWidget(t)
+        d = QLabel(self.tr_ui(description), item)
+        d.setObjectName("SettingsDescription")
+        d.setWordWrap(True)
+        item_layout.addWidget(d)
+        layout.addWidget(item)
+        return d
+
+    def _show_cloud_placeholder(self, title, message, parent=None):
+        self.show_ok_notice(title, message, parent=parent or self)
+
+    def cloud_register(self):
+        def build(layout, dlg, ctx):
+            self._cloud_info_row(
+                layout,
+                "연결 대상",
+                "Google Drive 계정을 OAuth로 연결합니다. 등록 버튼을 누르면 브라우저가 열리고, Google 로그인/권한 허용을 완료하면 로컬 토큰이 저장됩니다.",
+            )
+            status_label = self._cloud_info_row(
+                layout,
+                "현재 상태",
+                self.cloud_status_text(),
+            )
+            ctx["cloud_status_label"] = status_label
+            self._cloud_register_status_label = status_label
+            self._cloud_info_row(
+                layout,
+                "보안 안내",
+                "OAuth 토큰은 현재 PC의 로컬 캐시에 저장됩니다. 등록 해제 시 이 토큰을 삭제합니다. Google OAuth 클라이언트 JSON은 Drive API 로그인 시작에만 사용됩니다.",
+            )
+
+            client_box = QFrame(dlg)
+            client_box.setObjectName("SettingsItem")
+            client_layout = QVBoxLayout(client_box)
+            client_layout.setContentsMargins(12, 10, 12, 10)
+            client_layout.setSpacing(6)
+
+            title = QLabel(self.tr_ui("Google 로그인"), client_box)
+            title.setObjectName("SettingsItemTitle")
+            client_layout.addWidget(title)
+
+            desc = QLabel(
+                self.tr_ui(
+                    "기본 OAuth 설정이 있으면 JSON 선택 없이 바로 브라우저 로그인을 시작합니다. "
+                    "개발/테스트용 JSON을 직접 쓸 때만 고급 선택을 사용하세요."
+                ),
+                client_box,
+            )
+            desc.setObjectName("SettingsDescription")
+            desc.setWordWrap(True)
+            client_layout.addWidget(desc)
+
+            row = QHBoxLayout()
+            path_label = QLabel("", client_box)
+            path_label.setObjectName("SettingsPath")
+            cfg = self.load_cloud_config()
+            detected_secret = self.find_default_cloud_client_secret()
+            cached_secret = str(cfg.get("client_secret_path") or "")
+            if cached_secret and self.is_valid_google_oauth_client_secret(cached_secret):
+                detected_secret = cached_secret
+            if detected_secret:
+                ctx["client_secret_path"] = detected_secret
+                path_label.setText(self.tr_ui("OAuth 설정 자동 감지됨"))
+            else:
+                path_label.setText(self.tr_ui("OAuth 설정 파일이 없습니다. 고급 선택에서 JSON을 지정하세요."))
+            row.addWidget(path_label, 1)
+
+            select_btn = QPushButton(self.tr_ui("고급 JSON 선택"), client_box)
+            def choose():
+                path = self.select_cloud_client_secret_json(dlg)
+                if path:
+                    ctx["client_secret_path"] = path
+                    path_label.setText(self.tr_ui("사용자 지정 OAuth JSON 선택됨"))
+            select_btn.clicked.connect(choose)
+            row.addWidget(select_btn)
+            client_layout.addLayout(row)
+
+            dep = QLabel(
+                self.tr_ui(
+                    "최종 배포판에서는 EXE 옆 cloud_oauth_client.json 또는 내장 OAuth 설정을 두면 사용자는 Google 로그인만 누르면 됩니다."
+                ),
+                client_box,
+            )
+            dep.setObjectName("SettingsDescription")
+            dep.setWordWrap(True)
+            client_layout.addWidget(dep)
+
+            layout.addWidget(client_box)
+
+        def run(dlg, ctx):
+            client_secret_path = str(ctx.get("client_secret_path") or "") or self.find_default_cloud_client_secret()
+            if not client_secret_path:
+                if not self.ask_yes_no_shortcut(
+                    "클라우드 등록",
+                    "자동 OAuth 설정을 찾지 못했습니다. 개발/테스트용 JSON을 직접 선택할까요?",
+                    yes_text="선택",
+                    no_text="취소",
+                    default_yes=True,
+                    icon=QMessageBox.Icon.Question,
+                    parent=dlg,
+                ):
+                    return
+                client_secret_path = self.select_cloud_client_secret_json(dlg)
+                if client_secret_path:
+                    ctx["client_secret_path"] = client_secret_path
+            if not client_secret_path:
+                self.show_ok_notice(
+                    "클라우드 등록",
+                    "Google OAuth 설정이 없어 로그인을 시작할 수 없습니다. EXE 옆 cloud_oauth_client.json을 두거나 고급 JSON 선택을 사용하세요.",
+                    parent=dlg,
+                )
+                return
+
+            if not self.ask_yes_no_shortcut(
+                "클라우드 등록",
+                "브라우저를 열어 Google Drive 로그인을 시작할까요?",
+                yes_text="로그인",
+                no_text="취소",
+                default_yes=True,
+                icon=QMessageBox.Icon.Question,
+                parent=dlg,
+            ):
+                return
+
+            try:
+                cfg = self.run_google_drive_oauth(client_secret_path, parent=dlg)
+            except ImportError as e:
+                QMessageBox.warning(dlg, self.tr_ui("클라우드 등록 준비 필요"), str(e))
+                return
+            except Exception as e:
+                QMessageBox.warning(
+                    dlg,
+                    self.tr_ui("클라우드 등록 실패"),
+                    self.tr_ui("Google Drive 계정 등록에 실패했습니다.") + f"\n\n{e}",
+                )
+                return
+
+            self.cloud_refresh_status_widgets(ctx.get("cloud_status_label"))
+            account = str(cfg.get("account_email") or "").strip()
+            msg = "Google Drive 계정 등록이 완료되었습니다."
+            if account:
+                msg += f"\n\n{account}"
+            self.show_ok_notice("클라우드 등록 완료", msg, parent=dlg)
+            try:
+                self.log(f"☁️ 클라우드 등록 완료: {account or 'Google Drive'}")
+            except Exception:
+                pass
+
+        self._cloud_action_dialog(
+            "클라우드 등록",
+            "클라우드 백업/불러오기를 사용하려면 먼저 Google Drive 계정을 연결해야 합니다.",
+            "Google 로그인",
+            run,
+            build,
+            min_height=520,
+        )
+
+    def cloud_unregister(self):
+        def build(layout, dlg, ctx):
+            status_label = self._cloud_info_row(
+                layout,
+                "현재 상태",
+                self.cloud_status_text(),
+            )
+            ctx["cloud_status_label"] = status_label
+            self._cloud_register_status_label = status_label
+            self._cloud_info_row(
+                layout,
+                "해제 범위",
+                "현재 PC에 저장된 Google Drive OAuth 토큰과 클라우드 설정 캐시를 삭제합니다. 이후 백업/불러오기 기능은 다시 등록해야 사용할 수 있습니다.",
+            )
+            self._cloud_info_row(
+                layout,
+                "주의",
+                "등록 해제는 로컬 연결 정보를 지우는 작업입니다. 클라우드에 이미 올라간 백업 파일은 별도 삭제하지 않습니다.",
+            )
+        def run(dlg, ctx):
+            if not self.ask_yes_no_shortcut(
+                "클라우드 등록 해제",
+                "클라우드 등록을 해제할까요?",
+                yes_text="해제",
+                no_text="취소",
+                default_yes=False,
+                icon=QMessageBox.Icon.Warning,
+                parent=dlg,
+            ):
+                return
+
+            revoke_note = ""
+            try:
+                if self.cloud_token_path().exists():
+                    try:
+                        InstalledAppFlow, Credentials, Request, build = self.import_google_oauth_modules()
+                        creds = Credentials.from_authorized_user_file(str(self.cloud_token_path()), ["https://www.googleapis.com/auth/drive.file"])
+                        try:
+                            creds.revoke(Request())
+                            revoke_note = "\nGoogle 인증 토큰 해제도 시도했습니다."
+                        except Exception:
+                            revoke_note = "\nGoogle 서버 측 토큰 해제는 실패했지만, 로컬 토큰은 삭제합니다."
+                    except Exception:
+                        revoke_note = "\nGoogle 라이브러리를 사용할 수 없어 로컬 토큰만 삭제합니다."
+            except Exception:
+                revoke_note = ""
+
+            removed = []
+            for p in (self.cloud_token_path(), self.cloud_config_path(), self.cloud_client_secret_path()):
+                try:
+                    if p.exists():
+                        p.unlink()
+                        removed.append(str(p))
+                except Exception:
+                    pass
+
+            self.cloud_refresh_status_widgets(ctx.get("cloud_status_label"))
+            self.show_ok_notice(
+                "클라우드 등록 해제",
+                "클라우드 등록 정보를 삭제했습니다." + revoke_note,
+                parent=dlg,
+            )
+            try:
+                self.log("☁️ 클라우드 등록 해제 완료")
+            except Exception:
+                pass
+
+        self._cloud_action_dialog(
+            "클라우드 등록 해제",
+            "이 PC에서 클라우드 연결을 끊는 전용 창입니다.",
+            "해제",
+            run,
+            build,
+        )
+
+    def cloud_backup_cache(self):
+
+        def build(layout, dlg, ctx):
+            self._cloud_info_row(
+                layout,
+                "백업 대상",
+                "옵션, 단축키, 매크로, 글꼴 프리셋, 번역 프롬프트, 단어장 같은 작업환경 캐시를 클라우드에 백업합니다.",
+            )
+            api_box = QFrame(dlg)
+            api_box.setObjectName("SettingsItem")
+            api_layout = QVBoxLayout(api_box)
+            api_layout.setContentsMargins(12, 10, 12, 10)
+            api_layout.setSpacing(6)
+            cb = QCheckBox(self.tr_ui("API 키까지 백업"), api_box)
+            cb.setToolTip(self.tr_ui("API 키는 유료 API 접근 정보일 수 있으므로, 선택한 경우 암호화가 필수입니다."))
+            api_layout.addWidget(cb)
+            ctx["include_api_keys_checkbox"] = cb
+            api_desc = QLabel(self.tr_ui("기본값은 API 키 제외입니다. API 키까지 백업을 체크하면 업로드 전 반드시 암호화하고, 클라우드에서 불러올 때 반드시 복호화합니다. 암호화/복호화가 준비되지 않은 상태에서는 API 키 포함 백업을 실행하지 않습니다."), api_box)
+            api_desc.setObjectName("SettingsDescription")
+            api_desc.setWordWrap(True)
+            api_layout.addWidget(api_desc)
+            layout.addWidget(api_box)
+            self._cloud_info_row(
+                layout,
+                "보안 규칙",
+                "API 키는 평문으로 클라우드에 올리지 않습니다. API 키 포함 백업은 암호화 ZIP 또는 암호화된 별도 파일로 저장하고, 불러오기 단계에서 복호화 후 적용합니다.",
+            )
+        def run(dlg, ctx):
+            cb = ctx.get("include_api_keys_checkbox")
+            include_api = bool(cb.isChecked()) if cb is not None else False
+            question = "현재 작업환경 캐시를 클라우드로 백업할까요?"
+            if include_api:
+                question = "API 키까지 포함하여 작업환경 캐시를 클라우드로 백업할까요? API 키는 업로드 전에 반드시 암호화됩니다."
+            if not self.ask_yes_no_shortcut(
+                "클라우드로 캐시 백업",
+                question,
+                yes_text="백업",
+                no_text="취소",
+                default_yes=True,
+                icon=QMessageBox.Icon.Warning if include_api else QMessageBox.Icon.Question,
+                parent=dlg,
+            ):
+                return
+            creds = self.ensure_google_drive_credentials(parent=dlg)
+            if creds is None:
+                return
+            api_password = None
+            if include_api:
+                api_password = self.cloud_prompt_password(
+                    "API 키 포함 캐시 백업",
+                    "API 키를 암호화할 암호를 입력하세요. 이 암호를 잊으면 API 키 포함 백업은 복원할 수 없습니다.",
+                    confirm=True,
+                    parent=dlg,
+                )
+                if not api_password:
+                    return
+            try:
+                service = self.build_google_drive_service(creds)
+                root_id, cache_folder_id, project_folder_id = self.ensure_cloud_drive_folders(service)
+                zip_path, item_count = self.create_cache_backup_zip(include_api_keys=include_api, api_password=api_password)
+                uploaded = self.upload_file_to_drive_folder(service, zip_path, cache_folder_id, mime_type="application/zip")
+            except Exception as e:
+                QMessageBox.warning(
+                    dlg,
+                    self.tr_ui("클라우드로 캐시 백업 실패"),
+                    self.tr_ui("캐시 백업을 클라우드에 올리지 못했습니다.") + f"\n\n{e}",
+                )
+                return
+            self.show_ok_notice(
+                "클라우드로 캐시 백업 완료",
+                self.format_drive_upload_result_message(uploaded, local_path=str(zip_path), item_count=item_count),
+                parent=dlg,
+            )
+            try:
+                self.log(f"☁️ 캐시 백업 업로드 완료: {uploaded.get('name', '')}")
+            except Exception:
+                pass
+        self._cloud_action_dialog(
+            "클라우드로 캐시 백업",
+            "현재 PC의 작업환경 캐시를 클라우드에 올리는 전용 창입니다. API 키는 별도 체크한 경우에만 포함하며, 포함 시 암호화가 필수입니다.",
+            "백업",
+            run,
+            build,
+            min_height=470,
+        )
+
+    def cloud_restore_cache(self):
+        def build(layout, dlg, ctx):
+            self._cloud_info_row(
+                layout,
+                "불러오기 대상",
+                "클라우드에 저장된 작업환경 캐시를 내려받아 현재 PC에 적용합니다. 실제 적용 전에는 현재 로컬 설정을 먼저 백업합니다.",
+            )
+            self._cloud_info_row(
+                layout,
+                "API 키 복호화 규칙",
+                "백업에 API 키가 포함되어 있다면 반드시 복호화 과정을 거친 뒤에만 적용합니다. 복호화에 실패하면 API 키는 적용하지 않고, 기존 로컬 API 설정을 보호합니다.",
+            )
+            self._cloud_info_row(
+                layout,
+                "주의",
+                "캐시 불러오기는 단축키, 프리셋, 옵션 같은 현재 작업환경을 바꿀 수 있습니다. 적용 전 확인창을 한 번 더 표시합니다.",
+            )
+        def run(dlg, ctx):
+            if not self.ask_yes_no_shortcut(
+                "클라우드에서 캐시 불러오기",
+                "클라우드에 저장된 작업환경 캐시를 불러올까요? 현재 로컬 설정을 덮어쓸 수 있습니다.",
+                yes_text="불러오기",
+                no_text="취소",
+                default_yes=True,
+                icon=QMessageBox.Icon.Warning,
+                parent=dlg,
+            ):
+                return
+            creds = self.ensure_google_drive_credentials(parent=dlg)
+            if creds is None:
+                return
+            try:
+                service = self.build_google_drive_service(creds)
+                root_id, cache_folder_id, project_folder_id = self.ensure_cloud_drive_folders(service)
+                selected = self.choose_drive_backup_file(service, cache_folder_id, "클라우드에서 캐시 불러오기", "YSB_cache_backup_")
+                if not selected:
+                    return
+                if not self.ask_yes_no_shortcut(
+                    "클라우드에서 캐시 불러오기",
+                    f"{selected.get('name', '')}\n\n이 백업을 내려받아 현재 로컬 설정에 적용할까요?\n적용 전 현재 로컬 캐시는 안전 백업으로 저장됩니다.",
+                    yes_text="적용",
+                    no_text="취소",
+                    default_yes=False,
+                    icon=QMessageBox.Icon.Warning,
+                    parent=dlg,
+                ):
+                    return
+                safety = self.create_local_restore_safety_backup()
+                download_dir = self.cloud_dir() / "downloads"
+                download_dir.mkdir(parents=True, exist_ok=True)
+                local_zip = download_dir / selected.get("name", "cloud_cache_backup.zip")
+                self.download_drive_file(service, selected.get("id"), local_zip)
+                manifest = self.read_cloud_backup_manifest(local_zip)
+                apply_api = bool(manifest.get("include_api_keys"))
+                api_password = None
+                if apply_api:
+                    api_password = self.cloud_prompt_password(
+                        "API 키 포함 캐시 불러오기",
+                        "이 백업에는 암호화된 API 설정이 포함되어 있습니다. 복호화 암호를 입력하세요.",
+                        confirm=False,
+                        parent=dlg,
+                    )
+                    if not api_password:
+                        return
+                self.safe_extract_cache_backup_zip(local_zip, apply_api_keys=apply_api, api_password=api_password)
+                self.reload_runtime_caches_after_cloud_restore()
+            except Exception as e:
+                QMessageBox.warning(
+                    dlg,
+                    self.tr_ui("클라우드에서 캐시 불러오기 실패"),
+                    self.tr_ui("클라우드 캐시 백업을 적용하지 못했습니다.") + f"\n\n{e}",
+                )
+                return
+            self.show_ok_notice(
+                "클라우드에서 캐시 불러오기 완료",
+                "클라우드 캐시 백업을 적용하고 가능한 설정을 즉시 갱신했습니다.\n\n"
+                + self.tr_ui("현재 로컬 설정 안전 백업")
+                + f": {safety}\n"
+                + self.tr_ui("작업 폴더 위치가 바뀐 백업이라면 재시작 후 완전히 반영됩니다."),
+                parent=dlg,
+            )
+            try:
+                self.log(f"☁️ 캐시 백업 복원 완료: {selected.get('name', '')}")
+            except Exception:
+                pass
+        self._cloud_action_dialog(
+            "클라우드에서 캐시 불러오기",
+            "클라우드에 저장된 작업환경 캐시를 내려받아 현재 PC에 적용하는 전용 창입니다.",
+            "불러오기",
+            run,
+            build,
+            min_height=450,
+        )
+
+    def cloud_backup_current_project(self):
+        def build(layout, dlg, ctx):
+            self._cloud_info_row(
+                layout,
+                "백업 대상",
+                "현재 열려 있는 프로젝트의 YSBT 파일 자체를 클라우드에 백업합니다. 작업환경 캐시가 아니라 지금 작업 중인 프로젝트 파일을 보존하는 기능입니다.",
+            )
+            self._cloud_info_row(
+                layout,
+                "저장 규칙",
+                "저장하지 않은 작업이 있으면 클라우드 백업 전에 먼저 프로젝트 저장 여부를 확인합니다. 저장되지 않은 상태의 프로젝트는 업로드하지 않습니다.",
+            )
+        def run(dlg, ctx):
+            if not getattr(self, "project_dir", None):
+                QMessageBox.information(
+                    dlg,
+                    self.tr_ui("현재 프로젝트 클라우드 백업"),
+                    self.tr_ui("현재 열린 프로젝트가 없습니다."),
+                )
+                return
+            if getattr(self, "has_unsaved_changes", False):
+                if not self.ask_yes_no_shortcut(
+                    "현재 프로젝트 클라우드 백업",
+                    "저장하지 않은 작업이 있습니다. 클라우드 백업 전에 먼저 프로젝트를 저장할까요?",
+                    yes_text="저장",
+                    no_text="취소",
+                    default_yes=True,
+                    icon=QMessageBox.Icon.Warning,
+                    parent=dlg,
+                ):
+                    return
+                self.save_project()
+                if getattr(self, "has_unsaved_changes", False):
+                    return
+            creds = self.ensure_google_drive_credentials(parent=dlg)
+            if creds is None:
+                return
+            package_path = getattr(self, "ysbt_package_path", None)
+            if not package_path or not os.path.exists(str(package_path)):
+                QMessageBox.warning(
+                    dlg,
+                    self.tr_ui("현재 프로젝트 클라우드 백업"),
+                    self.tr_ui("현재 프로젝트 YSBT 파일을 찾을 수 없습니다. 먼저 다른 이름으로 저장 또는 저장을 완료해 주세요."),
+                )
+                return
+            try:
+                service = self.build_google_drive_service(creds)
+                root_id, cache_folder_id, project_folder_id = self.ensure_cloud_drive_folders(service)
+                local_path = Path(str(package_path))
+                ts = time.strftime("%Y%m%d_%H%M%S")
+                temp_dir = self.cloud_dir() / "project_uploads"
+                temp_dir.mkdir(parents=True, exist_ok=True)
+                upload_path = temp_dir / f"{local_path.stem}_{ts}{local_path.suffix or '.ysbt'}"
+                shutil.copyfile(str(local_path), str(upload_path))
+                uploaded = self.upload_file_to_drive_folder(service, upload_path, project_folder_id, mime_type="application/octet-stream")
+            except Exception as e:
+                QMessageBox.warning(
+                    dlg,
+                    self.tr_ui("현재 프로젝트 클라우드 백업 실패"),
+                    self.tr_ui("현재 프로젝트를 클라우드에 백업하지 못했습니다.") + f"\n\n{e}",
+                )
+                return
+            self.show_ok_notice(
+                "현재 프로젝트 클라우드 백업 완료",
+                self.format_drive_upload_result_message(uploaded, local_path=str(upload_path)),
+                parent=dlg,
+            )
+            try:
+                self.log(f"☁️ 프로젝트 백업 업로드 완료: {uploaded.get('name', '')}")
+            except Exception:
+                pass
+        self._cloud_action_dialog(
+            "현재 프로젝트 클라우드 백업",
+            "현재 열려 있는 프로젝트 파일을 클라우드에 따로 보존하는 전용 창입니다.",
+            "프로젝트 백업",
+            run,
+            build,
+            min_height=420,
+        )
+
+    def cloud_restore_project_from_cloud(self):
+        def build(layout, dlg, ctx):
+            self._cloud_info_row(
+                layout,
+                "불러오기 대상",
+                "클라우드의 project_backups 폴더에 저장된 YSBT 프로젝트 백업을 내려받아 로컬 파일로 저장한 뒤 열 수 있습니다.",
+            )
+            self._cloud_info_row(
+                layout,
+                "저장 규칙",
+                "다운로드한 프로젝트는 사용자가 고른 위치에 .ysbt 파일로 저장합니다. 기존 파일을 덮어쓸 수 있으므로 저장 위치를 확인하세요.",
+            )
+
+        def run(dlg, ctx):
+            creds = self.ensure_google_drive_credentials(parent=dlg)
+            if creds is None:
+                return
+            try:
+                service = self.build_google_drive_service(creds)
+                root_id, cache_folder_id, project_folder_id = self.ensure_cloud_drive_folders(service)
+                selected = self.choose_drive_backup_file(service, project_folder_id, "클라우드에서 프로젝트 불러오기", "")
+                if not selected:
+                    return
+
+                default_name = str(selected.get("name") or "cloud_project.ysbt")
+                if not default_name.lower().endswith(".ysbt"):
+                    default_name += ".ysbt"
+                save_path, _ = QFileDialog.getSaveFileName(
+                    dlg,
+                    self.tr_ui("클라우드 프로젝트 저장 위치"),
+                    default_name,
+                    self.tr_ui("YSBT 프로젝트 (*.ysbt);;모든 파일 (*)"),
+                )
+                if not save_path:
+                    return
+                if not str(save_path).lower().endswith(".ysbt"):
+                    save_path += ".ysbt"
+
+                self.download_drive_file(service, selected.get("id"), save_path)
+            except Exception as e:
+                QMessageBox.warning(
+                    dlg,
+                    self.tr_ui("클라우드에서 프로젝트 불러오기 실패"),
+                    self.tr_ui("클라우드 프로젝트 백업을 내려받지 못했습니다.") + f"\\n\\n{e}",
+                )
+                return
+
+            if self.ask_yes_no_shortcut(
+                "클라우드에서 프로젝트 불러오기",
+                "프로젝트 백업을 내려받았습니다. 지금 열까요?",
+                yes_text="열기",
+                no_text="닫기",
+                default_yes=True,
+                icon=QMessageBox.Icon.Question,
+                parent=dlg,
+            ):
+                try:
+                    self.open_project_path(save_path)
+                    dlg.accept()
+                except Exception as e:
+                    QMessageBox.warning(dlg, self.tr_ui("프로젝트 열기 실패"), str(e))
+            else:
+                self.show_ok_notice("클라우드에서 프로젝트 불러오기", f"저장 완료:\\n{save_path}", parent=dlg)
+
+        self._cloud_action_dialog(
+            "클라우드에서 프로젝트 불러오기",
+            "클라우드에 백업한 YSBT 프로젝트 파일을 로컬로 내려받는 전용 창입니다.",
+            "프로젝트 불러오기",
+            run,
+            build,
+            min_height=430,
+        )
+
+    def open_cloud_overview_dialog(self, include_project_backup=None):
+        """홈화면/런처에서 쓰는 클라우드 허브 창.
+        홈화면에서는 열린 프로젝트가 없으므로 현재 프로젝트 백업 항목을 숨긴다.
+        """
+        if include_project_backup is None:
+            include_project_backup = bool(getattr(self, "project_dir", None))
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(self.tr_ui("클라우드"))
+        dlg.resize(800, 660)
+        try:
+            dlg.setStyleSheet(self.settings_dialog_style())
+        except Exception:
+            pass
+
+        root = QVBoxLayout(dlg)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(12)
+
+        title = QLabel(self.tr_ui("클라우드"), dlg)
+        title.setObjectName("SettingsDialogTitle")
+        root.addWidget(title)
+
+        intro = QLabel(self.tr_ui("클라우드 메뉴는 작업환경 캐시 백업/복원과 프로젝트 백업을 관리합니다. 홈화면에서는 프로젝트가 열려 있지 않으므로 현재 프로젝트 백업 항목은 표시하지 않습니다.") + "\n" + self.tr_ui("현재 상태") + ": " + self.cloud_status_text(), dlg)
+        intro.setObjectName("SettingsDescription")
+        intro.setWordWrap(True)
+        self._cloud_overview_status_label = intro
+        root.addWidget(intro)
+
+        scroll = QScrollArea(dlg)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        body = QWidget(scroll)
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(12)
+        scroll.setWidget(body)
+        root.addWidget(scroll, 1)
+
+        cloud_block, cloud_layout = self._settings_block(
+            "클라우드",
+            "Google Drive 같은 외부 저장소와 연결해 작업환경 캐시를 보존하고, 필요할 때 다시 불러오는 영역입니다.",
+        )
+
+        def add_cloud_item(title_text, description_text, button_text, slot):
+            item = QFrame(dlg)
+            item.setObjectName("SettingsItem")
+            item_layout = QHBoxLayout(item)
+            item_layout.setContentsMargins(12, 10, 12, 10)
+            item_layout.setSpacing(12)
+            text_box = QVBoxLayout()
+            text_box.setContentsMargins(0, 0, 0, 0)
+            text_box.setSpacing(4)
+            t = QLabel(self.tr_ui(title_text), item)
+            t.setObjectName("SettingsItemTitle")
+            text_box.addWidget(t)
+            d = QLabel(self.tr_ui(description_text), item)
+            d.setObjectName("SettingsDescription")
+            d.setWordWrap(True)
+            text_box.addWidget(d)
+            item_layout.addLayout(text_box, 1)
+            btn = QPushButton(self.tr_ui(button_text), item)
+            btn.setMinimumWidth(150)
+            btn.clicked.connect(slot)
+            item_layout.addWidget(btn, 0)
+            cloud_layout.addWidget(item)
+
+        add_cloud_item(
+            "클라우드 등록",
+            "Google Drive 계정을 연결합니다. 등록 후 캐시 백업, 캐시 불러오기, 프로젝트 백업 기능을 사용할 수 있게 됩니다.",
+            "등록",
+            self.cloud_register,
+        )
+        add_cloud_item(
+            "클라우드 등록 해제",
+            "현재 PC에 저장된 클라우드 연결 토큰을 해제합니다. 이후 백업/불러오기 기능은 다시 등록해야 사용할 수 있습니다.",
+            "해제",
+            self.cloud_unregister,
+        )
+        add_cloud_item(
+            "클라우드로 캐시 백업",
+            "옵션, 단축키, 매크로, 프리셋, 프롬프트, 단어장 같은 작업환경 캐시를 백업합니다. API 키는 체크박스로 별도 선택하며, 포함 시 업로드 전 암호화와 불러오기 시 복호화가 필수입니다.",
+            "캐시 백업",
+            self.cloud_backup_cache,
+        )
+        add_cloud_item(
+            "클라우드에서 캐시 불러오기",
+            "클라우드에 저장된 작업환경 캐시를 내려받아 현재 PC에 적용합니다. API 키가 포함된 백업은 복호화 후에만 적용합니다.",
+            "캐시 불러오기",
+            self.cloud_restore_cache,
+        )
+        if include_project_backup:
+            add_cloud_item(
+                "현재 프로젝트 클라우드에 백업하기",
+                "현재 열려 있는 프로젝트의 YSBT 파일을 클라우드에 백업합니다. 작업환경 캐시가 아니라 지금 작업 중인 프로젝트 파일 자체를 보존하는 기능입니다.",
+                "프로젝트 백업",
+                self.cloud_backup_current_project,
+            )
+
+        add_cloud_item(
+            "클라우드에서 프로젝트 불러오기",
+            "클라우드에 백업한 YSBT 프로젝트 파일을 로컬로 내려받아 다시 열 수 있습니다.",
+            "프로젝트 불러오기",
+            self.cloud_restore_project_from_cloud,
+        )
+
+        body_layout.addWidget(cloud_block)
+        body_layout.addStretch(1)
+
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, dlg)
+        btns.button(QDialogButtonBox.StandardButton.Close).setText(self.tr_ui("닫기"))
+        btns.rejected.connect(dlg.reject)
+        root.addWidget(btns)
+        dlg.exec()
+
+    def settings_dialog_style(self):
+        """통합 설정/옵션 계열 창 전용 몽글 카드 스타일."""
+        if self.is_light_theme():
+            return """
+                QDialog { background:#f4f6fa; color:#22252b; }
+                QScrollArea { background:transparent; border:0; }
+                QLabel { color:#22252b; }
+                QFrame#SettingsBlock {
+                    background:#ffffff;
+                    border:1px solid #dfe5ef;
+                    border-radius:16px;
+                }
+                QFrame#SettingsItem {
+                    background:#f9fbfe;
+                    border:1px solid #e4eaf3;
+                    border-radius:14px;
+                }
+                QLabel#SettingsItemTitle { font-size:13px; font-weight:700; color:#1f232b; }
+                QLabel#SettingsTitle, QLabel#SettingsDialogTitle { font-size:22px; font-weight:800; color:#1f232b; }
+                QLabel#SettingsSectionTitle { font-size:16px; font-weight:750; color:#1f232b; }
+                QLabel#SettingsDescription { color:#667085; line-height:140%; }
+                QLabel#SettingsPath {
+                    color:#667085;
+                    background:#f1f4f9;
+                    border:1px solid #e0e6f0;
+                    border-radius:0px;
+                    padding:3px 6px;
+                }
+                QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QFontComboBox, QSpinBox, QDoubleSpinBox, QKeySequenceEdit {
+                    background:#ffffff;
+                    color:#22252b;
+                    border:1px solid #cfd7e5;
+                    border-radius:0px;
+                    padding:3px 6px;
+                    selection-background-color:#dbeafe;
+                    selection-color:#111827;
+                }
+                QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QFontComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QKeySequenceEdit:focus {
+                    border:1px solid #8fb4e8;
+                    background:#ffffff;
+                }
+QCheckBox, QRadioButton { color:#22252b; spacing:9px; }
+                QCheckBox::indicator, QRadioButton::indicator {
+                    width:15px; height:15px;
+                    border:1px solid #aab4c3;
+                    background:#ffffff;
+                    border-radius:0px;
+                }
+                QRadioButton::indicator { border-radius:0px; }
+                QCheckBox::indicator:checked, QRadioButton::indicator:checked {
+                    background:#7aa8e8;
+                    border:1px solid #7aa8e8;
+                }
+                QPushButton {
+                    background:#f8fafc;
+                    color:#22252b;
+                    border:1px solid #cfd7e5;
+                    border-radius:0px;
+                    padding:4px 10px;
+                }
+                QPushButton:hover { background:#edf4ff; border-color:#aac4e8; }
+                QPushButton:pressed { background:#e3edf9; }
+                QPushButton:disabled { background:#edf0f5; color:#9aa4b2; border-color:#dde3ec; }
+                QTabWidget::pane { border:1px solid #dfe5ef; border-radius:0px; background:#ffffff; }
+                QTabBar::tab {
+                    background:#edf1f7;
+                    color:#4b5563;
+                    border:1px solid #d9e0ea;
+                    border-bottom:none;
+                    border-top-left-radius:10px;
+                    border-top-right-radius:3px;
+                    padding:4px 10px;
+                }
+                QTabBar::tab:selected { background:#ffffff; color:#1f232b; font-weight:700; }
+                QListWidget, QTableWidget, QTreeWidget {
+                    background:#ffffff;
+                    color:#22252b;
+                    border:1px solid #dfe5ef;
+                    border-radius:0px;
+                    alternate-background-color:#f7f9fd;
+                    selection-background-color:#dbeafe;
+                    selection-color:#111827;
+                }
+                QHeaderView::section {
+                    background:#f1f4f9;
+                    color:#374151;
+                    border:0;
+                    border-right:1px solid #dfe5ef;
+                    padding:7px;
+                }
+                QScrollBar:vertical { background:#eef2f8; width:12px; margin:0; border:0; border-radius:0px; }
+                QScrollBar::handle:vertical { background:#cbd5e1; min-height:30px; border-radius:0px; }
+                QScrollBar::handle:vertical:hover { background:#b7c3d4; }
+                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }
+                QScrollBar:horizontal { background:#eef2f8; height:12px; margin:0; border:0; border-radius:0px; }
+                QScrollBar::handle:horizontal { background:#cbd5e1; min-width:30px; border-radius:0px; }
+                QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width:0; }
+            """
+        return """
+            QDialog { background:#202226; color:#f2f4f8; }
+            QScrollArea { background:transparent; border:0; }
+            QLabel { color:#f2f4f8; }
+            QFrame#SettingsBlock {
+                background:#282c33;
+                border:1px solid #3b414c;
+                border-radius:16px;
+            }
+            QFrame#SettingsItem {
+                background:#24282f;
+                border:1px solid #363c47;
+                border-radius:14px;
+            }
+            QLabel#SettingsItemTitle { font-size:13px; font-weight:700; color:#ffffff; }
+            QLabel#SettingsTitle, QLabel#SettingsDialogTitle { font-size:22px; font-weight:800; color:#ffffff; }
+            QLabel#SettingsSectionTitle { font-size:16px; font-weight:750; color:#ffffff; }
+            QLabel#SettingsDescription { color:#b5bfce; line-height:140%; }
+            QLabel#SettingsPath {
+                color:#c6ceda;
+                background:#1f2228;
+                border:1px solid #3b414c;
+                border-radius:0px;
+                padding:3px 6px;
+            }
+            QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QFontComboBox, QSpinBox, QDoubleSpinBox, QKeySequenceEdit {
+                background:#1f2228;
+                color:#f5f7fb;
+                border:1px solid #434a56;
+                border-radius:0px;
+                padding:3px 6px;
+                selection-background-color:#4c6f9f;
+                selection-color:#ffffff;
+            }
+            QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QFontComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QKeySequenceEdit:focus {
+                border:1px solid #7ea2d6;
+                background:#222630;
+            }
+QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
+            QCheckBox::indicator, QRadioButton::indicator {
+                width:15px; height:15px;
+                border:1px solid #6f7786;
+                background:#1f2228;
+                border-radius:0px;
+            }
+            QRadioButton::indicator { border-radius:0px; }
+            QCheckBox::indicator:checked, QRadioButton::indicator:checked {
+                background:#78a6e6;
+                border:1px solid #78a6e6;
+            }
+            QPushButton {
+                background:#333843;
+                color:#f2f4f8;
+                border:1px solid #555d6c;
+                border-radius:0px;
+                padding:4px 10px;
+            }
+            QPushButton:hover { background:#3d4654; border-color:#718098; }
+            QPushButton:pressed { background:#2b303a; }
+            QPushButton:disabled { background:#2a2d33; color:#858d9a; border-color:#3f4550; }
+            QTabWidget::pane { border:1px solid #3b414c; border-radius:0px; background:#24282f; }
+            QTabBar::tab {
+                background:#2a2e36;
+                color:#b5bfce;
+                border:1px solid #3b414c;
+                border-bottom:none;
+                border-top-left-radius:10px;
+                border-top-right-radius:3px;
+                padding:4px 10px;
+            }
+            QTabBar::tab:selected { background:#333842; color:#ffffff; font-weight:700; }
+            QListWidget, QTableWidget, QTreeWidget {
+                background:#24282f;
+                color:#f2f4f8;
+                border:1px solid #3b414c;
+                border-radius:0px;
+                alternate-background-color:#282d35;
+                selection-background-color:#3d587d;
+                selection-color:#ffffff;
+            }
+            QHeaderView::section {
+                background:#2d323b;
+                color:#d7deea;
+                border:0;
+                border-right:1px solid #3b414c;
+                padding:7px;
+            }
+            QScrollBar:vertical { background:#20242b; width:12px; margin:0; border:0; border-radius:0px; }
+            QScrollBar::handle:vertical { background:#424a57; min-height:30px; border-radius:0px; }
+            QScrollBar::handle:vertical:hover { background:#566173; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }
+            QScrollBar:horizontal { background:#20242b; height:12px; margin:0; border:0; border-radius:0px; }
+            QScrollBar::handle:horizontal { background:#424a57; min-width:30px; border-radius:0px; }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width:0; }
+        """
+
+    def _settings_block(self, title, description=None):
+        block = QFrame()
+        block.setObjectName("SettingsBlock")
+        layout = QVBoxLayout(block)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(10)
+        title_label = QLabel(self.tr_ui(title))
+        title_label.setObjectName("SettingsSectionTitle")
+        layout.addWidget(title_label)
+        if description:
+            desc = QLabel(self.tr_ui(description))
+            desc.setObjectName("SettingsDescription")
+            desc.setWordWrap(True)
+            layout.addWidget(desc)
+        return block, layout
+
+    def _settings_row(self, label_text, widget, description=None):
+        row_wrap = QWidget()
+        row = QHBoxLayout(row_wrap)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(10)
+        left = QVBoxLayout()
+        left.setContentsMargins(0, 0, 0, 0)
+        label = QLabel(self.tr_ui(label_text))
+        label.setMinimumWidth(180)
+        left.addWidget(label)
+        if description:
+            desc = QLabel(self.tr_ui(description))
+            desc.setObjectName("SettingsDescription")
+            desc.setWordWrap(True)
+            left.addWidget(desc)
+        row.addLayout(left, 1)
+        row.addWidget(widget, 0)
+        return row_wrap
+
+    def _settings_button(self, text, slot):
+        btn = QPushButton(self.tr_ui(text))
+        btn.clicked.connect(slot)
+        return btn
+
+    def open_settings_overview_dialog(self):
+        """설정과 옵션을 한 번에 보는 통합 창.
+        - 확인: 이 창에서 직접 바꾼 설정을 저장하고 닫는다.
+        - 닫기/X: 이 창에서 직접 바꾼 설정을 저장하지 않고 닫는다.
+        - 복잡한 옵션은 각 전용 관리창의 확인/닫기 규칙을 따른다.
+        """
+        old_auto_save = bool(getattr(self, "auto_save_enabled", False))
+        old_theme = str(getattr(self, "ui_theme", THEME_DARK) or THEME_DARK)
+        old_language = normalize_ui_language(getattr(self, "ui_language", LANG_KO))
+        old_temp_enabled = self.is_temp_auto_cleanup_enabled()
+        old_temp_days = self.get_temp_auto_cleanup_days()
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(self.tr_ui("설정 / 옵션"))
+        dlg.setModal(True)
+        dlg.resize(820, 760)
+        dlg.setStyleSheet(self.settings_dialog_style())
+
+        root = QVBoxLayout(dlg)
+        root.setContentsMargins(18, 18, 18, 18)
+        root.setSpacing(12)
+
+        title = QLabel(self.tr_ui("설정 / 옵션"))
+        title.setObjectName("SettingsDialogTitle")
+        root.addWidget(title)
+
+        intro = QLabel(self.tr_ui("확인을 누르면 이 창에서 바꾼 설정이 저장됩니다. 닫기나 X를 누르면 이 창에서 바꾼 설정은 저장하지 않습니다. 복잡한 항목은 오른쪽 버튼으로 전용 관리창을 엽니다."))
+        intro.setObjectName("SettingsDescription")
+        intro.setWordWrap(True)
+        root.addWidget(intro)
+
+        scroll = QScrollArea(dlg)
+        scroll.setWidgetResizable(True)
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(12)
+        scroll.setWidget(body)
+        root.addWidget(scroll, 1)
+
+        def make_action_button(text, slot):
+            btn = QPushButton(self.tr_ui(text), dlg)
+            btn.setMinimumWidth(150)
+            btn.clicked.connect(slot)
+            return btn
+
+        def add_item(layout, title_text, description_text, control_widget=None, button_text=None, button_slot=None):
+            item = QFrame(dlg)
+            item.setObjectName("SettingsItem")
+            item_layout = QHBoxLayout(item)
+            item_layout.setContentsMargins(12, 10, 12, 10)
+            item_layout.setSpacing(12)
+            text_box = QVBoxLayout()
+            text_box.setContentsMargins(0, 0, 0, 0)
+            text_box.setSpacing(4)
+            t = QLabel(self.tr_ui(title_text), item)
+            t.setObjectName("SettingsItemTitle")
+            text_box.addWidget(t)
+            d = QLabel(self.tr_ui(description_text), item)
+            d.setObjectName("SettingsDescription")
+            d.setWordWrap(True)
+            text_box.addWidget(d)
+            item_layout.addLayout(text_box, 1)
+            if control_widget is not None:
+                item_layout.addWidget(control_widget, 0)
+            if button_text and button_slot:
+                item_layout.addWidget(make_action_button(button_text, button_slot), 0)
+            layout.addWidget(item)
+            return item
+
+        # 설정 섹션
+        settings_block, settings_layout = self._settings_block(
+            "설정",
+            "프로그램의 기본 동작과 작업 환경을 정하는 항목입니다. 여기서 직접 바꾼 값은 확인을 눌러야 저장됩니다.",
+        )
+
+        cb_auto = QCheckBox(self.tr_ui("자동저장 모드"), dlg)
+        cb_auto.setChecked(old_auto_save)
+        add_item(
+            settings_layout,
+            "자동저장 모드",
+            "ON이면 변경 사항을 실제 프로젝트에 바로 저장합니다. OFF이면 임시 작업 캐시에 먼저 저장하고, 프로젝트 저장 시 확정합니다.",
+            cb_auto,
+        )
+
+        combo_theme = QComboBox(dlg)
+        combo_theme.addItem(self.tr_ui("다크 테마"), THEME_DARK)
+        combo_theme.addItem(self.tr_ui("화이트 테마"), THEME_LIGHT)
+        combo_theme.setCurrentIndex(1 if old_theme == THEME_LIGHT else 0)
+        add_item(
+            settings_layout,
+            "테마 설정",
+            "프로그램 전체의 밝기 테마를 정합니다. 확인을 누르면 선택한 테마가 적용됩니다.",
+            combo_theme,
+        )
+
+        combo_lang = QComboBox(dlg)
+        combo_lang.addItem(self.tr_ui("한국어"), LANG_KO)
+        combo_lang.addItem("English", LANG_EN)
+        combo_lang.setCurrentIndex(1 if old_language == LANG_EN else 0)
+        add_item(
+            settings_layout,
+            "언어 설정",
+            "메뉴와 안내 문구의 표시 언어를 정합니다. 확인을 누르면 선택한 언어가 적용됩니다.",
+            combo_lang,
+        )
+
+        workspace_widget = QWidget(dlg)
+        workspace_row = QHBoxLayout(workspace_widget)
+        workspace_row.setContentsMargins(0, 0, 0, 0)
+        workspace_row.setSpacing(8)
+        try:
+            old_workspace_root = Path(load_workspace_config().get("workspace_root") or get_workspace_root())
+        except Exception:
+            old_workspace_root = Path(str(get_workspace_root()))
+        workspace_target = {"path": old_workspace_root}
+        workspace_label = QLabel(str(old_workspace_root), workspace_widget)
+        workspace_label.setObjectName("SettingsPath")
+        workspace_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        workspace_row.addWidget(workspace_label, 1)
+        def change_workspace_from_dialog():
+            # 통합 설정창에서는 개별 작업 폴더 설정창을 다시 띄우지 않는다.
+            # 여기서는 경로값만 바꾸고, 실제 저장/재기동 확인은 통합 설정창의 [확인]에서 처리한다.
+            current = str(workspace_target.get("path") or old_workspace_root)
+            selected = QFileDialog.getExistingDirectory(dlg, self.tr_ui("작업 폴더 위치 선택"), current)
+            if selected:
+                try:
+                    target = normalize_workspace_root_from_user(selected)
+                except Exception:
+                    QMessageBox.warning(dlg, self.tr_ui("경로 오류"), self.tr_ui("작업 폴더 경로가 올바르지 않습니다."))
+                    return
+                workspace_target["path"] = target
+                workspace_label.setText(str(target))
+        btn_change_workspace = QPushButton(self.tr_ui("위치 변경"), workspace_widget)
+        btn_change_workspace.clicked.connect(change_workspace_from_dialog)
+        workspace_row.addWidget(btn_change_workspace)
+        def reset_workspace_from_dialog():
+            # 즉시 저장하지 않고 표시값만 기본값으로 되돌린다.
+            # [확인]에서 재기동을 승인해야 실제 적용된다.
+            target = default_workspace_root()
+            workspace_target["path"] = target
+            workspace_label.setText(str(target))
+        btn_reset_workspace = QPushButton(self.tr_ui("기본값으로\n변경"), workspace_widget)
+        btn_reset_workspace.setToolTip(self.tr_ui("Windows 실제 문서 폴더 아래 YSB_Translator로 되돌립니다."))
+        btn_reset_workspace.clicked.connect(reset_workspace_from_dialog)
+        workspace_row.addWidget(btn_reset_workspace)
+        add_item(
+            settings_layout,
+            "작업 폴더 위치",
+            "프로젝트 작업 폴더와 캐시가 저장되는 기준 위치입니다. 위치를 바꾸면 프로그램을 재기동해야 적용됩니다. 취소하면 이전 작업 폴더 위치값으로 원복됩니다. 기본값은 Windows 실제 문서 폴더 아래 YSB_Translator입니다.",
+            workspace_widget,
+        )
+
+        temp_widget = QWidget(dlg)
+        temp_row = QHBoxLayout(temp_widget)
+        temp_row.setContentsMargins(0, 0, 0, 0)
+        temp_row.setSpacing(8)
+        cb_temp_auto = QCheckBox(self.tr_ui("자동삭제"), temp_widget)
+        cb_temp_auto.setChecked(old_temp_enabled)
+        combo_days = QComboBox(temp_widget)
+        for days, label in self.temp_cleanup_period_options():
+            combo_days.addItem(self.tr_ui(label), days)
+            if days == old_temp_days:
+                combo_days.setCurrentIndex(combo_days.count() - 1)
+        combo_days.setEnabled(cb_temp_auto.isChecked())
+        cb_temp_auto.toggled.connect(lambda checked: combo_days.setEnabled(bool(checked)))
+        temp_row.addWidget(cb_temp_auto)
+        temp_row.addWidget(combo_days)
+        add_item(
+            settings_layout,
+            "임시 파일 관리",
+            "오래된 임시 작업 폴더를 자동으로 정리할지 정합니다. 즉시 삭제는 별도 확인 후 바로 실행됩니다.",
+            temp_widget,
+            "지금 정리",
+            lambda: self.delete_temp_files_now(dlg),
+        )
+
+        add_item(
+            settings_layout,
+            "YSBT 파일 연결 등록",
+            ".ysbt 파일을 더블클릭했을 때 현재 역식붕이 툴로 바로 열리게 Windows 연결을 등록합니다.",
+            None,
+            "등록",
+            self.register_ysb_file_association,
+        )
+        add_item(
+            settings_layout,
+            "YSBT 파일 연결 해제",
+            "현재 사용자 계정의 .ysbt 연결을 해제합니다. 이전 테스트용 .ysb 연결도 함께 정리합니다.",
+            None,
+            "해제",
+            self.unregister_ysbt_file_association,
+        )
+
+        body_layout.addWidget(settings_block)
+
+        # 옵션 섹션
+        options_block, options_layout = self._settings_block(
+            "옵션",
+            "작업 기능을 관리하는 항목입니다. 이 창 안에 전부 펼치면 복잡해지므로, 각 항목의 버튼으로 기존 전용 관리창을 엽니다.",
+        )
+        option_items = [
+            (
+                "API 관리",
+                "OpenAI, DeepSeek, OpenAI 호환 서버, 인페인팅 API 같은 외부 API 주소와 키, 모델명을 관리합니다. 유료 API 정보가 들어갈 수 있으니 저장 전 확인이 필요합니다.",
+                "관리",
+                self.open_api_settings_dialog,
+            ),
+            (
+                "번역 프롬프트 입력",
+                "AI 번역에 사용할 기본 지침을 편집합니다. 작품 말투, 번역 규칙, 금지 표현 같은 지시문을 이곳에서 관리합니다.",
+                "편집",
+                self.open_translation_prompt_dialog,
+            ),
+            (
+                "단어장",
+                "반복해서 나오는 이름, 고유명사, 말투 규칙, 번역 고정어를 관리합니다. 번역 품질을 일정하게 유지하는 데 쓰입니다.",
+                "관리",
+                self.open_glossary_dialog,
+            ),
+            (
+                "분석 마스크 확장 비율",
+                "OCR/분석 결과로 만들어지는 마스크의 여유 범위와 최소 확장 크기를 조절합니다. 최소 확장 크기를 0px로 두면 강제 최소 확장을 사용하지 않습니다.",
+                "설정",
+                self.open_analysis_mask_settings_dialog,
+            ),
+            (
+                "단축키 통합 관리",
+                "작업, 일괄 처리, 텍스트 입력, 옵션 기능에 연결된 단축키를 한곳에서 바꿉니다. 충돌 확인과 비활성화도 여기서 처리합니다.",
+                "관리",
+                self.open_shortcut_settings_dialog,
+            ),
+            (
+                "매크로 관리",
+                "여러 작업을 하나의 사용자 단축키로 묶어 실행하는 매크로를 관리합니다. 반복 작업을 줄이는 자동화용 기능입니다.",
+                "관리",
+                self.open_macro_settings_dialog,
+            ),
+            (
+                "페이지 글꼴 프리셋 관리",
+                "현재 페이지 또는 전체 페이지에 적용할 글꼴 스타일 묶음을 관리합니다. 페이지 단위 식질 스타일을 빠르게 맞출 때 사용합니다.",
+                "관리",
+                self.open_text_preset_dialog,
+            ),
+            (
+                "개별 글꼴 프리셋 관리",
+                "선택한 텍스트 박스 하나에 적용할 글꼴, 크기, 테두리, 색상 같은 개별 스타일 프리셋을 관리합니다.",
+                "관리",
+                self.open_item_text_preset_dialog,
+            ),
+        ]
+        for title_text, desc_text, btn_text, slot in option_items:
+            add_item(options_layout, title_text, desc_text, None, btn_text, slot)
+
+        body_layout.addWidget(options_block)
+        body_layout.addStretch(1)
+
+        save_applied = {"ok": False, "restart": False}
+
+        def apply_settings_overview_changes():
+            new_auto_save = bool(cb_auto.isChecked())
+            new_theme = str(combo_theme.currentData() or THEME_DARK)
+            if new_theme not in (THEME_DARK, THEME_LIGHT):
+                new_theme = THEME_DARK
+            new_language = normalize_ui_language(combo_lang.currentData())
+            new_temp_enabled = bool(cb_temp_auto.isChecked())
+            new_temp_days = int(combo_days.currentData() or old_temp_days or 7)
+
+            # 확인 → 저장 확인에서 예를 누른 뒤에만 실제 저장/적용한다.
+            if new_theme != old_theme:
+                self.ui_theme = new_theme
+                self.apply_theme(new_theme)
+            if new_language != old_language:
+                self.ui_language = new_language
+                self.apply_language(new_language)
+            if new_temp_enabled != old_temp_enabled or new_temp_days != old_temp_days:
+                self.set_temp_cleanup_options(new_temp_enabled, new_temp_days)
+                self.log(f"🧹 임시 파일 자동삭제 설정: {'ON' if new_temp_enabled else 'OFF'} / {new_temp_days}일")
+            if new_auto_save != old_auto_save:
+                try:
+                    self.act_auto_save_mode.blockSignals(True)
+                    self.act_auto_save_mode.setChecked(new_auto_save)
+                    self.act_auto_save_mode.blockSignals(False)
+                except Exception:
+                    pass
+                self.toggle_auto_save_mode(new_auto_save)
+            else:
+                self.save_app_options_cache()
+            self.log("⚙️ 설정 / 옵션 저장 완료")
+            save_applied["ok"] = True
+
+        def on_settings_overview_ok():
+            # 설정창은 닫지 않은 상태에서 먼저 저장 여부를 묻는다.
+            # 아니오(N)를 누르면 설정창으로 돌아가 다시 조작할 수 있다.
+            if not self.ask_yes_no_shortcut(
+                "설정 저장",
+                "이 창에서 바꾼 설정을 저장할까요?",
+                yes_text="저장",
+                no_text="취소",
+                default_yes=True,
+                icon=QMessageBox.Icon.Question,
+                parent=dlg,
+            ):
+                self.log("⚙️ 설정 / 옵션 저장 취소")
+                return
+
+            try:
+                current_workspace = Path(old_workspace_root).resolve()
+                target_workspace = Path(workspace_target.get("path") or old_workspace_root).resolve()
+            except Exception:
+                current_workspace = Path(str(old_workspace_root))
+                target_workspace = Path(str(workspace_target.get("path") or old_workspace_root))
+
+            workspace_changed = current_workspace != target_workspace
+            if workspace_changed:
+                if not workspace_restart_confirmation(dlg, current_workspace, target_workspace, self.ui_language):
+                    # 재기동을 취소하면 설정창은 그대로 두고 작업 폴더 표시값만 이전값으로 원복한다.
+                    workspace_target["path"] = old_workspace_root
+                    workspace_label.setText(str(old_workspace_root))
+                    self.log("📁 작업 폴더 위치 변경 취소")
+                    return
+                try:
+                    apply_settings_overview_changes()
+                    schedule_workspace_root_change(target_workspace)
+                    save_applied["restart"] = True
+                    self.log(f"📁 작업 폴더 위치 변경 예약 및 재기동: {target_workspace}")
+                    dlg.accept()
+                    restart_application_detached()
+                    return
+                except Exception as e:
+                    QMessageBox.critical(dlg, self.tr_ui("저장 실패"), f"{self.tr_ui('작업 폴더 위치를 변경하지 못했습니다.')}\n{e}")
+                    workspace_target["path"] = old_workspace_root
+                    workspace_label.setText(str(old_workspace_root))
+                    return
+
+            apply_settings_overview_changes()
+            dlg.accept()
+
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dlg)
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText(self.tr_ui("확인"))
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setText(self.tr_ui("닫기"))
+        btns.accepted.connect(on_settings_overview_ok)
+        btns.rejected.connect(dlg.reject)
+        root.addWidget(btns)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            self.log("⚙️ 설정 / 옵션 변경 취소")
+            return
+
+        if save_applied.get("ok") and not save_applied.get("restart"):
+            self.show_ok_notice("설정 저장 완료", "설정이 저장되었습니다.")
+
+    def open_analysis_mask_settings_dialog(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle(self.tr_ui("분석 마스크 확장 비율"))
+        dlg.resize(660, 500)
+        dlg.setStyleSheet(self.settings_dialog_style())
+        root = QVBoxLayout(dlg)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(12)
+
+        title = QLabel(self.tr_ui("분석 마스크 확장 비율"), dlg)
+        title.setObjectName("SettingsTitle")
+        root.addWidget(title)
+
+        desc = QLabel(self.tr_ui("OCR/분석 결과로 만들어지는 마스크의 여유 범위와 최소 확장 크기를 조절합니다. 최소 확장 크기를 0px로 두면 강제 최소 확장을 사용하지 않습니다."), dlg)
+        desc.setObjectName("SettingsDescription")
+        desc.setWordWrap(True)
+        root.addWidget(desc)
+
+        form_box = QFrame(dlg)
+        form_box.setObjectName("SettingsItem")
+        form_layout = QVBoxLayout(form_box)
+        form_layout.setContentsMargins(12, 12, 12, 12)
+        form_layout.setSpacing(12)
+
+        old_text_ratio = clamp_analysis_mask_ratio(
+            self.app_options.get(ANALYSIS_TEXT_MASK_EXPAND_RATIO_KEY, DEFAULT_ANALYSIS_TEXT_MASK_EXPAND_RATIO),
+            DEFAULT_ANALYSIS_TEXT_MASK_EXPAND_RATIO,
+        )
+        old_paint_ratio = clamp_analysis_mask_ratio(
+            self.app_options.get(ANALYSIS_PAINT_MASK_EXPAND_RATIO_KEY, DEFAULT_ANALYSIS_PAINT_MASK_EXPAND_RATIO),
+            DEFAULT_ANALYSIS_PAINT_MASK_EXPAND_RATIO,
+        )
+        old_text_min_px = clamp_analysis_mask_min_px(
+            self.app_options.get(ANALYSIS_TEXT_MASK_MIN_EXPAND_PX_KEY, DEFAULT_ANALYSIS_TEXT_MASK_MIN_EXPAND_PX),
+            DEFAULT_ANALYSIS_TEXT_MASK_MIN_EXPAND_PX,
+        )
+        old_paint_min_px = clamp_analysis_mask_min_px(
+            self.app_options.get(ANALYSIS_PAINT_MASK_MIN_EXPAND_PX_KEY, DEFAULT_ANALYSIS_PAINT_MASK_MIN_EXPAND_PX),
+            DEFAULT_ANALYSIS_PAINT_MASK_MIN_EXPAND_PX,
+        )
+
+        def make_ratio_spin(value):
+            spin = QDoubleSpinBox(dlg)
+            spin.setRange(0.00, 2.00)
+            spin.setDecimals(2)
+            spin.setSingleStep(0.05)
+            spin.setValue(float(value))
+            spin.setSuffix(" x")
+            spin.setMinimumWidth(120)
+            return spin
+
+        def make_px_spin(value):
+            spin = QSpinBox(dlg)
+            spin.setRange(0, 100)
+            spin.setSingleStep(1)
+            spin.setValue(int(value))
+            spin.setSuffix(" px")
+            spin.setMinimumWidth(120)
+            return spin
+
+        def add_setting_row(title_text, description_text, editor):
+            row = QHBoxLayout()
+            text_box = QVBoxLayout()
+            text_box.setContentsMargins(0, 0, 0, 0)
+            item_title = QLabel(self.tr_ui(title_text), dlg)
+            item_title.setObjectName("SettingsItemTitle")
+            item_desc = QLabel(self.tr_ui(description_text), dlg)
+            item_desc.setObjectName("SettingsDescription")
+            item_desc.setWordWrap(True)
+            text_box.addWidget(item_title)
+            text_box.addWidget(item_desc)
+            row.addLayout(text_box, 1)
+            row.addWidget(editor, 0)
+            form_layout.addLayout(row)
+
+        spin_text = make_ratio_spin(old_text_ratio)
+        add_setting_row(
+            "텍스트 마스크 확장 비율",
+            "분석 결과의 텍스트 마스크를 묶고 확장하는 비율입니다. 말풍선 글자 테두리가 덜 잡히면 이 값을 올리세요.",
+            spin_text,
+        )
+
+        spin_text_min = make_px_spin(old_text_min_px)
+        add_setting_row(
+            "텍스트 마스크 최소 확장 크기",
+            "텍스트 마스크를 만들 때 비율 계산값이 작아도 최소로 확장할 픽셀 크기입니다. 0px이면 최소 확장 강제를 사용하지 않습니다.",
+            spin_text_min,
+        )
+
+        line = QFrame(dlg)
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setFrameShadow(QFrame.Shadow.Sunken)
+        form_layout.addWidget(line)
+
+        spin_paint = make_ratio_spin(old_paint_ratio)
+        add_setting_row(
+            "페인트 마스크 확장 비율",
+            "인페인팅/페인트 마스크를 만들 때 글자 주변을 얼마나 여유 있게 지울지 정합니다. 배경까지 너무 많이 잡히면 이 값을 낮추세요.",
+            spin_paint,
+        )
+
+        spin_paint_min = make_px_spin(old_paint_min_px)
+        add_setting_row(
+            "페인트 마스크 최소 확장 크기",
+            "페인트 마스크를 만들 때 비율 계산값이 작아도 최소로 확장할 픽셀 크기입니다. 0px이면 최소 확장 강제를 사용하지 않습니다.",
+            spin_paint_min,
+        )
+
+        reset_row = QHBoxLayout()
+        reset_row.addStretch(1)
+        btn_reset = QPushButton(self.tr_ui("기본값으로 돌아가기"), dlg)
+        reset_row.addWidget(btn_reset)
+        form_layout.addLayout(reset_row)
+
+        def reset_defaults():
+            spin_text.setValue(DEFAULT_ANALYSIS_TEXT_MASK_EXPAND_RATIO)
+            spin_text_min.setValue(DEFAULT_ANALYSIS_TEXT_MASK_MIN_EXPAND_PX)
+            spin_paint.setValue(DEFAULT_ANALYSIS_PAINT_MASK_EXPAND_RATIO)
+            spin_paint_min.setValue(DEFAULT_ANALYSIS_PAINT_MASK_MIN_EXPAND_PX)
+
+        btn_reset.clicked.connect(reset_defaults)
+        root.addWidget(form_box)
+        root.addStretch(1)
+
+        save_applied = {"ok": False, "restart": False}
+
+        def apply_changes():
+            text_ratio = clamp_analysis_mask_ratio(spin_text.value(), DEFAULT_ANALYSIS_TEXT_MASK_EXPAND_RATIO)
+            paint_ratio = clamp_analysis_mask_ratio(spin_paint.value(), DEFAULT_ANALYSIS_PAINT_MASK_EXPAND_RATIO)
+            text_min_px = clamp_analysis_mask_min_px(spin_text_min.value(), DEFAULT_ANALYSIS_TEXT_MASK_MIN_EXPAND_PX)
+            paint_min_px = clamp_analysis_mask_min_px(spin_paint_min.value(), DEFAULT_ANALYSIS_PAINT_MASK_MIN_EXPAND_PX)
+            self.app_options[ANALYSIS_TEXT_MASK_EXPAND_RATIO_KEY] = text_ratio
+            self.app_options[ANALYSIS_PAINT_MASK_EXPAND_RATIO_KEY] = paint_ratio
+            self.app_options[ANALYSIS_TEXT_MASK_MIN_EXPAND_PX_KEY] = text_min_px
+            self.app_options[ANALYSIS_PAINT_MASK_MIN_EXPAND_PX_KEY] = paint_min_px
+            self.sync_analysis_mask_options_to_config()
+            self.save_app_options_cache()
+            self.log(f"🎭 분석 마스크 확장 설정 저장: 텍스트 {text_ratio:.2f}/{text_min_px}px, 페인트 {paint_ratio:.2f}/{paint_min_px}px")
+            save_applied["ok"] = True
+
+        def on_ok():
+            if not self.ask_yes_no_shortcut(
+                "분석 마스크 설정 저장",
+                "분석 마스크 확장 설정을 저장할까요?",
+                yes_text="저장",
+                no_text="취소",
+                default_yes=True,
+                icon=QMessageBox.Icon.Question,
+                parent=dlg,
+            ):
+                self.log("🎭 분석 마스크 확장 설정 저장 취소")
+                return
+            apply_changes()
+            dlg.accept()
+
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dlg)
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText(self.tr_ui("확인"))
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setText(self.tr_ui("닫기"))
+        btns.accepted.connect(on_ok)
+        btns.rejected.connect(dlg.reject)
+        root.addWidget(btns)
+
+        if dlg.exec() == QDialog.DialogCode.Accepted and save_applied.get("ok"):
+            self.show_ok_notice("분석 마스크 설정 저장 완료", "분석 마스크 확장 설정이 저장되었습니다.")
+
+    def open_launcher_options_menu(self):
+        menu = QMenu(self)
+        menu.addAction(self.actions["option_theme_settings"])
+        menu.addAction(self.actions["option_language_settings"])
+        menu.addSeparator()
+        menu.addAction(self.actions["option_api_settings"])
+        menu.addAction(self.actions["option_translation_prompt"])
+        menu.addAction(self.actions["option_glossary"])
+        menu.addAction(self.actions["option_analysis_mask_settings"])
+        menu.addSeparator()
+        menu.addAction(self.actions["option_shortcut_settings"])
+        menu.addAction(self.actions["option_macro_settings"])
+        menu.exec(QCursor.pos())
+
+    def open_launcher_help(self):
+        QMessageBox.information(
+            self,
+            self.tr_ui("도움말 / 매뉴얼"),
+            self.tr_ui("런처 화면에서는 새 프로젝트, 프로젝트 열기, 마지막 작업 복구, 최근 프로젝트 열기를 바로 사용할 수 있습니다."),
+        )
+
     def setup_menu(self):
         menubar = self.menuBar()
 
         project_menu = menubar.addMenu(self.tr_ui("프로젝트")); self.project_menu = project_menu
+        # 1. 새로 만들기 및 열기
         project_menu.addAction(self.actions["project_new"])
         project_menu.addAction(self.actions["project_open"])
         project_menu.addAction(self.actions["project_open_json"])
+        project_menu.addSeparator()
+        # 2. 저장하기
         project_menu.addAction(self.actions["project_save"])
         project_menu.addAction(self.actions["project_save_as"])
         project_menu.addSeparator()
+        # 3. 복구하기
         project_menu.addAction(self.actions["project_recover_last_work"])
+        project_menu.addSeparator()
+        # 4. 기타 옵션
+        project_menu.addAction(self.actions["project_show_launcher"])
+        project_menu.addAction(self.actions["option_settings_overview"])
 
         work_menu = menubar.addMenu(self.tr_ui("작업")); self.work_menu = work_menu
         work_menu.addAction(self.actions["work_tab_cycle"])
         work_menu.addAction(self.actions["work_page_prev"])
         work_menu.addAction(self.actions["work_page_next"])
+        work_menu.addSeparator()
+        work_menu.addAction(self.actions["work_open_current_project_folder"])
         work_menu.addSeparator()
         work_menu.addAction(self.actions["work_analyze"])
         work_menu.addAction(self.actions["work_text_number_width"])
@@ -2006,29 +6073,65 @@ class MainWindow(QMainWindow):
         auto_menu.addAction(self.actions["auto_linebreak_current"])
         auto_menu.addAction(self.actions["auto_linebreak_batch"])
 
-        option_menu = menubar.addMenu(self.tr_ui("옵션")); self.option_menu = option_menu
+        cloud_menu = menubar.addMenu(self.tr_ui("클라우드")); self.cloud_menu = cloud_menu
+        cloud_menu.addAction(self.actions["cloud_register"])
+        cloud_menu.addAction(self.actions["cloud_unregister"])
+        cloud_menu.addSeparator()
+        cloud_menu.addAction(self.actions["cloud_cache_backup"])
+        cloud_menu.addAction(self.actions["cloud_cache_restore"])
+        cloud_menu.addSeparator()
+        cloud_menu.addAction(self.actions["cloud_project_backup"])
+        cloud_menu.addAction(self.actions["cloud_project_restore"])
 
-        option_menu.addAction(self.actions["option_auto_save_mode"])
-        option_menu.addAction(self.actions["option_theme_settings"])
-        option_menu.addAction(self.actions["option_language_settings"])
-        option_menu.addSeparator()
+        option_menu = menubar.addMenu(self.tr_ui("옵션")); self.option_menu = option_menu
         option_menu.addAction(self.actions["option_api_settings"])
         option_menu.addAction(self.actions["option_translation_prompt"])
         option_menu.addAction(self.actions["option_glossary"])
-        option_menu.addSeparator()
-        option_menu.addAction(self.actions["option_workspace_location"])
-        option_menu.addAction(self.actions["option_cleanup_temp_files"])
-        option_menu.addAction(self.actions["option_register_ysb"])
-        option_menu.addAction(self.actions["option_unregister_ysbt"])
+        option_menu.addAction(self.actions["option_analysis_mask_settings"])
         option_menu.addSeparator()
         option_menu.addAction(self.actions["option_shortcut_settings"])
         option_menu.addAction(self.actions["option_macro_settings"])
         option_menu.addAction(self.actions["option_text_preset_settings"])
         option_menu.addAction(self.actions["option_item_text_preset_settings"])
+        settings_menu = menubar.addMenu(self.tr_ui("설정")); self.settings_menu = settings_menu
+        settings_menu.addAction(self.actions["option_auto_save_mode"])
+        settings_menu.addAction(self.actions["option_theme_settings"])
+        settings_menu.addAction(self.actions["option_language_settings"])
+        settings_menu.addSeparator()
+        settings_menu.addAction(self.actions["option_workspace_location"])
+        settings_menu.addAction(self.actions["option_workspace_reset_default"])
+        settings_menu.addAction(self.actions["option_cleanup_temp_files"])
+        settings_menu.addAction(self.actions["option_register_ysb"])
+        settings_menu.addAction(self.actions["option_unregister_ysbt"])
+
 
     def setup_ui(self):
+        self.main_stack = QStackedWidget()
+        self.setCentralWidget(self.main_stack)
+
+        self.recent_project_store = RecentProjectStore()
+        self.launcher_widget = LauncherWidget(
+            self.recent_project_store,
+            app_version=APP_VERSION,
+            lang=getattr(self, "ui_language", LANG_KO),
+            theme=getattr(self, "ui_theme", THEME_DARK),
+            parent=self,
+        )
+        self.launcher_widget.newProjectRequested.connect(self.new_project_from_images)
+        self.launcher_widget.openProjectRequested.connect(self.open_project)
+        self.launcher_widget.recoverRequested.connect(self.recover_last_work_project)
+        self.launcher_widget.cloudRequested.connect(lambda: self.open_cloud_overview_dialog(include_project_backup=False))
+        self.launcher_widget.optionsRequested.connect(self.open_settings_overview_dialog)
+        self.launcher_widget.helpRequested.connect(self.open_launcher_help)
+        self.launcher_widget.recentProjectOpenRequested.connect(self.confirm_open_recent_project)
+        self.launcher_widget.recentProjectRemoveRequested.connect(self.remove_recent_project_from_launcher)
+        self.launcher_widget.recentProjectRevealRequested.connect(self.reveal_recent_project_in_folder)
+        self.main_stack.addWidget(self.launcher_widget)
+
         w = QWidget()
-        self.setCentralWidget(w)
+        self.editor_widget = w
+        self.main_stack.addWidget(w)
+        self.main_stack.setCurrentWidget(self.launcher_widget)
         lay = QHBoxLayout(w)
         split = QSplitter(Qt.Orientation.Horizontal)
         lay.addWidget(split)
@@ -2042,7 +6145,7 @@ class MainWindow(QMainWindow):
         self.view.scene.selectionChanged.connect(self.on_scene_selection_changed)
 
         tb = QToolBar(orientation=Qt.Orientation.Vertical)
-        tb.setStyleSheet("background:#444;")
+        tb.setStyleSheet("background:#24282f; border:1px solid #3b414c; border-radius:0px;")
         self.act_brush = QAction("🖌️", self, triggered=lambda: self.set_tool('draw'))
         tb.addAction(self.act_brush)
         self.act_erase = QAction("🧼", self, triggered=lambda: self.set_tool('erase'))
@@ -2056,9 +6159,13 @@ class MainWindow(QMainWindow):
         self.act_undo.triggered.connect(self.handle_general_undo)
         tb.addAction(self.act_undo)
 
-        self.act_magic = QAction("W", self)
+        self.act_magic = QAction("*", self)
         self.act_magic.triggered.connect(lambda: self.set_tool('magic_wand'))
         tb.addAction(self.act_magic)
+
+        self.act_mask_wrap = QAction("🩹", self)
+        self.act_mask_wrap.triggered.connect(lambda: self.set_tool('mask_wrap'))
+        tb.addAction(self.act_mask_wrap)
 
         # QCheckBox를 QToolBar에 직접 넣으면 QToolBar 레이아웃 + QCheckBox indicator가 따로 놀아
         # 다른 도구 버튼들과 여백/정렬이 맞지 않는다.
@@ -2188,16 +6295,39 @@ class MainWindow(QMainWindow):
         vl.addWidget(self.magic_wand_bar)
         self.sb_magic_tolerance.valueChanged.connect(self.on_magic_wand_tolerance_changed)
 
+        self.mask_wrap_bar = QWidget()
+        mask_wrap_bar_lay = QHBoxLayout(self.mask_wrap_bar)
+        mask_wrap_bar_lay.setContentsMargins(6, 4, 6, 4)
+        mask_wrap_bar_lay.setSpacing(6)
+        self.btn_mask_wrap_rect = QPushButton(self.tr_ui("▭ 사각형"))
+        self.btn_mask_wrap_rect.setCheckable(True)
+        self.btn_mask_wrap_rect.clicked.connect(lambda checked=False: self.set_mask_wrap_shape("rect"))
+        self.btn_mask_wrap_free = QPushButton(self.tr_ui("✎ 자유형"))
+        self.btn_mask_wrap_free.setCheckable(True)
+        self.btn_mask_wrap_free.clicked.connect(lambda checked=False: self.set_mask_wrap_shape("free"))
+        mask_wrap_bar_lay.addWidget(QLabel(self.tr_ui("마스크 랩핑")))
+        mask_wrap_bar_lay.addWidget(self.btn_mask_wrap_rect)
+        mask_wrap_bar_lay.addWidget(self.btn_mask_wrap_free)
+        mask_wrap_bar_lay.addWidget(QLabel(self.tr_ui("선택한 영역 안의 떨어진 마스크들을 하나의 채움 영역으로 감싸줍니다.")))
+        mask_wrap_bar_lay.addStretch()
+        self.mask_wrap_bar.hide()
+        vl.addWidget(self.mask_wrap_bar)
+        self.set_mask_wrap_shape("rect", silent=True)
+
         vl.addWidget(self.view)
         ll.addWidget(vc)
 
         cl = QHBoxLayout()
-        cl.addWidget(QPushButton("◀", clicked=self.prev))
+        self.btn_prev_page = QPushButton("◀")
+        self.btn_prev_page.clicked.connect(self.prev)
+        cl.addWidget(self.btn_prev_page)
         self.btn_page = QPushButton("0 / 0")
         self.btn_page.setStyleSheet("border:none; font-weight:bold; color:#f2f2f2;")
         self.btn_page.clicked.connect(self.jump_page)
         cl.addWidget(self.btn_page)
-        cl.addWidget(QPushButton("▶", clicked=self.next))
+        self.btn_next_page = QPushButton("▶")
+        self.btn_next_page.clicked.connect(self.next)
+        cl.addWidget(self.btn_next_page)
 
         self.cb_mode = QComboBox()
         self.cb_mode.addItems(["1. 원본", "2. 분석도", "3. 텍스트 마스크", "4. 페인팅 마스크", "5. 최종결과"])
@@ -2206,12 +6336,14 @@ class MainWindow(QMainWindow):
 
         # Undo / Redo quick buttons.
         # 작업 탭 콤보 바로 오른쪽에 두어 탭/페이지/텍스트 작업을 마우스로도 되돌릴 수 있게 한다.
-        self.btn_quick_undo = QPushButton("↶")
-        self.btn_quick_undo.setFixedWidth(30)
+        self.btn_quick_undo = QPushButton("↺")
+        self.btn_quick_undo.setFixedWidth(36)
+        self.btn_quick_undo.setMinimumHeight(26)
         self.btn_quick_undo.clicked.connect(self.handle_global_undo_shortcut)
         cl.addWidget(self.btn_quick_undo)
-        self.btn_quick_redo = QPushButton("↷")
-        self.btn_quick_redo.setFixedWidth(30)
+        self.btn_quick_redo = QPushButton("↻")
+        self.btn_quick_redo.setFixedWidth(36)
+        self.btn_quick_redo.setMinimumHeight(26)
         self.btn_quick_redo.clicked.connect(self.handle_general_redo)
         cl.addWidget(self.btn_quick_redo)
         self.update_paint_toolbar_visibility()
@@ -2219,12 +6351,12 @@ class MainWindow(QMainWindow):
 
         cl.addStretch()
         self.btn_text_mask_reanalyze = QPushButton(self.tr_ui("🔄 재분석"))
-        self.btn_text_mask_reanalyze.setStyleSheet("background:#2f80ed;color:white;font-weight:bold")
+        self.btn_text_mask_reanalyze.setStyleSheet("background:#3d587d;color:#ffffff;font-weight:700;border:1px solid #7ea2d6;border-radius:0px;padding:6px 10px")
         self.btn_text_mask_reanalyze.clicked.connect(self.reanalyze_mask)
         self.btn_text_mask_reanalyze.hide()
         cl.addWidget(self.btn_text_mask_reanalyze)
         self.btn_analyze = QPushButton(self.tr_ui("⚡ 분석"), clicked=self.anal)
-        self.btn_analyze.setStyleSheet("background:#f55;color:white;font-weight:bold")
+        self.btn_analyze.setStyleSheet("background:#7d4a4a;color:#ffffff;font-weight:700;border:1px solid #a86b6b;border-radius:0px;padding:6px 10px")
         cl.addWidget(self.btn_analyze)
         vl.addLayout(cl)
         split.addWidget(lp)
@@ -2268,58 +6400,62 @@ class MainWindow(QMainWindow):
         style_line.setSpacing(6)
         self.cb_font = QFontComboBox()
         self.cb_font.setFixedWidth(150)
+        self.cb_font.setFixedHeight(26)
+        self.cb_font.setToolTip("글꼴")
         self.sb_font_size = QSpinBox()
         self.sb_font_size.setRange(10, 300)
         self.sb_font_size.setValue(35)
         self.sb_font_size.setSuffix(" px")
-        self.sb_font_size.setFixedWidth(82)
+        self.sb_font_size.setFixedWidth(100)
+        self.sb_font_size.setToolTip("글꼴 크기")
         self.sb_strk = QSpinBox()
         self.sb_strk.setRange(0, 100)
         self.sb_strk.setValue(3)
         self.sb_strk.setSuffix(" px")
-        self.sb_strk.setFixedWidth(72)
+        self.sb_strk.setFixedWidth(90)
+        self.sb_strk.setToolTip("획 크기")
 
         self.btn_text_color = QPushButton("")
         self.btn_text_color.setToolTip("문자 색상")
-        self.btn_text_color.setFixedSize(28, 28)
+        self.btn_text_color.setFixedSize(26, 26)
         self.btn_stroke_color = QPushButton("")
         self.btn_stroke_color.setToolTip("획 색상")
-        self.btn_stroke_color.setFixedSize(28, 28)
+        self.btn_stroke_color.setFixedSize(26, 26)
 
         self.btn_align_left = QPushButton("≡◁")
         self.btn_align_center = QPushButton("≡◇")
         self.btn_align_right = QPushButton("▷≡")
         for b in (self.btn_align_left, self.btn_align_center, self.btn_align_right):
             b.setFixedWidth(42)
-            b.setMinimumHeight(26)
+            b.setFixedHeight(26)
             b.setToolTip("글자 정렬")
 
         self.sb_line_spacing = QSpinBox()
         self.sb_line_spacing.setRange(50, 300)
         self.sb_line_spacing.setValue(100)
         self.sb_line_spacing.setSuffix(" %")
-        self.sb_line_spacing.setFixedWidth(72)
+        self.sb_line_spacing.setFixedWidth(78)
         self.sb_line_spacing.setToolTip("행간")
 
         self.sb_letter_spacing = QSpinBox()
         self.sb_letter_spacing.setRange(-100, 200)
         self.sb_letter_spacing.setValue(0)
         self.sb_letter_spacing.setSuffix(" px")
-        self.sb_letter_spacing.setFixedWidth(72)
+        self.sb_letter_spacing.setFixedWidth(78)
         self.sb_letter_spacing.setToolTip("자간")
 
         self.sb_char_width = QSpinBox()
         self.sb_char_width.setRange(10, 300)
         self.sb_char_width.setValue(100)
         self.sb_char_width.setSuffix(" %")
-        self.sb_char_width.setFixedWidth(72)
+        self.sb_char_width.setFixedWidth(78)
         self.sb_char_width.setToolTip("문자 너비")
 
         self.sb_char_height = QSpinBox()
         self.sb_char_height.setRange(10, 300)
         self.sb_char_height.setValue(100)
         self.sb_char_height.setSuffix(" %")
-        self.sb_char_height.setFixedWidth(72)
+        self.sb_char_height.setFixedWidth(78)
         self.sb_char_height.setToolTip("문자 높이")
 
         self.btn_bold = QPushButton("B")
@@ -2332,7 +6468,7 @@ class MainWindow(QMainWindow):
         ):
             b.setCheckable(True)
             b.setFixedWidth(32)
-            b.setMinimumHeight(26)
+            b.setFixedHeight(26)
             b.setToolTip(tip)
 
         self.btn_bold.setStyleSheet("font-weight:bold;")
@@ -2372,6 +6508,7 @@ class MainWindow(QMainWindow):
         self.cb_item_text_preset = QComboBox()
         self.cb_item_text_preset.setMinimumWidth(100)
         self.cb_item_text_preset.setMaximumWidth(110)
+        self.cb_item_text_preset.setFixedHeight(26)
         self.cb_item_text_preset.setToolTip("개별 글꼴 프리셋")
         detail_line.addWidget(self.cb_item_text_preset)
 
@@ -2384,6 +6521,7 @@ class MainWindow(QMainWindow):
         al.setContentsMargins(0, 0, 0, 0)
         al.setSpacing(6)
         self.cb_trans_provider = QComboBox()
+        self.cb_trans_provider.setFixedHeight(26)
         self.cb_trans_provider.addItem("OpenAI", "openai")
         self.cb_trans_provider.addItem("DeepSeek", "deepseek")
         self.cb_trans_provider.addItem("Google", "google")
@@ -2396,16 +6534,21 @@ class MainWindow(QMainWindow):
         self.sb_trans_chunk.setRange(1, 100)
         self.sb_trans_chunk.setValue(self.trans_chunk_sizes.get("openai", 20))
         self.sb_trans_chunk.setSuffix(" items" if getattr(self, "ui_language", LANG_KO) == LANG_EN else "개")
+        self.sb_trans_chunk.setFixedHeight(26)
         self.sb_trans_chunk.setStatusTip(self.tr_msg("한 번의 API 요청에 묶어서 보낼 텍스트 줄 수"))
         self.sb_trans_chunk.valueChanged.connect(self.on_translation_chunk_changed)
 
         self.cb_show_final_text = QCheckBox("텍스트 표시")
         self.cb_show_final_text.setChecked(True)
+        self.cb_show_final_text.setFixedHeight(26)
         self.cb_show_final_text.toggled.connect(self.on_show_final_text_toggled)
 
         self.btn_translate = QPushButton("🌐 번역", clicked=self.trans)
-        self.btn_inpaint = QPushButton("🎨 인페인팅", clicked=self.run_inpainting, styleSheet="background:#4b4;color:white")
+        self.btn_translate.setFixedHeight(26)
+        self.btn_inpaint = QPushButton("🎨 인페인팅", clicked=self.run_inpainting, styleSheet="background:#456f56;color:#ffffff;border:1px solid #6f9b7b;border-radius:0px;padding:4px 10px")
+        self.btn_inpaint.setFixedHeight(26)
         self.btn_text_cleanup = QPushButton("🧹 텍스트 정리", clicked=self.clean_text_current)
+        self.btn_text_cleanup.setFixedHeight(26)
 
         al.addWidget(QLabel("번역AI"))
         al.addWidget(self.cb_trans_provider)
@@ -2441,8 +6584,8 @@ class MainWindow(QMainWindow):
         self.tab.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.tab.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.tab.setStyleSheet(
-            "QTableWidget { background:#26282d; color:#f2f2f2; gridline-color:#4a4d55; }"
-            "QTableWidget::item:selected { background:#fff176; color:#000000; }"
+            "QTableWidget { background:#26282d; color:#f2f2f2; gridline-color:#4a4d55; border:1px solid #3b414c; border-radius:0px; }"
+            "QTableWidget::item:selected { background:#3d587d; color:#ffffff; }"
         )
         rl.addWidget(self.tab)
 
@@ -2454,13 +6597,14 @@ class MainWindow(QMainWindow):
         self.tab.verticalHeader().setVisible(False)
         self.tab.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
 
-        self.btn_export_result = QPushButton(self.tr_ui("📤 결과물 출력"), clicked=self.export_result, styleSheet="background:#48f;color:white;font-weight:bold;height:40px")
+        self.btn_export_result = QPushButton(self.tr_ui("📤 결과물 출력"), clicked=self.export_result, styleSheet="background:#3d587d;color:#ffffff;font-weight:700;border:1px solid #7ea2d6;border-radius:0px;height:40px")
         rl.addWidget(self.btn_export_result)
         self.log_w = QTextEdit()
         self.log_w.setMaximumHeight(100)
         self.log_w.setReadOnly(True)
         self.log_w.setStyleSheet("background:#222;color:#0f0;")
         rl.addWidget(self.log_w)
+        self.flush_pending_log_messages()
         split.setSizes([1000, 600])
 
         self.cb_text_preset.currentIndexChanged.connect(self.on_text_preset_selected)
@@ -2495,6 +6639,185 @@ class MainWindow(QMainWindow):
         self.btn_item_align_center.clicked.connect(lambda: self.apply_style_to_selected(align="center"))
         self.btn_item_align_right.clicked.connect(lambda: self.apply_style_to_selected(align="right"))
         self.update_color_button_styles()
+        self.install_main_input_enter_escape_filters()
+
+    def shortcut_text_for_key(self, key, fallback=""):
+        try:
+            seq = self.shortcut_settings.seq(key)
+            if seq and not seq.isEmpty():
+                txt = seq.toString(QKeySequence.SequenceFormat.NativeText)
+                return txt or fallback
+        except Exception:
+            pass
+        return fallback
+
+    def set_dialog_control_tooltip(self, widget, title, key="", desc=""):
+        if widget is None:
+            return
+        shortcut = self.shortcut_text_for_key(key, "") if key else ""
+        parts = [self.tr_ui(title)]
+        if shortcut:
+            parts.append(shortcut)
+        if desc:
+            parts.append(self.tr_msg(desc))
+        try:
+            widget.setToolTip("\n".join(parts))
+        except Exception:
+            pass
+
+    def focus_dialog_control(self, widget):
+        if widget is None:
+            return
+        try:
+            widget.setFocus()
+            if hasattr(widget, "selectAll"):
+                widget.selectAll()
+            elif hasattr(widget, "lineEdit") and widget.lineEdit() is not None:
+                widget.lineEdit().selectAll()
+        except Exception:
+            pass
+
+    def add_dialog_shortcut(self, dialog, key, callback):
+        try:
+            seq = self.shortcut_settings.seq(key)
+        except Exception:
+            seq = QKeySequence()
+        if not seq or seq.isEmpty():
+            return None
+        sc = QShortcut(seq, dialog)
+        sc.setContext(Qt.ShortcutContext.WindowShortcut)
+        sc.activated.connect(callback)
+        if not hasattr(dialog, "_ysb_style_shortcuts"):
+            dialog._ysb_style_shortcuts = []
+        dialog._ysb_style_shortcuts.append(sc)
+        return sc
+
+    def install_style_editor_shortcuts(self, dialog, controls):
+        """메인 인터페이스와 같은 글꼴 상세 단축키/툴팁을 프리셋 창에도 적용한다."""
+        if not dialog or not controls:
+            return
+
+        if not hasattr(dialog, "_ysb_enter_commit_filter"):
+            dialog._ysb_enter_commit_filter = EnterCommitFilter(parent_dialog=dialog, fallback_widget=dialog, parent=dialog)
+        for _name, _widget in list(controls.items()):
+            if _widget is None:
+                continue
+            try:
+                _widget.installEventFilter(dialog._ysb_enter_commit_filter)
+            except Exception:
+                pass
+            try:
+                line = _widget.lineEdit()
+                if line is not None:
+                    line.installEventFilter(dialog._ysb_enter_commit_filter)
+            except Exception:
+                pass
+
+        def open_font_selector():
+            font_widget = controls.get("font")
+            size_widget = controls.get("size")
+            bold_widget = controls.get("bold")
+            italic_widget = controls.get("italic")
+            try:
+                current_family = font_widget.currentFont().family()
+            except Exception:
+                current_family = ""
+            try:
+                current_size = int(size_widget.value())
+            except Exception:
+                current_size = 24
+            dlg = FontSelectDialog(
+                current_family=current_family,
+                current_size=current_size,
+                current_bold=bool(bold_widget.isChecked()) if bold_widget else False,
+                current_italic=bool(italic_widget.isChecked()) if italic_widget else False,
+                parent=self,
+            )
+            if dlg.exec() == QDialog.DialogCode.Accepted and dlg.selected_font_family():
+                if font_widget is not None:
+                    font_widget.setCurrentFont(QFont(dlg.selected_font_family()))
+                if bold_widget is not None:
+                    bold_widget.setChecked(dlg.selected_is_bold())
+                if italic_widget is not None:
+                    italic_widget.setChecked(dlg.selected_is_italic())
+
+        focus_map = {
+            "text_font_size": ("size", "글꼴 크기", "현재 편집 중인 글자 크기 값을 선택합니다."),
+            "text_stroke_size": ("stroke", "획 크기", "현재 편집 중인 외곽선 두께 값을 선택합니다."),
+            "text_line_spacing": ("line_spacing", "행간", "줄과 줄 사이 간격 값을 선택합니다."),
+            "text_letter_spacing": ("letter_spacing", "자간", "글자와 글자 사이 간격 값을 선택합니다."),
+            "text_char_width": ("char_width", "너비", "문자의 가로 비율 값을 선택합니다."),
+            "text_char_height": ("char_height", "높이", "문자의 세로 비율 값을 선택합니다."),
+        }
+        for key, (control_name, title, desc) in focus_map.items():
+            widget = controls.get(control_name)
+            self.set_dialog_control_tooltip(widget, title, key, desc)
+            self.add_dialog_shortcut(dialog, key, lambda w=widget: self.focus_dialog_control(w))
+
+        toggle_map = {
+            "text_bold_toggle": ("bold", "굵게"),
+            "text_italic_toggle": ("italic", "기울이기"),
+            "text_strike_toggle": ("strike", "취소선"),
+        }
+        for key, (control_name, title) in toggle_map.items():
+            widget = controls.get(control_name)
+            self.set_dialog_control_tooltip(widget, title, key, "")
+            self.add_dialog_shortcut(dialog, key, lambda w=widget: w.click() if w is not None else None)
+
+        font_widget = controls.get("font")
+        self.set_dialog_control_tooltip(font_widget, "글꼴 선택", "item_font_select", "전용 글꼴 선택창을 엽니다.")
+        self.add_dialog_shortcut(dialog, "item_font_select", open_font_selector)
+
+    def open_font_select_dialog(self):
+        """전용 글꼴 선택 창을 열어 선택 텍스트 또는 기본 글꼴에 적용한다."""
+        try:
+            current_family = self.cb_font.currentFont().family()
+        except Exception:
+            current_family = ""
+        try:
+            current_size = int(self.sb_font_size.value())
+        except Exception:
+            current_size = 24
+        try:
+            current_bold = bool(self.btn_bold.isChecked())
+            current_italic = bool(self.btn_italic.isChecked())
+        except Exception:
+            current_bold = False
+            current_italic = False
+
+        dlg = FontSelectDialog(
+            current_family=current_family,
+            current_size=current_size,
+            current_bold=current_bold,
+            current_italic=current_italic,
+            parent=self,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return False
+
+        family = dlg.selected_font_family()
+        if not family:
+            return False
+
+        style_updates = {
+            "font_family": family,
+            "bold": dlg.selected_is_bold(),
+            "italic": dlg.selected_is_italic(),
+        }
+
+        if self.cb_mode.currentIndex() == 4 and self.selected_text_items():
+            self.apply_style_to_selected(**style_updates)
+        else:
+            self.cb_font.setCurrentFont(QFont(family))
+            try:
+                self.btn_bold.setChecked(bool(style_updates["bold"]))
+                self.btn_italic.setChecked(bool(style_updates["italic"]))
+            except Exception:
+                pass
+            self.on_global_text_style_changed()
+
+        self.log((f"🔤 Font selected: {family} / {dlg.selected_font_style()}" if self.ui_language == LANG_EN else f"🔤 글꼴 선택: {family} / {dlg.selected_font_style()}"))
+        return True
 
     def set_combo_current_data(self, combo, data):
         """QComboBox의 userData 값으로 현재 항목을 선택한다."""
@@ -2628,6 +6951,8 @@ class MainWindow(QMainWindow):
             ("work_menu", "작업"),
             ("batch_menu", "일괄 작업"),
             ("auto_menu", "자동화 작업"),
+            ("settings_menu", "설정"),
+            ("cloud_menu", "클라우드"),
             ("option_menu", "옵션"),
         ):
             menu = getattr(self, attr, None)
@@ -2638,15 +6963,18 @@ class MainWindow(QMainWindow):
                     pass
 
         action_ko = {
-            "project_new": "새 프로젝트 만들기",
-            "project_open": "프로젝트 열기",
-            "project_open_json": "JSON 파일로 열기",
-            "project_save": "프로젝트 저장",
-            "project_save_as": "다른 이름으로 저장",
-            "project_recover_last_work": "마지막 작업 복구",
+            "project_new": "새로 만들기",
+            "project_open": "열기",
+            "project_open_json": "JSON으로 열기",
+            "project_show_launcher": "홈화면으로 가기",
+            "project_save": "저장하기",
+            "project_save_as": "다른 이름으로 저장하기",
+            "project_recover_last_work": "복구하기",
+            "option_settings_overview": "설정 / 옵션",
             "work_tab_cycle": "작업탭 변경",
             "work_page_prev": "이전 페이지",
             "work_page_next": "다음 페이지",
+            "work_open_current_project_folder": "현재 프로젝트의 작업 폴더로 이동하기",
             "work_analyze": "개별 분석",
             "work_text_number_width": "텍스트 넘버 크기 변경",
             "work_translate": "개별 번역",
@@ -2678,15 +7006,26 @@ class MainWindow(QMainWindow):
             "option_api_settings": "API 관리",
             "option_translation_prompt": "번역 프롬프트 입력",
             "option_glossary": "단어장",
+            "option_analysis_mask_settings": "분석 마스크 확장 비율",
             "option_workspace_location": "작업 폴더 위치 변경",
+            "option_workspace_reset_default": "작업 폴더 위치 기본값으로 변경",
             "option_cleanup_temp_files": "임시 파일 관리",
             "option_register_ysb": ".ysbt 확장자 연결 등록",
-            "option_unregister_ysbt": ".ysbt/.ysb 확장자 연결 해제",
+            "option_unregister_ysbt": ".ysbt 확장자 연결 해제",
             "option_shortcut_settings": "단축키 통합 관리",
             "option_macro_settings": "매크로 관리",
             "option_text_preset_settings": "페이지 글꼴 프리셋 관리",
             "option_item_text_preset_settings": "개별 글꼴 프리셋 관리",
+            "cloud_register": "클라우드 등록",
+            "cloud_unregister": "클라우드 등록 해제",
+            "cloud_cache_backup": "클라우드로 캐시 백업",
+            "cloud_cache_restore": "클라우드에서 캐시 불러오기",
+            "cloud_project_backup": "현재 프로젝트 클라우드에 백업하기",
+            "cloud_project_restore": "클라우드에서 프로젝트 불러오기",
             "paint_magic_fill": "마스킹 칠하기",
+            "paint_mask_wrap": "마스크 랩핑",
+            "paint_mask_wrap_rect": "마스크 랩핑 사각형",
+            "paint_mask_wrap_free": "마스크 랩핑 자유형",
             "paint_mask_toggle": "마스크 ON/OFF",
             "view_text_toggle": "텍스트 표시 ON/OFF",
             "final_paint_color": "최종 페인팅 색상",
@@ -2703,6 +7042,12 @@ class MainWindow(QMainWindow):
                     action.setText(self.tr_ui(ko))
                 except Exception:
                     pass
+
+        try:
+            if hasattr(self, "launcher_widget"):
+                self.launcher_widget.set_language(lang)
+        except Exception:
+            pass
 
         # 현재 생성된 고정 UI 위젯의 텍스트를 교체한다.
         widget_types = (QLabel, QPushButton, QCheckBox, QGroupBox, QRadioButton)
@@ -2781,6 +7126,10 @@ class MainWindow(QMainWindow):
                 self.btn_analyze.setText(self.tr_ui("⚡ 분석"))
             if hasattr(self, "btn_text_mask_reanalyze"):
                 self.btn_text_mask_reanalyze.setText(self.tr_ui("🔄 재분석"))
+            if hasattr(self, "btn_mask_wrap_rect"):
+                self.btn_mask_wrap_rect.setText(self.tr_ui("▭ 사각형"))
+            if hasattr(self, "btn_mask_wrap_free"):
+                self.btn_mask_wrap_free.setText(self.tr_ui("✎ 자유형"))
             if hasattr(self, "btn_translate"):
                 self.btn_translate.setText(self.tr_ui("🌐 번역"))
             if hasattr(self, "btn_inpaint"):
@@ -2837,22 +7186,7 @@ class MainWindow(QMainWindow):
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
 
-        if self.is_light_theme():
-            dialog.setStyleSheet("""
-                QDialog { background:#f6f7f9; color:#202124; }
-                QLabel { color:#202124; }
-                QComboBox { background:#ffffff; color:#202124; border:1px solid #b9bec7; padding:4px; }
-                QPushButton { background:#ffffff; color:#202124; border:1px solid #aeb4bf; padding:5px 14px; }
-                QPushButton:hover { background:#e9eef7; }
-            """)
-        else:
-            dialog.setStyleSheet("""
-                QDialog { background:#1f1f22; color:#f2f2f2; }
-                QLabel { color:#f2f2f2; }
-                QComboBox { background:#2d2f34; color:#f5f5f5; border:1px solid #53565f; padding:4px; }
-                QPushButton { background:#353841; color:#f2f2f2; border:1px solid #5a5d66; padding:5px 14px; }
-                QPushButton:hover { background:#424652; }
-            """)
+        dialog.setStyleSheet(self.settings_dialog_style())
 
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -2873,6 +7207,78 @@ class MainWindow(QMainWindow):
             self.apply_light_theme()
         else:
             self.apply_dark_theme()
+        try:
+            if hasattr(self, "launcher_widget"):
+                self.launcher_widget.set_theme(theme)
+        except Exception:
+            pass
+        self.force_theme_repaint_after_apply()
+
+    def refresh_top_bars_for_theme(self):
+        """테마 변경 직후 상단 메뉴/로그창/네이티브 제목 표시줄을 강제로 다시 칠한다."""
+        light = self.is_light_theme()
+        try:
+            mb = self.menuBar()
+            if mb is not None:
+                if light:
+                    mb.setStyleSheet(
+                        "QMenuBar { background-color:#ffffff; color:#22252b; border-bottom:1px solid #e0e6f0; padding:2px 4px; }"
+                        "QMenuBar::item { background:transparent; padding:6px 10px; border-radius:0px; }"
+                        "QMenuBar::item:selected { background:#edf4ff; color:#111827; }"
+                    )
+                else:
+                    mb.setStyleSheet(
+                        "QMenuBar { background-color:#1d1f23; color:#f2f4f8; border-bottom:1px solid #303640; padding:2px 4px; }"
+                        "QMenuBar::item { background:transparent; padding:6px 10px; border-radius:0px; }"
+                        "QMenuBar::item:selected { background:#303640; color:#ffffff; }"
+                    )
+                mb.update()
+                mb.repaint()
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, "log_w") and self.log_w:
+                if light:
+                    self.log_w.setStyleSheet("background:#ffffff;color:#25704a;border:1px solid #dfe5ef;border-radius:0px;")
+                else:
+                    self.log_w.setStyleSheet("background:#1f2228;color:#8ee0a1;border:1px solid #3b414c;border-radius:0px;")
+        except Exception:
+            pass
+
+        try:
+            self.schedule_native_title_bar_theme(self, dark=not light)
+        except Exception:
+            pass
+        try:
+            QApplication.processEvents()
+        except Exception:
+            pass
+
+    def force_theme_repaint_after_apply(self):
+        self.refresh_top_bars_for_theme()
+
+        def refresh_and_nudge():
+            try:
+                self.refresh_top_bars_for_theme()
+                self.update()
+                self.repaint()
+                if hasattr(self, "menuBar") and self.menuBar():
+                    self.menuBar().update()
+                    self.menuBar().repaint()
+                # 포커스를 뺐다가 다시 주면 갱신되던 현상을 코드에서 가볍게 재현한다.
+                self.clearFocus()
+                self.activateWindow()
+                self.raise_()
+                QApplication.processEvents()
+            except Exception:
+                pass
+
+        for delay in (0, 30, 80, 200, 600, 1200):
+            try:
+                QTimer.singleShot(delay, refresh_and_nudge)
+            except Exception:
+                pass
 
     def open_theme_settings_dialog(self):
         """옵션 > 테마 설정."""
@@ -2931,295 +7337,468 @@ class MainWindow(QMainWindow):
         self.apply_theme(selected)
         self.log(f"🎨 테마 변경: {'화이트 테마' if selected == THEME_LIGHT else '다크 테마'}")
 
+    def apply_native_title_bar_theme(self, widget=None, dark=None):
+        """Windows 네이티브 제목 표시줄 색상을 현재 테마와 맞춘다.
+        실패해도 UI 기능에는 영향이 없도록 조용히 무시한다.
+        """
+        if widget is None:
+            widget = self
+        if dark is None:
+            dark = not self.is_light_theme()
+
+        try:
+            if not sys.platform.startswith("win"):
+                return
+            import ctypes
+
+            hwnd = int(widget.winId())
+            value = ctypes.c_int(1 if dark else 0)
+            dwm = ctypes.windll.dwmapi
+
+            # Windows 10/11 dark title bar attribute. 버전에 따라 19/20 중 하나가 먹는다.
+            for attr in (20, 19):
+                try:
+                    dwm.DwmSetWindowAttribute(
+                        ctypes.c_void_p(hwnd),
+                        ctypes.c_uint(attr),
+                        ctypes.byref(value),
+                        ctypes.sizeof(value),
+                    )
+                except Exception:
+                    pass
+
+            def colorref(hex_color):
+                h = str(hex_color or "#000000").lstrip("#")
+                r = int(h[0:2], 16)
+                g = int(h[2:4], 16)
+                b = int(h[4:6], 16)
+                return ctypes.c_uint((b << 16) | (g << 8) | r)
+
+            # Windows 11 caption/text/border color. 지원 안 되는 환경에서는 실패해도 무시.
+            # 다크 테마의 제목 표시줄은 메인 배경색(#202226)에 맞춘다.
+            caption = colorref("#202226" if dark else "#ffffff")
+            text_color = colorref("#ffffff" if dark else "#111827")
+            border_color = colorref("#202226" if dark else "#ffffff")
+            for attr, val in ((35, caption), (36, text_color), (34, border_color)):
+                try:
+                    dwm.DwmSetWindowAttribute(
+                        ctypes.c_void_p(hwnd),
+                        ctypes.c_uint(attr),
+                        ctypes.byref(val),
+                        ctypes.sizeof(val),
+                    )
+                except Exception:
+                    pass
+
+            # 네이티브 프레임은 Show/ThemeChange 직후 DWM 값이 덮일 수 있어
+            # 프레임 변경/비클라이언트 활성 갱신/즉시 redraw를 같이 요청한다.
+            try:
+                user32 = ctypes.windll.user32
+                SWP_NOMOVE = 0x0002
+                SWP_NOSIZE = 0x0001
+                SWP_NOZORDER = 0x0004
+                SWP_NOACTIVATE = 0x0010
+                SWP_FRAMECHANGED = 0x0020
+                user32.SetWindowPos(
+                    ctypes.c_void_p(hwnd),
+                    None,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+                )
+                WM_NCACTIVATE = 0x0086
+                user32.SendMessageW(ctypes.c_void_p(hwnd), WM_NCACTIVATE, 0, 0)
+                user32.SendMessageW(ctypes.c_void_p(hwnd), WM_NCACTIVATE, 1, 0)
+                RDW_INVALIDATE = 0x0001
+                RDW_UPDATENOW = 0x0100
+                RDW_ALLCHILDREN = 0x0080
+                RDW_FRAME = 0x0400
+                user32.RedrawWindow(
+                    ctypes.c_void_p(hwnd),
+                    None,
+                    None,
+                    RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN | RDW_FRAME,
+                )
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def schedule_native_title_bar_theme(self, widget=None, dark=None):
+        """제목 표시줄 색상 적용은 창 생성/표시 직후 타이밍에 따라 먹지 않을 수 있어 지연 재시도를 건다."""
+        if widget is None:
+            widget = self
+        if dark is None:
+            dark = not self.is_light_theme()
+
+        def apply_once(w=widget, d=dark):
+            try:
+                self.apply_native_title_bar_theme(w, dark=d)
+            except Exception:
+                pass
+
+        apply_once()
+        for delay in (0, 50, 200, 600):
+            try:
+                QTimer.singleShot(delay, apply_once)
+            except Exception:
+                pass
+
+    def apply_tooltip_theme(self, light=None):
+        """QToolTip은 OS/Qt 기본 팔레트 영향을 많이 받아 글자색이 흐려질 수 있다.
+        테마 적용 시마다 팔레트와 앱 스타일시트를 같이 고정해 대비를 보장한다.
+        """
+        if light is None:
+            light = self.is_light_theme() if hasattr(self, "is_light_theme") else False
+
+        app = QApplication.instance()
+        if light:
+            bg = QColor("#ffffff")
+            fg = QColor("#111827")
+            border = "#cfd7e5"
+        else:
+            bg = QColor("#1f2430")
+            fg = QColor("#ffffff")
+            border = "#4b5563"
+
+        pal = QPalette()
+        pal.setColor(QPalette.ColorRole.ToolTipBase, bg)
+        pal.setColor(QPalette.ColorRole.ToolTipText, fg)
+        try:
+            QToolTip.setPalette(pal)
+        except Exception:
+            pass
+
+        if app:
+            try:
+                app.setStyleSheet(
+                    "QToolTip { "
+                    f"background-color:{bg.name()}; "
+                    f"color:{fg.name()}; "
+                    f"border:1px solid {border}; "
+                    "border-radius:0px; "
+                    "padding:5px; "
+                    "}"
+                )
+            except Exception:
+                pass
+
     def apply_light_theme(self):
-        """화이트 테마를 적용한다."""
+        """화이트 테마를 부드러운 카드형 톤으로 적용한다."""
         app = QApplication.instance()
         if app:
             app.setStyleSheet("""
-                QToolTip {
-                    background-color: #fff8d6;
-                    color: #000000;
-                    border: 1px solid #777777;
-                    padding: 6px;
-                }
+                QToolTip { background-color:#ffffff; color:#111827; border:1px solid #cfd7e5; border-radius:0px; padding:5px; }
             """)
             pal = QPalette()
-            pal.setColor(QPalette.ColorRole.Window, QColor("#f6f7f9"))
-            pal.setColor(QPalette.ColorRole.WindowText, QColor("#202124"))
+            pal.setColor(QPalette.ColorRole.Window, QColor("#f4f6fa"))
+            pal.setColor(QPalette.ColorRole.WindowText, QColor("#22252b"))
             pal.setColor(QPalette.ColorRole.Base, QColor("#ffffff"))
-            pal.setColor(QPalette.ColorRole.AlternateBase, QColor("#f0f2f5"))
-            pal.setColor(QPalette.ColorRole.Text, QColor("#202124"))
-            pal.setColor(QPalette.ColorRole.Button, QColor("#ffffff"))
-            pal.setColor(QPalette.ColorRole.ButtonText, QColor("#202124"))
-            pal.setColor(QPalette.ColorRole.Highlight, QColor("#d7e8ff"))
-            pal.setColor(QPalette.ColorRole.HighlightedText, QColor("#000000"))
-            pal.setColor(QPalette.ColorRole.ToolTipBase, QColor("#fff8d6"))
-            pal.setColor(QPalette.ColorRole.ToolTipText, QColor("#000000"))
+            pal.setColor(QPalette.ColorRole.AlternateBase, QColor("#f7f9fd"))
+            pal.setColor(QPalette.ColorRole.Text, QColor("#22252b"))
+            pal.setColor(QPalette.ColorRole.Button, QColor("#f8fafc"))
+            pal.setColor(QPalette.ColorRole.ButtonText, QColor("#22252b"))
+            pal.setColor(QPalette.ColorRole.Highlight, QColor("#dbeafe"))
+            pal.setColor(QPalette.ColorRole.HighlightedText, QColor("#111827"))
+            pal.setColor(QPalette.ColorRole.ToolTipBase, QColor("#ffffff"))
+            pal.setColor(QPalette.ColorRole.ToolTipText, QColor("#111827"))
             app.setPalette(pal)
+            self.apply_tooltip_theme(light=True)
 
         self.setStyleSheet("""
-            QMainWindow, QWidget {
-                background-color: #f6f7f9;
-                color: #202124;
-            }
+            QMainWindow, QWidget { background-color:#f4f6fa; color:#22252b; }
             QMenuBar {
-                background-color: #ffffff;
-                color: #202124;
-                border-bottom: 1px solid #d5d8df;
+                background-color:#ffffff;
+                color:#22252b;
+                border-bottom:1px solid #e0e6f0;
+                padding:2px 4px;
             }
-            QMenuBar::item {
-                background: transparent;
-                padding: 4px 8px;
-            }
-            QMenuBar::item:selected {
-                background: #e9eef7;
-            }
+            QMenuBar::item { background:transparent; padding:6px 10px; border-radius:0px; }
+            QMenuBar::item:selected { background:#edf4ff; }
             QMenu {
-                background-color: #ffffff;
-                color: #202124;
-                border: 1px solid #c8ccd5;
+                background-color:#ffffff;
+                color:#22252b;
+                border:1px solid #dfe5ef;
+                border-radius:0px;
+                padding:6px;
             }
-            QMenu::item:selected {
-                background-color: #e4f0ff;
-                color: #000000;
+            QMenu::separator { height:1px; background:#e3e8f1; margin:6px 6px; }
+            QMenu::item { padding:7px 28px 7px 12px; border-radius:0px; }
+            QMenu::item:selected { background-color:#edf4ff; color:#111827; }
+            QMessageBox { background:#f4f6fa; color:#111827; }
+            QMessageBox QLabel { color:#111827; }
+            QMessageBox QPushButton { background:#ffffff; color:#111827; border:1px solid #cfd7e5; border-radius:0px; padding:4px 10px; min-width:56px; }
+            QMessageBox QPushButton:hover { background:#edf4ff; border-color:#aac4e8; }
+            QLabel, QCheckBox, QRadioButton, QGroupBox { color:#22252b; }
+            QGroupBox {
+                border:1px solid #dfe5ef;
+                border-radius:0px;
+                margin-top:12px;
+                padding:10px;
+                background:#ffffff;
             }
-            QLabel, QCheckBox, QRadioButton, QGroupBox {
-                color: #202124;
+            QGroupBox::title { subcontrol-origin:margin; left:12px; padding:0 5px; color:#374151; }
+            QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QFontComboBox, QSpinBox, QDoubleSpinBox, QKeySequenceEdit {
+                background-color:#ffffff;
+                color:#22252b;
+                border:1px solid #cfd7e5;
+                border-radius:0px;
+                padding:3px 6px;
+                selection-background-color:#dbeafe;
+                selection-color:#111827;
             }
-            QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QFontComboBox, QSpinBox, QDoubleSpinBox {
-                background-color: #ffffff;
-                color: #202124;
-                border: 1px solid #b8bdc8;
-                selection-background-color: #b8d7ff;
-                selection-color: #000000;
+            QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QFontComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QKeySequenceEdit:focus {
+                border:1px solid #8fb4e8;
             }
             QAbstractItemView {
-                background-color: #ffffff;
-                color: #202124;
-                border: 1px solid #c8ccd5;
-                alternate-background-color: #f3f5f8;
-                selection-background-color: #d7e8ff;
-                selection-color: #000000;
-                gridline-color: #d7dbe3;
+                background-color:#ffffff;
+                color:#22252b;
+                border:1px solid #dfe5ef;
+                border-radius:0px;
+                alternate-background-color:#f7f9fd;
+                selection-background-color:#dbeafe;
+                selection-color:#111827;
+                gridline-color:#e4eaf3;
             }
             QHeaderView::section {
-                background-color: #eef1f6;
-                color: #202124;
-                border: 1px solid #d7dbe3;
-                padding: 4px;
+                background-color:#f1f4f9;
+                color:#374151;
+                border:0;
+                border-right:1px solid #dfe5ef;
+                padding:7px;
             }
             QPushButton {
-                background-color: #ffffff;
-                color: #202124;
-                border: 1px solid #aeb4bf;
-                padding: 4px 8px;
+                background-color:#f8fafc;
+                color:#22252b;
+                border:1px solid #cfd7e5;
+                border-radius:0px;
+                padding:4px 10px;
             }
-            QPushButton:hover {
-                background-color: #e9eef7;
-            }
-            QPushButton:pressed {
-                background-color: #dfe7f3;
-            }
-            QPushButton:disabled {
-                background-color: #edf0f4;
-                color: #9aa0aa;
-                border-color: #d3d7df;
-            }
+            QPushButton:hover { background-color:#edf4ff; border-color:#aac4e8; }
+            QPushButton:pressed { background-color:#e3edf9; }
+            QPushButton:disabled { background-color:#edf0f5; color:#9aa4b2; border-color:#dde3ec; }
             QToolBar {
-                background-color: #eef1f6;
-                border: 1px solid #d3d7df;
-                spacing: 4px;
+                background-color:#eef2f8;
+                border:1px solid #dfe5ef;
+                border-radius:0px;
+                spacing:5px;
+                padding:4px;
             }
             QToolButton {
-                background-color: #ffffff;
-                color: #202124;
-                border: 1px solid #aeb4bf;
-                padding: 4px;
+                background-color:#f8fafc;
+                color:#22252b;
+                border:1px solid #cfd7e5;
+                border-radius:0px;
+                padding:5px;
             }
-            QToolButton:hover {
-                background-color: #e9eef7;
+            QToolButton:hover { background-color:#edf4ff; border-color:#aac4e8; }
+            QToolButton:checked { background-color:#dbeafe; border-color:#8fb4e8; }
+            QCheckBox::indicator, QRadioButton::indicator {
+                width:15px; height:15px;
+                border:1px solid #aab4c3;
+                background:#ffffff;
+                border-radius:0px;
             }
-            QCheckBox::indicator {
-                width: 14px;
-                height: 14px;
-                border: 1px solid #8d96a4;
-                background: #ffffff;
-            }
-            QCheckBox::indicator:checked {
-                background: #4b8de8;
-            }
-            QSplitter::handle {
-                background: #d5d8df;
-            }
-            QTabWidget::pane {
-                border: 1px solid #d5d8df;
-            }
+            QRadioButton::indicator { border-radius:0px; }
+            QCheckBox::indicator:checked, QRadioButton::indicator:checked { background:#7aa8e8; border:1px solid #7aa8e8; }
+            QSplitter::handle { background:#dfe5ef; }
+            QTabWidget::pane { border:1px solid #dfe5ef; border-radius:0px; background:#ffffff; }
             QTabBar::tab {
-                background: #eef1f6;
-                color: #202124;
-                padding: 6px 10px;
-                border: 1px solid #d5d8df;
+                background:#edf1f7;
+                color:#4b5563;
+                padding:8px 12px;
+                border:1px solid #d9e0ea;
+                border-bottom:none;
+                border-top-left-radius:10px;
+                border-top-right-radius:3px;
             }
-            QTabBar::tab:selected {
-                background: #ffffff;
-                font-weight: bold;
-            }
-            QToolTip {
-                background-color: #fff8d6;
-                color: #000000;
-                border: 1px solid #777777;
-                padding: 6px;
-            }
+            QTabBar::tab:selected { background:#ffffff; color:#1f232b; font-weight:bold; }
+            QTabBar::tab:hover { background:#edf4ff; }
+            QScrollBar:vertical { background:#eef2f8; width:12px; margin:0; border:0; border-radius:0px; }
+            QScrollBar::handle:vertical { background:#cbd5e1; min-height:30px; border-radius:0px; }
+            QScrollBar::handle:vertical:hover { background:#b7c3d4; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }
+            QScrollBar:horizontal { background:#eef2f8; height:12px; margin:0; border:0; border-radius:0px; }
+            QScrollBar::handle:horizontal { background:#cbd5e1; min-width:30px; border-radius:0px; }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width:0; }
+            QToolTip { background-color:#ffffff; color:#111827; border:1px solid #cfd7e5; border-radius:0px; padding:5px; }
         """)
         if hasattr(self, 'tb') and self.tb:
-            self.tb.setStyleSheet("background:#eef1f6; border:1px solid #d3d7df;")
+            self.tb.setStyleSheet("background:#eef2f8; border:1px solid #dfe5ef; border-radius:0px;")
         if hasattr(self, 'mask_toggle_wrap') and self.mask_toggle_wrap:
             self.mask_toggle_wrap.setStyleSheet("")
         if hasattr(self, 'btn_page') and self.btn_page:
-            self.btn_page.setStyleSheet("border:none; font-weight:bold; color:#202124;")
+            self.btn_page.setStyleSheet("border:none; font-weight:bold; color:#22252b;")
         if hasattr(self, 'tab') and self.tab:
             self.tab.setStyleSheet(
-                "QTableWidget { background:#ffffff; color:#202124; gridline-color:#d7dbe3; }"
-                "QTableWidget::item:selected { background:#d7e8ff; color:#000000; }"
-                "QTableWidget QTableCornerButton::section { background:#eef1f6; border:1px solid #d7dbe3; }"
+                "QTableWidget { background:#ffffff; color:#22252b; gridline-color:#e4eaf3; border:1px solid #dfe5ef; border-radius:0px; }"
+                "QTableWidget::item:selected { background:#dbeafe; color:#111827; }"
+                "QTableWidget QTableCornerButton::section { background:#f1f4f9; border:1px solid #dfe5ef; }"
             )
             self.repaint_text_table_theme()
         if hasattr(self, 'log_w') and self.log_w:
-            self.log_w.setStyleSheet("background:#ffffff;color:#146c2e;border:1px solid #c8ccd5;")
+            self.log_w.setStyleSheet("background:#ffffff;color:#25704a;border:1px solid #dfe5ef;border-radius:0px;")
         self.update_color_button_styles()
+        self.schedule_native_title_bar_theme(self, dark=False)
 
     def apply_dark_theme(self):
-        # QToolTip은 OS/Qt 스타일에 따라 MainWindow stylesheet만으로는
-        # 일부 위젯에서 검은 기본 툴팁이 남을 수 있어서 앱 전체에 한 번 더 강제한다.
+        """다크 테마를 홈/클라우드와 맞는 부드러운 카드형 톤으로 적용한다."""
         app = QApplication.instance()
         if app:
             app.setStyleSheet("""
-                QToolTip {
-                    background-color: #fff8d6;
-                    color: #000000;
-                    border: 1px solid #777777;
-                    padding: 6px;
-                }
+                QToolTip { background-color:#1f2430; color:#ffffff; border:1px solid #4b5563; border-radius:0px; padding:5px; }
             """)
-            pal = app.palette()
-            pal.setColor(QPalette.ColorRole.ToolTipBase, QColor("#fff8d6"))
-            pal.setColor(QPalette.ColorRole.ToolTipText, QColor("#000000"))
+            pal = QPalette()
+            pal.setColor(QPalette.ColorRole.Window, QColor("#202226"))
+            pal.setColor(QPalette.ColorRole.WindowText, QColor("#f2f4f8"))
+            pal.setColor(QPalette.ColorRole.Base, QColor("#24282f"))
+            pal.setColor(QPalette.ColorRole.AlternateBase, QColor("#282d35"))
+            pal.setColor(QPalette.ColorRole.Text, QColor("#f2f4f8"))
+            pal.setColor(QPalette.ColorRole.Button, QColor("#333843"))
+            pal.setColor(QPalette.ColorRole.ButtonText, QColor("#f2f4f8"))
+            pal.setColor(QPalette.ColorRole.Highlight, QColor("#3d587d"))
+            pal.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
+            pal.setColor(QPalette.ColorRole.ToolTipBase, QColor("#1f2430"))
+            pal.setColor(QPalette.ColorRole.ToolTipText, QColor("#ffffff"))
             app.setPalette(pal)
 
         self.setStyleSheet("""
-            QMainWindow, QWidget {
-                background-color: #1f1f22;
-                color: #f2f2f2;
-            }
+            QMainWindow, QWidget { background-color:#202226; color:#f2f4f8; }
             QMenuBar {
-                background-color: #232326;
-                color: #f2f2f2;
+                background-color:#1d1f23;
+                color:#f2f4f8;
+                border-bottom:1px solid #303640;
+                padding:2px 4px;
             }
-            QMenuBar::item {
-                background: transparent;
-                padding: 4px 8px;
-            }
-            QMenuBar::item:selected {
-                background: #35353a;
-            }
+            QMenuBar::item { background:transparent; padding:6px 10px; border-radius:0px; }
+            QMenuBar::item:selected { background:#303640; }
             QMenu {
-                background-color: #2b2b30;
-                color: #f2f2f2;
-                border: 1px solid #4a4a52;
+                background-color:#282c33;
+                color:#f2f4f8;
+                border:1px solid #3b414c;
+                border-radius:0px;
+                padding:6px;
             }
-            QMenu::item:selected {
-                background-color: #3c3f46;
+            QMenu::separator { height:1px; background:#3b414c; margin:6px 6px; }
+            QMenu::item { padding:7px 28px 7px 12px; border-radius:0px; }
+            QMenu::item:selected { background-color:#38404c; color:#ffffff; }
+            QMessageBox { background:#24272d; color:#f2f4f8; }
+            QMessageBox QLabel { color:#f2f4f8; }
+            QMessageBox QPushButton { background:#333843; color:#f2f4f8; border:1px solid #586173; border-radius:0px; padding:4px 10px; min-width:56px; }
+            QMessageBox QPushButton:hover { background:#3d4654; border-color:#74839a; }
+            QLabel, QCheckBox, QRadioButton, QGroupBox { color:#f2f4f8; }
+            QGroupBox {
+                border:1px solid #3b414c;
+                border-radius:0px;
+                margin-top:12px;
+                padding:10px;
+                background:#282c33;
             }
-            QLabel, QCheckBox, QRadioButton, QGroupBox {
-                color: #f2f2f2;
+            QGroupBox::title { subcontrol-origin:margin; left:12px; padding:0 5px; color:#d7deea; }
+            QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QFontComboBox, QSpinBox, QDoubleSpinBox, QKeySequenceEdit {
+                background-color:#1f2228;
+                color:#f5f7fb;
+                border:1px solid #434a56;
+                border-radius:0px;
+                padding:3px 6px;
+                selection-background-color:#4c6f9f;
+                selection-color:#ffffff;
             }
-            QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QFontComboBox, QSpinBox, QDoubleSpinBox {
-                background-color: #2d2f34;
-                color: #f5f5f5;
-                border: 1px solid #53565f;
-                selection-background-color: #4b79ff;
-                selection-color: #ffffff;
+            QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QFontComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QKeySequenceEdit:focus {
+                border:1px solid #7ea2d6;
+                background:#222630;
             }
             QAbstractItemView {
-                background-color: #26282d;
-                color: #f5f5f5;
-                border: 1px solid #4a4d55;
-                alternate-background-color: #2d3036;
-                selection-background-color: #fff176;
-                selection-color: #000000;
-                gridline-color: #4a4d55;
+                background-color:#24282f;
+                color:#f2f4f8;
+                border:1px solid #3b414c;
+                border-radius:0px;
+                alternate-background-color:#282d35;
+                selection-background-color:#3d587d;
+                selection-color:#ffffff;
+                gridline-color:#38404a;
             }
             QHeaderView::section {
-                background-color: #31343a;
-                color: #f2f2f2;
-                border: 1px solid #4a4d55;
-                padding: 4px;
+                background-color:#2d323b;
+                color:#d7deea;
+                border:0;
+                border-right:1px solid #3b414c;
+                padding:7px;
             }
             QPushButton {
-                background-color: #353841;
-                color: #f2f2f2;
-                border: 1px solid #5a5d66;
-                padding: 4px 8px;
+                background-color:#333843;
+                color:#f2f4f8;
+                border:1px solid #555d6c;
+                border-radius:0px;
+                padding:4px 10px;
             }
-            QPushButton:hover {
-                background-color: #424652;
-            }
-            QPushButton:pressed {
-                background-color: #2d3038;
-            }
-            QPushButton:disabled {
-                background-color: #2a2b2f;
-                color: #8b8d93;
-                border-color: #44474f;
-            }
+            QPushButton:hover { background-color:#3d4654; border-color:#718098; }
+            QPushButton:pressed { background-color:#2b303a; }
+            QPushButton:disabled { background-color:#2a2d33; color:#858d9a; border-color:#3f4550; }
             QToolBar {
-                background-color: #24262b;
-                border: 1px solid #3d4048;
-                spacing: 4px;
+                background-color:#24282f;
+                border:1px solid #3b414c;
+                border-radius:0px;
+                spacing:5px;
+                padding:4px;
             }
             QToolButton {
-                background-color: #353841;
-                color: #f2f2f2;
-                border: 1px solid #5a5d66;
-                padding: 4px;
+                background-color:#333843;
+                color:#f2f4f8;
+                border:1px solid #555d6c;
+                border-radius:0px;
+                padding:5px;
             }
-            QToolButton:hover {
-                background-color: #424652;
+            QToolButton:hover { background-color:#3d4654; border-color:#718098; }
+            QToolButton:checked { background-color:#3d587d; border-color:#7ea2d6; }
+            QCheckBox::indicator, QRadioButton::indicator {
+                width:15px; height:15px;
+                border:1px solid #6f7786;
+                background:#1f2228;
+                border-radius:0px;
             }
-            QCheckBox::indicator {
-                width: 14px;
-                height: 14px;
-                border: 1px solid #72757f;
-                background: #2d2f34;
+            QRadioButton::indicator { border-radius:0px; }
+            QCheckBox::indicator:checked, QRadioButton::indicator:checked { background:#78a6e6; border:1px solid #78a6e6; }
+            QSplitter::handle { background:#303640; }
+            QTabWidget::pane { border:1px solid #3b414c; border-radius:0px; background:#24282f; }
+            QTabBar::tab {
+                background:#2a2e36;
+                color:#b5bfce;
+                padding:8px 12px;
+                border:1px solid #3b414c;
+                border-bottom:none;
+                border-top-left-radius:10px;
+                border-top-right-radius:3px;
             }
-            QCheckBox::indicator:checked {
-                background: #5da9ff;
-            }
-            QSplitter::handle {
-                background: #353841;
-            }
-            QToolTip {
-                background-color: #fff8d6;
-                color: #000000;
-                border: 1px solid #777777;
-                padding: 6px;
-            }
+            QTabBar::tab:selected { background:#333842; color:#ffffff; font-weight:bold; }
+            QTabBar::tab:hover { background:#38404c; }
+            QScrollBar:vertical { background:#20242b; width:12px; margin:0; border:0; border-radius:0px; }
+            QScrollBar::handle:vertical { background:#424a57; min-height:30px; border-radius:0px; }
+            QScrollBar::handle:vertical:hover { background:#566173; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }
+            QScrollBar:horizontal { background:#20242b; height:12px; margin:0; border:0; border-radius:0px; }
+            QScrollBar::handle:horizontal { background:#424a57; min-width:30px; border-radius:0px; }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width:0; }
+            QToolTip { background-color:#1f2430; color:#ffffff; border:1px solid #4b5563; border-radius:0px; padding:5px; }
         """)
         if hasattr(self, 'tb') and self.tb:
-            self.tb.setStyleSheet("background:#24262b; border:1px solid #3d4048;")
+            self.tb.setStyleSheet("background:#24282f; border:1px solid #3b414c; border-radius:0px;")
         if hasattr(self, 'mask_toggle_wrap') and self.mask_toggle_wrap:
             self.mask_toggle_wrap.setStyleSheet("")
         if hasattr(self, 'btn_page') and self.btn_page:
-            self.btn_page.setStyleSheet("border:none; font-weight:bold; color:#f2f2f2;")
+            self.btn_page.setStyleSheet("border:none; font-weight:bold; color:#f2f4f8;")
         if hasattr(self, 'tab') and self.tab:
             self.tab.setStyleSheet(
-                "QTableWidget { background:#26282d; color:#f5f5f5; gridline-color:#4a4d55; }"
-                "QTableWidget::item:selected { background:#fff176; color:#000000; }"
-                "QTableWidget QTableCornerButton::section { background:#31343a; border:1px solid #4a4d55; }"
+                "QTableWidget { background:#24282f; color:#f2f4f8; gridline-color:#38404a; border:1px solid #3b414c; border-radius:0px; }"
+                "QTableWidget::item:selected { background:#3d587d; color:#ffffff; }"
+                "QTableWidget QTableCornerButton::section { background:#2d323b; border:1px solid #3b414c; }"
             )
             self.repaint_text_table_theme()
         if hasattr(self, 'log_w') and self.log_w:
-            self.log_w.setStyleSheet("background:#111214;color:#75ff75;border:1px solid #3b3e46;")
+            self.log_w.setStyleSheet("background:#1f2228;color:#8ee0a1;border:1px solid #3b414c;border-radius:0px;")
+        self.update_color_button_styles()
 
     # =========================================================
     # 스타일 / 마스크 / 텍스트 파일 유틸
@@ -3248,8 +7827,8 @@ class MainWindow(QMainWindow):
             if btn:
                 btn.setText("")
                 btn.setStatusTip(f"{tooltip}: {color}")
-                btn.setFixedSize(28, 28)
-                btn.setStyleSheet(f"background:{color}; border:1px solid #444; padding:0px;")
+                btn.setFixedSize(26, 26)
+                btn.setStyleSheet(f"background:{color}; border:1px solid #555d6c; border-radius:0px; padding:0px;")
 
         if hasattr(self, "act_final_paint_color"):
             self.act_final_paint_color.setIcon(self.make_color_icon(self.final_paint_color))
@@ -3995,6 +8574,7 @@ class MainWindow(QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle(self.tr_ui("페이지 글꼴 프리셋 관리"))
         dialog.resize(1040, 620)
+        dialog.setStyleSheet(self.settings_dialog_style())
 
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -4024,14 +8604,14 @@ class MainWindow(QMainWindow):
 
         row1 = QHBoxLayout()
         row1.setSpacing(6)
-        dlg_font = QFontComboBox(dialog); dlg_font.setFixedWidth(160)
-        dlg_size = QSpinBox(dialog); dlg_size.setRange(5, 500); dlg_size.setSuffix(" px"); dlg_size.setFixedWidth(74)
-        dlg_stroke = QSpinBox(dialog); dlg_stroke.setRange(0, 100); dlg_stroke.setSuffix(" px"); dlg_stroke.setFixedWidth(70)
-        dlg_text_color_btn = QPushButton("", dialog); dlg_text_color_btn.setFixedSize(28, 28)
-        dlg_stroke_color_btn = QPushButton("", dialog); dlg_stroke_color_btn.setFixedSize(28, 28)
+        dlg_font = QFontComboBox(dialog); dlg_font.setFixedWidth(160); dlg_font.setFixedHeight(26)
+        dlg_size = QSpinBox(dialog); dlg_size.setRange(5, 500); dlg_size.setSuffix(" px"); dlg_size.setFixedWidth(82); dlg_size.setFixedHeight(26)
+        dlg_stroke = QSpinBox(dialog); dlg_stroke.setRange(0, 100); dlg_stroke.setSuffix(" px"); dlg_stroke.setFixedWidth(78); dlg_stroke.setFixedHeight(26)
+        dlg_text_color_btn = QPushButton("", dialog); dlg_text_color_btn.setFixedSize(26, 26)
+        dlg_stroke_color_btn = QPushButton("", dialog); dlg_stroke_color_btn.setFixedSize(26, 26)
         dlg_align_left = QPushButton("≡◁", dialog); dlg_align_center = QPushButton("≡◇", dialog); dlg_align_right = QPushButton("▷≡", dialog)
         for b in (dlg_align_left, dlg_align_center, dlg_align_right):
-            b.setFixedWidth(42); b.setMinimumHeight(26)
+            b.setFixedWidth(42); b.setFixedHeight(26)
         row1.addWidget(QLabel(self.tr_ui("폰트"))); row1.addWidget(dlg_font)
         row1.addWidget(QLabel(self.tr_ui("크기"))); row1.addWidget(dlg_size)
         row1.addWidget(dlg_text_color_btn)
@@ -4042,14 +8622,26 @@ class MainWindow(QMainWindow):
 
         row2 = QHBoxLayout()
         row2.setSpacing(6)
-        dlg_line_spacing = QSpinBox(dialog); dlg_line_spacing.setRange(50, 300); dlg_line_spacing.setValue(100); dlg_line_spacing.setSuffix(" %"); dlg_line_spacing.setFixedWidth(72)
-        dlg_letter_spacing = QSpinBox(dialog); dlg_letter_spacing.setRange(-100, 200); dlg_letter_spacing.setSuffix(" px"); dlg_letter_spacing.setFixedWidth(72)
-        dlg_char_width = QSpinBox(dialog); dlg_char_width.setRange(10, 300); dlg_char_width.setValue(100); dlg_char_width.setSuffix(" %"); dlg_char_width.setFixedWidth(72)
-        dlg_char_height = QSpinBox(dialog); dlg_char_height.setRange(10, 300); dlg_char_height.setValue(100); dlg_char_height.setSuffix(" %"); dlg_char_height.setFixedWidth(72)
+        dlg_line_spacing = QSpinBox(dialog); dlg_line_spacing.setRange(50, 300); dlg_line_spacing.setValue(100); dlg_line_spacing.setSuffix(" %"); dlg_line_spacing.setFixedWidth(86); dlg_line_spacing.setFixedHeight(26)
+        dlg_letter_spacing = QSpinBox(dialog); dlg_letter_spacing.setRange(-100, 200); dlg_letter_spacing.setSuffix(" px"); dlg_letter_spacing.setFixedWidth(86); dlg_letter_spacing.setFixedHeight(26)
+        dlg_char_width = QSpinBox(dialog); dlg_char_width.setRange(10, 300); dlg_char_width.setValue(100); dlg_char_width.setSuffix(" %"); dlg_char_width.setFixedWidth(86); dlg_char_width.setFixedHeight(26)
+        dlg_char_height = QSpinBox(dialog); dlg_char_height.setRange(10, 300); dlg_char_height.setValue(100); dlg_char_height.setSuffix(" %"); dlg_char_height.setFixedWidth(86); dlg_char_height.setFixedHeight(26)
         dlg_bold = QPushButton("B", dialog); dlg_italic = QPushButton("I", dialog); dlg_strike = QPushButton("S", dialog)
         for b, tip in ((dlg_bold, "굵게"), (dlg_italic, "기울이기"), (dlg_strike, "취소선")):
-            b.setCheckable(True); b.setFixedWidth(32); b.setMinimumHeight(26); b.setToolTip(tip)
+            b.setCheckable(True); b.setFixedWidth(32); b.setFixedHeight(26); b.setToolTip(tip)
         dlg_bold.setStyleSheet("font-weight:bold;"); dlg_italic.setStyleSheet("font-style:italic;"); dlg_strike.setStyleSheet("text-decoration: line-through;")
+        self.install_style_editor_shortcuts(dialog, {
+            "font": dlg_font,
+            "size": dlg_size,
+            "stroke": dlg_stroke,
+            "line_spacing": dlg_line_spacing,
+            "letter_spacing": dlg_letter_spacing,
+            "char_width": dlg_char_width,
+            "char_height": dlg_char_height,
+            "bold": dlg_bold,
+            "italic": dlg_italic,
+            "strike": dlg_strike,
+        })
         row2.addWidget(QLabel(self.tr_ui("행간"))); row2.addWidget(dlg_line_spacing)
         row2.addWidget(QLabel(self.tr_ui("자간"))); row2.addWidget(dlg_letter_spacing)
         row2.addWidget(QLabel(self.tr_ui("너비"))); row2.addWidget(dlg_char_width)
@@ -4063,7 +8655,7 @@ class MainWindow(QMainWindow):
             dlg_text_color_btn.setStyleSheet(f"background:{dialog_text_color['value']}; border:1px solid #444; padding:0px;")
             dlg_stroke_color_btn.setStyleSheet(f"background:{dialog_stroke_color['value']}; border:1px solid #444; padding:0px;")
             for align, btn in (("left", dlg_align_left), ("center", dlg_align_center), ("right", dlg_align_right)):
-                btn.setStyleSheet("background:#dfefff; border:1px solid #448aff;" if dialog_align["value"] == align else "")
+                btn.setStyleSheet("background:#dbeafe; border:1px solid #8fb4e8; border-radius:0px;" if dialog_align["value"] == align else "")
 
         def dialog_style_snapshot():
             return self.normalize_style_dict({
@@ -4162,6 +8754,12 @@ class MainWindow(QMainWindow):
                 chk = QCheckBox(); chk.setChecked(bool(enabled_map.get(name, True)))
                 btn_select = QPushButton("선택")
                 name_edit = QLineEdit(name)
+                try:
+                    if not hasattr(dialog, "_ysb_enter_commit_filter"):
+                        dialog._ysb_enter_commit_filter = EnterCommitFilter(parent_dialog=dialog, fallback_widget=dialog, parent=dialog)
+                    name_edit.installEventFilter(dialog._ysb_enter_commit_filter)
+                except Exception:
+                    pass
                 summary = QLabel(self.style_summary_text(style)); summary.setWordWrap(True)
                 btn_update = QPushButton("수정 저장")
                 btn_delete = QPushButton("삭제")
@@ -4460,6 +9058,7 @@ class MainWindow(QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle(self.tr_ui("개별 글꼴 프리셋 관리"))
         dialog.resize(1120, 680)
+        dialog.setStyleSheet(self.settings_dialog_style())
 
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -4495,14 +9094,14 @@ class MainWindow(QMainWindow):
         top_l = QVBoxLayout(top); top_l.setContentsMargins(0, 0, 0, 0); top_l.setSpacing(6)
 
         row1 = QHBoxLayout(); row1.setSpacing(6)
-        dlg_font = QFontComboBox(dialog); dlg_font.setFixedWidth(160)
-        dlg_size = QSpinBox(dialog); dlg_size.setRange(5, 500); dlg_size.setSuffix(" px"); dlg_size.setFixedWidth(74)
-        dlg_stroke = QSpinBox(dialog); dlg_stroke.setRange(0, 100); dlg_stroke.setSuffix(" px"); dlg_stroke.setFixedWidth(70)
-        dlg_text_color_btn = QPushButton("", dialog); dlg_text_color_btn.setFixedSize(28, 28)
-        dlg_stroke_color_btn = QPushButton("", dialog); dlg_stroke_color_btn.setFixedSize(28, 28)
+        dlg_font = QFontComboBox(dialog); dlg_font.setFixedWidth(160); dlg_font.setFixedHeight(26)
+        dlg_size = QSpinBox(dialog); dlg_size.setRange(5, 500); dlg_size.setSuffix(" px"); dlg_size.setFixedWidth(82); dlg_size.setFixedHeight(26)
+        dlg_stroke = QSpinBox(dialog); dlg_stroke.setRange(0, 100); dlg_stroke.setSuffix(" px"); dlg_stroke.setFixedWidth(78); dlg_stroke.setFixedHeight(26)
+        dlg_text_color_btn = QPushButton("", dialog); dlg_text_color_btn.setFixedSize(26, 26)
+        dlg_stroke_color_btn = QPushButton("", dialog); dlg_stroke_color_btn.setFixedSize(26, 26)
         dlg_align_left = QPushButton("≡◁", dialog); dlg_align_center = QPushButton("≡◇", dialog); dlg_align_right = QPushButton("▷≡", dialog)
         for b in (dlg_align_left, dlg_align_center, dlg_align_right):
-            b.setFixedWidth(42); b.setMinimumHeight(26)
+            b.setFixedWidth(42); b.setFixedHeight(26)
         row1.addWidget(QLabel(self.tr_ui("폰트"))); row1.addWidget(dlg_font)
         row1.addWidget(QLabel(self.tr_ui("크기"))); row1.addWidget(dlg_size)
         row1.addWidget(dlg_text_color_btn)
@@ -4512,14 +9111,26 @@ class MainWindow(QMainWindow):
         top_l.addLayout(row1)
 
         row2 = QHBoxLayout(); row2.setSpacing(6)
-        dlg_line_spacing = QSpinBox(dialog); dlg_line_spacing.setRange(50, 300); dlg_line_spacing.setValue(100); dlg_line_spacing.setSuffix(" %"); dlg_line_spacing.setFixedWidth(72)
-        dlg_letter_spacing = QSpinBox(dialog); dlg_letter_spacing.setRange(-100, 200); dlg_letter_spacing.setSuffix(" px"); dlg_letter_spacing.setFixedWidth(72)
-        dlg_char_width = QSpinBox(dialog); dlg_char_width.setRange(10, 300); dlg_char_width.setValue(100); dlg_char_width.setSuffix(" %"); dlg_char_width.setFixedWidth(72)
-        dlg_char_height = QSpinBox(dialog); dlg_char_height.setRange(10, 300); dlg_char_height.setValue(100); dlg_char_height.setSuffix(" %"); dlg_char_height.setFixedWidth(72)
+        dlg_line_spacing = QSpinBox(dialog); dlg_line_spacing.setRange(50, 300); dlg_line_spacing.setValue(100); dlg_line_spacing.setSuffix(" %"); dlg_line_spacing.setFixedWidth(86); dlg_line_spacing.setFixedHeight(26)
+        dlg_letter_spacing = QSpinBox(dialog); dlg_letter_spacing.setRange(-100, 200); dlg_letter_spacing.setSuffix(" px"); dlg_letter_spacing.setFixedWidth(86); dlg_letter_spacing.setFixedHeight(26)
+        dlg_char_width = QSpinBox(dialog); dlg_char_width.setRange(10, 300); dlg_char_width.setValue(100); dlg_char_width.setSuffix(" %"); dlg_char_width.setFixedWidth(86); dlg_char_width.setFixedHeight(26)
+        dlg_char_height = QSpinBox(dialog); dlg_char_height.setRange(10, 300); dlg_char_height.setValue(100); dlg_char_height.setSuffix(" %"); dlg_char_height.setFixedWidth(86); dlg_char_height.setFixedHeight(26)
         dlg_bold = QPushButton("B", dialog); dlg_italic = QPushButton("I", dialog); dlg_strike = QPushButton("S", dialog)
         for b, tip in ((dlg_bold, "굵게"), (dlg_italic, "기울이기"), (dlg_strike, "취소선")):
-            b.setCheckable(True); b.setFixedWidth(32); b.setMinimumHeight(26); b.setToolTip(tip)
+            b.setCheckable(True); b.setFixedWidth(32); b.setFixedHeight(26); b.setToolTip(tip)
         dlg_bold.setStyleSheet("font-weight:bold;"); dlg_italic.setStyleSheet("font-style:italic;"); dlg_strike.setStyleSheet("text-decoration: line-through;")
+        self.install_style_editor_shortcuts(dialog, {
+            "font": dlg_font,
+            "size": dlg_size,
+            "stroke": dlg_stroke,
+            "line_spacing": dlg_line_spacing,
+            "letter_spacing": dlg_letter_spacing,
+            "char_width": dlg_char_width,
+            "char_height": dlg_char_height,
+            "bold": dlg_bold,
+            "italic": dlg_italic,
+            "strike": dlg_strike,
+        })
         row2.addWidget(QLabel(self.tr_ui("행간"))); row2.addWidget(dlg_line_spacing)
         row2.addWidget(QLabel(self.tr_ui("자간"))); row2.addWidget(dlg_letter_spacing)
         row2.addWidget(QLabel(self.tr_ui("너비"))); row2.addWidget(dlg_char_width)
@@ -4563,7 +9174,7 @@ class MainWindow(QMainWindow):
             dlg_text_color_btn.setStyleSheet(f"background:{dialog_text_color['value']}; border:1px solid #444; padding:0px;")
             dlg_stroke_color_btn.setStyleSheet(f"background:{dialog_stroke_color['value']}; border:1px solid #444; padding:0px;")
             for align, btn in (("left", dlg_align_left), ("center", dlg_align_center), ("right", dlg_align_right)):
-                btn.setStyleSheet("background:#dfefff; border:1px solid #448aff;" if dialog_align["value"] == align else "")
+                btn.setStyleSheet("background:#dbeafe; border:1px solid #8fb4e8; border-radius:0px;" if dialog_align["value"] == align else "")
 
         def apply_style_to_editor(style, include=None):
             st = self.normalize_style_dict(style)
@@ -7906,6 +12517,7 @@ class MainWindow(QMainWindow):
             "project_save",
             "project_save_as",
             "option_workspace_location",
+            "option_workspace_reset_default",
         ):
             action = self.actions.get(key) if hasattr(self, "actions") else None
             if action is not None:
@@ -8028,6 +12640,44 @@ class MainWindow(QMainWindow):
         else:
             self.log("📁 작업 폴더 설정 변경 취소")
 
+    def reset_workspace_location_to_default(self, parent=None):
+        """작업 폴더 위치를 Windows 실제 문서 폴더 기준 기본값으로 되돌린 뒤 재기동한다."""
+        if not self.guard_project_action("작업 폴더 위치 기본값으로 변경"):
+            return
+        parent = parent or self
+        target = default_workspace_root()
+        try:
+            current = Path(load_workspace_config().get("workspace_root") or get_workspace_root()).resolve()
+            target_resolved = target.resolve()
+        except Exception:
+            current = Path(str(get_workspace_root()))
+            target_resolved = target
+
+        if current == target_resolved:
+            set_workspace_root(target)
+            QMessageBox.information(
+                parent,
+                self.tr_ui("설정 완료"),
+                f"{self.tr_ui('작업 폴더 위치가 이미 기본값입니다.')}\n\n{target}",
+            )
+            self.log(f"📁 작업 폴더 기본값 확인: {target}")
+            return
+
+        if not workspace_restart_confirmation(parent, current, target, self.ui_language):
+            self.log("📁 작업 폴더 기본값 변경 취소")
+            return
+
+        try:
+            schedule_workspace_root_change(target)
+            self.log(f"📁 작업 폴더 기본값 변경 예약 및 재기동: {target}")
+            restart_application_detached()
+        except Exception as e:
+            QMessageBox.critical(
+                parent,
+                self.tr_ui("저장 실패"),
+                f"{self.tr_ui('작업 폴더 위치를 기본값으로 변경하지 못했습니다.')}\n{e}",
+            )
+
     def register_ysb_file_association(self):
         if not is_windows():
             QMessageBox.information(self, self.tr_ui("지원 안내"), self.tr_msg(".ysbt 확장자 연결 등록은 Windows에서만 지원합니다."))
@@ -8098,8 +12748,14 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, self.tr_ui("해제 실패"), f"{self.tr_ui('확장자 연결 해제에 실패했습니다.')}\n{e}")
 
     def workspace_temp_project_dir(self, project_name="unsaved_project"):
+        """새 프로젝트용 임시 작업 폴더를 만든다.
+
+        v1.8 런처 이후에는 사용자가 작업 폴더를 문서/YSB_Translator로 잡아두었는지
+        바로 확인할 수 있어야 하므로, 새 프로젝트의 임시 작업도 workspaces 아래에 만든다.
+        아직 .ysbt로 저장되지 않은 상태라는 의미는 is_temp_project 플래그로 관리한다.
+        """
         safe = safe_project_name(project_name)
-        return unique_dir(temp_dir(), f"unsaved_{safe}_{uuid.uuid4().hex[:8]}")
+        return unique_dir(workspaces_dir(), f"unsaved_{safe}_{uuid.uuid4().hex[:8]}")
 
     def workspace_project_dir(self, project_name="ysb_project", code=None, *, append_code=True):
         safe = clean_workspace_name(project_name)
@@ -8116,11 +12772,20 @@ class MainWindow(QMainWindow):
         return str(default_package_dir() / f"{safe_project_name(base)}{YSB_EXTENSION}")
 
     def delete_temp_project_if_needed(self):
+        """저장되지 않은 임시 프로젝트 폴더를 안전하게 삭제한다.
+
+        예전에는 임시 프로젝트가 temp 아래에만 있었지만, v1.8 런처 이후 새 프로젝트는
+        사용자가 지정한 작업 폴더의 workspaces 아래에 unsaved_* 형태로 보이게 만든다.
+        따라서 is_temp_project=True이고 아직 .ysbt 패키지에 연결되지 않은 경우에는
+        temp/workspaces 내부의 unsaved_* 폴더를 정리한다.
+        """
         if self.is_temp_project and self.project_dir and os.path.exists(self.project_dir):
             try:
-                tmp_root = os.path.abspath(str(temp_dir()))
                 proj = os.path.abspath(self.project_dir)
-                if proj.startswith(tmp_root):
+                roots = [os.path.abspath(str(temp_dir())), os.path.abspath(str(workspaces_dir()))]
+                name = os.path.basename(proj)
+                can_delete = (not getattr(self, "ysbt_package_path", None)) and name.startswith("unsaved_")
+                if can_delete and any(proj.startswith(root) for root in roots):
                     shutil.rmtree(self.project_dir, ignore_errors=True)
                     self.log(f"🧹 임시 프로젝트 삭제: {self.project_dir}")
             except Exception:
@@ -8678,7 +13343,9 @@ class MainWindow(QMainWindow):
             # 새 프로젝트 생성은 원본 탭으로 시작하지만, 기존 프로젝트 열기는 마지막 작업 탭/화면 상태로 복원한다.
             mode_to_load = 0 if temp_project else int(ui_state.get("current_mode", 0) or 0)
             self.set_work_mode_without_undo(mode_to_load)
+            self.show_editor()
             self.load()
+            self.record_current_project_recent()
             state = self.project_ui_view_states.get(self.view_state_key(self.idx, mode_to_load))
             if state:
                 self.apply_view_state(state)
@@ -8770,6 +13437,23 @@ class MainWindow(QMainWindow):
         if cleanup_days not in (7, 30, 90, 180, 365):
             cleanup_days = 7
         self.app_options["temp_auto_cleanup_days"] = cleanup_days
+        self.app_options[ANALYSIS_TEXT_MASK_EXPAND_RATIO_KEY] = clamp_analysis_mask_ratio(
+            self.app_options.get(ANALYSIS_TEXT_MASK_EXPAND_RATIO_KEY, getattr(Config, "MERGE_RATIO", DEFAULT_ANALYSIS_TEXT_MASK_EXPAND_RATIO)),
+            DEFAULT_ANALYSIS_TEXT_MASK_EXPAND_RATIO,
+        )
+        self.app_options[ANALYSIS_PAINT_MASK_EXPAND_RATIO_KEY] = clamp_analysis_mask_ratio(
+            self.app_options.get(ANALYSIS_PAINT_MASK_EXPAND_RATIO_KEY, getattr(Config, "INPAINT_RATIO", DEFAULT_ANALYSIS_PAINT_MASK_EXPAND_RATIO)),
+            DEFAULT_ANALYSIS_PAINT_MASK_EXPAND_RATIO,
+        )
+        self.app_options[ANALYSIS_TEXT_MASK_MIN_EXPAND_PX_KEY] = clamp_analysis_mask_min_px(
+            self.app_options.get(ANALYSIS_TEXT_MASK_MIN_EXPAND_PX_KEY, getattr(Config, "MERGE_MIN_STROKE_PX", DEFAULT_ANALYSIS_TEXT_MASK_MIN_EXPAND_PX)),
+            DEFAULT_ANALYSIS_TEXT_MASK_MIN_EXPAND_PX,
+        )
+        self.app_options[ANALYSIS_PAINT_MASK_MIN_EXPAND_PX_KEY] = clamp_analysis_mask_min_px(
+            self.app_options.get(ANALYSIS_PAINT_MASK_MIN_EXPAND_PX_KEY, getattr(Config, "MIN_STROKE_PX", DEFAULT_ANALYSIS_PAINT_MASK_MIN_EXPAND_PX)),
+            DEFAULT_ANALYSIS_PAINT_MASK_MIN_EXPAND_PX,
+        )
+        self.sync_analysis_mask_options_to_config()
         self.app_options.setdefault(TRANSLATION_PROMPT_KEY, "")
         self.app_options.setdefault(TRANSLATION_GLOSSARY_TEXT_KEY, "")
         self.app_options.setdefault(TRANSLATION_GLOSSARY_PATH_KEY, "")
@@ -8780,6 +13464,36 @@ class MainWindow(QMainWindow):
         try:
             Config.TRANSLATION_PROMPT = str(self.app_options.get(TRANSLATION_PROMPT_KEY, "") or "")
             Config.TRANSLATION_GLOSSARY_TEXT = str(self.app_options.get(TRANSLATION_GLOSSARY_TEXT_KEY, "") or "")
+        except Exception:
+            pass
+
+    def sync_analysis_mask_options_to_config(self):
+        """옵션 캐시의 분석 마스크 확장 설정을 엔진 Config에 반영한다."""
+        try:
+            text_ratio = clamp_analysis_mask_ratio(
+                self.app_options.get(ANALYSIS_TEXT_MASK_EXPAND_RATIO_KEY, DEFAULT_ANALYSIS_TEXT_MASK_EXPAND_RATIO),
+                DEFAULT_ANALYSIS_TEXT_MASK_EXPAND_RATIO,
+            )
+            paint_ratio = clamp_analysis_mask_ratio(
+                self.app_options.get(ANALYSIS_PAINT_MASK_EXPAND_RATIO_KEY, DEFAULT_ANALYSIS_PAINT_MASK_EXPAND_RATIO),
+                DEFAULT_ANALYSIS_PAINT_MASK_EXPAND_RATIO,
+            )
+            text_min_px = clamp_analysis_mask_min_px(
+                self.app_options.get(ANALYSIS_TEXT_MASK_MIN_EXPAND_PX_KEY, DEFAULT_ANALYSIS_TEXT_MASK_MIN_EXPAND_PX),
+                DEFAULT_ANALYSIS_TEXT_MASK_MIN_EXPAND_PX,
+            )
+            paint_min_px = clamp_analysis_mask_min_px(
+                self.app_options.get(ANALYSIS_PAINT_MASK_MIN_EXPAND_PX_KEY, DEFAULT_ANALYSIS_PAINT_MASK_MIN_EXPAND_PX),
+                DEFAULT_ANALYSIS_PAINT_MASK_MIN_EXPAND_PX,
+            )
+            self.app_options[ANALYSIS_TEXT_MASK_EXPAND_RATIO_KEY] = text_ratio
+            self.app_options[ANALYSIS_PAINT_MASK_EXPAND_RATIO_KEY] = paint_ratio
+            self.app_options[ANALYSIS_TEXT_MASK_MIN_EXPAND_PX_KEY] = text_min_px
+            self.app_options[ANALYSIS_PAINT_MASK_MIN_EXPAND_PX_KEY] = paint_min_px
+            Config.MERGE_RATIO = text_ratio
+            Config.INPAINT_RATIO = paint_ratio
+            Config.MERGE_MIN_STROKE_PX = text_min_px
+            Config.MIN_STROKE_PX = paint_min_px
         except Exception:
             pass
 
@@ -9003,7 +13717,7 @@ class MainWindow(QMainWindow):
         # 프로젝트 이름은 첫 생성 때 묻지 않는다.
         # 실제 이름은 .ysbt로 저장할 때 파일명 기준으로 확정된다.
         self.suggested_project_name = safe_project_name(Path(source_paths[0]).stem + "_project")
-        project_dir = self.workspace_temp_project_dir("project")
+        project_dir = self.workspace_temp_project_dir(self.suggested_project_name)
 
         self.commit_current_page_ui_to_data()
 
@@ -9023,12 +13737,13 @@ class MainWindow(QMainWindow):
         self.update_window_title()
         self.idx = 0
         self.is_loading_project = False
-        self.log(f"📁 새 임시 프로젝트 생성: {project_dir}")
+        self.log(f"📁 새 임시 프로젝트 작업 폴더 생성: {project_dir}")
         self.log("💾 아직 YSBT 파일로 저장되지 않았습니다. [프로젝트 저장] 또는 [다른 이름으로 저장]을 눌러 .ysbt로 저장하세요.")
         self.has_unsaved_changes = True
         if not self.auto_save_enabled:
             self.start_work_cache_from_current(mark_dirty=True)
         self.reset_mode_to_original()
+        self.show_editor()
         self.load()
 
     def open_project(self):
@@ -9036,7 +13751,7 @@ class MainWindow(QMainWindow):
 
         v1.6부터 기본 프로젝트 열기는 .ysbt 패키지만 지원한다.
         구버전 폴더/project.json 열기 흐름은 아래에 주석으로 남겨두고,
-        별도 메뉴인 [JSON 파일로 열기]에서만 project.json을 열 수 있게 분리한다.
+        별도 메뉴인 [JSON으로 열기]에서만 project.json을 열 수 있게 분리한다.
         """
         if not self.guard_project_action("프로젝트 열기"):
             return
@@ -9066,7 +13781,7 @@ class MainWindow(QMainWindow):
 
     def open_project_json(self):
         """구버전/디버그용 project.json 직접 열기. 기본 열기와 분리한다."""
-        if not self.guard_project_action("JSON 파일로 열기"):
+        if not self.guard_project_action("JSON으로 열기"):
             return
 
         path, _ = QFileDialog.getOpenFileName(
@@ -9104,6 +13819,7 @@ class MainWindow(QMainWindow):
             self.mark_saved_state()
             self.update_window_title()
             self.log(f"💾 프로젝트 저장 완료: {self.ysbt_package_path}")
+            self.record_current_project_recent()
 
             # 자동저장 OFF에서는 저장본을 다시 로드한 뒤, 새 작업 캐시를 기준으로 이어간다.
             if not self.auto_save_enabled:
@@ -9131,6 +13847,7 @@ class MainWindow(QMainWindow):
         if not path:
             return
         old_package_path = os.path.abspath(self.ysbt_package_path) if self.ysbt_package_path else None
+        old_is_temp_project = bool(getattr(self, "is_temp_project", False))
         path_abs, display_project_name, new_uuid = self.make_ysbt_path_with_uuid_suffix(path)
         path_abs = os.path.abspath(path_abs)
 
@@ -9177,6 +13894,14 @@ class MainWindow(QMainWindow):
                     shutil.rmtree(old_work_cache, ignore_errors=True)
                 except Exception:
                     pass
+            if old_is_temp_project and old_project_dir and os.path.abspath(old_project_dir) != os.path.abspath(new_project_dir):
+                try:
+                    old_abs = os.path.abspath(old_project_dir)
+                    roots = [os.path.abspath(str(temp_dir())), os.path.abspath(str(workspaces_dir()))]
+                    if os.path.basename(old_abs).startswith("unsaved_") and any(old_abs.startswith(root) for root in roots) and os.path.exists(old_abs):
+                        shutil.rmtree(old_abs, ignore_errors=True)
+                except Exception:
+                    pass
             self.work_project_dir = None
             self.work_project_store = None
 
@@ -9202,6 +13927,7 @@ class MainWindow(QMainWindow):
             self.reload_saved_project_from_disk(refresh_view=False)
             self.mark_saved_state()
             self.log(f"💾 다른 이름으로 저장 완료: {self.ysbt_package_path}")
+            self.record_current_project_recent()
             if not self.auto_save_enabled:
                 self.start_work_cache_from_current(mark_dirty=False)
             self.load()
@@ -9626,13 +14352,44 @@ class MainWindow(QMainWindow):
     # =========================================================
     # 일반 UI 함수
     # =========================================================
+    def flush_pending_log_messages(self):
+        pending = list(getattr(self, "_pending_log_messages", []) or [])
+        if not pending or not hasattr(self, "log_w") or self.log_w is None:
+            return
+        self._pending_log_messages = []
+        for msg in pending:
+            try:
+                self.log_w.append(str(msg))
+            except Exception:
+                pass
+        try:
+            self.log_w.verticalScrollBar().setValue(self.log_w.verticalScrollBar().maximum())
+        except Exception:
+            pass
+
     def log(self, m):
         try:
             m = self.tr_msg(m)
         except Exception:
             pass
-        self.log_w.append(m)
-        self.log_w.verticalScrollBar().setValue(self.log_w.verticalScrollBar().maximum())
+        if not hasattr(self, "log_w") or self.log_w is None:
+            try:
+                self._pending_log_messages.append(str(m))
+            except Exception:
+                self._pending_log_messages = [str(m)]
+            try:
+                print(str(m))
+            except Exception:
+                pass
+            return
+        try:
+            self.log_w.append(str(m))
+            self.log_w.verticalScrollBar().setValue(self.log_w.verticalScrollBar().maximum())
+        except Exception:
+            try:
+                print(str(m))
+            except Exception:
+                pass
 
     def get_special_shortcuts(self):
         symbol_map = {}
@@ -10761,6 +15518,93 @@ class MainWindow(QMainWindow):
     def current_magic_source_image(self):
         return self.get_source_display_image(self.idx)
 
+    def set_mask_wrap_shape(self, shape, silent=False):
+        shape = "free" if str(shape) == "free" else "rect"
+        try:
+            self.view.mask_wrap_shape = shape
+            self.view.clear_mask_wrap_preview()
+        except Exception:
+            pass
+        for btn, active in ((getattr(self, "btn_mask_wrap_rect", None), shape == "rect"), (getattr(self, "btn_mask_wrap_free", None), shape == "free")):
+            if btn is None:
+                continue
+            try:
+                btn.blockSignals(True)
+                btn.setChecked(active)
+                btn.blockSignals(False)
+                if active:
+                    btn.setStyleSheet("font-weight:bold; background:#2f80ed; color:white;")
+                else:
+                    btn.setStyleSheet("opacity:0.7;")
+            except Exception:
+                pass
+        if not silent:
+            if shape == "rect":
+                self.log("🩹 마스크 랩핑 모드: 사각형")
+            else:
+                self.log("🩹 마스크 랩핑 모드: 자유형")
+
+    def apply_mask_wrapping(self, region_mask):
+        """선택한 영역 안의 분리된 마스크 덩어리들을 하나의 채움 영역으로 감싸준다."""
+        try:
+            mode = int(self.cb_mode.currentIndex())
+        except Exception:
+            mode = -1
+        if mode not in (2, 3):
+            self.log("⚠️ 마스크 랩핑은 텍스트 마스크/페인팅 마스크 탭에서 사용하세요.")
+            return
+        if region_mask is None:
+            self.log("⚠️ 마스크 랩핑 영역이 비어 있습니다.")
+            return
+        before = self.view.get_mask_np()
+        if before is None:
+            self.log("⚠️ 현재 탭에 마스크 레이어가 없습니다.")
+            return
+
+        try:
+            mask = (before > 0).astype(np.uint8) * 255
+            region = (region_mask > 0).astype(np.uint8) * 255
+            if mask.shape[:2] != region.shape[:2]:
+                region = cv2.resize(region, (mask.shape[1], mask.shape[0]), interpolation=cv2.INTER_NEAREST)
+
+            # 선택 영역 안에 실제로 들어온 마스크 조각만 대상으로 삼는다.
+            inside = cv2.bitwise_and(mask, region)
+            num, labels, stats, _ = cv2.connectedComponentsWithStats(inside, 8)
+            comps = [i for i in range(1, num) if int(stats[i, cv2.CC_STAT_AREA]) > 0]
+            if len(comps) < 2:
+                self.log("⚠️ 선택한 영역 안에 랩핑할 마스크가 2개 이상 필요합니다.")
+                return
+
+            ys, xs = np.where(inside > 0)
+            if len(xs) == 0 or len(ys) == 0:
+                self.log("⚠️ 마스크 랩핑 영역 안에서 마스크를 찾지 못했습니다.")
+                return
+
+            try:
+                self.commit_current_page_ui_to_data(include_mask=True)
+                self.push_project_undo("마스크 랩핑")
+            except Exception:
+                pass
+
+            x1, x2 = int(xs.min()), int(xs.max())
+            y1, y2 = int(ys.min()), int(ys.max())
+            fill = np.zeros_like(mask, dtype=np.uint8)
+            cv2.rectangle(fill, (x1, y1), (x2, y2), 255, thickness=-1)
+            # 사용자가 잡은 영역 밖은 절대 건드리지 않는다.
+            fill = cv2.bitwise_and(fill, region)
+            wrapped = cv2.bitwise_or(mask, fill)
+
+            if np.array_equal(wrapped, mask):
+                self.log("⚠️ 마스크 랩핑으로 추가될 영역이 없습니다.")
+                return
+
+            color = QColor(0, 0, 255, 150) if mode == 3 else QColor(255, 0, 0, 150)
+            self.view.set_user_mask_np(wrapped, color)
+            self.on_view_mask_edited()
+            self.log(f"🩹 마스크 랩핑 완료: {len(comps)}개 마스크 덩어리를 1개 영역으로 감쌈")
+        except Exception as e:
+            self.log(f"⚠️ 마스크 랩핑 실패: {e}")
+
     def magic_wand_pick(self, x, y):
         if self.cb_mode.currentIndex() not in [2, 3]:
             self.log("⚠️ 요술봉은 텍스트 마스크/페인팅 마스크 탭에서만 사용할 수 있습니다.")
@@ -10904,6 +15748,9 @@ class MainWindow(QMainWindow):
         if m == 'magic_wand' and mode not in [2, 3]:
             self.log("⚠️ 요술봉은 텍스트 마스크/페인팅 마스크 탭에서 사용하세요.")
             return
+        if m == 'mask_wrap' and mode not in [2, 3]:
+            self.log("⚠️ 마스크 랩핑은 텍스트 마스크/페인팅 마스크 탭에서 사용하세요.")
+            return
         if m == 'final_text' and mode != 4:
             self.log("⚠️ 텍스트 도구는 최종화면에서만 사용할 수 있습니다.")
             return
@@ -10925,8 +15772,12 @@ class MainWindow(QMainWindow):
         self.view.setDragMode(QGraphicsView.DragMode.NoDrag if m else QGraphicsView.DragMode.ScrollHandDrag)
         if hasattr(self, "magic_wand_bar"):
             self.magic_wand_bar.setVisible(m == 'magic_wand' and mode in [2, 3])
+        if hasattr(self, "mask_wrap_bar"):
+            self.mask_wrap_bar.setVisible(m == 'mask_wrap' and mode in [2, 3])
         if m != 'magic_wand':
             self.clear_magic_wand_selection()
+        if m != 'mask_wrap' and hasattr(self.view, "clear_mask_wrap_preview"):
+            self.view.clear_mask_wrap_preview()
 
         self.update_final_paint_option_bar_visibility()
 
@@ -10938,6 +15789,8 @@ class MainWindow(QMainWindow):
             self.log("🖌️ 도구: 브러시")
         elif m == 'erase':
             self.log("🧼 도구: 지우개")
+        elif m == 'mask_wrap':
+            self.log("🩹 도구: 마스크 랩핑")
         elif m is None:
             self.log("✋ 도구: 이동")
 
@@ -11036,8 +15889,10 @@ class MainWindow(QMainWindow):
         self.tab.blockSignals(True)
         try:
             if self.tab.rowCount() > 0:
+                self.clear_native_table_check_item(0)
                 self.paint_all_row_header()
             for row in range(1, self.tab.rowCount()):
+                self.clear_native_table_check_item(row)
                 self.set_table_row_visual(row, self.get_table_check_state(row))
         finally:
             self.tab.blockSignals(False)
@@ -11056,6 +15911,20 @@ class MainWindow(QMainWindow):
         item = self.tab.item(row, 1)
         return item is not None and item.checkState() == Qt.CheckState.Checked
 
+    def clear_native_table_check_item(self, row):
+        """체크 표시는 cellWidget(QCheckBox) 하나만 사용한다.
+        QTableWidgetItem의 CheckStateRole이 남아 있으면 테마 전환 후 기본 체크박스가
+        같이 그려져 체크박스가 2개처럼 보일 수 있으므로 항상 제거한다.
+        """
+        try:
+            item = self.tab.item(row, 1)
+            if item is None:
+                return
+            item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+            item.setData(Qt.ItemDataRole.CheckStateRole, None)
+        except Exception:
+            pass
+
     def set_table_check_state(self, row, checked):
         cb = self.get_table_checkbox(row)
         if cb is not None:
@@ -11064,9 +15933,7 @@ class MainWindow(QMainWindow):
                 cb.setChecked(bool(checked))
             finally:
                 cb.blockSignals(False)
-        item = self.tab.item(row, 1)
-        if item is not None:
-            item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+        self.clear_native_table_check_item(row)
 
     def make_center_check_widget(self, row, checked):
         wrap = QWidget()
@@ -11084,6 +15951,7 @@ class MainWindow(QMainWindow):
         return wrap
 
     def set_table_row_visual(self, row, checked):
+        self.clear_native_table_check_item(row)
         color = self.table_row_color(checked)
         for c in range(self.tab.columnCount()):
             cell = self.tab.item(row, c)
@@ -11095,6 +15963,7 @@ class MainWindow(QMainWindow):
             widget.setStyleSheet(self.table_check_widget_style(color))
 
     def paint_all_row_header(self):
+        self.clear_native_table_check_item(0)
         bg = self.table_header_color()
         fg = self.table_header_text_color()
         for c in range(self.tab.columnCount()):
@@ -11275,7 +16144,7 @@ class MainWindow(QMainWindow):
         if not self.check_ocr_api_or_alert():
             return
 
-        self.commit_current_page_ui_to_data()
+        self.commit_current_page_ui_to_data(include_mask=False)
 
         target_idx = self.idx
         self.prepare_text_mask_slots_for_fresh_analysis(target_idx)
@@ -11350,8 +16219,8 @@ class MainWindow(QMainWindow):
             # 텍스트 마스크는 ON/OFF 슬롯을 사용하지 않지만, 예전 버전/작업 캐시에서
             # 남아 있을 수 있는 보조 슬롯까지 같이 지워야 전체 분석이 항상 새 상태가 된다.
             curr['mask_merge_off'] = None
-            # 수동 페인팅 OFF 마스크는 사용자가 직접 만든 페인팅 마스크이므로 여기서는 보존한다.
-            # 일반 분석으로 새로 만들어지는 것은 텍스트 마스크와 분석 기반 인페인팅 마스크다.
+            # 일반 분석은 초기화에 가까운 작업이므로 기존 수동/자동 마스킹 슬롯을 모두 비운다.
+            curr['mask_inpaint_off'] = None
             curr['mask_toggle_enabled'] = True
             if page_idx == getattr(self, 'idx', -1) and self.cb_mode.currentIndex() == 2:
                 try:
@@ -11390,6 +16259,8 @@ class MainWindow(QMainWindow):
             }
 
         old_inpaint_off = self.data[page_idx].get('mask_inpaint_off')
+        if not preserve_text_mask:
+            old_inpaint_off = None
 
         if preserve_text_mask:
             # 재분석은 사용자가 칠한 텍스트 마스크를 기준으로 OCR을 다시 거는 작업이다.
@@ -11420,8 +16291,8 @@ class MainWindow(QMainWindow):
                 'mask_merge': mm.copy() if isinstance(mm, np.ndarray) else mm,
                 'mask_inpaint': mi.copy() if isinstance(mi, np.ndarray) else mi,
                 'mask_merge_off': None,
-                # OFF 페인팅 마스크는 수동 페인팅 작업물이라 일반 OCR 분석으로 덮지 않는다.
-                'mask_inpaint_off': old_inpaint_off,
+                # 일반 분석은 기존 마스킹 자료를 무시하고 새로 따는 작업이므로 OFF 마스크도 초기화한다.
+                'mask_inpaint_off': None,
                 'mask_toggle_enabled': True,
             })
             self.log((
@@ -11434,10 +16305,18 @@ class MainWindow(QMainWindow):
         if page_idx == self.idx:
             self.ref_tab()
 
-            if self.cb_mode.currentIndex() != 1:
-                self.cb_mode.setCurrentIndex(1)
-            else:
-                self.mode_chg(1)
+            # 분석/재분석 결과 반영 직후 분석도 탭으로 이동할 때,
+            # 직전 텍스트/페인팅 마스크 화면에 남아 있던 구 마스크가 mode_chg에서
+            # 새 분석 결과를 덮어쓰지 않도록 마스크 자동 커밋을 잠시 막는다.
+            old_skip_mode_mask_commit = getattr(self, "_skip_mode_mask_commit", False)
+            self._skip_mode_mask_commit = True
+            try:
+                if self.cb_mode.currentIndex() != 1:
+                    self.cb_mode.setCurrentIndex(1)
+                else:
+                    self.mode_chg(1)
+            finally:
+                self._skip_mode_mask_commit = old_skip_mode_mask_commit
 
             # ON 강제 조건 1/2: 일반 분석 또는 텍스트 마스크 재분석 완료 직후에만 켠다.
             self.set_mask_toggle_safely(True)
@@ -12075,6 +16954,8 @@ class MainWindow(QMainWindow):
         if not curr:
             if hasattr(self, "magic_wand_bar"):
                 self.magic_wand_bar.hide()
+            if hasattr(self, "mask_wrap_bar"):
+                self.mask_wrap_bar.hide()
             if hasattr(self, "final_edit_bar"):
                 self.final_edit_bar.hide()
             return
@@ -12082,10 +16963,12 @@ class MainWindow(QMainWindow):
         if i != 4 and getattr(self.view, "draw_mode", None) == 'paste_text':
             self.set_tool(None)
 
-        if i not in [2, 3] and getattr(self.view, "draw_mode", None) == 'magic_wand':
+        if i not in [2, 3] and getattr(self.view, "draw_mode", None) in ('magic_wand', 'mask_wrap'):
             self.set_tool(None)
         elif hasattr(self, "magic_wand_bar"):
             self.magic_wand_bar.setVisible(getattr(self.view, "draw_mode", None) == 'magic_wand' and i in [2, 3])
+        if hasattr(self, "mask_wrap_bar"):
+            self.mask_wrap_bar.setVisible(getattr(self.view, "draw_mode", None) == 'mask_wrap' and i in [2, 3])
         self.final_edit_bar.hide()
         self.update_final_paint_option_bar_visibility()
 
@@ -12516,8 +17399,9 @@ class MainWindow(QMainWindow):
             return
 
         # 일괄 시작 전 현재 페이지의 UI 상태를 한 번만 확정한다.
-        # 이후 일괄 중에는 화면 마스크 자동 커밋/화면 리로드를 막는다.
-        self.commit_current_page_ui_to_data(include_mask=True)
+        # 일괄 분석은 일반 분석과 동일하게 기존 마스크를 무시하고 새로 따야 하므로
+        # 현재 화면 마스크를 데이터에 다시 저장하지 않는다.
+        self.commit_current_page_ui_to_data(include_mask=(mode != "analyze"))
         self.auto_save_project()
 
         self.is_batch_running = True
@@ -12580,6 +17464,7 @@ class MainWindow(QMainWindow):
             # 일반 일괄 분석도 개별 분석과 동일하게 이전 텍스트 마스크를 누적하지 않는다.
             # worker payload의 mask_merge / mask_inpaint가 새 기준이며, 이전 보조 텍스트 마스크는 비운다.
             self.data[i]['mask_merge_off'] = None
+            self.data[i]['mask_inpaint_off'] = None
             self.data[i]['mask_toggle_enabled'] = True
 
     def on_batch_finished(self, mode):
@@ -12730,6 +17615,12 @@ class MainWindow(QMainWindow):
                 return
 
         if self.cb_mode.currentIndex() == 4:
+            if self._event_matches_shortcut(event, "text_font_size"):
+                self.set_text_detail_focus("sb_font_size")
+                return
+            if self._event_matches_shortcut(event, "text_stroke_size"):
+                self.set_text_detail_focus("sb_strk")
+                return
             if self._event_matches_shortcut(event, "text_line_spacing"):
                 self.set_text_detail_focus("sb_line_spacing")
                 return
@@ -12800,6 +17691,16 @@ class MainWindow(QMainWindow):
         if self._event_matches_shortcut(event, "paint_magic_expand_dec"):
             self.adjust_magic_expand_range(-1)
             return
+        if self._event_matches_shortcut(event, "paint_mask_wrap"):
+            self.set_tool('mask_wrap')
+            return
+        if getattr(self.view, "draw_mode", None) == 'mask_wrap':
+            if self._event_matches_shortcut(event, "paint_mask_wrap_rect"):
+                self.set_mask_wrap_shape('rect')
+                return
+            if self._event_matches_shortcut(event, "paint_mask_wrap_free"):
+                self.set_mask_wrap_shape('free')
+                return
 
         if self._event_matches_shortcut(event, "work_tab_cycle"):
             self.cycle_work_tab()
@@ -12811,12 +17712,16 @@ class MainWindow(QMainWindow):
             self.next()
             return
 
+        # 최종 화면에서는 F1/글꼴 선택 단축키로 전용 글꼴 선택창을 연다.
+        # 텍스트가 선택되어 있으면 선택 텍스트에 적용하고, 없으면 기본 글꼴을 바꾼다.
+        if self.cb_mode.currentIndex() == 4 and self._event_matches_shortcut(event, "item_font_select"):
+            self.open_font_select_dialog()
+            return
+
         # 최종 화면에서 텍스트를 선택한 상태일 때만 작동하는 개별 텍스트 단축키
         if self.cb_mode.currentIndex() == 4 and self.selected_text_items():
             if self._event_matches_shortcut(event, "item_font_select"):
-                font, ok = QFontDialog.getFont(QFont(self.cb_font.currentFont().family()), self, "글꼴 선택")
-                if ok:
-                    self.apply_style_to_selected(font_family=font.family())
+                self.open_font_select_dialog()
                 return
             if self._event_matches_shortcut(event, "item_font_inc"):
                 self.push_page_text_undo('텍스트 글자 크기 증가')

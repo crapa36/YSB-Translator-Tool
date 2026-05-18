@@ -9,11 +9,87 @@ CONFIG_FOLDER_NAME = "YSBTranslator"
 CONFIG_FILE_NAME = "workspace_config.json"
 
 
+def _path_key(path: str | Path) -> str:
+    """경로 비교용 정규화 문자열. Windows 대소문자 차이와 슬래시 차이를 흡수한다."""
+    return os.path.normcase(os.path.abspath(os.fspath(path)))
+
+
+def _same_path(a: str | Path, b: str | Path) -> bool:
+    try:
+        return _path_key(a) == _path_key(b)
+    except Exception:
+        return False
+
+
+def _windows_known_documents_dir() -> Path | None:
+    """Windows Known Folder API로 실제 '문서/Documents' 위치를 가져온다.
+
+    한국어 Windows처럼 탐색기에 '문서'로 표시되거나 OneDrive/회사 계정으로
+    리디렉션된 경우, Path.home() / "Documents"를 직접 만들면 엉뚱한
+    실제 폴더가 생길 수 있다. Windows에서는 반드시 Known Folder를 우선한다.
+    """
+    if not sys.platform.startswith("win"):
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class GUID(ctypes.Structure):
+            _fields_ = [
+                ("Data1", wintypes.DWORD),
+                ("Data2", wintypes.WORD),
+                ("Data3", wintypes.WORD),
+                ("Data4", wintypes.BYTE * 8),
+            ]
+
+            def __init__(self, data1, data2, data3, data4):
+                super().__init__()
+                self.Data1 = data1
+                self.Data2 = data2
+                self.Data3 = data3
+                self.Data4 = (wintypes.BYTE * 8)(*data4)
+
+        # FOLDERID_Documents = {FDD39AD0-238F-46AF-ADB4-6C85480369C7}
+        folder_id_documents = GUID(
+            0xFDD39AD0,
+            0x238F,
+            0x46AF,
+            (0xAD, 0xB4, 0x6C, 0x85, 0x48, 0x03, 0x69, 0xC7),
+        )
+        path_ptr = ctypes.c_wchar_p()
+        shell32 = ctypes.windll.shell32
+        shell32.SHGetKnownFolderPath.argtypes = [ctypes.POINTER(GUID), wintypes.DWORD, wintypes.HANDLE, ctypes.POINTER(ctypes.c_wchar_p)]
+        shell32.SHGetKnownFolderPath.restype = ctypes.c_long
+        hr = shell32.SHGetKnownFolderPath(ctypes.byref(folder_id_documents), 0, None, ctypes.byref(path_ptr))
+        if hr == 0 and path_ptr.value:
+            result = Path(path_ptr.value)
+            try:
+                ctypes.windll.ole32.CoTaskMemFree(path_ptr)
+            except Exception:
+                pass
+            return result
+    except Exception:
+        pass
+    return None
+
+
+def _literal_home_documents_dir() -> Path:
+    return Path.home() / "Documents"
+
+
 def user_documents_dir() -> Path:
-    # Windows 기본값: C:\Users\사용자\Documents. 다른 OS에서는 홈/Documents 사용.
-    home = Path.home()
-    docs = home / "Documents"
-    return docs if docs.exists() else home
+    # Windows에서는 탐색기의 '문서'가 실제로 어디에 연결되어 있는지 Known Folder API로 가져온다.
+    known = _windows_known_documents_dir()
+    if known:
+        return known
+    # Windows가 아니거나 API 조회에 실패한 경우에만 홈/Documents를 fallback으로 쓴다.
+    docs = _literal_home_documents_dir()
+    return docs if docs.exists() else Path.home()
+
+
+def legacy_literal_workspace_root() -> Path:
+    """v1.8.0 hotfix15까지 잘못 만들 수 있던 홈/Documents 기준 작업 루트."""
+    return _literal_home_documents_dir() / APP_FOLDER_NAME
 
 
 def default_workspace_root() -> Path:
@@ -116,8 +192,29 @@ def _safe_move_workspace(old_root: Path, new_root: Path):
 
 def apply_pending_workspace_move_if_needed() -> Path:
     cfg = load_workspace_config()
-    current = Path(cfg.get("workspace_root") or default_workspace_root())
+    default_root = default_workspace_root()
+    current = Path(cfg.get("workspace_root") or default_root)
     pending = cfg.get("pending_workspace_root")
+
+    # hotfix16: 한국어 Windows/리디렉션 환경에서 Path.home()/Documents를 직접 만들어
+    # 잘못된 Documents 폴더가 생긴 경우, 실제 Windows '문서' Known Folder로 자동 보정한다.
+    # 단, 사용자가 직접 다른 경로를 지정한 경우까지 함부로 바꾸지 않기 위해
+    # 저장된 경로가 기존 잘못된 기본값과 정확히 같을 때만 마이그레이션한다.
+    legacy_root = legacy_literal_workspace_root()
+    if (not pending) and cfg.get("workspace_root") and _same_path(current, legacy_root) and not _same_path(legacy_root, default_root):
+        try:
+            if legacy_root.exists():
+                _safe_move_workspace(legacy_root, default_root)
+            else:
+                ensure_workspace_structure(default_root)
+            cfg["workspace_root"] = str(default_root)
+            cfg.pop("pending_workspace_root", None)
+            save_workspace_config(cfg)
+            current = default_root
+        except Exception:
+            # 마이그레이션 실패 시 기존 설정을 유지한다. 작업 폴더 설정창에서 사용자가 직접 바꿀 수 있다.
+            current = Path(cfg.get("workspace_root") or default_root)
+
     if pending:
         pending_path = Path(pending)
         try:
@@ -128,7 +225,7 @@ def apply_pending_workspace_move_if_needed() -> Path:
             current = pending_path
         except Exception:
             # 이동 실패 시 기존 루트를 유지한다. 실패 내용은 프로그램 시작 후 옵션 창에서 다시 처리하게 한다.
-            current = Path(cfg.get("workspace_root") or default_workspace_root())
+            current = Path(cfg.get("workspace_root") or default_root)
     ensure_workspace_structure(current)
     return current
 

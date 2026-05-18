@@ -57,7 +57,8 @@ class Config:
 
     # [설정] 마스킹 비율
     INPAINT_RATIO = 0.1
-    MERGE_RATIO = 0.2  
+    MERGE_RATIO = 0.2
+    MERGE_MIN_STROKE_PX = 5
     MIN_STROKE_PX = 1
     
     # [설정] 긴 웹툰 이미지 OCR 분할
@@ -632,7 +633,7 @@ class MangaProcessEngine:
         for item in raw_items:
             pts = np.array(item['vertices'], np.int32).reshape((-1, 1, 2))
             expansion = int(item['stroke_size'] * ratio)
-            expansion = max(expansion, 5)
+            expansion = max(expansion, getattr(Config, 'MERGE_MIN_STROKE_PX', 5))
             cv2.fillPoly(merge_map, [pts], 255)
             cv2.polylines(merge_map, [pts], True, 255, thickness=expansion*2) 
 
@@ -1775,8 +1776,8 @@ preferences.rulerUnits = originalUnit;
 function normFontKey(s) {{
     try {{
         s = String(s || "").toLowerCase();
-        s = s.replace(/\([^\)]*\)/g, "");
-        s = s.replace(/[\s_\-\.]/g, "");
+        s = s.replace(/\\([^\\)]*\\)/g, "");
+        s = s.replace(/[\\s_\\-\\.]/g, "");
         s = s.replace(/[0-9]+$/g, "");
         return s;
     }} catch(e) {{ return ""; }}
@@ -1790,7 +1791,7 @@ function uniquePush(arr, v) {{
 function fontAliasCandidates(fontName) {{
     var out = [];
     uniquePush(out, fontName);
-    var cleaned = String(fontName || "").replace(/\([^\)]*\)/g, "").replace(/\s+[0-9]+$/g, "");
+    var cleaned = String(fontName || "").replace(/\\([^\\)]*\\)/g, "").replace(/\\s+[0-9]+$/g, "");
     uniquePush(out, cleaned);
     var key = normFontKey(cleaned || fontName);
     var aliases = {{

@@ -1,120 +1,116 @@
 @echo off
-chcp 65001 >nul
+setlocal EnableExtensions
 cd /d "%~dp0"
 
 echo ==========================================
-echo  역식붕이 툴 실행 준비
+echo  YSB Tool run launcher
 echo ==========================================
+echo.
 
-set REQ_FILE=requirements_ysik_tool.txt
-set MAIN_FILE=main.py
+set "REQ_FILE=requirements_ysik_tool.txt"
+set "MAIN_FILE=main.py"
 
-REM ------------------------------------------
-REM 1. Python 확인
-REM ------------------------------------------
-echo [1/5] Python 설치 확인 중...
+echo [1/5] Checking Python...
 
-py --version >nul 2>&1
-if %errorlevel%==0 (
-    set PY_CMD=py
+py --version >nul 2>nul
+if "%errorlevel%"=="0" (
+    set "PY_CMD=py"
     goto PY_FOUND
 )
 
-python --version >nul 2>&1
-if %errorlevel%==0 (
-    set PY_CMD=python
+python --version >nul 2>nul
+if "%errorlevel%"=="0" (
+    set "PY_CMD=python"
     goto PY_FOUND
 )
 
 echo.
-echo ❌ Python이 설치되어 있지 않습니다.
-echo Python을 먼저 설치해야 합니다.
-echo 설치 시 "Add Python to PATH"를 꼭 체크하세요.
-echo.
+echo Python was not found.
+echo Install Python first, and enable "Add Python to PATH".
 pause
 exit /b 1
 
 :PY_FOUND
-echo Python 확인 완료: %PY_CMD%
+echo Python command: %PY_CMD%
+echo.
 
-REM ------------------------------------------
-REM 2. requirements 파일 자동 생성
-REM ------------------------------------------
-echo [2/5] 라이브러리 목록 확인 중...
+echo [2/5] Checking requirements file...
 
 if not exist "%REQ_FILE%" (
-    echo requirements 파일이 없어 새로 생성합니다.
-
-    > "%REQ_FILE%" echo PyQt6
-    >> "%REQ_FILE%" echo opencv-python
-    >> "%REQ_FILE%" echo numpy
-    >> "%REQ_FILE%" echo requests
-    >> "%REQ_FILE%" echo openai
-    >> "%REQ_FILE%" echo pillow
-    >> "%REQ_FILE%" echo replicate
+    echo Creating %REQ_FILE%...
+    (
+        echo PyQt6
+        echo opencv-python
+        echo numpy
+        echo requests
+        echo openai
+        echo pillow
+        echo replicate
+        echo google-auth
+        echo google-auth-oauthlib
+        echo google-api-python-client
+    ) > "%REQ_FILE%"
 )
 
-REM ------------------------------------------
-REM 3. 가상환경 생성
-REM ------------------------------------------
-echo [3/5] 가상환경 확인 중...
+echo [3/5] Checking virtual environment...
 
-if not exist ".venv" (
-    echo .venv 가상환경 생성 중...
+if not exist ".venv\Scripts\python.exe" (
+    echo Creating .venv...
     %PY_CMD% -m venv .venv
-
-    if errorlevel 1 (
-        echo.
-        echo ❌ 가상환경 생성 실패
-        pause
-        exit /b 1
-    )
+    if errorlevel 1 goto VENV_FAIL
 )
 
-REM ------------------------------------------
-REM 4. 라이브러리 설치 / 확인
-REM ------------------------------------------
-echo [4/5] 라이브러리 설치 및 확인 중...
+echo [4/5] Installing and checking libraries...
 
 call ".venv\Scripts\activate.bat"
+if errorlevel 1 goto ACTIVATE_FAIL
 
 python -m pip install --upgrade pip
+if errorlevel 1 goto INSTALL_FAIL
+
 python -m pip install -r "%REQ_FILE%"
+if errorlevel 1 goto INSTALL_FAIL
 
 echo.
-echo 핵심 라이브러리 import 테스트 중...
+echo Import test...
 
 python -c "import PyQt6; print('PyQt6 OK')"
-if errorlevel 1 goto LIB_FAIL
+if errorlevel 1 goto IMPORT_FAIL
 
 python -c "import cv2; print('opencv-python OK:', cv2.__version__)"
-if errorlevel 1 goto LIB_FAIL
+if errorlevel 1 goto IMPORT_FAIL
 
 python -c "import numpy; print('numpy OK:', numpy.__version__)"
-if errorlevel 1 goto LIB_FAIL
+if errorlevel 1 goto IMPORT_FAIL
 
 python -c "import requests; print('requests OK')"
-if errorlevel 1 goto LIB_FAIL
+if errorlevel 1 goto IMPORT_FAIL
 
 python -c "import openai; print('openai OK')"
-if errorlevel 1 goto LIB_FAIL
+if errorlevel 1 goto IMPORT_FAIL
 
 python -c "import PIL; print('pillow OK')"
-if errorlevel 1 goto LIB_FAIL
+if errorlevel 1 goto IMPORT_FAIL
 
 python -c "import replicate; print('replicate OK')"
-if errorlevel 1 goto LIB_FAIL
+if errorlevel 1 goto IMPORT_FAIL
 
-REM ------------------------------------------
-REM 5. 프로그램 실행
-REM ------------------------------------------
+python -c "import google_auth_oauthlib; print('google-auth-oauthlib OK')"
+if errorlevel 1 goto IMPORT_FAIL
+
+python -c "import google.oauth2.credentials; import google.auth.transport.requests; print('google-auth OK')"
+if errorlevel 1 goto IMPORT_FAIL
+
+python -c "import googleapiclient.discovery; print('google-api-python-client OK')"
+if errorlevel 1 goto IMPORT_FAIL
+
 echo.
-echo [5/5] 프로그램 실행 중...
+echo [5/5] Running app...
 
 if not exist "%MAIN_FILE%" (
     echo.
-    echo ❌ main.py를 찾을 수 없습니다.
-    echo 이 BAT 파일을 main.py가 있는 폴더에 넣어주세요.
+    echo main.py was not found.
+    echo Put this BAT in the same folder as main.py.
     pause
     exit /b 1
 )
@@ -122,18 +118,35 @@ if not exist "%MAIN_FILE%" (
 python "%MAIN_FILE%"
 
 echo.
-echo 프로그램이 종료되었습니다.
+echo App closed.
 pause
 exit /b 0
 
-:LIB_FAIL
+:VENV_FAIL
 echo.
-echo ❌ 라이브러리 import 테스트 실패
-echo 설치가 제대로 되지 않았습니다.
-echo 아래 명령으로 수동 재설치를 시도해볼 수 있습니다:
+echo Failed to create .venv.
+pause
+exit /b 1
+
+:ACTIVATE_FAIL
 echo.
-echo .venv\Scripts\activate
-echo python -m pip install --upgrade --force-reinstall -r %REQ_FILE%
+echo Failed to activate .venv.
+pause
+exit /b 1
+
+:INSTALL_FAIL
 echo.
+echo Failed to install libraries.
+echo Try this manually:
+echo .venv\Scripts\python.exe -m pip install --upgrade pip
+echo .venv\Scripts\python.exe -m pip install -r %REQ_FILE%
+pause
+exit /b 1
+
+:IMPORT_FAIL
+echo.
+echo Import test failed.
+echo Try reinstalling libraries:
+echo .venv\Scripts\python.exe -m pip install --upgrade --force-reinstall -r %REQ_FILE%
 pause
 exit /b 1

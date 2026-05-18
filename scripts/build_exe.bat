@@ -2,17 +2,14 @@
 setlocal EnableExtensions
 cd /d "%~dp0"
 
-title YSB Tool v1.7.0 EXE Build
+title YSB Tool EXE Build
 
 rem ==========================================================
-rem YSB Tool v1.7.0 onefile build BAT
-rem Saved as CP949/ANSI without UTF-8 BOM.
+rem YSB Tool onefile build BAT
+rem ASCII-safe BAT. Output EXE name can be renamed after build.
 rem ==========================================================
 
-set "APP_NAME=¿ª½ÄºØÀÌ Åø v1.7.0"
-
-rem 0 = no PyInstaller boot splash [recommended]
-rem 1 = use PyInstaller boot splash
+set "APP_NAME=YSB_Tool_v1.8.0"
 set "USE_BOOT_SPLASH=0"
 
 set "ENTRY=main.py"
@@ -23,7 +20,7 @@ set "SPLASH_FILE=ysb_splash.png"
 set "BOOT_SPLASH_FILE=ysb_splash_boot.png"
 
 echo ==========================================
-echo  YSB Tool v1.7.0 onefile EXE build
+echo  YSB Tool onefile EXE build
 echo ==========================================
 echo.
 echo APP_NAME=%APP_NAME%
@@ -46,11 +43,11 @@ if "%USE_BOOT_SPLASH%"=="1" (
 echo.
 
 echo [1/7] Checking Python...
-py --version >nul 2>&1
+py --version >nul 2>nul
 if "%errorlevel%"=="0" (
     set "PY_CMD=py"
 ) else (
-    python --version >nul 2>&1
+    python --version >nul 2>nul
     if "%errorlevel%"=="0" (
         set "PY_CMD=python"
     ) else (
@@ -62,7 +59,7 @@ echo Python command: %PY_CMD%
 echo.
 
 echo [2/7] Checking virtual environment...
-if not exist ".venv" (
+if not exist ".venv\Scripts\python.exe" (
     echo Creating .venv...
     %PY_CMD% -m venv .venv
     if errorlevel 1 goto VENV_FAIL
@@ -84,6 +81,7 @@ if errorlevel 1 goto INSTALL_FAIL
 
 echo.
 echo [5/7] Import test...
+
 python -c "import PyQt6; print('PyQt6 OK')"
 if errorlevel 1 goto IMPORT_FAIL
 
@@ -94,6 +92,9 @@ python -c "import numpy; print('numpy OK:', numpy.__version__)"
 if errorlevel 1 goto IMPORT_FAIL
 
 python -c "import requests, openai, replicate, PIL; print('API libs OK')"
+if errorlevel 1 goto IMPORT_FAIL
+
+python -c "import google_auth_oauthlib; import google.oauth2.credentials; import google.auth.transport.requests; import googleapiclient.discovery; print('Google cloud libs OK')"
 if errorlevel 1 goto IMPORT_FAIL
 
 echo.
@@ -111,11 +112,97 @@ if "%USE_BOOT_SPLASH%"=="1" goto BUILD_WITH_BOOT_SPLASH
 goto BUILD_NO_BOOT_SPLASH
 
 :BUILD_NO_BOOT_SPLASH
-python -m PyInstaller --noconfirm --clean --onefile --windowed --icon "%ICON_FILE%" --add-data "%ICON_FILE%;." --add-data "%SPLASH_FILE%;." --name "%APP_NAME%" --collect-all cv2 --collect-submodules replicate --copy-metadata replicate --copy-metadata openai --copy-metadata pydantic --copy-metadata pydantic_core --copy-metadata annotated-types --copy-metadata typing-extensions --copy-metadata httpx --copy-metadata httpcore --copy-metadata anyio --copy-metadata sniffio --copy-metadata certifi --copy-metadata idna --hidden-import=cv2 --hidden-import=numpy --hidden-import=requests --hidden-import=openai --hidden-import=replicate --hidden-import=PIL "%ENTRY%" > "%LOG%" 2>&1
+python -m PyInstaller ^
+ --noconfirm ^
+ --clean ^
+ --onefile ^
+ --windowed ^
+ --icon "%ICON_FILE%" ^
+ --add-data "%ICON_FILE%;." ^
+ --add-data "%SPLASH_FILE%;." ^
+ --name "%APP_NAME%" ^
+ --collect-all cv2 ^
+ --collect-submodules replicate ^
+ --copy-metadata replicate ^
+ --copy-metadata openai ^
+ --copy-metadata pydantic ^
+ --copy-metadata pydantic_core ^
+ --copy-metadata annotated-types ^
+ --copy-metadata typing-extensions ^
+ --copy-metadata httpx ^
+ --copy-metadata httpcore ^
+ --copy-metadata anyio ^
+ --copy-metadata sniffio ^
+ --copy-metadata certifi ^
+ --copy-metadata idna ^
+ --hidden-import=cv2 ^
+ --hidden-import=numpy ^
+ --hidden-import=requests ^
+ --hidden-import=openai ^
+ --hidden-import=replicate ^
+ --hidden-import=PIL ^
+ --collect-all googleapiclient ^
+ --collect-submodules google ^
+ --collect-submodules google_auth_oauthlib ^
+ --copy-metadata google-auth ^
+ --copy-metadata google-auth-oauthlib ^
+ --copy-metadata google-api-python-client ^
+ --copy-metadata google-auth-httplib2 ^
+ --copy-metadata httplib2 ^
+ --copy-metadata uritemplate ^
+ --hidden-import=google_auth_oauthlib.flow ^
+ --hidden-import=google.oauth2.credentials ^
+ --hidden-import=google.auth.transport.requests ^
+ --hidden-import=googleapiclient.discovery ^
+ "%ENTRY%" > "%LOG%" 2>&1
 goto CHECK_BUILD_RESULT
 
 :BUILD_WITH_BOOT_SPLASH
-python -m PyInstaller --noconfirm --clean --onefile --windowed --splash "%BOOT_SPLASH_FILE%" --icon "%ICON_FILE%" --add-data "%ICON_FILE%;." --add-data "%SPLASH_FILE%;." --add-data "%BOOT_SPLASH_FILE%;." --name "%APP_NAME%" --collect-all cv2 --collect-submodules replicate --copy-metadata replicate --copy-metadata openai --copy-metadata pydantic --copy-metadata pydantic_core --copy-metadata annotated-types --copy-metadata typing-extensions --copy-metadata httpx --copy-metadata httpcore --copy-metadata anyio --copy-metadata sniffio --copy-metadata certifi --copy-metadata idna --hidden-import=cv2 --hidden-import=numpy --hidden-import=requests --hidden-import=openai --hidden-import=replicate --hidden-import=PIL "%ENTRY%" > "%LOG%" 2>&1
+python -m PyInstaller ^
+ --noconfirm ^
+ --clean ^
+ --onefile ^
+ --windowed ^
+ --splash "%BOOT_SPLASH_FILE%" ^
+ --icon "%ICON_FILE%" ^
+ --add-data "%ICON_FILE%;." ^
+ --add-data "%SPLASH_FILE%;." ^
+ --add-data "%BOOT_SPLASH_FILE%;." ^
+ --name "%APP_NAME%" ^
+ --collect-all cv2 ^
+ --collect-submodules replicate ^
+ --copy-metadata replicate ^
+ --copy-metadata openai ^
+ --copy-metadata pydantic ^
+ --copy-metadata pydantic_core ^
+ --copy-metadata annotated-types ^
+ --copy-metadata typing-extensions ^
+ --copy-metadata httpx ^
+ --copy-metadata httpcore ^
+ --copy-metadata anyio ^
+ --copy-metadata sniffio ^
+ --copy-metadata certifi ^
+ --copy-metadata idna ^
+ --hidden-import=cv2 ^
+ --hidden-import=numpy ^
+ --hidden-import=requests ^
+ --hidden-import=openai ^
+ --hidden-import=replicate ^
+ --hidden-import=PIL ^
+ --collect-all googleapiclient ^
+ --collect-submodules google ^
+ --collect-submodules google_auth_oauthlib ^
+ --copy-metadata google-auth ^
+ --copy-metadata google-auth-oauthlib ^
+ --copy-metadata google-api-python-client ^
+ --copy-metadata google-auth-httplib2 ^
+ --copy-metadata httplib2 ^
+ --copy-metadata uritemplate ^
+ --hidden-import=google_auth_oauthlib.flow ^
+ --hidden-import=google.oauth2.credentials ^
+ --hidden-import=google.auth.transport.requests ^
+ --hidden-import=googleapiclient.discovery ^
+ "%ENTRY%" > "%LOG%" 2>&1
 goto CHECK_BUILD_RESULT
 
 :CHECK_BUILD_RESULT
@@ -157,32 +244,32 @@ exit /b 1
 
 :MISSING_BOOT_SPLASH
 echo.
-echo Missing file: %BOOT_SPLASH_FILE%
-echo USE_BOOT_SPLASH=1 requires this file.
+echo Missing boot splash file: %BOOT_SPLASH_FILE%
 pause
 exit /b 1
 
 :NO_PYTHON
 echo.
 echo Python was not found.
+echo Install Python first, and enable "Add Python to PATH".
 pause
 exit /b 1
 
 :VENV_FAIL
 echo.
-echo Failed to create virtual environment.
+echo Failed to create .venv.
 pause
 exit /b 1
 
 :ACTIVATE_FAIL
 echo.
-echo Failed to activate virtual environment.
+echo Failed to activate .venv.
 pause
 exit /b 1
 
 :INSTALL_FAIL
 echo.
-echo Failed to install libraries.
+echo Library installation failed.
 pause
 exit /b 1
 
@@ -195,13 +282,6 @@ exit /b 1
 :BUILD_FAIL
 echo.
 echo Build failed.
-if exist "%LOG%" (
-    echo Last lines of build_log.txt:
-    echo ------------------------------------------
-    powershell -NoProfile -Command "Get-Content -LiteralPath '%CD%\%LOG%' -Tail 120"
-    echo ------------------------------------------
-) else (
-    echo build_log.txt was not created.
-)
+echo Check %LOG%.
 pause
 exit /b 1

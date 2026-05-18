@@ -74,7 +74,7 @@ UI_KO_EN = {'.ysbt 확장자 연결': '.ysbt File Association',
                                                                                                       'Register it '
                                                                                                       'now?',
  '.ysbt 확장자가 현재 실행 중인 역식붕이 툴에 이미 연결되어 있습니다.': '.ysbt is already associated with the currently running YSB Tool.',
- '.ysbt/.ysb 확장자 연결 해제': 'Unregister .ysbt/.ysb Association',
+ '.ysbt 확장자 연결 해제': 'Unregister .ysbt Association',
  '1. 원본': '1. Original',
  '2. 분석도': '2. Analysis',
  '3. 텍스트 마스크': '3. Text Mask',
@@ -693,6 +693,62 @@ UI_KO_EN = {'.ysbt 확장자 연결': '.ysbt File Association',
 
 
 
+# v1.8.0 launcher/start screen strings
+UI_KO_EN.update({
+    '시작 화면': 'Start Screen',
+    '최근 프로젝트': 'Recent Projects',
+    '새로 만들기': 'New',
+    'JSON으로 열기': 'Open as JSON',
+    '저장하기': 'Save',
+    '다른 이름으로 저장하기': 'Save As',
+    '복구하기': 'Recover',
+    '홈화면으로 가기': 'Go to Home Screen',
+    '새 프로젝트 만들기': 'New Project',
+    '프로젝트 열기': 'Open Project',
+    '마지막 작업 복구': 'Recover Last Work',
+    '클라우드 설정 백업': 'Cloud Settings Backup',
+    '클라우드에서 설정 불러오기': 'Restore Settings from Cloud',
+    '옵션 / 설정': 'Options / Settings',
+    '도움말 / 매뉴얼': 'Help / Manual',
+    '프로젝트는 YSBT로 보존하고, 작업환경은 설정 캐시로 이어갑니다.': 'Projects are preserved as YSBT files, and your work environment continues through settings cache.',
+    '최근 프로젝트는 로컬 경로를 기본 화면에 직접 노출하지 않습니다.': 'Local paths are not shown directly on the main recent-project screen.',
+    '아직 최근 프로젝트가 없습니다. 왼쪽에서 새 프로젝트를 만들거나 기존 YSBT를 열어주세요.': 'No recent projects yet. Create a new project or open an existing YSBT from the left.',
+    '썸네일 없음': 'No Thumbnail',
+    '제목 없음': 'Untitled',
+    '마지막 열기': 'Last opened',
+    '페이지': ' pages',
+    '로컬 있음': 'Local file available',
+    '파일을 찾을 수 없음': 'File not found',
+    '열기': 'Open',
+    '폴더 위치 열기': 'Open Folder Location',
+    '최근 목록에서 제거': 'Remove from Recent List',
+    '준비 중': 'Coming Soon',
+    '클라우드 설정 백업은 다음 단계에서 연결됩니다. 현재 런처에는 진입점만 준비되어 있습니다.': 'Cloud settings backup will be connected in the next stage. The launcher currently provides the entry point only.',
+    '런처 화면에서는 새 프로젝트, 프로젝트 열기, 마지막 작업 복구, 최근 프로젝트 열기를 바로 사용할 수 있습니다.': 'From the launcher, you can create a new project, open a project, recover the last work, or reopen recent projects directly.',
+    '폴더 열기 실패': 'Failed to Open Folder',
+})
+
+
+
+# v1.8.0 launcher/settings overview strings
+UI_KO_EN.update({
+    '설정': 'Settings',
+    '설정 / 옵션': 'Settings / Options',
+    '작업 폴더 위치': 'Workspace Folder Location',
+    'YSBT 파일 연결': 'YSBT File Association',
+    '설정은 프로그램 환경, 옵션은 작업 기능 관리 항목입니다. 자주 쓰는 설정은 이 창에서 바로 바꾸고, 복잡한 항목은 관리 버튼으로 엽니다.': 'Settings are program environment items, while options manage work features. Frequently used settings can be changed here, and complex items open their dedicated management windows.',
+    '프로그램의 기본 동작, 표시 방식, 작업 폴더, 임시 파일, YSBT 연결처럼 환경에 가까운 항목입니다.': 'Environment-level items such as basic behavior, display, workspace folder, temporary files, and YSBT association.',
+    'API, 프롬프트, 단어장, 단축키, 매크로, 프리셋처럼 작업 기능을 관리하는 항목입니다. 복잡한 항목은 기존 전용 창으로 엽니다.': 'Work-feature items such as APIs, prompts, glossary, shortcuts, macros, and presets. Complex items open their existing dedicated windows.',
+    'ON이면 변경 사항이 실제 프로젝트에 바로 저장되고, OFF이면 작업 캐시에만 저장됩니다.': 'When ON, changes are saved directly to the real project. When OFF, changes are saved only to the work cache.',
+    '창과 작업 화면의 밝기 테마를 바꿉니다.': 'Changes the brightness theme of the window and work area.',
+    '사용자 인터페이스 표시 언어를 바꿉니다.': 'Changes the user interface display language.',
+    '프로젝트 작업 폴더와 캐시가 저장되는 기준 위치입니다.': 'The base location where project work folders and caches are saved.',
+    '임시 작업 폴더 자동 삭제 주기를 정하고, 필요하면 즉시 삭제합니다.': 'Sets the auto-delete interval for temporary work folders and can delete them immediately if needed.',
+    '.ysbt 파일을 더블클릭했을 때 역식붕이 툴로 바로 열리게 합니다.': 'Allows .ysbt files to open directly in YSB Tool when double-clicked.',
+    '.ysbt 확장자 연결 해제': 'Unregister .ysbt Association',
+})
+
+
 # Reverse lookup table for restoring simple fixed UI strings when switching back to Korean.
 # Values are generated from UI_KO_EN after the table is fully declared.
 UI_EN_KO = {en: ko for ko, en in UI_KO_EN.items()}
@@ -753,9 +809,28 @@ API_TR_KO_EN = {'API 관리': 'API Settings',
                                                                                       'servers',
  '확인': 'OK'}
 
+API_TR_KO_EN.update({
+    "OCR / 인페인팅 / 번역 API를 분류별로 선택하고, 외부 API 주소·키·모델명을 관리합니다.\n확인을 누르면 사용자 설정 캐시에 저장되고, 닫기를 누르면 저장하지 않습니다.": "Select OCR / inpainting / translation APIs by category, and manage external API URLs, keys, and model names.\nOK saves them to the user settings cache. Cancel closes without saving.",
+    "캐시 위치: ": "Cache path: ",
+    "이미지의 글자를 읽어올 OCR 제공자를 선택합니다. 선택한 제공자 한 개만 분석 작업에 사용됩니다.": "Choose the OCR provider used to read text from images. Only the selected provider is used for analysis.",
+    "마스크 영역의 배경을 복원할 인페인팅 제공자를 선택합니다. 선택한 제공자 한 개만 인페인팅 작업에 사용됩니다.": "Choose the inpainting provider used to restore the background inside mask areas. Only the selected provider is used for inpainting.",
+    "AI 번역에 사용할 번역 제공자를 선택합니다. 선택한 제공자 한 개만 번역 작업에 사용됩니다.": "Choose the translation provider used for AI translation. Only the selected provider is used for translation.",
+    "Model": "Model",
+    "Invoke URL": "Invoke URL",
+    "Secret Key": "Secret Key",
+    "Model / Mode": "Model / Mode",
+    "API Key": "API Key",
+    "Language Hints": "Language Hints",
+    "Prompt": "Prompt",
+    "API Token": "API Token",
+    "Preset Name": "Preset Name",
+    "Base URL": "Base URL",
+})
 
 SHORTCUT_TR_KO_EN = {'.ysbt 확장자 연결 등록': 'Register .ysbt Association',
- '.ysbt/.ysb 확장자 연결 해제': 'Unregister .ysbt/.ysb Association',
+ '설정 / 옵션': 'Settings / Options',
+ '설정': 'Settings',
+ '.ysbt 확장자 연결 해제': 'Unregister .ysbt Association',
  'API 관리': 'API Settings',
  'JSON 파일로 열기': 'Open JSON Project',
  '가로장음(―)': 'Horizontal Dash (―)',
@@ -959,6 +1034,7 @@ SHORTCUT_TR_KO_EN = {'.ysbt 확장자 연결 등록': 'Register .ysbt Associatio
  '페이지 글꼴 프리셋 관리': 'Page Font Presets',
  '페인팅 마스크 ON/OFF': 'Painting Mask ON/OFF',
  '프로젝트 열기': 'Open Project',
+ '시작 화면': 'Start Screen',
  '프로젝트 옵션': 'Project',
  '프로젝트 저장': 'Save Project',
  '하얀하트(♡)': 'White Heart (♡)',
@@ -1008,3 +1084,268 @@ SHORTCUT_TR_KO_EN = {'.ysbt 확장자 연결 등록': 'Register .ysbt Associatio
  '작업 캐시': 'Work Sessions',
  '총합': 'Total',
  '임시 파일 상태를 읽지 못했습니다.': 'Could not read temporary file status.'}
+
+# v1.8.0 hotfix3 settings/options overview strings
+UI_KO_EN.update({
+    '확인을 누르면 이 창에서 바꾼 설정이 저장됩니다. 닫기나 X를 누르면 이 창에서 바꾼 설정은 저장하지 않습니다. 복잡한 항목은 오른쪽 버튼으로 전용 관리창을 엽니다.': 'Click OK to save the settings changed in this window. Click Close or X to leave without saving changes made in this window. Complex items open their dedicated management windows from the button on the right.',
+    '프로그램의 기본 동작과 작업 환경을 정하는 항목입니다. 여기서 직접 바꾼 값은 확인을 눌러야 저장됩니다.': 'Items that define the program behavior and work environment. Values changed directly here are saved only when you click OK.',
+    'ON이면 변경 사항을 실제 프로젝트에 바로 저장합니다. OFF이면 임시 작업 캐시에 먼저 저장하고, 프로젝트 저장 시 확정합니다.': 'When ON, changes are saved directly to the real project. When OFF, changes are saved to the temporary work cache first and finalized when the project is saved.',
+    '프로그램 전체의 밝기 테마를 정합니다. 확인을 누르면 선택한 테마가 적용됩니다.': 'Sets the brightness theme for the whole program. The selected theme is applied when you click OK.',
+    '메뉴와 안내 문구의 표시 언어를 정합니다. 확인을 누르면 선택한 언어가 적용됩니다.': 'Sets the display language for menus and guidance text. The selected language is applied when you click OK.',
+    '프로젝트 작업 폴더와 캐시가 저장되는 기준 위치입니다. 변경은 전용 작업 폴더 설정창에서 확인을 눌러야 적용됩니다.': 'The base location where project work folders and caches are stored. Changes are applied only when you click OK in the dedicated workspace folder dialog.',
+    '위치 변경': 'Change Location',
+    '자동삭제': 'Auto Delete',
+    '오래된 임시 작업 폴더를 자동으로 정리할지 정합니다. 즉시 삭제는 별도 확인 후 바로 실행됩니다.': 'Sets whether old temporary work folders are cleaned automatically. Immediate cleanup runs after a separate confirmation.',
+    '지금 정리': 'Clean Now',
+    'YSBT 파일 연결 등록': 'Register YSBT File Association',
+    'YSBT 파일 연결 해제': 'Unregister YSBT File Association',
+    '.ysbt 파일을 더블클릭했을 때 현재 역식붕이 툴로 바로 열리게 Windows 연결을 등록합니다.': 'Registers the Windows association so .ysbt files open directly with the current YSB Tool when double-clicked.',
+    '현재 사용자 계정의 .ysbt 연결을 해제합니다. 이전 테스트용 .ysb 연결도 함께 정리합니다.': 'Unregisters the .ysbt association for the current user account and also cleans up the older test .ysb association.',
+    '등록': 'Register',
+    '해제': 'Unregister',
+    '작업 기능을 관리하는 항목입니다. 이 창 안에 전부 펼치면 복잡해지므로, 각 항목의 버튼으로 기존 전용 관리창을 엽니다.': 'Items that manage work features. To avoid making this window too complex, each item opens its existing dedicated management window from its button.',
+    'OpenAI, DeepSeek, OpenAI 호환 서버, 인페인팅 API 같은 외부 API 주소와 키, 모델명을 관리합니다. 유료 API 정보가 들어갈 수 있으니 저장 전 확인이 필요합니다.': 'Manages external API URLs, keys, and model names such as OpenAI, DeepSeek, OpenAI-compatible servers, and inpainting APIs. This may include paid API information, so review it before saving.',
+    '관리': 'Manage',
+    'AI 번역에 사용할 기본 지침을 편집합니다. 작품 말투, 번역 규칙, 금지 표현 같은 지시문을 이곳에서 관리합니다.': 'Edits the default instructions for AI translation. Use this to manage tone, translation rules, and prohibited expressions.',
+    '편집': 'Edit',
+    '반복해서 나오는 이름, 고유명사, 말투 규칙, 번역 고정어를 관리합니다. 번역 품질을 일정하게 유지하는 데 쓰입니다.': 'Manages recurring names, proper nouns, tone rules, and fixed translation terms. This helps keep translation quality consistent.',
+    '작업, 일괄 처리, 텍스트 입력, 옵션 기능에 연결된 단축키를 한곳에서 바꿉니다. 충돌 확인과 비활성화도 여기서 처리합니다.': 'Changes shortcuts for work actions, batch actions, text input, and options in one place. Conflict checks and disabling shortcuts are also handled here.',
+    '여러 작업을 하나의 사용자 단축키로 묶어 실행하는 매크로를 관리합니다. 반복 작업을 줄이는 자동화용 기능입니다.': 'Manages macros that bundle multiple actions into one user shortcut. This is used to reduce repetitive work.',
+    '현재 페이지 또는 전체 페이지에 적용할 글꼴 스타일 묶음을 관리합니다. 페이지 단위 식질 스타일을 빠르게 맞출 때 사용합니다.': 'Manages font style sets applied to the current page or all pages. Use this to quickly match page-level typesetting styles.',
+    '선택한 텍스트 박스 하나에 적용할 글꼴, 크기, 테두리, 색상 같은 개별 스타일 프리셋을 관리합니다.': 'Manages individual style presets such as font, size, outline, and color for a selected text box.',
+    '⚙️ 설정 / 옵션 변경 취소': '⚙️ Settings / Options changes canceled',
+    '⚙️ 설정 / 옵션 저장 완료': '⚙️ Settings / Options saved',
+})
+
+
+# hotfix5 additions: launcher/session close and confirmation dialogs
+_HOTFIX5_UI_KO_EN = {
+    '역식붕이 툴': 'YSB Tool',
+    '예': 'Yes',
+    '아니오': 'No',
+    '열기': 'Open',
+    '취소': 'Cancel',
+    '저장': 'Save',
+    '최근 프로젝트 열기': 'Open Recent Project',
+    '이 최근 프로젝트를 열까요?': 'Open this recent project?',
+    '최근 프로젝트 파일을 찾을 수 없습니다.\n최근 목록에서 제거하거나 파일 위치를 확인해 주세요.': 'The recent project file could not be found.\nRemove it from the recent list or check the file location.',
+    '설정 저장': 'Save Settings',
+    '이 창에서 바꾼 설정을 저장할까요?': 'Save the settings changed in this window?',
+    '설정 저장 완료': 'Settings Saved',
+    '설정이 저장되었습니다.': 'Settings have been saved.',
+    '⚙️ 설정 / 옵션 저장 취소': '⚙️ Settings / Options save canceled',
+    '일괄 작업 중에는 홈화면으로 이동할 수 없습니다.\n작업이 끝난 뒤 다시 시도해 주세요.': 'You cannot go to the home screen while a batch job is running.\nTry again after the job finishes.',
+    '🏠 프로젝트를 닫고 홈화면으로 이동했습니다.': '🏠 Closed the project and moved to the home screen.',
+    '↩️ 홈화면 이동 취소': '↩️ Home screen move canceled',
+    '↩️ 최근 프로젝트 열기 취소': '↩️ Recent project open canceled',
+}
+UI_KO_EN.update(_HOTFIX5_UI_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _HOTFIX5_UI_KO_EN.items()})
+
+
+# hotfix7 additions: English cleanup and current project work folder shortcut
+_HOTFIX7_UI_KO_EN = {
+    '임시 파일 관리': 'Temporary File Management',
+    '일주일': '1 Week',
+    '한달': '1 Month',
+    '3개월': '3 Months',
+    '6개월': '6 Months',
+    '12개월': '12 Months',
+    '영어': 'English',
+    '작업 폴더 열기': 'Open Work Folder',
+    '작업 폴더 열기 실패': 'Failed to Open Work Folder',
+    '현재 열린 프로젝트가 없습니다.': 'No project is currently open.',
+    '현재 프로젝트 작업 폴더를 찾을 수 없습니다.': 'Could not find the current project work folder.',
+    '현재 프로젝트 작업 폴더를 열었습니다.': 'Opened current project work folder',
+    '현재 프로젝트의 작업 폴더로 이동하기': 'Open Current Project Work Folder',
+}
+UI_KO_EN.update(_HOTFIX7_UI_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _HOTFIX7_UI_KO_EN.items()})
+
+# hotfix8 additions: analysis mask expansion ratio settings
+_HOTFIX8_UI_KO_EN = {
+    '분석 마스크 확장 비율': 'Analysis Mask Expansion Ratio',
+    'OCR/분석 결과로 만들어지는 마스크의 여유 범위를 조절합니다. 글자 테두리가 덜 잡히면 값을 올리고, 배경까지 너무 넓게 잡히면 값을 낮추세요.': 'Adjusts the extra margin of masks created from OCR/analysis results. Increase the value if text outlines are not fully captured, and lower it if too much background is included.',
+    '텍스트 마스크 확장 비율': 'Text Mask Expansion Ratio',
+    '분석 결과의 텍스트 마스크를 묶고 확장하는 비율입니다. 말풍선 글자 테두리가 덜 잡히면 이 값을 올리세요.': 'Controls how much the text mask from analysis is grouped and expanded. Increase this when speech bubble text outlines are not fully captured.',
+    '페인트 마스크 확장 비율': 'Paint Mask Expansion Ratio',
+    '인페인팅/페인트 마스크를 만들 때 글자 주변을 얼마나 여유 있게 지울지 정합니다. 배경까지 너무 많이 잡히면 이 값을 낮추세요.': 'Controls how much extra area around text is cleared when creating the inpainting/paint mask. Lower this if too much background is included.',
+    '기본값으로 돌아가기': 'Restore Defaults',
+    '분석 마스크 설정 저장': 'Save Analysis Mask Settings',
+    '분석 마스크 확장 비율을 저장할까요?': 'Save the analysis mask expansion ratios?',
+    '분석 마스크 설정 저장 완료': 'Analysis Mask Settings Saved',
+    '분석 마스크 확장 비율이 저장되었습니다.': 'Analysis mask expansion ratios have been saved.',
+    '🎭 분석 마스크 확장 비율 저장 취소': '🎭 Analysis mask expansion ratio save canceled',
+    'OCR/분석 결과로 만들어지는 마스크의 여유 범위를 조절합니다. 글자 테두리가 덜 잡히면 값을 올리고, 배경까지 너무 넓게 잡히면 값을 낮추세요.': 'Adjusts the extra margin of masks created from OCR/analysis results. Increase the value if text outlines are not fully captured, and lower it if too much background is included.',
+}
+UI_KO_EN.update(_HOTFIX8_UI_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _HOTFIX8_UI_KO_EN.items()})
+try:
+    SHORTCUT_TR_KO_EN.update({'분석 마스크 확장 비율': 'Analysis Mask Expansion Ratio'})
+except Exception:
+    pass
+
+# hotfix9 additions: analysis mask minimum expansion size settings
+_HOTFIX9_UI_KO_EN = {
+    'OCR/분석 결과로 만들어지는 마스크의 여유 범위와 최소 확장 크기를 조절합니다. 최소 확장 크기를 0px로 두면 강제 최소 확장을 사용하지 않습니다.': 'Adjusts the extra mask margin and minimum expansion size created from OCR/analysis results. Set the minimum expansion size to 0px to disable forced minimum expansion.',
+    '텍스트 마스크 최소 확장 크기': 'Text Mask Minimum Expansion Size',
+    '텍스트 마스크를 만들 때 비율 계산값이 작아도 최소로 확장할 픽셀 크기입니다. 0px이면 최소 확장 강제를 사용하지 않습니다.': 'The minimum pixel size used to expand the text mask even when the ratio-based value is small. Set it to 0px to disable forced minimum expansion.',
+    '페인트 마스크 최소 확장 크기': 'Paint Mask Minimum Expansion Size',
+    '페인트 마스크를 만들 때 비율 계산값이 작아도 최소로 확장할 픽셀 크기입니다. 0px이면 최소 확장 강제를 사용하지 않습니다.': 'The minimum pixel size used to expand the paint mask even when the ratio-based value is small. Set it to 0px to disable forced minimum expansion.',
+    '분석 마스크 확장 설정을 저장할까요?': 'Save the analysis mask expansion settings?',
+    '분석 마스크 확장 설정이 저장되었습니다.': 'Analysis mask expansion settings have been saved.',
+    '🎭 분석 마스크 확장 설정 저장 취소': '🎭 Analysis mask expansion settings save canceled',
+}
+UI_KO_EN.update(_HOTFIX9_UI_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _HOTFIX9_UI_KO_EN.items()})
+
+# hotfix10 additions: mask wrapping tool
+_HOTFIX10_UI_KO_EN = {
+    '마스크 랩핑': 'Mask Wrapping',
+    '마스크 랩핑 사각형': 'Mask Wrapping Rectangle',
+    '마스크 랩핑 자유형': 'Mask Wrapping Freeform',
+    '▭ 사각형': '▭ Rectangle',
+    '✎ 자유형': '✎ Freeform',
+    '사각형으로 영역 그리기': 'Draw Rectangular Area',
+    '자유형으로 영역 그리기': 'Draw Freeform Area',
+    '영역 안의 떨어진 마스크들을 하나의 채움 영역으로 감싸줍니다.': 'Wraps separated masks inside the selected area into one filled area.',
+    '윈도우 캡처처럼 사각형 범위를 잡고 그 안의 마스크들을 하나로 감싸 채웁니다.': 'Drag a rectangular area like Windows capture, then wrap and fill the masks inside it.',
+    '드래그한 자유형 범위 안에서만 마스크들을 하나로 감싸 채웁니다.': 'Wraps and fills masks only inside the freeform area you drag.',
+    '선택한 영역 안의 떨어진 마스크들을 하나의 채움 영역으로 감싸줍니다.': 'Wraps separated masks inside the selected area into one filled area.',
+    '⚠️ 마스크 랩핑은 텍스트 마스크/페인팅 마스크 탭에서 사용하세요.': '⚠️ Use Mask Wrapping on the Text Mask or Painting Mask tab.',
+    '⚠️ 마스크 랩핑 영역이 비어 있습니다.': '⚠️ The mask wrapping area is empty.',
+    '⚠️ 선택한 영역 안에 랩핑할 마스크가 2개 이상 필요합니다.': '⚠️ At least two mask islands are required for wrapping inside the selected area.',
+    '⚠️ 마스크 랩핑 영역 안에서 마스크를 찾지 못했습니다.': '⚠️ Could not find masks inside the mask wrapping area.',
+    '⚠️ 마스크 랩핑 실패:': '⚠️ Mask wrapping failed:',
+    '⚠️ 마스크 랩핑으로 추가될 영역이 없습니다.': '⚠️ Mask wrapping has no area to add.',
+    '🩹 마스크 랩핑 완료:': '🩹 Mask wrapping complete:',
+    '🩹 도구: 마스크 랩핑': '🩹 Tool: Mask Wrapping',
+    '🩹 마스크 랩핑 모드: 사각형': '🩹 Mask Wrapping Mode: Rectangle',
+    '🩹 마스크 랩핑 모드: 자유형': '🩹 Mask Wrapping Mode: Freeform',
+}
+UI_KO_EN.update(_HOTFIX10_UI_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _HOTFIX10_UI_KO_EN.items()})
+try:
+    SHORTCUT_TR_KO_EN.update({
+        '마스크 랩핑': 'Mask Wrapping',
+        '마스크 랩핑 사각형': 'Mask Wrapping Rectangle',
+        '마스크 랩핑 자유형': 'Mask Wrapping Freeform',
+    })
+except Exception:
+    pass
+
+
+
+# v1.8.0 cloud hotfix13 security / action dialog strings
+UI_KO_EN.update({
+    '연결 대상': 'Connection Target',
+    '보안 안내': 'Security Notice',
+    'OAuth 토큰은 현재 PC의 로컬 캐시에 저장됩니다. 등록 해제 시 이 토큰을 삭제하고, 가능하면 Google 인증 토큰 해제도 함께 시도합니다.': 'The OAuth token is saved in the local cache on this PC. Unregistering deletes this token and, when possible, also attempts to revoke the Google auth token.',
+    '클라우드 백업/불러오기를 사용하려면 먼저 Google Drive 계정을 연결해야 합니다.': 'Connect a Google Drive account before using cloud backup/restore.',
+    '해제 범위': 'Unregister Scope',
+    '주의': 'Warning',
+    '등록 해제는 로컬 연결 정보를 지우는 작업입니다. 클라우드에 이미 올라간 백업 파일은 별도 삭제하지 않습니다.': 'Unregistering deletes the local connection information. It does not separately delete backup files already uploaded to the cloud.',
+    '이 PC에서 클라우드 연결을 끊는 전용 창입니다.': 'This dialog disconnects cloud access on this PC.',
+    '백업 대상': 'Backup Target',
+    '옵션, 단축키, 매크로, 글꼴 프리셋, 번역 프롬프트, 단어장 같은 작업환경 캐시를 클라우드에 백업합니다.': 'Back up work-environment cache such as options, shortcuts, macros, font presets, translation prompts, and glossary to the cloud.',
+    'API 키까지 백업': 'Back up API keys too',
+    'API 키는 유료 API 접근 정보일 수 있으므로, 선택한 경우 암호화가 필수입니다.': 'API keys may grant access to paid APIs, so encryption is required when this is selected.',
+    '기본값은 API 키 제외입니다. API 키까지 백업을 체크하면 업로드 전 반드시 암호화하고, 클라우드에서 불러올 때 반드시 복호화합니다. 암호화/복호화가 준비되지 않은 상태에서는 API 키 포함 백업을 실행하지 않습니다.': 'The default is to exclude API keys. If you check API key backup, they must be encrypted before upload and decrypted when restoring from the cloud. API-key backup will not run until encryption/decryption is ready.',
+    '보안 규칙': 'Security Rule',
+    'API 키는 평문으로 클라우드에 올리지 않습니다. API 키 포함 백업은 암호화 ZIP 또는 암호화된 별도 파일로 저장하고, 불러오기 단계에서 복호화 후 적용합니다.': 'API keys are not uploaded to the cloud in plain text. API-key backups are saved as an encrypted ZIP or a separately encrypted file, and are applied only after decryption during restore.',
+    'API 키까지 포함하여 작업환경 캐시를 클라우드로 백업할까요? API 키는 업로드 전에 반드시 암호화됩니다.': 'Back up the work-environment cache including API keys? API keys must be encrypted before upload.',
+    'API 키 포함 캐시 백업은 암호화 모듈이 연결된 뒤에만 실행됩니다. 다음 단계에서 업로드 전 암호화와 불러오기 시 복호화를 필수로 연결합니다.': 'Cache backup including API keys will run only after the encryption module is connected. The next step will require encryption before upload and decryption during restore.',
+    '현재 PC의 작업환경 캐시를 클라우드에 올리는 전용 창입니다. API 키는 별도 체크한 경우에만 포함하며, 포함 시 암호화가 필수입니다.': 'This dialog uploads this PC’s work-environment cache to the cloud. API keys are included only when separately checked, and encryption is required if included.',
+    '불러오기 대상': 'Restore Target',
+    '클라우드에 저장된 작업환경 캐시를 내려받아 현재 PC에 적용합니다. 실제 적용 전에는 현재 로컬 설정을 먼저 백업합니다.': 'Download the work-environment cache stored in the cloud and apply it to this PC. Before applying, the current local settings are backed up first.',
+    'API 키 복호화 규칙': 'API Key Decryption Rule',
+    '백업에 API 키가 포함되어 있다면 반드시 복호화 과정을 거친 뒤에만 적용합니다. 복호화에 실패하면 API 키는 적용하지 않고, 기존 로컬 API 설정을 보호합니다.': 'If a backup includes API keys, they are applied only after decryption. If decryption fails, API keys are not applied and the existing local API settings are protected.',
+    '캐시 불러오기는 단축키, 프리셋, 옵션 같은 현재 작업환경을 바꿀 수 있습니다. 적용 전 확인창을 한 번 더 표시합니다.': 'Restoring cache may change the current work environment, such as shortcuts, presets, and options. A confirmation dialog appears before applying.',
+    '클라우드 캐시 불러오기는 다음 단계에서 Google Drive 연동과 함께 연결됩니다. 실제 적용 전에는 로컬 설정 백업을 먼저 만들고, API 키가 포함된 백업은 복호화 후 적용합니다.': 'Cloud cache restore will be connected with Google Drive integration in the next step. Before applying, a local settings backup will be created first, and backups containing API keys will be applied only after decryption.',
+    '클라우드에 저장된 작업환경 캐시를 내려받아 현재 PC에 적용하는 전용 창입니다.': 'This dialog downloads the work-environment cache stored in the cloud and applies it to this PC.',
+    '저장 규칙': 'Save Rule',
+    '현재 열려 있는 프로젝트의 YSBT 파일 자체를 클라우드에 백업합니다. 작업환경 캐시가 아니라 지금 작업 중인 프로젝트 파일을 보존하는 기능입니다.': 'Back up the currently open project’s YSBT file itself to the cloud. This preserves the project file you are working on, not the work-environment cache.',
+    '저장하지 않은 작업이 있으면 클라우드 백업 전에 먼저 프로젝트 저장 여부를 확인합니다. 저장되지 않은 상태의 프로젝트는 업로드하지 않습니다.': 'If there are unsaved changes, the app asks whether to save before cloud backup. Unsaved project states are not uploaded.',
+    '현재 열려 있는 프로젝트 파일을 클라우드에 따로 보존하는 전용 창입니다.': 'This dialog separately preserves the currently open project file in the cloud.',
+    '옵션, 단축키, 매크로, 프리셋, 프롬프트, 단어장 같은 작업환경 캐시를 백업합니다. API 키는 체크박스로 별도 선택하며, 포함 시 업로드 전 암호화와 불러오기 시 복호화가 필수입니다.': 'Back up work-environment cache such as options, shortcuts, macros, presets, prompts, and glossary. API keys are selected separately with a checkbox, and if included, encryption before upload and decryption on restore are required.',
+    '클라우드에 저장된 작업환경 캐시를 내려받아 현재 PC에 적용합니다. API 키가 포함된 백업은 복호화 후에만 적용합니다.': 'Download the work-environment cache stored in the cloud and apply it to this PC. Backups containing API keys are applied only after decryption.',
+})
+UI_EN_KO.update({v: k for k, v in UI_KO_EN.items()})
+
+# v1.8.0 cloud menu / cloud hub strings
+UI_KO_EN.update({
+    '클라우드': 'Cloud',
+    '클라우드 등록': 'Register Cloud',
+    '클라우드 등록 해제': 'Unregister Cloud',
+    '클라우드로 캐시 백업': 'Back Up Cache to Cloud',
+    '클라우드에서 캐시 불러오기': 'Restore Cache from Cloud',
+    '현재 프로젝트 클라우드에 백업하기': 'Back Up Current Project to Cloud',
+    'Google Drive 계정 등록은 다음 단계에서 연결됩니다. 이 버튼은 클라우드 등록 진입점입니다.': 'Google Drive account registration will be connected in the next step. This button is the cloud registration entry point.',
+    '클라우드 등록을 해제할까요?': 'Unregister the cloud connection?',
+    '현재 버전에서는 실제 클라우드 연결 해제 로직이 아직 연결되지 않았습니다.': 'The actual cloud unregister logic is not connected in this version yet.',
+    '현재 작업환경 캐시를 클라우드로 백업할까요?': 'Back up the current work-environment cache to the cloud?',
+    '설정 캐시 백업 업로드는 다음 단계에서 Google Drive 연동과 함께 연결됩니다.': 'Settings cache backup upload will be connected with Google Drive integration in the next step.',
+    '클라우드에 저장된 작업환경 캐시를 불러올까요? 현재 로컬 설정을 덮어쓸 수 있습니다.': 'Restore the work-environment cache saved in the cloud? This may overwrite current local settings.',
+    '클라우드 캐시 불러오기는 다음 단계에서 Google Drive 연동과 함께 연결됩니다. 실제 적용 전에는 로컬 설정 백업을 먼저 만들 예정입니다.': 'Cloud cache restore will be connected with Google Drive integration in the next step. A local settings backup will be created before actual application.',
+    '현재 프로젝트 클라우드 백업': 'Current Project Cloud Backup',
+    '저장하지 않은 작업이 있습니다. 클라우드 백업 전에 먼저 프로젝트를 저장할까요?': 'There are unsaved changes. Save the project before cloud backup?',
+    '현재 프로젝트 YSBT 파일을 클라우드에 백업하는 기능은 다음 단계에서 Google Drive 연동과 함께 연결됩니다.': 'Backing up the current project YSBT file to the cloud will be connected with Google Drive integration in the next step.',
+    '클라우드 메뉴는 작업환경 캐시 백업/복원과 프로젝트 백업을 관리합니다. 홈화면에서는 프로젝트가 열려 있지 않으므로 현재 프로젝트 백업 항목은 표시하지 않습니다.': 'The Cloud menu manages work-environment cache backup/restore and project backup. On the home screen, no project is open, so the current project backup item is not shown.',
+    'Google Drive 같은 외부 저장소와 연결해 작업환경 캐시를 보존하고, 필요할 때 다시 불러오는 영역입니다.': 'Connect to external storage such as Google Drive to preserve the work-environment cache and restore it when needed.',
+    'Google Drive 계정을 연결합니다. 등록 후 캐시 백업, 캐시 불러오기, 프로젝트 백업 기능을 사용할 수 있게 됩니다.': 'Connect a Google Drive account. After registration, cache backup, cache restore, and project backup will be available.',
+    '현재 PC에 저장된 클라우드 연결 토큰을 해제합니다. 이후 백업/불러오기 기능은 다시 등록해야 사용할 수 있습니다.': 'Remove the cloud connection token saved on this PC. Backup/restore features will require registration again afterward.',
+    '옵션, API 설정, 단축키, 매크로, 프리셋, 프롬프트, 단어장 같은 작업환경 캐시를 클라우드에 백업합니다.': 'Back up work-environment cache such as options, API settings, shortcuts, macros, presets, prompts, and glossary to the cloud.',
+    '클라우드에 저장된 작업환경 캐시를 내려받아 현재 PC에 적용합니다. 실제 적용 전에는 로컬 설정 백업을 먼저 만들 예정입니다.': 'Download the work-environment cache stored in the cloud and apply it to this PC. A local settings backup will be created before actual application.',
+    '현재 열려 있는 프로젝트의 YSBT 파일을 클라우드에 백업합니다. 작업환경 캐시가 아니라 지금 작업 중인 프로젝트 파일 자체를 보존하는 기능입니다.': 'Back up the YSBT file of the currently open project to the cloud. This preserves the project file itself, not the work-environment cache.',
+    '등록': 'Register',
+    '해제': 'Unregister',
+    '캐시 백업': 'Back Up Cache',
+    '캐시 불러오기': 'Restore Cache',
+    '프로젝트 백업': 'Back Up Project',
+})
+
+# Rebuild reverse table after cloud strings are added.
+UI_EN_KO = {en: ko for ko, en in UI_KO_EN.items()}
+
+# v1.8.0 cloud shortcut strings
+SHORTCUT_TR_KO_EN.update({
+    '클라우드': 'Cloud',
+    '클라우드 등록': 'Register Cloud',
+    '클라우드 등록 해제': 'Unregister Cloud',
+    '클라우드로 캐시 백업': 'Back Up Cache to Cloud',
+    '클라우드에서 캐시 불러오기': 'Restore Cache from Cloud',
+    '현재 프로젝트 클라우드에 백업하기': 'Back Up Current Project to Cloud',
+})
+
+# v1.8.0 hotfix17 workspace default reset strings
+UI_KO_EN.update({
+    '기본값으로 변경': 'Restore Default',
+    'Windows 실제 문서 폴더 아래 YSB_Translator로 되돌립니다.': 'Restore to YSB_Translator under the actual Windows Documents folder.',
+    '작업 폴더 위치 기본값으로 변경': 'Restore Workspace Folder to Default',
+    '작업 폴더 위치를 기본값으로 변경할까요?': 'Restore the workspace folder location to the default?',
+    '현재 위치': 'Current location',
+    '기본값': 'Default',
+    '변경': 'Change',
+    '작업 폴더 위치가 기본값으로 변경 예약되었습니다.\n프로그램을 재실행하면 아래 위치로 이동됩니다.': 'The workspace folder location has been scheduled to restore to the default.\nRestart the program to move it to the location below.',
+    '작업 폴더 위치가 이미 기본값입니다.': 'The workspace folder location is already set to the default.',
+    '작업 폴더 위치를 기본값으로 변경하지 못했습니다.': 'Failed to restore the workspace folder location to the default.',
+    '프로젝트 작업 폴더와 캐시가 저장되는 기준 위치입니다. 위치 변경 또는 기본값으로 변경은 전용 확인 후 적용되며, 기본값은 Windows 실제 문서 폴더 아래 YSB_Translator입니다.': 'This is the base location for project workspace folders and cache. Change Location or Restore Default applies only after its own confirmation. The default is YSB_Translator under the actual Windows Documents folder.',
+})
+UI_EN_KO.update({v: k for k, v in UI_KO_EN.items()})
+SHORTCUT_TR_KO_EN.update({
+    '작업 폴더 위치 기본값으로 변경': 'Restore Workspace Folder to Default',
+})
+
+
+# v1.8.0 hotfix18 workspace restart strings
+UI_KO_EN.update({
+    '기본값으로\n변경': 'Restore\nDefault',
+    '작업 폴더 위치 변경': 'Change Workspace Folder Location',
+    '폴더 위치 변경으로 프로그램을 재기동합니다.\n취소할 시 이전 설정한 폴더 위치값으로 원복합니다.': 'The program will restart because the workspace folder location is changing.\nIf you cancel, the previous workspace folder location will be restored.',
+    '변경 위치': 'New location',
+    '재기동(Y)': 'Restart (Y)',
+    'Enter 또는 Y 키로 재기동합니다.': 'Press Enter or Y to restart.',
+    'N 키로 취소하고 이전 설정값으로 되돌립니다.': 'Press N to cancel and restore the previous setting.',
+    '프로젝트 작업 폴더와 캐시가 저장되는 기준 위치입니다. 위치를 바꾸면 프로그램을 재기동해야 적용됩니다. 취소하면 이전 작업 폴더 위치값으로 원복됩니다. 기본값은 Windows 실제 문서 폴더 아래 YSB_Translator입니다.': 'This is the base location for project workspace folders and cache. Changing this location requires restarting the program to apply it. If you cancel, the previous workspace folder location is restored. The default is YSB_Translator under the actual Windows Documents folder.',
+})
+UI_EN_KO.update({v: k for k, v in UI_KO_EN.items()})
