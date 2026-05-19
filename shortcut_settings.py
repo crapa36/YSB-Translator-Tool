@@ -1,4 +1,5 @@
 import json
+import time
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List
 
@@ -253,12 +254,13 @@ DEFAULT_SHORTCUTS = {
     "paint_magic_tolerance_dec": "Ctrl+;",
     "paint_magic_expand_inc": "Ctrl+Shift+'",
     "paint_magic_expand_dec": "Ctrl+Shift+;",
-    "paint_magic_fill": "Alt+D",
-    "paint_mask_wrap": "W",
-    "paint_mask_wrap_rect": "R",
-    "paint_mask_wrap_free": "F",
+    "paint_magic_fill": "Alt+Shift+D",
+     "paint_mask_wrap": "W",
+    "paint_mask_cut": "C",
+    "paint_mask_wrap_rect": "Alt+D",
+    "paint_mask_wrap_free": "Alt+F",
     "paint_mask_toggle": "Ctrl+M",
-    "final_paint_color": "C",
+    "final_paint_color": "Ctrl+Shift+C",
     "final_paint_to_background": "Alt+P",
     "final_text_tool": "T",
     "final_paint_above_toggle": "X",
@@ -392,8 +394,9 @@ GROUPS = [
         ("paint_magic_expand_dec", "요술봉 확장범위 감소"),
         ("paint_magic_fill", "마스킹 칠하기"),
         ("paint_mask_wrap", "마스크 랩핑"),
-        ("paint_mask_wrap_rect", "마스크 랩핑 사각형"),
-        ("paint_mask_wrap_free", "마스크 랩핑 자유형"),
+        ("paint_mask_cut", "마스크 커팅"),
+        ("paint_mask_wrap_rect", "마스크 선택 사각형"),
+        ("paint_mask_wrap_free", "마스크 선택 자유형"),
         ("paint_mask_toggle", "페인팅 마스크 ON/OFF"),
         ("final_paint_color", "최종 페인팅 색상"),
         ("final_paint_to_background", "최종 페인팅을 배경으로 반영"),
@@ -630,6 +633,24 @@ class ShortcutSettingsStore:
                 merged_shortcuts["option_theme_settings"] = "Ctrl+Alt+Shift+F9"
             if merged_shortcuts.get("work_clean_text") in {"Ctrl+Y", "Ctrl+Alt+Shift+Y"}:
                 merged_shortcuts["work_clean_text"] = "Ctrl+Alt+Shift+C"
+
+            # v1.8.1 마스크 커팅 도구 추가:
+            # C는 마스크 커팅으로 이동하고, 기존 C였던 최종 페인팅 색상은 Ctrl+Shift+C로 이동한다.
+            if merged_shortcuts.get("paint_mask_cut") in ("", None):
+                merged_shortcuts["paint_mask_cut"] = DEFAULT_SHORTCUTS.get("paint_mask_cut", "C")
+            if merged_shortcuts.get("final_paint_color") == "C":
+                merged_shortcuts["final_paint_color"] = DEFAULT_SHORTCUTS.get("final_paint_color", "Ctrl+Shift+C")
+            if merged_shortcuts.get("paint_mask_wrap_rect") == "R":
+                merged_shortcuts["paint_mask_wrap_rect"] = DEFAULT_SHORTCUTS.get("paint_mask_wrap_rect", "Alt+Shift+R")
+            if merged_shortcuts.get("paint_mask_wrap_free") == "F":
+                merged_shortcuts["paint_mask_wrap_free"] = DEFAULT_SHORTCUTS.get("paint_mask_wrap_free", "Alt+F")
+
+            # v1.8.1 마스크 커팅 단축키 보정:
+            # Alt+D는 사각형 영역으로 이동하고, 기존 Alt+D였던 마스킹 칠하기는 Alt+Shift+D로 이동한다.
+            if merged_shortcuts.get("paint_magic_fill") == "Alt+D":
+                merged_shortcuts["paint_magic_fill"] = DEFAULT_SHORTCUTS.get("paint_magic_fill", "Alt+Shift+D")
+            if merged_shortcuts.get("paint_mask_wrap_rect") in ("R", "Alt+Shift+R", "", None):
+                merged_shortcuts["paint_mask_wrap_rect"] = DEFAULT_SHORTCUTS.get("paint_mask_wrap_rect", "Alt+D")
 
             # 비활성화된 단축키는 입력칸/동작에서 빠진 상태로 유지한다.
             for key in list(merged_shortcuts.keys()):
@@ -1428,6 +1449,7 @@ class ShortcutSettingsDialog(QDialog):
         self.last_sequences = {}
         self.disabled_backup = {}
         self._handling_change = False
+        self._shortcut_conflict_prompt_active = False
         # 기본 단축키 입력 중 개별 글꼴 프리셋과 충돌을 허용한 경우,
         # 실제 비활성화는 OK로 저장할 때 메인 창에서 최종 충돌 여부를 재확인한 뒤 적용한다.
         self._pending_disabled_item_presets = set()
@@ -1507,6 +1529,19 @@ class ShortcutSettingsDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+
+    def ask_shortcut_conflict_question(self, *args, **kwargs):
+        # QKeySequenceEdit는 포커스 이동/메시지박스 표시 과정에서 editingFinished가
+        # 중복으로 들어올 수 있다. 확인창이 떠 있는 동안 재진입을 차단해
+        # 같은 충돌 알림이 2번 표시되는 것을 막는다.
+        if getattr(self, "_shortcut_conflict_prompt_active", False):
+            return QMessageBox.StandardButton.No
+        self._shortcut_conflict_prompt_active = True
+        try:
+            return QMessageBox.question(*args, **kwargs)
+        finally:
+            self._shortcut_conflict_prompt_active = False
+
     def sequence_text(self, edit: QKeySequenceEdit) -> str:
         return edit.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
 
@@ -1524,7 +1559,7 @@ class ShortcutSettingsDialog(QDialog):
             edit.setStyleSheet(disabled_key_edit_qss(self._ui_theme))
 
     def on_enabled_toggled(self, key: str, checked: bool):
-        if self._handling_change:
+        if self._handling_change or getattr(self, "_shortcut_conflict_prompt_active", False):
             return
 
         edit = self.edits[key]
@@ -1551,7 +1586,7 @@ class ShortcutSettingsDialog(QDialog):
             self.swap_if_conflict(key)
 
     def swap_if_conflict(self, key: str, notify=True):
-        if self._handling_change:
+        if self._handling_change or getattr(self, "_shortcut_conflict_prompt_active", False):
             return
 
         if not self.checks[key].isChecked():
@@ -1589,7 +1624,7 @@ class ShortcutSettingsDialog(QDialog):
             if QKeySequence(macro_seq).toString(QKeySequence.SequenceFormat.PortableText) == new_text:
                 label = self.labels.get(key).text() if self.labels.get(key) else key
                 macro_name = str(macro.get("name", "매크로"))
-                ans = QMessageBox.question(
+                ans = self.ask_shortcut_conflict_question(
                     self,
                     "매크로 단축키 비활성화 확인",
                     f"'{macro_name}' 매크로가 같은 단축키를 사용 중입니다.\n\n"
@@ -1615,7 +1650,7 @@ class ShortcutSettingsDialog(QDialog):
             item_seq = str(preset.get("shortcut", "") or "")
             if item_seq and QKeySequence(item_seq).toString(QKeySequence.SequenceFormat.PortableText) == new_text:
                 label = self.labels.get(key).text() if self.labels.get(key) else key
-                ans = QMessageBox.question(
+                ans = self.ask_shortcut_conflict_question(
                     self,
                     tr_text("개별 프리셋 단축키 비활성화 확인", self._ui_language),
                     (
@@ -1648,7 +1683,7 @@ class ShortcutSettingsDialog(QDialog):
             new_label = self.labels.get(key).text() if self.labels.get(key) else key
             old_label = self.labels.get(other_key).text() if self.labels.get(other_key) else other_key
             old_text_display = old_text if old_text else tr_text("비어 있음", self._ui_language)
-            ans = QMessageBox.question(
+            ans = self.ask_shortcut_conflict_question(
                 self,
                 "단축키 교체 확인",
                 f"이미 사용 중인 단축키입니다.\n\n"

@@ -1349,3 +1349,37 @@ UI_KO_EN.update({
     '프로젝트 작업 폴더와 캐시가 저장되는 기준 위치입니다. 위치를 바꾸면 프로그램을 재기동해야 적용됩니다. 취소하면 이전 작업 폴더 위치값으로 원복됩니다. 기본값은 Windows 실제 문서 폴더 아래 YSB_Translator입니다.': 'This is the base location for project workspace folders and cache. Changing this location requires restarting the program to apply it. If you cancel, the previous workspace folder location is restored. The default is YSB_Translator under the actual Windows Documents folder.',
 })
 UI_EN_KO.update({v: k for k, v in UI_KO_EN.items()})
+
+
+# hotfix11 additions: mask cutting tool
+_HOTFIX11_UI_KO_EN = {
+    '마스크 커팅': 'Mask Cutting',
+    '마스크 선택 사각형': 'Rectangle Area',
+    '마스크 선택 자유형': 'Freeform Area',
+    '커팅 폭': 'Cut Width',
+    '선택 영역 밖 경계를 지정 픽셀만큼 잘라 붙어 있는 마스크를 분리합니다.': 'Cuts the mask by the specified pixels outside the selected boundary to separate connected masks.',
+    '사각형 보존 영역의 바깥 경계를 지정 픽셀만큼 잘라냅니다.': 'Cuts the mask by the specified pixels outside the rectangular keep area.',
+    '자유형 보존 영역의 바깥 경계를 지정 픽셀만큼 잘라냅니다.': 'Cuts the mask by the specified pixels outside the freeform keep area.',
+    '선택 영역 밖으로 잘라낼 마스크 폭입니다.': 'The mask width to cut outside the selected area.',
+    '⚠️ 마스크 커팅은 텍스트 마스크/페인팅 마스크 탭에서 사용하세요.': '⚠️ Use Mask Cutting on the Text Mask or Painting Mask tab.',
+    '⚠️ 마스크 커팅 영역이 비어 있습니다.': '⚠️ The mask cutting area is empty.',
+    '⚠️ 현재 탭에 마스크 레이어가 없습니다.': '⚠️ There is no mask layer on the current tab.',
+    '⚠️ 마스크 커팅으로 제거할 외곽 영역이 없습니다.': '⚠️ There is no outer boundary area to cut.',
+    '⚠️ 지정한 커팅 영역에 제거할 마스크가 없습니다.': '⚠️ There is no mask to remove in the specified cutting area.',
+    '⚠️ 마스크 커팅으로 변경된 영역이 없습니다.': '⚠️ Mask cutting did not change any area.',
+    '🔪 도구: 마스크 커팅': '🔪 Tool: Mask Cutting',
+    '🔪 마스크 커팅 모드: 사각형': '🔪 Mask Cutting Mode: Rectangle Area',
+    '🔪 마스크 커팅 모드: 자유형': '🔪 Mask Cutting Mode: Freeform Area',
+    '🔪 마스크 커팅 완료:': '🔪 Mask cutting complete:',
+    '⚠️ 마스크 커팅 실패:': '⚠️ Mask cutting failed:',
+}
+UI_KO_EN.update(_HOTFIX11_UI_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _HOTFIX11_UI_KO_EN.items()})
+try:
+    SHORTCUT_TR_KO_EN.update({
+        '마스크 커팅': 'Mask Cutting',
+        '마스크 선택 사각형': 'Rectangle Area',
+        '마스크 선택 자유형': 'Freeform Area',
+    })
+except Exception:
+    pass

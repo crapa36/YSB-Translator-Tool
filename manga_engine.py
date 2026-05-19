@@ -7,7 +7,36 @@ import time
 import math
 import uuid
 from openai import OpenAI
-from PIL import Image, ImageDraw, ImageFont
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    _PIL_IMPORT_ERROR = None
+except Exception as _e:
+    # PyInstaller onefile 빌드에서 PIL._imaging 같은 네이티브 모듈이 누락되면
+    # 앱 시작 시점에 바로 죽지 않도록 지연 로드로 전환한다.
+    Image = ImageDraw = ImageFont = None
+    _PIL_IMPORT_ERROR = _e
+
+
+def _ensure_pillow():
+    """Pillow를 실제로 쓰는 순간에 로드한다.
+
+    EXE 빌드에 PIL._imaging이 누락되어도 앱 시작 자체는 막지 않고,
+    이미지 출력 기능을 사용할 때 명확한 오류로 넘긴다.
+    """
+    global Image, ImageDraw, ImageFont, _PIL_IMPORT_ERROR
+    if Image is not None and ImageDraw is not None and ImageFont is not None:
+        return
+    try:
+        from PIL import Image as _Image, ImageDraw as _ImageDraw, ImageFont as _ImageFont
+        Image, ImageDraw, ImageFont = _Image, _ImageDraw, _ImageFont
+        _PIL_IMPORT_ERROR = None
+    except Exception as e:
+        _PIL_IMPORT_ERROR = e
+        raise RuntimeError(
+            "Pillow 이미지 모듈을 불러오지 못했습니다. "
+            "EXE 빌드에 Pillow 네이티브 모듈(PIL._imaging)이 누락되었을 수 있습니다. "
+            "build_exe_v1.8.1_pillow_strong_bundle.bat로 다시 빌드해 주세요."
+        ) from e
 
 class Config:
     # ---------------------------------------------------------
@@ -1322,6 +1351,7 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
         - Photoshop 실행 완료 알림(alert)은 띄우지 않음
         """
         import io
+        _ensure_pillow()
 
         def _hex_to_rgb(value, fallback=(0, 0, 0)):
             value = str(value or '').strip()

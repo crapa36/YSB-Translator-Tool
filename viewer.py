@@ -41,6 +41,12 @@ class MuleImageViewer(QGraphicsView):
         self.mask_wrap_preview_item = None
         self.is_mask_wrapping = False
 
+        self.mask_cut_shape = "rect"
+        self.mask_cut_start = None
+        self.mask_cut_points = []
+        self.mask_cut_preview_item = None
+        self.is_mask_cutting = False
+
     def _active_transform_item_obj(self):
         active = self.main.current_transform_data_item() if hasattr(self.main, 'current_transform_data_item') else None
         if active is None:
@@ -166,6 +172,7 @@ class MuleImageViewer(QGraphicsView):
         self.final_paint_above_img = None
         self.magic_preview_items = []
         self.clear_mask_wrap_preview()
+        self.clear_mask_cut_preview()
         self.clear_paste_preview()
         self.history.clear()
         if hasattr(self.main, "update_undo_redo_buttons"):
@@ -189,6 +196,7 @@ class MuleImageViewer(QGraphicsView):
         self.magic_preview_items = []
         self.paste_preview_items = []
         self.clear_mask_wrap_preview()
+        self.clear_mask_cut_preview()
         if bg is None:
             return
 
@@ -448,6 +456,77 @@ class MuleImageViewer(QGraphicsView):
             return region
 
         points = list(getattr(self, "mask_wrap_points", []) or [])
+        if end_pos is not None:
+            points.append(end_pos)
+        if len(points) < 3:
+            return None
+        arr = []
+        for pt in points:
+            x = max(0, min(w - 1, int(round(pt.x()))))
+            y = max(0, min(h - 1, int(round(pt.y()))))
+            arr.append([x, y])
+        if len(arr) < 3:
+            return None
+        cv2.fillPoly(region, [np.array(arr, dtype=np.int32)], 255)
+        return region
+
+
+    def clear_mask_cut_preview(self):
+        item = getattr(self, "mask_cut_preview_item", None)
+        if item is not None:
+            try:
+                self.scene.removeItem(item)
+            except Exception:
+                pass
+        self.mask_cut_preview_item = None
+
+    def _mask_cut_pen(self):
+        return QPen(QColor(255, 80, 40), 2, Qt.PenStyle.SolidLine)
+
+    def _draw_mask_cut_preview(self, now):
+        self.clear_mask_cut_preview()
+        if self.mask_cut_start is None:
+            return
+        pen = self._mask_cut_pen()
+        brush = QBrush(Qt.BrushStyle.NoBrush)
+        if getattr(self, "mask_cut_shape", "rect") == "rect":
+            rect = QRectF(self.mask_cut_start, now).normalized()
+            self.mask_cut_preview_item = self.scene.addRect(rect, pen, brush)
+        else:
+            path = QPainterPath()
+            points = list(getattr(self, "mask_cut_points", []) or [])
+            if not points:
+                points = [self.mask_cut_start, now]
+            path.moveTo(points[0])
+            for pt in points[1:]:
+                path.lineTo(pt)
+            self.mask_cut_preview_item = self.scene.addPath(path, pen, brush)
+        if self.mask_cut_preview_item is not None:
+            self.mask_cut_preview_item.setZValue(43)
+            self.mask_cut_preview_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+
+    def _mask_cut_region_np(self, end_pos):
+        if self.user_mask_img is None or self.mask_cut_start is None:
+            return None
+        import cv2
+        h = int(self.user_mask_img.height())
+        w = int(self.user_mask_img.width())
+        if w <= 0 or h <= 0:
+            return None
+        region = np.zeros((h, w), dtype=np.uint8)
+        if getattr(self, "mask_cut_shape", "rect") == "rect":
+            x1 = int(round(min(self.mask_cut_start.x(), end_pos.x())))
+            y1 = int(round(min(self.mask_cut_start.y(), end_pos.y())))
+            x2 = int(round(max(self.mask_cut_start.x(), end_pos.x())))
+            y2 = int(round(max(self.mask_cut_start.y(), end_pos.y())))
+            x1 = max(0, min(w - 1, x1)); x2 = max(0, min(w - 1, x2))
+            y1 = max(0, min(h - 1, y1)); y2 = max(0, min(h - 1, y2))
+            if x2 <= x1 or y2 <= y1:
+                return None
+            cv2.rectangle(region, (x1, y1), (x2, y2), 255, thickness=-1)
+            return region
+
+        points = list(getattr(self, "mask_cut_points", []) or [])
         if end_pos is not None:
             points.append(end_pos)
         if len(points) < 3:
@@ -810,6 +889,17 @@ class MuleImageViewer(QGraphicsView):
             e.accept()
             return
 
+        if self.draw_mode == 'mask_cut' and e.button() == Qt.MouseButton.LeftButton:
+            if getattr(self.main, "cb_mode", None) is None or self.main.cb_mode.currentIndex() not in (2, 3):
+                e.accept()
+                return
+            self.is_mask_cutting = True
+            self.mask_cut_start = self.mapToScene(e.pos())
+            self.mask_cut_points = [self.mask_cut_start]
+            self._draw_mask_cut_preview(self.mask_cut_start)
+            e.accept()
+            return
+
         if self.draw_mode == 'magic_wand' and e.button() == Qt.MouseButton.LeftButton:
             pt = self.mapToScene(e.pos())
             self.main.magic_wand_pick(int(pt.x()), int(pt.y()))
@@ -923,6 +1013,23 @@ class MuleImageViewer(QGraphicsView):
             e.accept()
             return
 
+        if self.draw_mode == 'mask_cut' and getattr(self, "is_mask_cutting", False):
+            now = self.mapToScene(e.pos())
+            if getattr(self, "mask_cut_shape", "rect") == "free":
+                pts = getattr(self, "mask_cut_points", []) or []
+                if not pts:
+                    self.mask_cut_points = [now]
+                else:
+                    last = pts[-1]
+                    dx = now.x() - last.x()
+                    dy = now.y() - last.y()
+                    if (dx * dx + dy * dy) >= 9:
+                        pts.append(now)
+                        self.mask_cut_points = pts
+            self._draw_mask_cut_preview(now)
+            e.accept()
+            return
+
         if (
             self.draw_mode == 'paste_text'
             and getattr(self.main, "cb_mode", None) is not None
@@ -983,6 +1090,18 @@ class MuleImageViewer(QGraphicsView):
             self.clear_mask_wrap_preview()
             if region is not None and hasattr(self.main, "apply_mask_wrapping"):
                 self.main.apply_mask_wrapping(region)
+            e.accept()
+            return
+
+        if self.draw_mode == 'mask_cut' and getattr(self, "is_mask_cutting", False):
+            end_pos = self.mapToScene(e.pos())
+            region = self._mask_cut_region_np(end_pos)
+            self.is_mask_cutting = False
+            self.mask_cut_start = None
+            self.mask_cut_points = []
+            self.clear_mask_cut_preview()
+            if region is not None and hasattr(self.main, "apply_mask_cutting"):
+                self.main.apply_mask_cutting(region)
             e.accept()
             return
 

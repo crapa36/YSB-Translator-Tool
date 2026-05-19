@@ -15,6 +15,11 @@ import io
 import base64
 import hashlib
 import hmac
+import threading
+import webbrowser
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import urlparse, parse_qs
+from datetime import datetime
 
 import cv2
 import numpy as np
@@ -62,13 +67,18 @@ def close_pyinstaller_boot_splash():
                     lang = str(json.load(f).get("ui_language", "ko")).lower()
         except Exception:
             lang = "ko"
-        pyi_splash.update_text("Loading interface..." if lang.startswith("en") else "인터페이스 로딩 중...")
+        pyi_splash.update_text("Preparing main window..." if lang.startswith("en") else "메인 로딩 화면 준비 중...")
         pyi_splash.close()
     except Exception:
         pass
 
 
 APP_OPTIONS_FILE_NAME = "app_options.json"
+
+
+class CloudOAuthCancelled(Exception):
+    """사용자가 OAuth 로그인을 취소했거나 브라우저 인증이 완료되지 않은 경우."""
+    pass
 
 
 def app_options_file():
@@ -289,7 +299,7 @@ def clamp_analysis_mask_min_px(value, default_value):
     return v
 
 
-APP_VERSION = "v1.8.0"
+APP_VERSION = "v1.8.1"
 APP_NAME_KO = "역식붕이 툴"
 APP_NAME_EN = "YSB Tool"
 
@@ -343,6 +353,7 @@ def styled_question(parent, title, text, buttons=None, defaultButton=None, defau
         except Exception:
             pass
         msg.setStyleSheet(DARK_MESSAGEBOX_QSS)
+        force_message_box_front(msg)
         return msg.exec()
 
     lang = _messagebox_ui_language(parent)
@@ -372,6 +383,7 @@ def styled_question(parent, title, text, buttons=None, defaultButton=None, defau
     except Exception:
         pass
 
+    force_message_box_front(msg)
     result = msg.exec()
     clicked = msg.clickedButton()
     if clicked is yes_button:
@@ -379,6 +391,25 @@ def styled_question(parent, title, text, buttons=None, defaultButton=None, defau
     if clicked is no_button:
         return QMessageBox.StandardButton.No
     return QMessageBox.StandardButton.Yes if result == int(QDialog.DialogCode.Accepted) else QMessageBox.StandardButton.No
+
+
+def force_message_box_front(msg):
+    """알림/확인창이 메인 창이나 스플래시 뒤에 가려지지 않게 앞으로 올린다."""
+    try:
+        msg.setWindowModality(Qt.WindowModality.ApplicationModal)
+    except Exception:
+        pass
+    try:
+        msg.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+    except Exception:
+        pass
+    try:
+        msg.show()
+        msg.raise_()
+        msg.activateWindow()
+        QApplication.processEvents()
+    except Exception:
+        pass
 
 
 def workspace_restart_confirmation(parent, current_path, target_path, lang=None):
@@ -431,86 +462,103 @@ def _restart_python_executable():
 
 
 def restart_application_detached():
-    """현재 프로세스를 종료하고 새 프로세스를 지연 실행한다.
+    """현재 프로세스를 종료하고 새 프로세스를 독립 재실행한다.
 
-    hotfix20:
-    - cmd.exe /C timeout 방식 폐기
-    - source 실행에서는 __file__ 기준 absolute main.py를 재실행
-    - app_dir를 작업 디렉터리로 지정
-    - Windows에서는 pythonw.exe를 우선 사용해 검은 콘솔창 노출을 줄임
-    - 재시작 실패 원인을 확인할 수 있게 restart_stdout.log / restart_stderr.log를 남김
+    v1.8.1:
+    - 가능하면 YSB_FileOpener.exe를 통해 재기동한다.
+      그러면 위치 변경 후 재기동 중에도 런처 진행률 화면이 표시된다.
+    - 런처가 없으면 기존처럼 메인 EXE를 직접 재실행한다.
     """
     app = QApplication.instance()
     try:
+        current_pid = os.getpid()
+
         if getattr(sys, "frozen", False):
-            launch_program = sys.executable
-            launch_args = []
             app_dir = str(Path(sys.executable).resolve().parent)
+            opener_path = None
+            try:
+                opener_path = get_file_opener_path()
+            except Exception:
+                opener_path = None
+
+            if opener_path and Path(opener_path).exists():
+                launch_program = str(Path(opener_path).resolve())
+                launch_args = ["--restart-main", str(current_pid)]
+                app_dir = str(Path(opener_path).resolve().parent)
+            else:
+                launch_program = str(Path(sys.executable).resolve())
+                launch_args = []
         else:
             launch_program = _restart_python_executable()
-            script_path = str(Path(__file__).resolve())
-            launch_args = [script_path]
+            launch_args = [str(Path(__file__).resolve())]
             app_dir = str(Path(__file__).resolve().parent)
 
+        env = os.environ.copy()
+
+        if getattr(sys, "frozen", False):
+            env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+
+        for key in (
+            "QT_PLUGIN_PATH",
+            "QT_QPA_PLATFORM_PLUGIN_PATH",
+            "QT_QPA_FONTDIR",
+            "QT_DEBUG_PLUGINS",
+        ):
+            env.pop(key, None)
+
+        if is_windows() and getattr(sys, "frozen", False):
+            try:
+                import ctypes
+                ctypes.windll.kernel32.SetDllDirectoryW(None)
+            except Exception:
+                pass
+
+        stdout_target = subprocess.DEVNULL
+        stderr_target = subprocess.DEVNULL
+        log_handles = []
         if is_windows():
             try:
                 restart_dir = app_config_dir() / "restart_logs"
                 restart_dir.mkdir(parents=True, exist_ok=True)
-                stdout_path = str(restart_dir / "restart_stdout.log")
-                stderr_path = str(restart_dir / "restart_stderr.log")
+                stdout_target = open(restart_dir / "restart_stdout.log", "a", encoding="utf-8", errors="replace")
+                stderr_target = open(restart_dir / "restart_stderr.log", "a", encoding="utf-8", errors="replace")
+                log_handles.extend([stdout_target, stderr_target])
             except Exception:
-                stdout_path = os.devnull
-                stderr_path = os.devnull
+                stdout_target = subprocess.DEVNULL
+                stderr_target = subprocess.DEVNULL
 
-            helper_python = _restart_python_executable()
-            helper_code = (
-                "import os, subprocess, sys, time\\n"
-                "time.sleep(1.5)\\n"
-                "program = sys.argv[1]\\n"
-                "cwd = sys.argv[2]\\n"
-                "stdout_path = sys.argv[3]\\n"
-                "stderr_path = sys.argv[4]\\n"
-                "args = sys.argv[5:]\\n"
-                "flags = 0\\n"
-                "for name in ('CREATE_NEW_PROCESS_GROUP','DETACHED_PROCESS'):\\n"
-                "    flags |= int(getattr(subprocess, name, 0))\\n"
-                "try:\\n"
-                "    out = open(stdout_path, 'a', encoding='utf-8', errors='replace') if stdout_path else subprocess.DEVNULL\\n"
-                "    err = open(stderr_path, 'a', encoding='utf-8', errors='replace') if stderr_path else subprocess.DEVNULL\\n"
-                "    out.write('\\n--- YSB restart launch ---\\n') if hasattr(out, 'write') else None\\n"
-                "    err.write('\\n--- YSB restart launch ---\\n') if hasattr(err, 'write') else None\\n"
-                "    subprocess.Popen([program] + args, cwd=cwd, stdout=out, stderr=err, stdin=subprocess.DEVNULL, close_fds=False, creationflags=flags)\\n"
-                "except Exception as e:\\n"
-                "    try:\\n"
-                "        with open(stderr_path, 'a', encoding='utf-8', errors='replace') as f:\\n"
-                "            f.write('restart helper failed: %r\\n' % (e,))\\n"
-                "    except Exception:\\n"
-                "        pass\\n"
-            )
-            creationflags = 0
+        creationflags = 0
+        if is_windows():
             for flag_name in ("CREATE_NO_WINDOW", "DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP"):
                 creationflags |= int(getattr(subprocess, flag_name, 0))
-            subprocess.Popen(
-                [helper_python, "-c", helper_code, launch_program, app_dir, stdout_path, stderr_path] + list(launch_args),
-                cwd=app_dir,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                close_fds=False,
-                creationflags=creationflags,
-            )
-        else:
-            # Unix 계열은 Qt의 startDetached가 가장 단순하고 안정적이다.
-            QProcess.startDetached(launch_program, launch_args, app_dir)
+
+        subprocess.Popen(
+            [launch_program] + list(launch_args),
+            cwd=app_dir,
+            stdin=subprocess.DEVNULL,
+            stdout=stdout_target,
+            stderr=stderr_target,
+            close_fds=False,
+            creationflags=creationflags,
+            env=env,
+        )
+
+        for h in log_handles:
+            try:
+                h.close()
+            except Exception:
+                pass
+
     except Exception:
-        # 재기동 실행에 실패해도 현재 앱은 닫지 않는다.
         return False
+
     try:
         if app:
             app.quit()
     except Exception:
         pass
     return True
+
 
 QMessageBox.question = staticmethod(styled_question)
 
@@ -526,9 +574,15 @@ def get_executable_for_association() -> str:
 def get_association_command() -> str:
     """.ysbt 더블클릭 시 Windows가 실행할 명령어.
 
-    EXE 빌드 상태면 EXE를 직접 호출하고, 소스 실행 상태면 현재 Python으로 main.py를 실행한다.
-    그래서 개발 중에도 더블클릭 테스트가 가능하다.
+    v1.8.1 opener patch:
+    - YSB_FileOpener.exe가 있으면 파일 연결은 경량 런처를 우선 사용한다.
+    - 런처가 없으면 기존처럼 메인 EXE 또는 main.py로 fallback한다.
     """
+    opener = get_file_opener_path()
+    if opener is not None:
+        if getattr(sys, "frozen", False):
+            return f'"{opener}" "%1"'
+        return f'"{sys.executable}" "{opener}" "%1"'
     if getattr(sys, "frozen", False):
         return f'"{sys.executable}" "%1"'
     script = os.path.abspath(sys.argv[0])
@@ -975,6 +1029,88 @@ def run_initial_workspace_setup_if_needed() -> bool:
     return dlg.exec() == QDialog.DialogCode.Accepted
 
 
+def wait_for_launcher_closed_if_needed(timeout_sec=8.0):
+    """런처가 100%를 찍고 닫힌 뒤에만 메인 스플래시를 띄우게 대기한다.
+
+    런처를 거쳐 실행된 경우에만 YSB_LAUNCHER_SESSION_ID가 들어온다.
+    메인을 직접 실행한 경우에는 바로 통과한다.
+    """
+    session_id = os.environ.get("YSB_LAUNCHER_SESSION_ID", "")
+    if not session_id:
+        return
+
+    path = ysb_launcher_closed_signal_path()
+    start = time.time()
+    while time.time() - start < timeout_sec:
+        try:
+            if path.exists():
+                data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+                if str(data.get("session_id") or "") == str(session_id):
+                    return
+        except Exception:
+            pass
+        QApplication.processEvents()
+        time.sleep(0.05)
+
+
+
+def is_launcher_splash_owner() -> bool:
+    """이번 실행의 스플래시 소유자가 런처인지 확인한다.
+
+    기준은 "런처 파일이 존재하는가"가 아니라 "런처가 이번 메인 실행을 시작했는가"다.
+    따라서 YSB_LAUNCHER_SESSION_ID가 있으면 런처 모드로 인정한다.
+    YSB_SPLASH_OWNER=launcher는 보조 표시값으로만 사용한다.
+    """
+    return bool(os.environ.get("YSB_LAUNCHER_SESSION_ID", ""))
+
+
+def write_launcher_mode_debug(stage: str):
+    """런처 진행률 연동 문제를 확인하기 위한 작은 디버그 로그."""
+    try:
+        path = app_config_dir() / "runtime" / "launcher_mode_debug.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "stage": str(stage),
+            "pid": os.getpid(),
+            "YSB_LAUNCHER_SESSION_ID": os.environ.get("YSB_LAUNCHER_SESSION_ID", ""),
+            "YSB_SPLASH_OWNER": os.environ.get("YSB_SPLASH_OWNER", ""),
+            "is_launcher_splash_owner": is_launcher_splash_owner(),
+            "time_epoch": time.time(),
+            "time": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        }
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(path)
+    except Exception:
+        pass
+
+
+def report_launcher_progress(progress: int, message: str, done: bool = False):
+    """런처 소유 스플래시에 표시할 메인 초기화 진행률을 기록한다."""
+    if not is_launcher_splash_owner():
+        return
+    try:
+        path = ysb_launcher_progress_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "session_id": os.environ.get("YSB_LAUNCHER_SESSION_ID", ""),
+            "pid": os.getpid(),
+            "progress": max(0, min(100, int(progress or 0))),
+            "message": str(message or ""),
+            "done": bool(done),
+            "time_epoch": time.time(),
+            "time": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "source": "main",
+        }
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(path)
+    except Exception:
+        pass
+
+
+
+
 def prompt_update_ysbt_file_association_if_needed(parent=None) -> None:
     """.ysbt가 다른 위치의 역식붕이 툴에 연결되어 있으면 현재 프로그램으로 갱신할지 묻는다.
 
@@ -983,6 +1119,8 @@ def prompt_update_ysbt_file_association_if_needed(parent=None) -> None:
     둘이 다르면 구버전/다른 위치 포터블 EXE로 등록되어 있을 가능성이 높다.
     """
     if not is_windows():
+        return
+    if launcher_association_preflight_recent():
         return
     if not is_ysbt_file_association_registered_to_other_ysb():
         return
@@ -997,8 +1135,8 @@ def prompt_update_ysbt_file_association_if_needed(parent=None) -> None:
             ".ysbt is currently associated with YSB Tool in another location.\n"
             "This can happen after replacing the portable EXE with a new version, or after testing another EXE in a different folder.\n\n"
             f"Current registered command:\n{registered}\n\n"
-            f"Register the currently running program again?\n{current}\n\n"
-            "Press [Yes] to update only the .ysbt file association to the current program path. Project files will not be changed."
+            "Register the file association to the currently running program?\n\n"
+            "Press [Yes] to update only the .ysbt file association. Project files will not be changed."
         )
     else:
         title = ".ysbt 확장자 연결 갱신"
@@ -1006,7 +1144,7 @@ def prompt_update_ysbt_file_association_if_needed(parent=None) -> None:
             "현재 .ysbt 확장자가 다른 위치의 역식붕이 툴에 연결되어 있습니다.\n"
             "포터블 EXE를 새 버전으로 교체했거나, 다른 폴더의 EXE로 테스트한 경우에 생길 수 있습니다.\n\n"
             f"현재 등록된 실행 명령:\n{registered}\n\n"
-            f"현재 실행 중인 프로그램으로 다시 등록할까요?\n{current}\n\n"
+            "현재 실행 중인 프로그램으로 다시 등록할까요?\n\n"
             "[예]를 누르면 .ysbt 파일 연결만 현재 프로그램 경로로 덮어씁니다. 프로젝트 파일은 변경되지 않습니다."
         )
 
@@ -1020,6 +1158,300 @@ def prompt_update_ysbt_file_association_if_needed(parent=None) -> None:
             else:
                 QMessageBox.critical(parent, "등록 실패", f".ysbt 확장자 연결 갱신에 실패했습니다.\n{e}")
 
+
+# =========================================================
+# 빠른 .ysbt 더블클릭 전달 런처 / 큐
+# =========================================================
+FILE_OPENER_EXE_NAME = "YSBT Luncher.exe"
+OPEN_QUEUE_FILE_NAME = "open_queue.jsonl"
+RUNTIME_INFO_FILE_NAME = "main_instance.json"
+ASSOCIATION_PREFLIGHT_FILE_NAME = "association_preflight.json"
+STARTUP_SIGNAL_FILE_NAME = "main_startup_signal.json"
+LAUNCHER_CLOSED_SIGNAL_FILE_NAME = "launcher_closed_signal.json"
+LAUNCHER_PROGRESS_FILE_NAME = "launcher_progress.json"
+
+YSB_COMPANY_NAME = "Zerostress8"
+YSB_PRODUCT_NAME = "YSB Translator Tool"
+YSB_APP_FAMILY_ID = "ZEROSTRESS8_YSB_TRANSLATOR_TOOL"
+YSB_ROLE_MAIN = "YSB_MAIN"
+YSB_ROLE_OPENER = "YSB_FILE_OPENER"
+
+
+def ysb_runtime_dir() -> Path:
+    return app_config_dir() / "runtime"
+
+
+def ysb_open_queue_path() -> Path:
+    return app_config_dir() / OPEN_QUEUE_FILE_NAME
+
+
+def ysb_main_runtime_info_path() -> Path:
+    return ysb_runtime_dir() / RUNTIME_INFO_FILE_NAME
+
+
+
+
+def ysb_startup_signal_path() -> Path:
+    return app_config_dir() / "runtime" / STARTUP_SIGNAL_FILE_NAME
+
+
+def ysb_launcher_closed_signal_path() -> Path:
+    return app_config_dir() / "runtime" / LAUNCHER_CLOSED_SIGNAL_FILE_NAME
+
+
+def ysb_launcher_progress_path() -> Path:
+    return app_config_dir() / "runtime" / LAUNCHER_PROGRESS_FILE_NAME
+
+
+def ysb_association_preflight_path() -> Path:
+    return app_config_dir() / ASSOCIATION_PREFLIGHT_FILE_NAME
+
+
+def write_main_startup_signal():
+    """런처가 메인 Python 코드 시작을 감지해 자신의 스플래시를 닫을 수 있게 신호를 남긴다."""
+    try:
+        path = ysb_startup_signal_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "pid": os.getpid(),
+            "exe": str(Path(sys.executable).resolve()),
+            "time_epoch": time.time(),
+            "time": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "source": "main",
+            "launcher_session_id": os.environ.get("YSB_LAUNCHER_SESSION_ID", ""),
+        }
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(path)
+    except Exception:
+        pass
+
+
+def launcher_association_preflight_recent(max_age_sec=180) -> bool:
+    """런처가 같은 실행 흐름에서 확장자 갱신 알림을 이미 처리했는지 확인한다.
+
+    런처에서 사용자가 예/아니오를 선택한 경우, 메인에서 같은 알림을 다시 띄우지 않는다.
+    failed 상태는 메인에서 다시 처리할 수 있게 False로 본다.
+    """
+    try:
+        path = ysb_association_preflight_path()
+        if not path.exists():
+            return False
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        status = str(data.get("status") or "")
+        t = float(data.get("time") or 0)
+        if time.time() - t > max_age_sec:
+            return False
+        return status in {"already_current", "checked_no_action", "registered", "declined"}
+    except Exception:
+        return False
+
+
+
+def read_windows_exe_version_strings(exe_path: Path) -> dict:
+    """EXE의 Windows 버전 리소스 문자열을 읽는다.
+
+    PyInstaller onefile 내부 압축을 풀지 않아도 읽을 수 있는 PE 리소스 정보다.
+    """
+    if not is_windows():
+        return {}
+    try:
+        exe_text = str(Path(exe_path))
+        version = ctypes.windll.version
+        handle = ctypes.c_uint(0)
+        size = version.GetFileVersionInfoSizeW(exe_text, ctypes.byref(handle))
+        if not size:
+            return {}
+
+        buffer = ctypes.create_string_buffer(size)
+        if not version.GetFileVersionInfoW(exe_text, 0, size, buffer):
+            return {}
+
+        translations = []
+        trans_ptr = ctypes.c_void_p()
+        trans_len = ctypes.c_uint(0)
+        if version.VerQueryValueW(buffer, r"\VarFileInfo\Translation", ctypes.byref(trans_ptr), ctypes.byref(trans_len)):
+            count = int(trans_len.value // 4)
+            arr_type = ctypes.c_ushort * (count * 2)
+            arr = arr_type.from_address(trans_ptr.value)
+            for i in range(count):
+                translations.append((arr[i * 2], arr[i * 2 + 1]))
+
+        if not translations:
+            translations = [
+                (0x0409, 0x04B0),
+                (0x0409, 0x04E4),
+                (0x0412, 0x04B0),
+                (0x0000, 0x04B0),
+            ]
+
+        keys = [
+            "CompanyName",
+            "ProductName",
+            "FileDescription",
+            "InternalName",
+            "OriginalFilename",
+            "ProductVersion",
+            "FileVersion",
+            "YSBAppFamilyId",
+            "YSBAppRole",
+        ]
+        out = {}
+        for lang, codepage in translations:
+            base = rf"\StringFileInfo\{lang:04x}{codepage:04x}"
+            for key in keys:
+                if key in out:
+                    continue
+                ptr = ctypes.c_void_p()
+                length = ctypes.c_uint(0)
+                query = base + "\\" + key
+                if version.VerQueryValueW(buffer, query, ctypes.byref(ptr), ctypes.byref(length)) and ptr.value:
+                    try:
+                        out[key] = ctypes.wstring_at(ptr.value)
+                    except Exception:
+                        pass
+            if out:
+                break
+        return out
+    except Exception:
+        return {}
+
+
+def is_ysb_opener_exe_by_metadata(exe_path: Path) -> bool:
+    info = read_windows_exe_version_strings(exe_path)
+    if not info:
+        return False
+
+    company = str(info.get("CompanyName", "")).strip()
+    product = str(info.get("ProductName", "")).strip()
+    family = str(info.get("YSBAppFamilyId", "")).strip()
+    role = str(info.get("YSBAppRole", "")).strip()
+    internal = str(info.get("InternalName", "")).strip()
+
+    family_ok = (
+        company == YSB_COMPANY_NAME
+        and (
+            family == YSB_APP_FAMILY_ID
+            or product == YSB_PRODUCT_NAME
+        )
+    )
+    role_ok = role == YSB_ROLE_OPENER or internal == YSB_ROLE_OPENER
+    return bool(family_ok and role_ok)
+
+
+def get_file_opener_path() -> Path | None:
+    """.ysbt 더블클릭 전용 경량 런처 경로를 반환한다.
+
+    1순위는 EXE 버전 리소스 메타데이터다.
+    - CompanyName: Zerostress8
+    - ProductName: YSB Translator Tool
+    - InternalName 또는 YSBAppRole: YSB_FILE_OPENER
+
+    파일명이 바뀌어도 이 정보로 런처를 식별할 수 있다.
+    """
+    try:
+        search_dirs = []
+        if getattr(sys, "frozen", False):
+            here = Path(sys.executable).resolve().parent
+            self_exe = Path(sys.executable).resolve()
+        else:
+            here = Path(__file__).resolve().parent
+            self_exe = None
+
+        search_dirs.append(here)
+        try:
+            search_dirs.append(here.parent)
+        except Exception:
+            pass
+
+        for folder in ("YSB", "YSB Tool", "YSB Translator", "YSB TRANSLATE", "YSB_Translator", "app", "program"):
+            search_dirs.append(here / folder)
+            try:
+                search_dirs.append(here.parent / folder)
+            except Exception:
+                pass
+
+        seen = set()
+        resolved_dirs = []
+        for d in search_dirs:
+            try:
+                rd = d.resolve()
+                if rd in seen:
+                    continue
+                seen.add(rd)
+                resolved_dirs.append(rd)
+            except Exception:
+                continue
+
+        # 1. EXE 내부 메타데이터로 진짜 런처 식별
+        metadata_candidates = []
+        for rd in resolved_dirs:
+            try:
+                if not rd.exists() or not rd.is_dir():
+                    continue
+                for candidate in rd.glob("*.exe"):
+                    try:
+                        if self_exe is not None and candidate.resolve() == self_exe:
+                            continue
+                    except Exception:
+                        pass
+                    if is_ysb_opener_exe_by_metadata(candidate):
+                        try:
+                            metadata_candidates.append((candidate.stat().st_size, candidate))
+                        except Exception:
+                            metadata_candidates.append((0, candidate))
+            except Exception:
+                continue
+
+        if metadata_candidates:
+            metadata_candidates.sort(key=lambda x: x[0])
+            return metadata_candidates[0][1]
+
+        # 2. 기본 이름 후보
+        for rd in resolved_dirs:
+            for launcher_name in (FILE_OPENER_EXE_NAME, "YSB_FileOpener.exe"):
+                candidate = rd / launcher_name
+                if candidate.exists():
+                    return candidate
+
+        if not getattr(sys, "frozen", False):
+            candidate = Path(__file__).resolve().parent / "ysb_file_opener.py"
+            return candidate if candidate.exists() else None
+
+        # 3. 구버전/미표식 런처 fallback: 이름/크기 추정
+        named = []
+        small = []
+        for rd in resolved_dirs:
+            try:
+                if not rd.exists() or not rd.is_dir():
+                    continue
+                for candidate in rd.glob("*.exe"):
+                    try:
+                        if self_exe is not None and candidate.resolve() == self_exe:
+                            continue
+                    except Exception:
+                        pass
+                    low = candidate.name.lower()
+                    try:
+                        size = candidate.stat().st_size
+                    except Exception:
+                        size = 0
+                    if size > 0 and size <= (30 * 1024 * 1024):
+                        small.append((size, candidate))
+                        if any(k in low for k in ("opener", "launcher", "open", "file")):
+                            named.append((size, candidate))
+            except Exception:
+                continue
+
+        if named:
+            named.sort(key=lambda x: x[0])
+            return named[0][1]
+        if small:
+            small.sort(key=lambda x: x[0])
+            return small[0][1]
+    except Exception:
+        pass
+    return None
 
 # =========================================================
 # 단일 실행 / .ysbt 더블클릭 전달
@@ -1133,20 +1565,23 @@ class SingleInstanceServer(QObject):
             print(f"Single instance dispatch error: {e}")
 
 
-class YSBSplashScreen(QSplashScreen):
+class YSBSplashScreen(QWidget):
     """
     로고 하단에 진행바를 직접 그리는 스플래시 화면.
-    실제 로딩 퍼센트라기보다 앱 초기화 단계에 맞춘 stage progress 개념이다.
+
+    기존 QSplashScreen.drawContents 방식은 환경에 따라 오버레이가 안 보일 수 있어서,
+    QWidget.paintEvent에서 배경 이미지와 진행률을 직접 그리는 방식으로 바꾼다.
     """
     def __init__(self, pixmap):
-        super().__init__(pixmap, Qt.WindowType.WindowStaysOnTopHint)
-        self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
+        super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        self._pixmap = pixmap
         self._progress = 0
         self._message = "로딩 중..."
         self._timer = QTimer(self)
         self._timer.setInterval(90)
         self._timer.timeout.connect(self._tick_progress)
+        self.resize(self._pixmap.size())
 
     def start(self):
         self._timer.start()
@@ -1158,27 +1593,30 @@ class YSBSplashScreen(QSplashScreen):
         # 실제 로딩이 끝나기 전엔 90%까지만 자동 진행
         if self._progress < 90:
             self._progress += 1
-            self.update()
+            self.repaint()
 
     def set_progress(self, value, message=None):
         self._progress = max(0, min(100, int(value)))
         if message is not None:
             self._message = str(message)
-        self.update()
+        self.repaint()
         QApplication.processEvents()
 
-    def drawContents(self, painter):
-        # 바닥 진행바 영역
-        margin_x = 36
-        bar_h = 18
-        y = self.pixmap().height() - 42
-        bar_rect = QRect(margin_x, y, self.pixmap().width() - margin_x * 2, bar_h)
-
+    def paintEvent(self, event):
+        painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
-        # 배경 바
-        painter.setPen(QPen(QColor(30, 30, 30, 210), 1))
-        painter.setBrush(QColor(20, 20, 20, 200))
+        # 배경 로고 이미지
+        painter.drawPixmap(0, 0, self._pixmap)
+
+        margin_x = 36
+        bar_h = 18
+        y = self.height() - 42
+        bar_rect = QRect(margin_x, y, self.width() - margin_x * 2, bar_h)
+
+        # 진행바 배경
+        painter.setPen(QPen(QColor(35, 35, 35, 230), 1))
+        painter.setBrush(QColor(18, 18, 18, 220))
         painter.drawRoundedRect(bar_rect, 8, 8)
 
         # 진행 채움
@@ -1186,16 +1624,25 @@ class YSBSplashScreen(QSplashScreen):
         if fill_w > 0:
             fill_rect = QRect(bar_rect.x() + 2, bar_rect.y() + 2, fill_w, bar_rect.height() - 4)
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(255, 40, 40, 235))
+            painter.setBrush(QColor(255, 40, 40, 245))
             painter.drawRoundedRect(fill_rect, 6, 6)
 
         # 메시지 / 퍼센트
-        text_rect = QRect(margin_x, y - 24, self.pixmap().width() - margin_x * 2, 20)
-        painter.setPen(QColor(245, 245, 245))
+        text_rect = QRect(margin_x, y - 26, self.width() - margin_x * 2, 22)
+        painter.setPen(QColor(250, 250, 250))
         font = QFont("맑은 고딕", 10)
+        font.setBold(True)
         painter.setFont(font)
         painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, self._message)
         painter.drawText(text_rect, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, f"{self._progress}%")
+        painter.end()
+
+    def finish(self, widget):
+        try:
+            self.hide()
+        except Exception:
+            pass
+
 
 def make_splash_screen():
     """
@@ -1223,6 +1670,7 @@ def make_splash_screen():
         splash.move(geo.center() - splash.rect().center())
 
     splash.show()
+    QApplication.processEvents()
     splash.start()
     splash.set_progress(35, translate_ui_text("압축 해제 완료 · 인터페이스 로딩 중..."))
     return splash
@@ -2516,6 +2964,10 @@ class MainWindow(QMainWindow):
         # 오래된 임시 작업 폴더는 한 달에 한 번 자동 정리한다.
         QTimer.singleShot(1500, self.auto_cleanup_temp_files_if_needed)
 
+        # .ysbt 더블클릭 전용 경량 런처가 남긴 열기 요청을 감시한다.
+        # 이미 켜진 앱에 파일 경로만 전달해 드래그앤드롭과 같은 빠른 열기를 구현한다.
+        self.setup_external_open_queue_monitor()
+
     # =========================================================
     # 메뉴 / UI
     # =========================================================
@@ -2532,7 +2984,6 @@ class MainWindow(QMainWindow):
             try:
                 if event.type() in (
                     QEvent.Type.WindowStateChange,
-                    QEvent.Type.ActivationChange,
                     QEvent.Type.PaletteChange,
                     QEvent.Type.StyleChange,
                 ):
@@ -2618,12 +3069,12 @@ class MainWindow(QMainWindow):
         make_action("cloud_unregister", "클라우드 등록 해제", self.cloud_unregister)
         make_action("cloud_cache_backup", "클라우드로 캐시 백업", self.cloud_backup_cache)
         make_action("cloud_cache_restore", "클라우드에서 캐시 불러오기", self.cloud_restore_cache)
-        make_action("cloud_project_backup", "현재 프로젝트 클라우드에 백업하기", self.cloud_backup_current_project)
-        make_action("cloud_project_restore", "클라우드에서 프로젝트 불러오기", self.cloud_restore_project_from_cloud)
+        make_action("cloud_delete_backups", "클라우드 백업 삭제", self.cloud_delete_cache_backups)
 
         # 토글/보조 작업
         make_action("paint_redo", "작업 재실행", self.handle_general_redo)
         make_action("paint_magic_fill", "마스킹 칠하기", self.fill_magic_wand_mask)
+        make_action("paint_mask_cut", "마스크 커팅", lambda: self.set_tool("mask_cut"))
         make_action("paint_mask_toggle", "마스크 ON/OFF", self.toggle_mask_toggle)
         make_action("view_text_toggle", "텍스트 표시 ON/OFF", self.toggle_show_final_text)
         make_action("final_paint_color", "최종 페인팅 색상", lambda: self.pick_color("final_paint"))
@@ -2704,6 +3155,8 @@ class MainWindow(QMainWindow):
             self.act_magic.setVisible(mask_tabs)
         if hasattr(self, "act_mask_wrap"):
             self.act_mask_wrap.setVisible(mask_tabs)
+        if hasattr(self, "act_mask_cut"):
+            self.act_mask_cut.setVisible(mask_tabs)
         if hasattr(self, "act_reanal"):
             self.act_reanal.setVisible(False)
         if hasattr(self, "btn_text_mask_reanalyze"):
@@ -3342,6 +3795,7 @@ class MainWindow(QMainWindow):
             if hasattr(self, "act_redo"): action_info.append((self.act_redo, "작업 재실행", seq_text("paint_redo")))
             if hasattr(self, "act_magic"): action_info.append((self.act_magic, "요술봉 선택", seq_text("paint_magic_select")))
             if hasattr(self, "act_mask_wrap"): action_info.append((self.act_mask_wrap, "마스크 랩핑", seq_text("paint_mask_wrap"), "영역 안의 떨어진 마스크들을 하나의 채움 영역으로 감싸줍니다."))
+            if hasattr(self, "act_mask_cut"): action_info.append((self.act_mask_cut, "마스크 커팅", seq_text("paint_mask_cut"), "선택 영역 밖 경계를 지정 픽셀만큼 잘라 붙어 있는 마스크를 분리합니다."))
             if hasattr(self, "act_final_text_tool"): action_info.append((self.act_final_text_tool, "최종 텍스트 도구", seq_text("final_text_tool"), "최종화면을 클릭하면 텍스트 영역을 만듭니다. 내용 작성 후 Ctrl+Return을 누르거나 다른 곳을 클릭하면 작성이 완료됩니다."))
             if hasattr(self, "act_final_paint_to_bg"): action_info.append((self.act_final_paint_to_bg, "최종 페인팅을 배경으로 반영", seq_text("final_paint_to_background")))
             if hasattr(self, "act_final_paint_above_text"): action_info.append((self.act_final_paint_above_text, "텍스트 위에 페인팅", seq_text("final_paint_above_toggle"), "ON이면 이후 새로 칠하는 브러시가 텍스트보다 위 레이어에 그려집니다."))
@@ -3375,6 +3829,10 @@ class MainWindow(QMainWindow):
         if hasattr(self, "mask_wrap_bar"):
             self.register_delayed_tooltip(self.btn_mask_wrap_rect, "사각형으로 영역 그리기", seq_text("paint_mask_wrap_rect"), "윈도우 캡처처럼 사각형 범위를 잡고 그 안의 마스크들을 하나로 감싸 채웁니다.")
             self.register_delayed_tooltip(self.btn_mask_wrap_free, "자유형으로 영역 그리기", seq_text("paint_mask_wrap_free"), "드래그한 자유형 범위 안에서만 마스크들을 하나로 감싸 채웁니다.")
+        if hasattr(self, "mask_cut_bar"):
+            self.register_delayed_tooltip(self.btn_mask_cut_rect, "사각형으로 영역 그리기", seq_text("paint_mask_wrap_rect"), "사각형 보존 영역의 바깥 경계를 지정 픽셀만큼 잘라냅니다.")
+            self.register_delayed_tooltip(self.btn_mask_cut_free, "자유형으로 영역 그리기", seq_text("paint_mask_wrap_free"), "자유형 보존 영역의 바깥 경계를 지정 픽셀만큼 잘라냅니다.")
+            self.register_delayed_tooltip(self.sb_mask_cut_px, "커팅 폭", "", "선택 영역 밖으로 잘라낼 마스크 폭입니다.")
 
         # 툴팁 기본 글자색:
         # - 다크 테마: 흰색
@@ -3528,6 +3986,7 @@ class MainWindow(QMainWindow):
             msg.setDefaultButton(btn_ok)
         except Exception:
             pass
+        force_message_box_front(msg)
         msg.exec()
 
     def _show_launcher_screen_only(self):
@@ -3934,7 +4393,14 @@ class MainWindow(QMainWindow):
         return path or ""
 
     def run_google_drive_oauth(self, client_secret_path, parent=None):
-        """Google Drive OAuth 로그인 창을 열고 토큰을 로컬 캐시에 저장한다."""
+        """Google Drive OAuth 로그인 창을 열고 토큰을 로컬 캐시에 저장한다.
+
+        기존 InstalledAppFlow.run_local_server()는 브라우저 창을 닫거나 로그인을 취소했을 때
+        UI 스레드를 오래 붙잡을 수 있어, 취소 가능한 로컬 콜백 서버를 직접 띄운다.
+        - 사용자가 Google 화면에서 취소/거부하면 CloudOAuthCancelled로 정상 취소 처리
+        - 진행 창의 취소/X 버튼을 누르면 CloudOAuthCancelled로 정상 취소 처리
+        - 제한 시간 동안 콜백이 없으면 CloudOAuthCancelled로 정상 취소 처리
+        """
         InstalledAppFlow, Credentials, Request, build = self.import_google_oauth_modules()
 
         client_secret_path = Path(str(client_secret_path or ""))
@@ -3944,15 +4410,135 @@ class MainWindow(QMainWindow):
         scopes = ["https://www.googleapis.com/auth/drive.file"]
         flow = InstalledAppFlow.from_client_secrets_file(str(client_secret_path), scopes=scopes)
 
-        # 브라우저 로그인 + 로컬 리다이렉트 서버.
-        # access_type/prompt는 refresh token을 받기 위한 힌트이며, Google 설정에 따라 무시될 수 있다.
-        creds = flow.run_local_server(
-            port=0,
+        result = {"code": "", "state": "", "error": "", "error_description": ""}
+        callback_received = threading.Event()
+        cancel_requested = threading.Event()
+
+        class OAuthCallbackHandler(BaseHTTPRequestHandler):
+            def log_message(self, fmt, *args):
+                # 콘솔 노이즈 방지
+                return
+
+            def do_GET(self):
+                parsed = urlparse(self.path)
+                query = parse_qs(parsed.query or "")
+                result["code"] = str((query.get("code") or [""])[0] or "")
+                result["state"] = str((query.get("state") or [""])[0] or "")
+                result["error"] = str((query.get("error") or [""])[0] or "")
+                result["error_description"] = str((query.get("error_description") or [""])[0] or "")
+
+                if result["error"]:
+                    title = "YSB Tool cloud registration was cancelled."
+                    body = "You can close this browser window and return to YSB Tool."
+                else:
+                    title = "YSB Tool cloud registration is complete."
+                    body = "You can close this browser window and return to YSB Tool."
+
+                html = f"""<!doctype html>
+<html><head><meta charset=\"utf-8\"><title>YSB Tool</title></head>
+<body style=\"font-family:Arial,sans-serif;background:#111;color:#eee;padding:32px;\">
+<h2>{title}</h2>
+<p>{body}</p>
+</body></html>""".encode("utf-8")
+                try:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(html)))
+                    self.end_headers()
+                    self.wfile.write(html)
+                finally:
+                    callback_received.set()
+
+        # 포트 0으로 OS가 빈 포트를 배정하게 한다.
+        server = HTTPServer(("localhost", 0), OAuthCallbackHandler)
+        server.timeout = 0.25
+        host, port = server.server_address
+        redirect_uri = f"http://localhost:{port}/"
+        flow.redirect_uri = redirect_uri
+
+        # CSRF 방지용 state는 google-auth-oauthlib가 반환한 값을 검증한다.
+        auth_url, expected_state = flow.authorization_url(
+            access_type="offline",
             prompt="consent",
-            authorization_prompt_message=self.tr_ui("브라우저에서 Google 계정 로그인을 완료해 주세요: {url}"),
-            success_message=self.tr_ui("YSB Tool 클라우드 등록이 완료되었습니다. 이 창은 닫아도 됩니다."),
-            open_browser=True,
+            include_granted_scopes="true",
         )
+
+        def serve_until_done():
+            try:
+                while not callback_received.is_set() and not cancel_requested.is_set():
+                    server.handle_request()
+            finally:
+                try:
+                    server.server_close()
+                except Exception:
+                    pass
+
+        thread = threading.Thread(target=serve_until_done, daemon=True)
+        thread.start()
+
+        progress = QProgressDialog(parent or self)
+        progress.setWindowTitle(self.tr_ui("클라우드 등록"))
+        progress.setLabelText(self.tr_ui("브라우저에서 Google 로그인을 완료해 주세요.\n로그인을 취소했거나 창을 닫았다면 아래 취소를 누르세요."))
+        progress.setCancelButtonText(self.tr_ui("취소"))
+        progress.setRange(0, 0)
+        progress.setMinimumDuration(0)
+        progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.show()
+
+        try:
+            webbrowser.open(auth_url)
+        except Exception as e:
+            cancel_requested.set()
+            try:
+                progress.close()
+            except Exception:
+                pass
+            raise RuntimeError(self.tr_ui("브라우저를 열 수 없습니다." ) + f"\n{e}")
+
+        timeout_seconds = 300
+        deadline = time.time() + timeout_seconds
+        try:
+            while not callback_received.is_set():
+                QApplication.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, 50)
+                if progress.wasCanceled():
+                    cancel_requested.set()
+                    raise CloudOAuthCancelled(self.tr_ui("클라우드 등록이 취소되었습니다."))
+                if time.time() > deadline:
+                    cancel_requested.set()
+                    raise CloudOAuthCancelled(self.tr_ui("제한 시간 안에 Google 로그인이 완료되지 않아 클라우드 등록을 취소했습니다."))
+                time.sleep(0.05)
+        finally:
+            cancel_requested.set()
+            try:
+                progress.close()
+            except Exception:
+                pass
+            try:
+                thread.join(timeout=1.0)
+            except Exception:
+                pass
+
+        if result.get("error"):
+            error = str(result.get("error") or "")
+            desc = str(result.get("error_description") or "")
+            if error in {"access_denied", "user_cancelled", "consent_required"}:
+                raise CloudOAuthCancelled(self.tr_ui("Google 로그인이 취소되었습니다."))
+            raise RuntimeError(f"OAuth error: {error}\n{desc}".strip())
+
+        if expected_state and result.get("state") and result.get("state") != expected_state:
+            raise RuntimeError(self.tr_ui("OAuth 응답 검증에 실패했습니다. 다시 시도해 주세요."))
+
+        code = str(result.get("code") or "")
+        if not code:
+            raise CloudOAuthCancelled(self.tr_ui("Google 로그인 응답을 받지 못해 클라우드 등록을 취소했습니다."))
+
+        # code를 토큰으로 교환한다. 여기서 실패하면 실제 등록 실패로 처리한다.
+        flow.fetch_token(code=code)
+        creds = flow.credentials
+        if not creds:
+            raise RuntimeError(self.tr_ui("Google OAuth 토큰을 가져오지 못했습니다."))
 
         # 연결 검증 겸 계정 정보를 최대한 가져온다.
         account_email = ""
@@ -4018,7 +4604,7 @@ class MainWindow(QMainWindow):
                 if lbl is not None:
                     if lbl is getattr(self, "_cloud_overview_status_label", None):
                         lbl.setText(
-                            self.tr_ui("클라우드 메뉴는 작업환경 캐시 백업/복원과 프로젝트 백업을 관리합니다. 홈화면에서는 프로젝트가 열려 있지 않으므로 현재 프로젝트 백업 항목은 표시하지 않습니다.")
+                            self.tr_ui("클라우드 메뉴는 작업환경 캐시 백업/복원과 백업 삭제를 관리합니다.")
                             + "\n"
                             + self.tr_ui("현재 상태")
                             + ": "
@@ -4225,18 +4811,19 @@ class MainWindow(QMainWindow):
         return folder.get("id")
 
     def ensure_cloud_drive_folders(self, service):
+        # 공개 배포판의 Google Drive 연동은 작업환경 캐시 백업/복원 전용이다.
+        # YSBT 프로젝트 파일은 사용자가 로컬 파일 또는 동기화 폴더로 직접 관리한다.
         root_id = self.drive_find_or_create_folder(service, "YSB_Translator_Backup")
         cache_id = self.drive_find_or_create_folder(service, "cache_backups", parent_id=root_id)
-        project_id = self.drive_find_or_create_folder(service, "project_backups", parent_id=root_id)
         cfg = self.load_cloud_config()
         cfg.update({
             "drive_root_folder_id": root_id,
             "drive_cache_folder_id": cache_id,
-            "drive_project_folder_id": project_id,
+            "drive_project_folder_id": "",
             "drive_folder_checked_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         })
         self.save_cloud_config(cfg)
-        return root_id, cache_id, project_id
+        return root_id, cache_id, None
 
     def cloud_backup_manifest(self, backup_type="cache", include_api_keys=False):
         cfg = self.load_cloud_config()
@@ -4359,6 +4946,52 @@ class MainWindow(QMainWindow):
                 break
         return files
 
+    def format_drive_time_local(self, iso_text):
+        """Google Drive UTC ISO 시간을 현재 PC의 로컬 시간대로 변환해 표시한다.
+        내부 정렬/비교에는 Drive의 원본 UTC 값을 유지하고, 사용자 표시만 로컬 시간으로 바꾼다.
+        """
+        if not iso_text:
+            return ""
+        try:
+            raw = str(iso_text).strip()
+            # Google Drive API 예: 2026-05-19T04:11:43.723Z
+            dt_utc = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            dt_local = dt_utc.astimezone()  # Windows/OS 현재 시간대 기준
+            return dt_local.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return str(iso_text)
+
+    def format_drive_file_size(self, size_value):
+        try:
+            n = int(size_value or 0)
+        except Exception:
+            return str(size_value or "")
+        units = ["bytes", "KB", "MB", "GB", "TB"]
+        value = float(n)
+        idx = 0
+        while value >= 1024 and idx < len(units) - 1:
+            value /= 1024.0
+            idx += 1
+        if idx == 0:
+            return f"{n} bytes"
+        return f"{value:.1f} {units[idx]}"
+
+    def format_drive_backup_label(self, drive_file):
+        name = drive_file.get("name", "(no name)") if isinstance(drive_file, dict) else "(no name)"
+        iso_time = ""
+        size = ""
+        if isinstance(drive_file, dict):
+            iso_time = drive_file.get("modifiedTime") or drive_file.get("createdTime") or ""
+            size = drive_file.get("size", "")
+        local_time = self.format_drive_time_local(iso_time)
+        size_label = self.format_drive_file_size(size)
+        parts = [name]
+        if local_time:
+            parts.append(local_time)
+        if size_label:
+            parts.append(size_label)
+        return "  /  ".join(parts)
+
     def choose_drive_backup_file(self, service, folder_id, title, prefix):
         files = self.list_drive_files_in_folder(service, folder_id, name_prefix=prefix)
         if not files:
@@ -4372,9 +5005,7 @@ class MainWindow(QMainWindow):
         labels = []
         mapping = {}
         for f in files:
-            size = f.get("size", "")
-            mod = f.get("modifiedTime", "")
-            label = f"{f.get('name', '(no name)')}  /  {mod}  /  {size} bytes"
+            label = self.format_drive_backup_label(f)
             labels.append(label)
             mapping[label] = f
 
@@ -4490,6 +5121,9 @@ class MainWindow(QMainWindow):
             link = uploaded.get("webViewLink", "")
             if name:
                 parts.append(f"\n{self.tr_ui('파일')}: {name}")
+            created_local = self.format_drive_time_local(uploaded.get("createdTime", ""))
+            if created_local:
+                parts.append(f"\n{self.tr_ui('백업 시간')}: {created_local}")
             if link:
                 parts.append(f"\n{self.tr_ui('링크')}: {link}")
         if item_count is not None:
@@ -4594,30 +5228,6 @@ class MainWindow(QMainWindow):
                 "OAuth 토큰은 현재 PC의 로컬 캐시에 저장됩니다. 등록 해제 시 이 토큰을 삭제합니다. Google OAuth 클라이언트 JSON은 Drive API 로그인 시작에만 사용됩니다.",
             )
 
-            client_box = QFrame(dlg)
-            client_box.setObjectName("SettingsItem")
-            client_layout = QVBoxLayout(client_box)
-            client_layout.setContentsMargins(12, 10, 12, 10)
-            client_layout.setSpacing(6)
-
-            title = QLabel(self.tr_ui("Google 로그인"), client_box)
-            title.setObjectName("SettingsItemTitle")
-            client_layout.addWidget(title)
-
-            desc = QLabel(
-                self.tr_ui(
-                    "기본 OAuth 설정이 있으면 JSON 선택 없이 바로 브라우저 로그인을 시작합니다. "
-                    "개발/테스트용 JSON을 직접 쓸 때만 고급 선택을 사용하세요."
-                ),
-                client_box,
-            )
-            desc.setObjectName("SettingsDescription")
-            desc.setWordWrap(True)
-            client_layout.addWidget(desc)
-
-            row = QHBoxLayout()
-            path_label = QLabel("", client_box)
-            path_label.setObjectName("SettingsPath")
             cfg = self.load_cloud_config()
             detected_secret = self.find_default_cloud_client_secret()
             cached_secret = str(cfg.get("client_secret_path") or "")
@@ -4625,53 +5235,22 @@ class MainWindow(QMainWindow):
                 detected_secret = cached_secret
             if detected_secret:
                 ctx["client_secret_path"] = detected_secret
-                path_label.setText(self.tr_ui("OAuth 설정 자동 감지됨"))
+                oauth_desc = "OAuth 설정이 준비되어 있습니다. Google 로그인 버튼을 누르면 브라우저에서 Google 계정 연결을 시작합니다."
             else:
-                path_label.setText(self.tr_ui("OAuth 설정 파일이 없습니다. 고급 선택에서 JSON을 지정하세요."))
-            row.addWidget(path_label, 1)
+                oauth_desc = "OAuth 설정을 찾지 못했습니다. 배포본에 cloud_oauth_client.json이 포함되어 있는지 확인해 주세요."
 
-            select_btn = QPushButton(self.tr_ui("고급 JSON 선택"), client_box)
-            def choose():
-                path = self.select_cloud_client_secret_json(dlg)
-                if path:
-                    ctx["client_secret_path"] = path
-                    path_label.setText(self.tr_ui("사용자 지정 OAuth JSON 선택됨"))
-            select_btn.clicked.connect(choose)
-            row.addWidget(select_btn)
-            client_layout.addLayout(row)
-
-            dep = QLabel(
-                self.tr_ui(
-                    "최종 배포판에서는 EXE 옆 cloud_oauth_client.json 또는 내장 OAuth 설정을 두면 사용자는 Google 로그인만 누르면 됩니다."
-                ),
-                client_box,
+            self._cloud_info_row(
+                layout,
+                "Google 로그인",
+                oauth_desc,
             )
-            dep.setObjectName("SettingsDescription")
-            dep.setWordWrap(True)
-            client_layout.addWidget(dep)
-
-            layout.addWidget(client_box)
 
         def run(dlg, ctx):
             client_secret_path = str(ctx.get("client_secret_path") or "") or self.find_default_cloud_client_secret()
             if not client_secret_path:
-                if not self.ask_yes_no_shortcut(
-                    "클라우드 등록",
-                    "자동 OAuth 설정을 찾지 못했습니다. 개발/테스트용 JSON을 직접 선택할까요?",
-                    yes_text="선택",
-                    no_text="취소",
-                    default_yes=True,
-                    icon=QMessageBox.Icon.Question,
-                    parent=dlg,
-                ):
-                    return
-                client_secret_path = self.select_cloud_client_secret_json(dlg)
-                if client_secret_path:
-                    ctx["client_secret_path"] = client_secret_path
-            if not client_secret_path:
                 self.show_ok_notice(
                     "클라우드 등록",
-                    "Google OAuth 설정이 없어 로그인을 시작할 수 없습니다. EXE 옆 cloud_oauth_client.json을 두거나 고급 JSON 선택을 사용하세요.",
+                    "Google OAuth 설정이 없어 로그인을 시작할 수 없습니다. 배포본에 cloud_oauth_client.json이 포함되어 있는지 확인해 주세요.",
                     parent=dlg,
                 )
                 return
@@ -4689,6 +5268,13 @@ class MainWindow(QMainWindow):
 
             try:
                 cfg = self.run_google_drive_oauth(client_secret_path, parent=dlg)
+            except CloudOAuthCancelled as e:
+                self.show_ok_notice(
+                    "클라우드 등록 취소",
+                    str(e) or "클라우드 등록이 취소되었습니다.",
+                    parent=dlg,
+                )
+                return
             except ImportError as e:
                 QMessageBox.warning(dlg, self.tr_ui("클라우드 등록 준비 필요"), str(e))
                 return
@@ -4732,7 +5318,7 @@ class MainWindow(QMainWindow):
             self._cloud_info_row(
                 layout,
                 "해제 범위",
-                "현재 PC에 저장된 Google Drive OAuth 토큰과 클라우드 설정 캐시를 삭제합니다. 이후 백업/불러오기 기능은 다시 등록해야 사용할 수 있습니다.",
+                "현재 PC에 저장된 Google Drive OAuth 토큰과 클라우드 설정 캐시를 삭제합니다. 이후 클라우드 백업/복원 기능은 다시 등록해야 사용할 수 있습니다.",
             )
             self._cloud_info_row(
                 layout,
@@ -4751,7 +5337,7 @@ class MainWindow(QMainWindow):
             ):
                 return
 
-            revoke_note = ""
+            revoke_log = ""
             try:
                 if self.cloud_token_path().exists():
                     try:
@@ -4759,13 +5345,13 @@ class MainWindow(QMainWindow):
                         creds = Credentials.from_authorized_user_file(str(self.cloud_token_path()), ["https://www.googleapis.com/auth/drive.file"])
                         try:
                             creds.revoke(Request())
-                            revoke_note = "\nGoogle 인증 토큰 해제도 시도했습니다."
-                        except Exception:
-                            revoke_note = "\nGoogle 서버 측 토큰 해제는 실패했지만, 로컬 토큰은 삭제합니다."
-                    except Exception:
-                        revoke_note = "\nGoogle 라이브러리를 사용할 수 없어 로컬 토큰만 삭제합니다."
-            except Exception:
-                revoke_note = ""
+                            revoke_log = "Google 인증 토큰 해제 요청 완료"
+                        except Exception as e:
+                            revoke_log = f"Google 인증 토큰 해제 요청 실패, 로컬 연결 정보만 삭제: {e}"
+                    except Exception as e:
+                        revoke_log = f"Google 라이브러리 로드 실패, 로컬 연결 정보만 삭제: {e}"
+            except Exception as e:
+                revoke_log = f"클라우드 등록 해제 사전 처리 중 예외, 로컬 연결 정보 삭제 진행: {e}"
 
             removed = []
             for p in (self.cloud_token_path(), self.cloud_config_path(), self.cloud_client_secret_path()):
@@ -4773,13 +5359,16 @@ class MainWindow(QMainWindow):
                     if p.exists():
                         p.unlink()
                         removed.append(str(p))
-                except Exception:
-                    pass
+                except Exception as e:
+                    try:
+                        self.log(f"⚠️ 클라우드 연결 정보 삭제 실패: {p} / {e}")
+                    except Exception:
+                        pass
 
             self.cloud_refresh_status_widgets(ctx.get("cloud_status_label"))
             self.show_ok_notice(
                 "클라우드 등록 해제",
-                "클라우드 등록 정보를 삭제했습니다." + revoke_note,
+                "Google Drive 계정 연결이 해제되었습니다.",
                 parent=dlg,
             )
             try:
@@ -4975,165 +5564,161 @@ class MainWindow(QMainWindow):
             min_height=450,
         )
 
-    def cloud_backup_current_project(self):
+    def delete_drive_file_permanently(self, service, file_id):
+        service.files().delete(fileId=file_id).execute()
+
+    def cloud_delete_cache_backups(self):
         def build(layout, dlg, ctx):
             self._cloud_info_row(
                 layout,
-                "백업 대상",
-                "현재 열려 있는 프로젝트의 YSBT 파일 자체를 클라우드에 백업합니다. 작업환경 캐시가 아니라 지금 작업 중인 프로젝트 파일을 보존하는 기능입니다.",
+                "삭제 대상",
+                "Google Drive의 YSB_Translator_Backup/cache_backups 폴더에 저장된 작업환경 캐시 백업 ZIP만 삭제합니다. 프로젝트 파일은 공개 배포판 클라우드 백업 대상이 아닙니다.",
             )
             self._cloud_info_row(
                 layout,
-                "저장 규칙",
-                "저장하지 않은 작업이 있으면 클라우드 백업 전에 먼저 프로젝트 저장 여부를 확인합니다. 저장되지 않은 상태의 프로젝트는 업로드하지 않습니다.",
+                "전체 백업 삭제",
+                "클라우드에 있는 캐시 백업을 전부 삭제합니다. 이 작업은 되돌릴 수 없습니다.",
             )
+            self._cloud_info_row(
+                layout,
+                "최신본만 남기기",
+                "가장 최근에 수정된 캐시 백업 1개만 남기고 나머지 캐시 백업을 삭제합니다.",
+            )
+
         def run(dlg, ctx):
-            if not getattr(self, "project_dir", None):
-                QMessageBox.information(
-                    dlg,
-                    self.tr_ui("현재 프로젝트 클라우드 백업"),
-                    self.tr_ui("현재 열린 프로젝트가 없습니다."),
-                )
+            mode, ok = QInputDialog.getItem(
+                dlg,
+                self.tr_ui("클라우드 백업 삭제"),
+                self.tr_ui("삭제 방식을 선택하세요."),
+                [
+                    self.tr_ui("최신 백업 1개만 남기고 삭제"),
+                    self.tr_ui("전체 백업 삭제"),
+                ],
+                0,
+                False,
+            )
+            if not ok or not mode:
                 return
-            if getattr(self, "has_unsaved_changes", False):
-                if not self.ask_yes_no_shortcut(
-                    "현재 프로젝트 클라우드 백업",
-                    "저장하지 않은 작업이 있습니다. 클라우드 백업 전에 먼저 프로젝트를 저장할까요?",
-                    yes_text="저장",
-                    no_text="취소",
-                    default_yes=True,
-                    icon=QMessageBox.Icon.Warning,
-                    parent=dlg,
-                ):
-                    return
-                self.save_project()
-                if getattr(self, "has_unsaved_changes", False):
-                    return
+
             creds = self.ensure_google_drive_credentials(parent=dlg)
             if creds is None:
                 return
-            package_path = getattr(self, "ysbt_package_path", None)
-            if not package_path or not os.path.exists(str(package_path)):
-                QMessageBox.warning(
-                    dlg,
-                    self.tr_ui("현재 프로젝트 클라우드 백업"),
-                    self.tr_ui("현재 프로젝트 YSBT 파일을 찾을 수 없습니다. 먼저 다른 이름으로 저장 또는 저장을 완료해 주세요."),
-                )
-                return
+
             try:
                 service = self.build_google_drive_service(creds)
-                root_id, cache_folder_id, project_folder_id = self.ensure_cloud_drive_folders(service)
-                local_path = Path(str(package_path))
-                ts = time.strftime("%Y%m%d_%H%M%S")
-                temp_dir = self.cloud_dir() / "project_uploads"
-                temp_dir.mkdir(parents=True, exist_ok=True)
-                upload_path = temp_dir / f"{local_path.stem}_{ts}{local_path.suffix or '.ysbt'}"
-                shutil.copyfile(str(local_path), str(upload_path))
-                uploaded = self.upload_file_to_drive_folder(service, upload_path, project_folder_id, mime_type="application/octet-stream")
+                root_id, cache_folder_id, _ = self.ensure_cloud_drive_folders(service)
+                files = self.list_drive_files_in_folder(service, cache_folder_id, name_prefix="YSB_cache_backup_")
             except Exception as e:
                 QMessageBox.warning(
                     dlg,
-                    self.tr_ui("현재 프로젝트 클라우드 백업 실패"),
-                    self.tr_ui("현재 프로젝트를 클라우드에 백업하지 못했습니다.") + f"\n\n{e}",
+                    self.tr_ui("클라우드 백업 삭제 실패"),
+                    self.tr_ui("클라우드 백업 목록을 불러오지 못했습니다.") + f"\n\n{e}",
                 )
                 return
-            self.show_ok_notice(
-                "현재 프로젝트 클라우드 백업 완료",
-                self.format_drive_upload_result_message(uploaded, local_path=str(upload_path)),
+
+            if not files:
+                QMessageBox.information(
+                    dlg,
+                    self.tr_ui("클라우드 백업 삭제"),
+                    self.tr_ui("삭제할 클라우드 캐시 백업이 없습니다."),
+                )
+                return
+
+            delete_all = mode == self.tr_ui("전체 백업 삭제")
+            if delete_all:
+                targets = list(files)
+                question = self.tr_ui("클라우드의 캐시 백업을 전부 삭제할까요?\n\n삭제 개수: {count}개\n이 작업은 되돌릴 수 없습니다.").format(count=len(targets))
+            else:
+                files_sorted = sorted(files, key=lambda f: str(f.get("modifiedTime") or f.get("createdTime") or ""), reverse=True)
+                keep = files_sorted[0] if files_sorted else None
+                targets = files_sorted[1:]
+                if not targets:
+                    QMessageBox.information(
+                        dlg,
+                        self.tr_ui("클라우드 백업 삭제"),
+                        self.tr_ui("이미 최신 백업 1개만 남아 있습니다."),
+                    )
+                    return
+                question = (
+                    self.tr_ui("최신 캐시 백업 1개만 남기고 나머지를 삭제할까요?")
+                    + "\n\n"
+                    + self.tr_ui("남길 백업")
+                    + f": {keep.get('name', '')}\n"
+                    + self.tr_ui("삭제 개수")
+                    + f": {len(targets)}개\n"
+                    + self.tr_ui("이 작업은 되돌릴 수 없습니다.")
+                )
+
+            if not self.ask_yes_no_shortcut(
+                "클라우드 백업 삭제",
+                question,
+                yes_text="삭제",
+                no_text="취소",
+                default_yes=False,
+                icon=QMessageBox.Icon.Warning,
                 parent=dlg,
-            )
+            ):
+                return
+
+            deleted = 0
+            errors = []
+            for f in targets:
+                try:
+                    self.delete_drive_file_permanently(service, f.get("id"))
+                    deleted += 1
+                except Exception as e:
+                    errors.append(f"{f.get('name', '')}: {e}")
+
+            if errors:
+                QMessageBox.warning(
+                    dlg,
+                    self.tr_ui("클라우드 백업 삭제 일부 실패"),
+                    self.tr_ui("일부 백업을 삭제하지 못했습니다.")
+                    + f"\n\n{self.tr_ui('삭제 성공')}: {deleted}개\n"
+                    + "\n".join(errors[:10]),
+                )
+            else:
+                self.show_ok_notice(
+                    "클라우드 백업 삭제 완료",
+                    self.tr_ui("클라우드 캐시 백업 삭제가 완료되었습니다.") + f"\n\n{self.tr_ui('삭제 개수')}: {deleted}개",
+                    parent=dlg,
+                )
             try:
-                self.log(f"☁️ 프로젝트 백업 업로드 완료: {uploaded.get('name', '')}")
+                self.log(f"☁️ 클라우드 캐시 백업 삭제 완료: {deleted}개")
             except Exception:
                 pass
+
         self._cloud_action_dialog(
-            "현재 프로젝트 클라우드 백업",
-            "현재 열려 있는 프로젝트 파일을 클라우드에 따로 보존하는 전용 창입니다.",
-            "프로젝트 백업",
+            "클라우드 백업 삭제",
+            "Google Drive에 저장된 작업환경 캐시 백업을 정리하는 전용 창입니다. 전체 삭제 또는 최신본 1개만 남기기를 선택할 수 있습니다.",
+            "백업 삭제",
             run,
             build,
-            min_height=420,
+            min_height=470,
+        )
+
+    def cloud_backup_current_project(self):
+        # 공개 배포판에서는 Google Drive 프로젝트 백업 기능을 제공하지 않는다.
+        QMessageBox.information(
+            self,
+            self.tr_ui("기능 제거됨"),
+            self.tr_ui("공개 배포판에서는 Google Drive 프로젝트 백업을 사용하지 않습니다. 프로젝트 파일은 로컬 파일 또는 사용자의 동기화 폴더로 직접 관리해 주세요."),
         )
 
     def cloud_restore_project_from_cloud(self):
-        def build(layout, dlg, ctx):
-            self._cloud_info_row(
-                layout,
-                "불러오기 대상",
-                "클라우드의 project_backups 폴더에 저장된 YSBT 프로젝트 백업을 내려받아 로컬 파일로 저장한 뒤 열 수 있습니다.",
-            )
-            self._cloud_info_row(
-                layout,
-                "저장 규칙",
-                "다운로드한 프로젝트는 사용자가 고른 위치에 .ysbt 파일로 저장합니다. 기존 파일을 덮어쓸 수 있으므로 저장 위치를 확인하세요.",
-            )
-
-        def run(dlg, ctx):
-            creds = self.ensure_google_drive_credentials(parent=dlg)
-            if creds is None:
-                return
-            try:
-                service = self.build_google_drive_service(creds)
-                root_id, cache_folder_id, project_folder_id = self.ensure_cloud_drive_folders(service)
-                selected = self.choose_drive_backup_file(service, project_folder_id, "클라우드에서 프로젝트 불러오기", "")
-                if not selected:
-                    return
-
-                default_name = str(selected.get("name") or "cloud_project.ysbt")
-                if not default_name.lower().endswith(".ysbt"):
-                    default_name += ".ysbt"
-                save_path, _ = QFileDialog.getSaveFileName(
-                    dlg,
-                    self.tr_ui("클라우드 프로젝트 저장 위치"),
-                    default_name,
-                    self.tr_ui("YSBT 프로젝트 (*.ysbt);;모든 파일 (*)"),
-                )
-                if not save_path:
-                    return
-                if not str(save_path).lower().endswith(".ysbt"):
-                    save_path += ".ysbt"
-
-                self.download_drive_file(service, selected.get("id"), save_path)
-            except Exception as e:
-                QMessageBox.warning(
-                    dlg,
-                    self.tr_ui("클라우드에서 프로젝트 불러오기 실패"),
-                    self.tr_ui("클라우드 프로젝트 백업을 내려받지 못했습니다.") + f"\\n\\n{e}",
-                )
-                return
-
-            if self.ask_yes_no_shortcut(
-                "클라우드에서 프로젝트 불러오기",
-                "프로젝트 백업을 내려받았습니다. 지금 열까요?",
-                yes_text="열기",
-                no_text="닫기",
-                default_yes=True,
-                icon=QMessageBox.Icon.Question,
-                parent=dlg,
-            ):
-                try:
-                    self.open_project_path(save_path)
-                    dlg.accept()
-                except Exception as e:
-                    QMessageBox.warning(dlg, self.tr_ui("프로젝트 열기 실패"), str(e))
-            else:
-                self.show_ok_notice("클라우드에서 프로젝트 불러오기", f"저장 완료:\\n{save_path}", parent=dlg)
-
-        self._cloud_action_dialog(
-            "클라우드에서 프로젝트 불러오기",
-            "클라우드에 백업한 YSBT 프로젝트 파일을 로컬로 내려받는 전용 창입니다.",
-            "프로젝트 불러오기",
-            run,
-            build,
-            min_height=430,
+        # 공개 배포판에서는 Google Drive 프로젝트 불러오기 기능을 제공하지 않는다.
+        QMessageBox.information(
+            self,
+            self.tr_ui("기능 제거됨"),
+            self.tr_ui("공개 배포판에서는 클라우드에서 프로젝트 불러오기를 사용하지 않습니다. 프로젝트 파일은 로컬 파일 또는 사용자의 동기화 폴더로 직접 관리해 주세요."),
         )
 
     def open_cloud_overview_dialog(self, include_project_backup=None):
         """홈화면/런처에서 쓰는 클라우드 허브 창.
-        홈화면에서는 열린 프로젝트가 없으므로 현재 프로젝트 백업 항목을 숨긴다.
+        공개 배포판에서는 Google Drive 연동을 작업환경 캐시 백업/복원 전용으로 유지한다.
+        include_project_backup 인자는 이전 버전 호환용으로만 남겨두며 사용하지 않는다.
         """
-        if include_project_backup is None:
-            include_project_backup = bool(getattr(self, "project_dir", None))
+        include_project_backup = False
 
         dlg = QDialog(self)
         dlg.setWindowTitle(self.tr_ui("클라우드"))
@@ -5151,7 +5736,7 @@ class MainWindow(QMainWindow):
         title.setObjectName("SettingsDialogTitle")
         root.addWidget(title)
 
-        intro = QLabel(self.tr_ui("클라우드 메뉴는 작업환경 캐시 백업/복원과 프로젝트 백업을 관리합니다. 홈화면에서는 프로젝트가 열려 있지 않으므로 현재 프로젝트 백업 항목은 표시하지 않습니다.") + "\n" + self.tr_ui("현재 상태") + ": " + self.cloud_status_text(), dlg)
+        intro = QLabel(self.tr_ui("클라우드 메뉴는 작업환경 캐시 백업/복원과 백업 삭제를 관리합니다.") + "\n" + self.tr_ui("현재 상태") + ": " + self.cloud_status_text(), dlg)
         intro.setObjectName("SettingsDescription")
         intro.setWordWrap(True)
         self._cloud_overview_status_label = intro
@@ -5169,7 +5754,7 @@ class MainWindow(QMainWindow):
 
         cloud_block, cloud_layout = self._settings_block(
             "클라우드",
-            "Google Drive 같은 외부 저장소와 연결해 작업환경 캐시를 보존하고, 필요할 때 다시 불러오는 영역입니다.",
+            "Google Drive와 연결해 작업환경 캐시를 보존하고, 필요할 때 다시 불러오거나 오래된 백업을 정리하는 영역입니다.",
         )
 
         def add_cloud_item(title_text, description_text, button_text, slot):
@@ -5197,7 +5782,7 @@ class MainWindow(QMainWindow):
 
         add_cloud_item(
             "클라우드 등록",
-            "Google Drive 계정을 연결합니다. 등록 후 캐시 백업, 캐시 불러오기, 프로젝트 백업 기능을 사용할 수 있게 됩니다.",
+            "Google Drive 계정을 연결합니다. 등록 후 작업환경 캐시 백업, 캐시 불러오기, 백업 삭제 기능을 사용할 수 있게 됩니다.",
             "등록",
             self.cloud_register,
         )
@@ -5219,19 +5804,11 @@ class MainWindow(QMainWindow):
             "캐시 불러오기",
             self.cloud_restore_cache,
         )
-        if include_project_backup:
-            add_cloud_item(
-                "현재 프로젝트 클라우드에 백업하기",
-                "현재 열려 있는 프로젝트의 YSBT 파일을 클라우드에 백업합니다. 작업환경 캐시가 아니라 지금 작업 중인 프로젝트 파일 자체를 보존하는 기능입니다.",
-                "프로젝트 백업",
-                self.cloud_backup_current_project,
-            )
-
         add_cloud_item(
-            "클라우드에서 프로젝트 불러오기",
-            "클라우드에 백업한 YSBT 프로젝트 파일을 로컬로 내려받아 다시 열 수 있습니다.",
-            "프로젝트 불러오기",
-            self.cloud_restore_project_from_cloud,
+            "클라우드 백업 삭제",
+            "클라우드에 저장된 작업환경 캐시 백업을 정리합니다. 전체 백업 삭제 또는 최신 백업 1개만 남기기를 선택할 수 있습니다.",
+            "백업 삭제",
+            self.cloud_delete_cache_backups,
         )
 
         body_layout.addWidget(cloud_block)
@@ -6080,8 +6657,7 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         cloud_menu.addAction(self.actions["cloud_cache_backup"])
         cloud_menu.addAction(self.actions["cloud_cache_restore"])
         cloud_menu.addSeparator()
-        cloud_menu.addAction(self.actions["cloud_project_backup"])
-        cloud_menu.addAction(self.actions["cloud_project_restore"])
+        cloud_menu.addAction(self.actions["cloud_delete_backups"])
 
         option_menu = menubar.addMenu(self.tr_ui("옵션")); self.option_menu = option_menu
         option_menu.addAction(self.actions["option_api_settings"])
@@ -6159,13 +6735,23 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         self.act_undo.triggered.connect(self.handle_general_undo)
         tb.addAction(self.act_undo)
 
-        self.act_magic = QAction("*", self)
+        self.act_magic = QAction("⭐", self)
         self.act_magic.triggered.connect(lambda: self.set_tool('magic_wand'))
         tb.addAction(self.act_magic)
+        try:
+            _magic_btn = tb.widgetForAction(self.act_magic)
+            if _magic_btn is not None:
+                _magic_btn.setStyleSheet("font-size:18px; color:#ffd43b;")
+        except Exception:
+            pass
 
         self.act_mask_wrap = QAction("🩹", self)
         self.act_mask_wrap.triggered.connect(lambda: self.set_tool('mask_wrap'))
         tb.addAction(self.act_mask_wrap)
+
+        self.act_mask_cut = QAction("🔪", self)
+        self.act_mask_cut.triggered.connect(lambda: self.set_tool('mask_cut'))
+        tb.addAction(self.act_mask_cut)
 
         # QCheckBox를 QToolBar에 직접 넣으면 QToolBar 레이아웃 + QCheckBox indicator가 따로 놀아
         # 다른 도구 버튼들과 여백/정렬이 맞지 않는다.
@@ -6313,6 +6899,31 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         self.mask_wrap_bar.hide()
         vl.addWidget(self.mask_wrap_bar)
         self.set_mask_wrap_shape("rect", silent=True)
+
+        self.mask_cut_bar = QWidget()
+        mask_cut_bar_lay = QHBoxLayout(self.mask_cut_bar)
+        mask_cut_bar_lay.setContentsMargins(6, 4, 6, 4)
+        mask_cut_bar_lay.setSpacing(6)
+        self.btn_mask_cut_rect = QPushButton(self.tr_ui("▭ 사각형"))
+        self.btn_mask_cut_rect.setCheckable(True)
+        self.btn_mask_cut_rect.clicked.connect(lambda checked=False: self.set_mask_cut_shape("rect"))
+        self.btn_mask_cut_free = QPushButton(self.tr_ui("✎ 자유형"))
+        self.btn_mask_cut_free.setCheckable(True)
+        self.btn_mask_cut_free.clicked.connect(lambda checked=False: self.set_mask_cut_shape("free"))
+        self.sb_mask_cut_px = QSpinBox()
+        self.sb_mask_cut_px.setRange(1, 200)
+        self.sb_mask_cut_px.setValue(8)
+        self.sb_mask_cut_px.setSuffix(" px")
+        mask_cut_bar_lay.addWidget(QLabel(self.tr_ui("마스크 커팅")))
+        mask_cut_bar_lay.addWidget(self.btn_mask_cut_rect)
+        mask_cut_bar_lay.addWidget(self.btn_mask_cut_free)
+        mask_cut_bar_lay.addWidget(QLabel(self.tr_ui("커팅 폭")))
+        mask_cut_bar_lay.addWidget(self.sb_mask_cut_px)
+        mask_cut_bar_lay.addWidget(QLabel(self.tr_ui("선택 영역 밖 경계를 지정 픽셀만큼 잘라 붙어 있는 마스크를 분리합니다.")))
+        mask_cut_bar_lay.addStretch()
+        self.mask_cut_bar.hide()
+        vl.addWidget(self.mask_cut_bar)
+        self.set_mask_cut_shape("rect", silent=True)
 
         vl.addWidget(self.view)
         ll.addWidget(vc)
@@ -7020,12 +7631,12 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
             "cloud_unregister": "클라우드 등록 해제",
             "cloud_cache_backup": "클라우드로 캐시 백업",
             "cloud_cache_restore": "클라우드에서 캐시 불러오기",
-            "cloud_project_backup": "현재 프로젝트 클라우드에 백업하기",
-            "cloud_project_restore": "클라우드에서 프로젝트 불러오기",
+            "cloud_delete_backups": "클라우드 백업 삭제",
             "paint_magic_fill": "마스킹 칠하기",
             "paint_mask_wrap": "마스크 랩핑",
-            "paint_mask_wrap_rect": "마스크 랩핑 사각형",
-            "paint_mask_wrap_free": "마스크 랩핑 자유형",
+            "paint_mask_cut": "마스크 커팅",
+            "paint_mask_wrap_rect": "마스크 선택 사각형",
+            "paint_mask_wrap_free": "마스크 선택 자유형",
             "paint_mask_toggle": "마스크 ON/OFF",
             "view_text_toggle": "텍스트 표시 ON/OFF",
             "final_paint_color": "최종 페인팅 색상",
@@ -7130,6 +7741,10 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
                 self.btn_mask_wrap_rect.setText(self.tr_ui("▭ 사각형"))
             if hasattr(self, "btn_mask_wrap_free"):
                 self.btn_mask_wrap_free.setText(self.tr_ui("✎ 자유형"))
+            if hasattr(self, "btn_mask_cut_rect"):
+                self.btn_mask_cut_rect.setText(self.tr_ui("▭ 사각형"))
+            if hasattr(self, "btn_mask_cut_free"):
+                self.btn_mask_cut_free.setText(self.tr_ui("✎ 자유형"))
             if hasattr(self, "btn_translate"):
                 self.btn_translate.setText(self.tr_ui("🌐 번역"))
             if hasattr(self, "btn_inpaint"):
@@ -7215,7 +7830,10 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         self.force_theme_repaint_after_apply()
 
     def refresh_top_bars_for_theme(self):
-        """테마 변경 직후 상단 메뉴/로그창/네이티브 제목 표시줄을 강제로 다시 칠한다."""
+        """Qt 내부 상단 영역만 현재 테마에 맞춘다.
+        Windows 네이티브 제목 표시줄은 건드리지 않는다. 네이티브 프레임을 강제로
+        다시 그리면 최소화/복원/전체화면 전환 뒤 포커스와 입력 상태가 꼬일 수 있다.
+        """
         light = self.is_light_theme()
         try:
             mb = self.menuBar()
@@ -7233,7 +7851,6 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
                         "QMenuBar::item:selected { background:#303640; color:#ffffff; }"
                     )
                 mb.update()
-                mb.repaint()
         except Exception:
             pass
 
@@ -7243,42 +7860,18 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
                     self.log_w.setStyleSheet("background:#ffffff;color:#25704a;border:1px solid #dfe5ef;border-radius:0px;")
                 else:
                     self.log_w.setStyleSheet("background:#1f2228;color:#8ee0a1;border:1px solid #3b414c;border-radius:0px;")
-        except Exception:
-            pass
-
-        try:
-            self.schedule_native_title_bar_theme(self, dark=not light)
-        except Exception:
-            pass
-        try:
-            QApplication.processEvents()
+                self.log_w.update()
         except Exception:
             pass
 
     def force_theme_repaint_after_apply(self):
+        # 안전 원칙: 테마 적용은 1회만 수행한다.
+        # 지연 타이머, processEvents, activateWindow/raise_, 네이티브 프레임 Redraw는 사용하지 않는다.
         self.refresh_top_bars_for_theme()
-
-        def refresh_and_nudge():
-            try:
-                self.refresh_top_bars_for_theme()
-                self.update()
-                self.repaint()
-                if hasattr(self, "menuBar") and self.menuBar():
-                    self.menuBar().update()
-                    self.menuBar().repaint()
-                # 포커스를 뺐다가 다시 주면 갱신되던 현상을 코드에서 가볍게 재현한다.
-                self.clearFocus()
-                self.activateWindow()
-                self.raise_()
-                QApplication.processEvents()
-            except Exception:
-                pass
-
-        for delay in (0, 30, 80, 200, 600, 1200):
-            try:
-                QTimer.singleShot(delay, refresh_and_nudge)
-            except Exception:
-                pass
+        try:
+            self.update()
+        except Exception:
+            pass
 
     def open_theme_settings_dialog(self):
         """옵션 > 테마 설정."""
@@ -7338,113 +7931,19 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         self.log(f"🎨 테마 변경: {'화이트 테마' if selected == THEME_LIGHT else '다크 테마'}")
 
     def apply_native_title_bar_theme(self, widget=None, dark=None):
-        """Windows 네이티브 제목 표시줄 색상을 현재 테마와 맞춘다.
-        실패해도 UI 기능에는 영향이 없도록 조용히 무시한다.
+        """Windows 네이티브 제목 표시줄 테마 적용은 공개판에서 비활성화한다.
+
+        DwmSetWindowAttribute/SetWindowPos/RedrawWindow 같은 비클라이언트 영역 갱신은
+        Windows와 Qt의 포커스 이벤트를 계속 흔들 수 있다. 색상 일치보다 입력 안정성을
+        우선하므로 제목 표시줄은 OS 기본 동작에 맡긴다.
         """
-        if widget is None:
-            widget = self
-        if dark is None:
-            dark = not self.is_light_theme()
-
-        try:
-            if not sys.platform.startswith("win"):
-                return
-            import ctypes
-
-            hwnd = int(widget.winId())
-            value = ctypes.c_int(1 if dark else 0)
-            dwm = ctypes.windll.dwmapi
-
-            # Windows 10/11 dark title bar attribute. 버전에 따라 19/20 중 하나가 먹는다.
-            for attr in (20, 19):
-                try:
-                    dwm.DwmSetWindowAttribute(
-                        ctypes.c_void_p(hwnd),
-                        ctypes.c_uint(attr),
-                        ctypes.byref(value),
-                        ctypes.sizeof(value),
-                    )
-                except Exception:
-                    pass
-
-            def colorref(hex_color):
-                h = str(hex_color or "#000000").lstrip("#")
-                r = int(h[0:2], 16)
-                g = int(h[2:4], 16)
-                b = int(h[4:6], 16)
-                return ctypes.c_uint((b << 16) | (g << 8) | r)
-
-            # Windows 11 caption/text/border color. 지원 안 되는 환경에서는 실패해도 무시.
-            # 다크 테마의 제목 표시줄은 메인 배경색(#202226)에 맞춘다.
-            caption = colorref("#202226" if dark else "#ffffff")
-            text_color = colorref("#ffffff" if dark else "#111827")
-            border_color = colorref("#202226" if dark else "#ffffff")
-            for attr, val in ((35, caption), (36, text_color), (34, border_color)):
-                try:
-                    dwm.DwmSetWindowAttribute(
-                        ctypes.c_void_p(hwnd),
-                        ctypes.c_uint(attr),
-                        ctypes.byref(val),
-                        ctypes.sizeof(val),
-                    )
-                except Exception:
-                    pass
-
-            # 네이티브 프레임은 Show/ThemeChange 직후 DWM 값이 덮일 수 있어
-            # 프레임 변경/비클라이언트 활성 갱신/즉시 redraw를 같이 요청한다.
-            try:
-                user32 = ctypes.windll.user32
-                SWP_NOMOVE = 0x0002
-                SWP_NOSIZE = 0x0001
-                SWP_NOZORDER = 0x0004
-                SWP_NOACTIVATE = 0x0010
-                SWP_FRAMECHANGED = 0x0020
-                user32.SetWindowPos(
-                    ctypes.c_void_p(hwnd),
-                    None,
-                    0,
-                    0,
-                    0,
-                    0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-                )
-                WM_NCACTIVATE = 0x0086
-                user32.SendMessageW(ctypes.c_void_p(hwnd), WM_NCACTIVATE, 0, 0)
-                user32.SendMessageW(ctypes.c_void_p(hwnd), WM_NCACTIVATE, 1, 0)
-                RDW_INVALIDATE = 0x0001
-                RDW_UPDATENOW = 0x0100
-                RDW_ALLCHILDREN = 0x0080
-                RDW_FRAME = 0x0400
-                user32.RedrawWindow(
-                    ctypes.c_void_p(hwnd),
-                    None,
-                    None,
-                    RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN | RDW_FRAME,
-                )
-            except Exception:
-                pass
-        except Exception:
-            pass
+        return
 
     def schedule_native_title_bar_theme(self, widget=None, dark=None):
-        """제목 표시줄 색상 적용은 창 생성/표시 직후 타이밍에 따라 먹지 않을 수 있어 지연 재시도를 건다."""
-        if widget is None:
-            widget = self
-        if dark is None:
-            dark = not self.is_light_theme()
-
-        def apply_once(w=widget, d=dark):
-            try:
-                self.apply_native_title_bar_theme(w, dark=d)
-            except Exception:
-                pass
-
-        apply_once()
-        for delay in (0, 50, 200, 600):
-            try:
-                QTimer.singleShot(delay, apply_once)
-            except Exception:
-                pass
+        """네이티브 제목 표시줄 지연 갱신 비활성화.
+        최소화/복원/전체화면 전환 뒤 버벅임과 먹통을 막기 위해 아무 작업도 하지 않는다.
+        """
+        return
 
     def apply_tooltip_theme(self, light=None):
         """QToolTip은 OS/Qt 기본 팔레트 영향을 많이 받아 글자색이 흐려질 수 있다.
@@ -12565,6 +13064,108 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         self.close_current_project_state_for_switch()
         return True
 
+    def setup_external_open_queue_monitor(self):
+        """YSB_FileOpener가 기록한 .ysbt 열기 요청 큐를 감시한다."""
+        try:
+            self.write_external_open_runtime_info()
+        except Exception:
+            pass
+
+        self._external_open_queue_timer = QTimer(self)
+        self._external_open_queue_timer.setInterval(350)
+        self._external_open_queue_timer.timeout.connect(self.process_external_open_queue)
+        self._external_open_queue_timer.start()
+
+        self._external_runtime_timer = QTimer(self)
+        self._external_runtime_timer.setInterval(5000)
+        self._external_runtime_timer.timeout.connect(self.write_external_open_runtime_info)
+        self._external_runtime_timer.start()
+
+        QTimer.singleShot(700, self.process_external_open_queue)
+
+    def write_external_open_runtime_info(self):
+        """경량 런처가 메인 앱 실행 여부를 빠르게 판단할 수 있게 pid 정보를 남긴다."""
+        try:
+            path = ysb_main_runtime_info_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            data = {
+                "pid": os.getpid(),
+                "exe": str(Path(sys.executable).resolve()),
+                "time": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                "queue": str(ysb_open_queue_path()),
+            }
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(path)
+        except Exception:
+            pass
+
+    def cleanup_external_open_runtime_info(self):
+        """정상 종료 시 런처용 pid 정보를 정리한다. 실패해도 종료는 막지 않는다."""
+        try:
+            path = ysb_main_runtime_info_path()
+            if path.exists():
+                try:
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                    if int(data.get("pid") or -1) != os.getpid():
+                        return
+                except Exception:
+                    pass
+                path.unlink()
+        except Exception:
+            pass
+
+    def process_external_open_queue(self):
+        """open_queue.jsonl에 쌓인 .ysbt 열기 요청을 기존 창에서 처리한다."""
+        queue_path = ysb_open_queue_path()
+        if not queue_path.exists():
+            return
+        try:
+            processing_path = queue_path.with_suffix(f".processing.{os.getpid()}.{int(time.time() * 1000)}")
+            try:
+                queue_path.replace(processing_path)
+            except FileNotFoundError:
+                return
+            except Exception:
+                # 다른 프로세스가 쓰는 순간이면 다음 타이머에서 다시 처리한다.
+                return
+
+            try:
+                raw = processing_path.read_text(encoding="utf-8", errors="replace")
+            finally:
+                try:
+                    processing_path.unlink()
+                except Exception:
+                    pass
+
+            for line in raw.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                command = str(payload.get("command") or "activate")
+                if command == "activate":
+                    self.handle_single_instance_payload({"command": "activate", "source": "file-opener-queue"})
+                    continue
+                if command != "open":
+                    continue
+                path = str(payload.get("path") or "")
+                if not path:
+                    continue
+                if not (path.lower().endswith(YSB_EXTENSION) or os.path.basename(path).lower() == PROJECT_FILENAME):
+                    continue
+                self.handle_single_instance_payload({"command": "open", "path": path, "source": "file-opener-queue"})
+        except Exception as e:
+            try:
+                self.log(f"⚠️ 외부 열기 큐 처리 실패: {e}")
+            except Exception:
+                pass
+
     def handle_single_instance_payload(self, payload):
         """두 번째 실행 프로세스에서 넘어온 메시지를 현재 창에서 처리한다."""
         self.force_app_focus(reason="external request")
@@ -12692,8 +13293,7 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
                 ".ysbt 확장자가 다른 위치의 역식붕이 툴에 연결되어 있습니다.\n"
                 "현재 실행 중인 프로그램으로 연결을 갱신할까요?\n\n"
                 f"현재 등록된 실행 명령:\n{registered}\n\n"
-                f"새로 등록할 실행 명령:\n{get_association_command()}\n\n"
-                "이 작업은 Windows의 확장자 연결 정보만 덮어씁니다. 기존 .ysbt 프로젝트 파일은 변경되지 않습니다."
+                "이 작업은 Windows의 확장자 연결 정보만 현재 프로그램으로 덮어씁니다. 기존 .ysbt 프로젝트 파일은 변경되지 않습니다."
             )
         else:
             message = (
@@ -13620,6 +14220,7 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
                 return
 
             if getattr(self, "_closing_confirmed", False):
+                self.cleanup_external_open_runtime_info()
                 event.accept()
                 return
 
@@ -13682,6 +14283,7 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
                 except Exception as e:
                     self.log(f"⚠️ 작업 캐시 정리 실패: {e}")
 
+            self.cleanup_external_open_runtime_info()
             self._closing_confirmed = True
             event.accept()
         except Exception as e:
@@ -13830,6 +14432,116 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         finally:
             self.end_busy_state("프로젝트 저장")
 
+    def ensure_save_as_output_parent(self, path_abs: str):
+        """다른 이름으로 저장 대상 폴더가 없을 때 먼저 만든다."""
+        parent = os.path.dirname(os.path.abspath(str(path_abs or "")))
+        if parent and not os.path.isdir(parent):
+            os.makedirs(parent, exist_ok=True)
+
+    def _write_image_for_save_as_fallback(self, img, dst_path: str) -> bool:
+        """원본 이미지 경로가 사라진 경우 메모리 이미지/작업 이미지를 새 저장용 파일로 복구한다."""
+        if img is None:
+            return False
+        try:
+            os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+            ext = Path(dst_path).suffix.lower()
+            if ext not in (".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff"):
+                ext = ".png"
+                dst_path = str(Path(dst_path).with_suffix(ext))
+
+            if isinstance(img, (bytes, bytearray)):
+                with open(dst_path, "wb") as f:
+                    f.write(img)
+                return os.path.exists(dst_path) and os.path.getsize(dst_path) > 0
+
+            if isinstance(img, np.ndarray):
+                encode_ext = ".jpg" if ext == ".jpeg" else ext
+                ok, buf = cv2.imencode(encode_ext, img)
+                if ok:
+                    buf.tofile(dst_path)
+                    return os.path.exists(dst_path) and os.path.getsize(dst_path) > 0
+        except Exception:
+            return False
+        return False
+
+    def prepare_save_as_paths_for_store(self, target_project_dir: str):
+        """Save As용 이미지 경로 목록을 만든다.
+
+        ProjectStore.save()는 원본 이미지 파일이 실제 디스크에 있어야 새 프로젝트 폴더로 복사할 수 있다.
+        그런데 작업 폴더 이동/임시 캐시 정리/구버전 경로 문제로 self.paths의 일부가 사라진 경우
+        다른 이름으로 저장이 [WinError 3]로 실패할 수 있다.
+
+        이 함수는 저장 전에 각 이미지 경로를 확인하고,
+        경로가 없으면 현재 프로젝트 images 폴더나 메모리의 ori/working_source로 복구한다.
+        """
+        prepared = list(self.paths or [])
+        image_dir = os.path.join(str(target_project_dir), "images")
+        os.makedirs(image_dir, exist_ok=True)
+
+        project_images_dir = os.path.join(str(self.project_dir or ""), "images")
+        known_exts = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff")
+
+        for i, src in enumerate(prepared):
+            src_text = str(src or "")
+            if src_text and os.path.exists(src_text):
+                continue
+
+            candidates = []
+            if src_text:
+                candidates.append(src_text)
+                if self.project_dir and not os.path.isabs(src_text):
+                    candidates.append(os.path.join(str(self.project_dir), src_text))
+                if self.project_dir:
+                    candidates.append(os.path.join(str(self.project_dir), "images", os.path.basename(src_text)))
+
+            if os.path.isdir(project_images_dir):
+                try:
+                    for ext in known_exts:
+                        candidates.append(os.path.join(project_images_dir, f"{i + 1:04d}{ext}"))
+                except Exception:
+                    pass
+
+            found = None
+            for cand in candidates:
+                try:
+                    if cand and os.path.exists(cand):
+                        found = os.path.abspath(cand)
+                        break
+                except Exception:
+                    pass
+
+            if found:
+                prepared[i] = found
+                continue
+
+            curr = self.data.get(i, {}) if isinstance(self.data, dict) else {}
+            ext = Path(src_text).suffix.lower() if src_text else ".png"
+            if ext not in known_exts:
+                ext = ".png"
+            dst = os.path.join(image_dir, f"{i + 1:04d}{ext}")
+
+            recovered = False
+            img = curr.get("ori") if isinstance(curr, dict) else None
+            if img is not None:
+                recovered = self._write_image_for_save_as_fallback(img, dst)
+
+            if not recovered and isinstance(curr, dict):
+                working_source = curr.get("working_source")
+                if working_source is not None:
+                    recovered = self._write_image_for_save_as_fallback(working_source, dst)
+
+            if not recovered:
+                raise FileNotFoundError(
+                    "다른 이름으로 저장할 원본 이미지 경로를 찾지 못했습니다.\n"
+                    f"페이지: {i + 1}\n"
+                    f"기존 경로: {src_text or '(비어 있음)'}"
+                )
+
+            prepared[i] = dst
+
+        return prepared
+
+
     def save_project_as(self):
         if not self.guard_project_action("다른 이름으로 저장"):
             return
@@ -13870,9 +14582,12 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
             new_project_dir = self.workspace_project_dir(project_name, code=new_uuid[:8], append_code=True)
 
             try:
+                self.ensure_save_as_output_parent(path_abs)
                 new_store = ProjectStore(new_project_dir)
-                # ProjectStore.save()는 paths를 새 작업 폴더 내부 이미지 경로로 고정한다.
-                self.save_project_store(new_store)
+                # ProjectStore.save()는 전달받은 paths를 새 작업 폴더 내부 이미지 경로로 고정한다.
+                # 실패 시 기존 self.paths가 오염되지 않도록 복사본을 사용하고, 성공 후에만 반영한다.
+                save_as_paths = self.prepare_save_as_paths_for_store(new_project_dir)
+                self.save_project_store(new_store, paths=save_as_paths)
                 new_store.write_manifest(package_source=path_abs, project_name=project_name, project_uuid=new_uuid)
                 package_project(new_project_dir, path_abs, project_name=project_name, project_uuid=new_uuid)
             except Exception as e:
@@ -13881,6 +14596,7 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
                 return
 
             # 현재 작업은 새 파일/새 작업 폴더로 전환한다.
+            self.paths = save_as_paths
             self.project_dir = new_project_dir
             self.project_store = ProjectStore(new_project_dir)
             self.ysbt_package_path = path_abs
@@ -15544,6 +16260,32 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
             else:
                 self.log("🩹 마스크 랩핑 모드: 자유형")
 
+    def set_mask_cut_shape(self, shape, silent=False):
+        shape = "free" if str(shape) == "free" else "rect"
+        try:
+            self.view.mask_cut_shape = shape
+            self.view.clear_mask_cut_preview()
+        except Exception:
+            pass
+        for btn, active in ((getattr(self, "btn_mask_cut_rect", None), shape == "rect"), (getattr(self, "btn_mask_cut_free", None), shape == "free")):
+            if btn is None:
+                continue
+            try:
+                btn.blockSignals(True)
+                btn.setChecked(active)
+                btn.blockSignals(False)
+                if active:
+                    btn.setStyleSheet("font-weight:bold; background:#c2410c; color:white;")
+                else:
+                    btn.setStyleSheet("opacity:0.7;")
+            except Exception:
+                pass
+        if not silent:
+            if shape == "rect":
+                self.log(self.tr_ui("🔪 마스크 커팅 모드: 사각형"))
+            else:
+                self.log(self.tr_ui("🔪 마스크 커팅 모드: 자유형"))
+
     def apply_mask_wrapping(self, region_mask):
         """선택한 영역 안의 분리된 마스크 덩어리들을 하나의 채움 영역으로 감싸준다."""
         try:
@@ -15558,7 +16300,7 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
             return
         before = self.view.get_mask_np()
         if before is None:
-            self.log("⚠️ 현재 탭에 마스크 레이어가 없습니다.")
+            self.log(self.tr_ui("⚠️ 현재 탭에 마스크 레이어가 없습니다."))
             return
 
         try:
@@ -15604,6 +16346,80 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
             self.log(f"🩹 마스크 랩핑 완료: {len(comps)}개 마스크 덩어리를 1개 영역으로 감쌈")
         except Exception as e:
             self.log(f"⚠️ 마스크 랩핑 실패: {e}")
+
+
+    def apply_mask_cutting(self, region_mask):
+        """선택 영역 내부는 보존하고, 선택 영역 바깥 경계 주변의 마스크를 지정 px만큼 잘라낸다."""
+        try:
+            mode = int(self.cb_mode.currentIndex())
+        except Exception:
+            mode = -1
+        if mode not in (2, 3):
+            self.log(self.tr_ui("⚠️ 마스크 커팅은 텍스트 마스크/페인팅 마스크 탭에서 사용하세요."))
+            return
+        if region_mask is None:
+            self.log(self.tr_ui("⚠️ 마스크 커팅 영역이 비어 있습니다."))
+            return
+
+        before = self.view.get_mask_np()
+        if before is None:
+            self.log(self.tr_ui("⚠️ 현재 탭에 마스크 레이어가 없습니다."))
+            return
+
+        try:
+            cut_px = int(getattr(self, "sb_mask_cut_px", None).value()) if hasattr(self, "sb_mask_cut_px") else 8
+        except Exception:
+            cut_px = 8
+        cut_px = max(1, min(200, int(cut_px)))
+
+        try:
+            mask = (before > 0).astype(np.uint8) * 255
+            region = (region_mask > 0).astype(np.uint8) * 255
+            if mask.shape[:2] != region.shape[:2]:
+                region = cv2.resize(region, (mask.shape[1], mask.shape[0]), interpolation=cv2.INTER_NEAREST)
+
+            kernel_size = cut_px * 2 + 1
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+            expanded = cv2.dilate(region, kernel, iterations=1)
+            cut_band = cv2.bitwise_and(expanded, cv2.bitwise_not(region))
+
+            if np.count_nonzero(cut_band) <= 0:
+                self.log(self.tr_ui("⚠️ 마스크 커팅으로 제거할 외곽 영역이 없습니다."))
+                return
+
+            target_pixels = cv2.bitwise_and(mask, cut_band)
+            removed = int(np.count_nonzero(target_pixels))
+            if removed <= 0:
+                self.log(self.tr_ui("⚠️ 지정한 커팅 영역에 제거할 마스크가 없습니다."))
+                return
+
+            try:
+                self.commit_current_page_ui_to_data(include_mask=True)
+                self.push_project_undo("마스크 커팅")
+            except Exception:
+                pass
+
+            cut = mask.copy()
+            cut[cut_band > 0] = 0
+
+            if np.array_equal(cut, mask):
+                self.log(self.tr_ui("⚠️ 마스크 커팅으로 변경된 영역이 없습니다."))
+                return
+
+            color = QColor(0, 0, 255, 150) if mode == 3 else QColor(255, 0, 0, 150)
+            self.view.set_user_mask_np(cut, color)
+            self.on_view_mask_edited()
+            lang = normalize_ui_language(getattr(self, "ui_language", None) or current_ui_language())
+            if lang == LANG_EN:
+                self.log(f"🔪 Mask cutting complete: outer {cut_px}px / {removed} px removed")
+            else:
+                self.log(f"🔪 마스크 커팅 완료: 외곽 {cut_px}px / {removed} px 제거")
+        except Exception as e:
+            lang = normalize_ui_language(getattr(self, "ui_language", None) or current_ui_language())
+            if lang == LANG_EN:
+                self.log(f"⚠️ Mask cutting failed: {e}")
+            else:
+                self.log(f"⚠️ 마스크 커팅 실패: {e}")
 
     def magic_wand_pick(self, x, y):
         if self.cb_mode.currentIndex() not in [2, 3]:
@@ -15712,7 +16528,7 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
             return
 
         if self.view.user_mask_item is None:
-            self.log("⚠️ 현재 탭에 마스크 레이어가 없습니다.")
+            self.log(self.tr_ui("⚠️ 현재 탭에 마스크 레이어가 없습니다."))
             return
 
         try:
@@ -15751,6 +16567,9 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         if m == 'mask_wrap' and mode not in [2, 3]:
             self.log("⚠️ 마스크 랩핑은 텍스트 마스크/페인팅 마스크 탭에서 사용하세요.")
             return
+        if m == 'mask_cut' and mode not in [2, 3]:
+            self.log(self.tr_ui("⚠️ 마스크 커팅은 텍스트 마스크/페인팅 마스크 탭에서 사용하세요."))
+            return
         if m == 'final_text' and mode != 4:
             self.log("⚠️ 텍스트 도구는 최종화면에서만 사용할 수 있습니다.")
             return
@@ -15774,10 +16593,14 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
             self.magic_wand_bar.setVisible(m == 'magic_wand' and mode in [2, 3])
         if hasattr(self, "mask_wrap_bar"):
             self.mask_wrap_bar.setVisible(m == 'mask_wrap' and mode in [2, 3])
+        if hasattr(self, "mask_cut_bar"):
+            self.mask_cut_bar.setVisible(m == 'mask_cut' and mode in [2, 3])
         if m != 'magic_wand':
             self.clear_magic_wand_selection()
         if m != 'mask_wrap' and hasattr(self.view, "clear_mask_wrap_preview"):
             self.view.clear_mask_wrap_preview()
+        if m != 'mask_cut' and hasattr(self.view, "clear_mask_cut_preview"):
+            self.view.clear_mask_cut_preview()
 
         self.update_final_paint_option_bar_visibility()
 
@@ -15791,6 +16614,8 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
             self.log("🧼 도구: 지우개")
         elif m == 'mask_wrap':
             self.log("🩹 도구: 마스크 랩핑")
+        elif m == 'mask_cut':
+            self.log(self.tr_ui("🔪 도구: 마스크 커팅"))
         elif m is None:
             self.log("✋ 도구: 이동")
 
@@ -17662,6 +18487,7 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
             "paint_magic_select", "paint_magic_expand",
             "paint_magic_tolerance_inc", "paint_magic_tolerance_dec",
             "paint_magic_expand_inc", "paint_magic_expand_dec",
+            "paint_mask_cut",
             "paint_brush", "paint_erase", "paint_move",
             "paint_zoom_out", "paint_zoom_in", "paint_reanalyze", "paint_undo", "paint_redo",
             "final_paint_color", "final_paint_to_background", "final_text_tool",
@@ -17694,12 +18520,21 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         if self._event_matches_shortcut(event, "paint_mask_wrap"):
             self.set_tool('mask_wrap')
             return
-        if getattr(self.view, "draw_mode", None) == 'mask_wrap':
+        if self._event_matches_shortcut(event, "paint_mask_cut"):
+            self.set_tool('mask_cut')
+            return
+        if getattr(self.view, "draw_mode", None) in ('mask_wrap', 'mask_cut'):
             if self._event_matches_shortcut(event, "paint_mask_wrap_rect"):
-                self.set_mask_wrap_shape('rect')
+                if getattr(self.view, "draw_mode", None) == 'mask_cut':
+                    self.set_mask_cut_shape('rect')
+                else:
+                    self.set_mask_wrap_shape('rect')
                 return
             if self._event_matches_shortcut(event, "paint_mask_wrap_free"):
-                self.set_mask_wrap_shape('free')
+                if getattr(self.view, "draw_mode", None) == 'mask_cut':
+                    self.set_mask_cut_shape('free')
+                else:
+                    self.set_mask_wrap_shape('free')
                 return
 
         if self._event_matches_shortcut(event, "work_tab_cycle"):
@@ -17859,13 +18694,10 @@ if __name__ == "__main__":
 
     app = QApplication(sys.argv)
 
-    # PyInstaller 부트 스플래시는 EXE가 시작되면 먼저 뜰 수 있다.
-    # 두 번째 실행(.ysbt 더블클릭 전달)일 때는 로딩처럼 보이면 안 되므로
-    # 기존 프로세스에 전달하기 전에 가능한 즉시 닫는다.
     close_pyinstaller_boot_splash()
 
     # 두 번째 실행이면 기존 프로세스에 열기 요청만 전달하고 종료한다.
-    # 이 경로에서는 Qt 진행바 스플래시를 절대 만들지 않는다.
+    # 이 경로에서는 어떤 스플래시도 만들지 않는다.
     if notify_running_instance(sys.argv[1:]):
         sys.exit(0)
 
@@ -17875,15 +18707,65 @@ if __name__ == "__main__":
 
     app.setWindowIcon(QIcon(resource_path("ysb_icon.ico")))
 
-    # 여기까지 오면 첫 번째 실제 실행 프로세스다.
-    # 첫 실행 작업 폴더 설정을 먼저 확인한다.
+    launcher_owned = is_launcher_splash_owner()
+    write_launcher_mode_debug("after_launcher_owned_check")
+    if launcher_owned:
+        # 런처가 55%에서 멈추지 않도록, 런처 모드 판정 직후 즉시 진행률을 남긴다.
+        report_launcher_progress(56, translate_ui_text("메인 초기화 시작 중..."))
+
+    # 런처가 시작한 경우:
+    # - 메인 스플래시는 절대 만들지 않는다.
+    # - 메인은 런처의 단일 스플래시에 진행률만 보고한다.
+    if launcher_owned:
+        write_main_startup_signal()
+        write_launcher_mode_debug("after_startup_signal")
+        report_launcher_progress(58, translate_ui_text("환경 준비 중..."))
+
+        # 작업 폴더 설정창 같은 실제 입력창이 필요하면, 런처를 먼저 닫게 한다.
+        try:
+            needs_setup, _reason, _kind = workspace_root_needs_setup()
+        except Exception:
+            needs_setup = False
+        if needs_setup:
+            report_launcher_progress(100, translate_ui_text("설정 화면으로 전환 중..."), done=True)
+            wait_for_launcher_closed_if_needed()
+            if not run_initial_workspace_setup_if_needed():
+                sys.exit(0)
+        else:
+            if not run_initial_workspace_setup_if_needed():
+                sys.exit(0)
+
+        # 런처가 확장자 사전 확인을 처리한 경우 메인은 중복 알림을 띄우지 않는다.
+        report_launcher_progress(65, translate_ui_text("환경 준비 중..."))
+        prompt_update_ysbt_file_association_if_needed(None)
+
+        report_launcher_progress(78, translate_ui_text("인터페이스 로딩 중..."))
+        w = MainWindow()
+        single_instance_server.set_main_window(w)
+
+        report_launcher_progress(92, translate_ui_text("화면 구성 마무리 중..."))
+        w.setWindowIcon(QIcon(resource_path("ysb_icon.ico")))
+
+        try:
+            if len(sys.argv) > 1:
+                open_arg = sys.argv[1]
+                QTimer.singleShot(250, lambda p=open_arg: w.open_project_path(p, external_request=True))
+        except Exception:
+            pass
+
+        report_launcher_progress(100, translate_ui_text("시작 완료"), done=True)
+        wait_for_launcher_closed_if_needed()
+        w.show()
+        sys.exit(app.exec())
+
+    # 메인 EXE 직접 실행:
+    # - 런처가 폴더에 있더라도 호출하지 않는다.
+    # - 메인 스플래시만 표시한다.
     if not run_initial_workspace_setup_if_needed():
         sys.exit(0)
 
-    # 작업 폴더 설정이 끝난 뒤, .ysbt가 구버전/다른 위치 EXE에 연결되어 있으면 갱신 여부를 묻는다.
     prompt_update_ysbt_file_association_if_needed(None)
 
-    # 작업 폴더 설정이 끝난 뒤 Qt 진행바 스플래시로 앱 초기화를 보여준다.
     splash = make_splash_screen()
     if splash is not None:
         splash.set_progress(45, translate_ui_text("환경 준비 중..."))
@@ -17900,7 +18782,6 @@ if __name__ == "__main__":
     w.setWindowIcon(QIcon(resource_path("ysb_icon.ico")))
     w.show()
 
-    # .ysbt 파일 연결/명령행 인자 열기 지원
     try:
         if len(sys.argv) > 1:
             open_arg = sys.argv[1]
