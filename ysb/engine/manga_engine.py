@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import cv2
 import numpy as np
@@ -46,9 +47,11 @@ class Config:
     CLOVA_API_URL = ""
     CLOVA_SECRET_KEY = ""
     CLOVA_MODEL = "clova_ocr_v2"
+    CLOVA_OCR_LANGUAGE = "ja"
     GOOGLE_VISION_CREDENTIAL_JSON_PATH = ""
     GOOGLE_VISION_API_KEY = ""
     GOOGLE_VISION_MODEL = "DOCUMENT_TEXT_DETECTION"
+    GOOGLE_VISION_OCR_LANGUAGE = "en"
     GOOGLE_VISION_LANGUAGE_HINTS = "ja,ko,en"
     
     # [설정] OpenAI & Replicate
@@ -83,6 +86,12 @@ class Config:
     REPAINT_MODEL = ""  # 구버전 설정 호환용
     STABLE_INPAINT_MODEL = "stability-ai/stable-diffusion-inpainting:95b7223104132402a9ae91cc677285bc5eb997834bd2349fa486f53910fd68b3"
     STABLE_INPAINT_PROMPT = "remove text and restore the original background"
+    GEMINI_INPAINT_MODEL = "gemini-2.5-flash-image"
+    GEMINI_INPAINT_PROMPT = (
+        "Remove the text only inside the white mask area and reconstruct the original manga background. "
+        "Keep all characters, panel borders, screentones, line art, and unmasked areas unchanged. "
+        "Return only the edited full image."
+    )
 
     # [설정] 마스킹 비율
     INPAINT_RATIO = 0.1
@@ -195,8 +204,10 @@ class MangaProcessEngine:
         if model not in ("TEXT_DETECTION", "DOCUMENT_TEXT_DETECTION"):
             model = "DOCUMENT_TEXT_DETECTION"
 
-        hints_raw = str(getattr(Config, "GOOGLE_VISION_LANGUAGE_HINTS", "") or "")
-        hints = [x.strip() for x in hints_raw.replace(";", ",").split(",") if x.strip()]
+        # Google Vision의 언어 힌트는 사용자가 직접 문자열로 입력하지 않는다.
+        # API 설정창의 OCR 언어 콤보박스 값만 사용해서 동작을 확정한다.
+        lang = self._normalize_ocr_language(getattr(Config, "GOOGLE_VISION_OCR_LANGUAGE", "en"))
+        hints = [lang] if lang in ("en", "ja", "zh", "ko") else []
 
         with open(image_path, "rb") as f:
             content = base64.b64encode(f.read()).decode("ascii")
@@ -231,10 +242,11 @@ class MangaProcessEngine:
                 pass
         return pts
 
-    def _append_google_raw_item(self, raw_items, text, vertices, offset_x=0, offset_y=0, locale=""):
+    def _append_google_raw_item(self, raw_items, text, vertices, offset_x=0, offset_y=0, locale="", detected_break="", order_index=None):
         text = str(text or "").strip()
         if not text:
             return
+        detected_break = str(detected_break or "").strip()
         pts = self._google_vertices_to_points(vertices, offset_x, offset_y)
         if len(pts) < 3:
             return
@@ -257,7 +269,60 @@ class MangaProcessEngine:
             'char_count': char_count,
             'source_provider': 'google_vision',
             'locale': locale,
+            'detected_break': detected_break,
+            'order_index': order_index,
         })
+
+    def _google_symbol_break_type(self, symbol):
+        """Google Vision symbol.property.detectedBreak.type 추출."""
+        try:
+            return str(
+                ((symbol or {}).get("property") or {})
+                .get("detectedBreak", {})
+                .get("type", "")
+                or ""
+            ).strip()
+        except Exception:
+            return ""
+
+    def _google_word_text_and_break(self, word):
+        """word 안의 symbol을 조립하고, 마지막 symbol의 detectedBreak를 보존한다."""
+        symbols = (word or {}).get("symbols", []) or []
+        chars = []
+        last_break = ""
+        for sym in symbols:
+            chars.append(str((sym or {}).get("text", "") or ""))
+            b = self._google_symbol_break_type(sym)
+            if b:
+                last_break = b
+        return ''.join(chars).strip(), last_break
+
+    def _google_word_locale(self, word, fallback=""):
+        try:
+            langs = ((word or {}).get("property") or {}).get("detectedLanguages", []) or []
+            if langs:
+                return str((langs[0] or {}).get("languageCode", "") or fallback)
+        except Exception:
+            pass
+        return str(fallback or "")
+
+    def _normalize_ocr_language(self, value):
+        """API 설정창의 OCR 언어 값을 내부 정렬 코드(en/ja/ko/zh)로 정규화한다."""
+        lang = str(value or "").strip().lower()
+        aliases = {
+            "jp": "ja", "jpn": "ja", "japanese": "ja", "일본어": "ja",
+            "en-us": "en", "en-gb": "en", "eng": "en", "english": "en", "영어": "en",
+            "kr": "ko", "kor": "ko", "korean": "ko", "한국어": "ko",
+            "cn": "zh", "chi": "zh", "zho": "zh", "chinese": "zh", "중국어": "zh",
+            "zh-cn": "zh", "zh-tw": "zh", "zh-hans": "zh", "zh-hant": "zh",
+        }
+        return aliases.get(lang, lang if lang in ("en", "ja", "ko", "zh") else "ja")
+
+    def _current_ocr_language(self):
+        provider = str(getattr(Config, "OCR_PROVIDER", "clova") or "clova").strip().lower()
+        if provider == "google_vision":
+            return self._normalize_ocr_language(getattr(Config, "GOOGLE_VISION_OCR_LANGUAGE", "en"))
+        return self._normalize_ocr_language(getattr(Config, "CLOVA_OCR_LANGUAGE", "ja"))
 
     def _google_vision_response_to_raw_items(self, ocr_res, offset_x=0, offset_y=0):
         """
@@ -283,15 +348,28 @@ class MangaProcessEngine:
                 page_locale = str((page.get("property", {}).get("detectedLanguages", []) or [{}])[0].get("languageCode", "") or "")
             except Exception:
                 page_locale = ""
+            order_index = 0
             for block in page.get("blocks", []) or []:
+                block_locale = str(((block.get("property", {}) or {}).get("detectedLanguages", []) or [{}])[0].get("languageCode", "") or page_locale)
                 for para in block.get("paragraphs", []) or []:
+                    para_locale = str(((para.get("property", {}) or {}).get("detectedLanguages", []) or [{}])[0].get("languageCode", "") or block_locale)
                     for word in para.get("words", []) or []:
-                        symbols = word.get("symbols", []) or []
-                        text = ''.join(str(sym.get("text", "") or "") for sym in symbols).strip()
+                        text, detected_break = self._google_word_text_and_break(word)
                         if not text:
                             continue
                         vertices = (word.get("boundingBox") or {}).get("vertices", []) or []
-                        self._append_google_raw_item(raw_items, text, vertices, offset_x, offset_y, page_locale)
+                        locale = self._google_word_locale(word, para_locale)
+                        self._append_google_raw_item(
+                            raw_items,
+                            text,
+                            vertices,
+                            offset_x,
+                            offset_y,
+                            locale,
+                            detected_break=detected_break,
+                            order_index=order_index,
+                        )
+                        order_index += 1
 
         # fullTextAnnotation이 비어 있거나 word 단위가 안 잡힌 경우만 textAnnotations fallback 사용.
         if not raw_items:
@@ -308,22 +386,312 @@ class MangaProcessEngine:
     # ---------------------------------------------------------
     # [LOGIC] 1. 말풍선 내부 텍스트 정렬 (형태 기반 단순화)
     # ---------------------------------------------------------
+    def _is_latin_ocr_items(self, items):
+        """영어권 OCR처럼 단어 사이 공백 복원이 필요한 조각인지 대략 판정한다."""
+        text = ''.join(str(it.get('text', '') or '') for it in (items or []))
+        letters = [ch for ch in text if ch.isalpha()]
+        if not letters:
+            return False
+        ascii_letters = [ch for ch in letters if ('A' <= ch <= 'Z') or ('a' <= ch <= 'z')]
+        ascii_ratio = len(ascii_letters) / max(1, len(letters))
+        locale_text = ' '.join(str(it.get('locale', '') or '').lower() for it in (items or []))
+        provider_text = ' '.join(str(it.get('source_provider', '') or '') for it in (items or []))
+        return ascii_ratio >= 0.65 or ('en' in locale_text and 'google_vision' in provider_text)
+
+    def _manga_sort_latin_words(self, items):
+        """Google Vision 영어 OCR용: word 단위 박스를 줄 단위로 묶고 공백을 복원한다."""
+        items = list(items or [])
+        if not items:
+            return ""
+
+        def rect_h(it):
+            try:
+                return max(1.0, float(it.get('rect', [0, 0, 1, 1])[3]))
+            except Exception:
+                return 1.0
+
+        heights = sorted(rect_h(it) for it in items)
+        median_h = heights[len(heights) // 2] if heights else 12.0
+        line_tol = max(6.0, median_h * 0.65)
+
+        sorted_items = sorted(items, key=lambda it: (float(it.get('cy', 0) or 0), float(it.get('cx', 0) or 0)))
+        lines = []
+
+        for it in sorted_items:
+            cy = float(it.get('cy', 0) or 0)
+            placed = False
+            for line in lines:
+                if abs(cy - line['cy']) <= line_tol:
+                    line['items'].append(it)
+                    line['cy'] = (line['cy'] * (len(line['items']) - 1) + cy) / len(line['items'])
+                    placed = True
+                    break
+            if not placed:
+                lines.append({'cy': cy, 'items': [it]})
+
+        lines.sort(key=lambda line: line['cy'])
+
+        out_lines = []
+        for line in lines:
+            words = sorted(line['items'], key=lambda it: float(it.get('cx', 0) or 0))
+            parts = []
+            for it in words:
+                word = str(it.get('text', '') or '').strip()
+                if not word:
+                    continue
+                b = str(it.get('detected_break', '') or '').upper()
+                no_space_before = bool(re.match(r"^[\.,!\?;:\)\]\}…、。！？・』」）］｝]+", word))
+                if parts and not parts[-1].endswith('-') and not no_space_before:
+                    parts.append(' ')
+                parts.append(word)
+                if b == 'HYPHEN' and not word.endswith('-'):
+                    parts.append('-')
+            line_text = ''.join(parts).strip()
+            if line_text:
+                out_lines.append(line_text)
+
+        # 번역 API에는 줄바꿈보다 공백이 더 안정적이다.
+        # OCR 박스는 줄 단위로 잡되, 최종 원문은 한 문장처럼 공백으로 이어준다.
+        return " ".join(out_lines).strip()
+
+    def _cluster_ocr_items(self, items, axis="y", tol=8.0):
+        """중심 좌표 기준으로 OCR 조각을 줄/열 단위로 묶는다."""
+        items = list(items or [])
+        if not items:
+            return []
+        key = 'cy' if axis == "y" else 'cx'
+        ordered = sorted(items, key=lambda it: float(it.get(key, 0) or 0))
+        clusters = []
+        for it in ordered:
+            value = float(it.get(key, 0) or 0)
+            placed = False
+            for cluster in clusters:
+                if abs(value - cluster['value']) <= tol:
+                    cluster['items'].append(it)
+                    cluster['value'] = (cluster['value'] * (len(cluster['items']) - 1) + value) / len(cluster['items'])
+                    placed = True
+                    break
+            if not placed:
+                clusters.append({'value': value, 'items': [it]})
+        return clusters
+
+    def _ocr_bounds(self, items):
+        xs, ys, xe, ye = [], [], [], []
+        for it in items or []:
+            try:
+                x, y, w, h = it.get('rect', [0, 0, 1, 1])
+                xs.append(float(x)); ys.append(float(y)); xe.append(float(x) + float(w)); ye.append(float(y) + float(h))
+            except Exception:
+                pass
+        if not xs:
+            return 0.0, 0.0, 1.0, 1.0
+        x1, y1, x2, y2 = min(xs), min(ys), max(xe), max(ye)
+        return x1, y1, max(1.0, x2 - x1), max(1.0, y2 - y1)
+
+    def _median_item_size(self, items):
+        widths, heights = [], []
+        for it in items or []:
+            try:
+                x, y, w, h = it.get('rect', [0, 0, 1, 1])
+                widths.append(max(1.0, float(w)))
+                heights.append(max(1.0, float(h)))
+            except Exception:
+                pass
+        widths.sort(); heights.sort()
+        mw = widths[len(widths) // 2] if widths else 8.0
+        mh = heights[len(heights) // 2] if heights else 8.0
+        return mw, mh
+
+    def _join_cjk_texts(self, items):
+        return "".join(str(it.get('text', '') or '').strip() for it in (items or []) if str(it.get('text', '') or '').strip())
+
+    def _item_rect_edges(self, item):
+        try:
+            x, y, w, h = item.get('rect', [0, 0, 1, 1])
+            return float(x), float(y), float(x) + float(w), float(y) + float(h)
+        except Exception:
+            return 0.0, 0.0, 1.0, 1.0
+
+    def _normalize_korean_spacing(self, text):
+        """한국어 OCR 결합 후 문장부호 주변의 어색한 공백을 정리한다."""
+        text = str(text or '')
+        text = re.sub(r"\s+", " ", text).strip()
+        # 닫는 문장부호 앞 공백 제거
+        text = re.sub(r"\s+([,\.\!\?;:…、。！？・』」）］｝])", r"\1", text)
+        # 여는 괄호/따옴표 뒤 공백 제거
+        text = re.sub(r"([\(\[\{『「（［｛])\s+", r"\1", text)
+        # 영문/숫자 사이가 아닌 하이픈 주변 공백은 과하게 건드리지 않는다.
+        return text.strip()
+
+    def _manga_sort_korean_horizontal(self, items):
+        """한국어 OCR용: 줄은 위→아래, 줄 안은 왼쪽→오른쪽, 단어 공백은 보존/복원한다."""
+        items = list(items or [])
+        if not items:
+            return ""
+
+        mw, mh = self._median_item_size(items)
+        line_tol = max(6.0, mh * 0.70)
+        gap_space_threshold = max(3.0, mw * 0.35)
+        lines = self._cluster_ocr_items(items, axis="y", tol=line_tol)
+        lines.sort(key=lambda line: line['value'])
+
+        out_lines = []
+        for line in lines:
+            ordered = sorted(line['items'], key=lambda it: float(it.get('cx', 0) or 0))
+            pieces = []
+            prev = None
+
+            for it in ordered:
+                word = str(it.get('text', '') or '').strip()
+                if not word:
+                    continue
+
+                if pieces and prev is not None:
+                    prev_break = str(prev.get('detected_break', '') or '').upper()
+                    no_space_before = bool(re.match(r"^[,\.\!\?;:…、。！？・』」）］｝]+", word))
+                    prev_text = str(prev.get('text', '') or '')
+                    no_space_after_prev = bool(re.search(r"[『「（［｛\(\[\{]$", prev_text))
+
+                    if not no_space_before and not no_space_after_prev:
+                        px1, py1, px2, py2 = self._item_rect_edges(prev)
+                        cx1, cy1, cx2, cy2 = self._item_rect_edges(it)
+                        gap = cx1 - px2
+                        force_space = prev_break in ("SPACE", "SURE_SPACE", "EOL_SURE_SPACE", "LINE_BREAK")
+                        # CLOVA는 break 정보가 비는 경우가 많아서 실제 OCR 박스 간격으로 한 번 더 판단한다.
+                        if force_space or gap >= gap_space_threshold:
+                            pieces.append(' ')
+
+                pieces.append(word)
+                prev = it
+
+            line_text = self._normalize_korean_spacing(''.join(pieces))
+            if line_text:
+                out_lines.append(line_text)
+
+        # 번역 API에는 줄바꿈보다 공백으로 이어진 한 문장이 더 안정적이다.
+        return self._normalize_korean_spacing(' '.join(out_lines))
+
+    def _manga_sort_cjk_horizontal(self, items):
+        """일본어/중국어 가로문용: 위→아래, 왼쪽→오른쪽으로 공백 없이 결합한다."""
+        items = list(items or [])
+        if not items:
+            return ""
+        _, mh = self._median_item_size(items)
+        line_tol = max(6.0, mh * 0.70)
+        lines = self._cluster_ocr_items(items, axis="y", tol=line_tol)
+        lines.sort(key=lambda line: line['value'])
+        out_lines = []
+        for line in lines:
+            ordered = sorted(line['items'], key=lambda it: float(it.get('cx', 0) or 0))
+            line_text = self._join_cjk_texts(ordered)
+            if line_text:
+                out_lines.append(line_text)
+        return "".join(out_lines).strip()
+
+    def _manga_sort_cjk_vertical(self, items):
+        """일본어/중국어 세로문용: 오른쪽 열→왼쪽 열, 각 열은 위→아래로 결합한다."""
+        items = list(items or [])
+        if not items:
+            return ""
+
+        mw, mh = self._median_item_size(items)
+
+        # 일본어 세로문은 "열"이 읽기 단위다.
+        # CLOVA가 한 열을 긴 조각으로 주는 경우가 많으므로 x축 허용치는 너무 좁지 않게 둔다.
+        col_tol = max(7.0, min(28.0, mw * 1.05))
+        cols = self._cluster_ocr_items(items, axis="x", tol=col_tol)
+        cols.sort(key=lambda col: -col['value'])
+
+        out_cols = []
+        for col in cols:
+            ordered = sorted(col['items'], key=lambda it: float(it.get('cy', 0) or 0))
+            col_text = self._join_cjk_texts(ordered)
+            if col_text:
+                out_cols.append(col_text)
+
+        return "".join(out_cols).strip()
+
+    def _looks_like_cjk_vertical(self, items):
+        """사용자 옵션 없이 일본어/중국어 안에서 세로문/가로문을 내부 판정한다.
+
+        일본어 만화 OCR에서는 CLOVA가 세로문 한 열을 긴 조각 하나로 주는 경우가 많다.
+        이때 기존의 row_count > col_count 기준만 쓰면 세로문을 가로문으로 오판해서
+        왼쪽 조각부터 결합될 수 있다. 일본어/중국어 선택 상태에서는 세로문 판정을
+        조금 더 강하게 가져가되, 명확히 가로로 긴 효과음/영문은 가로문으로 남긴다.
+        """
+        items = list(items or [])
+        if len(items) <= 1:
+            return False
+
+        _, _, bw, bh = self._ocr_bounds(items)
+        mw, mh = self._median_item_size(items)
+        row_count = len(self._cluster_ocr_items(items, axis="y", tol=max(6.0, mh * 0.70)))
+        col_count = len(self._cluster_ocr_items(items, axis="x", tol=max(6.0, mw * 0.80)))
+
+        joined_text = "".join(str(it.get('text', '') or '') for it in items)
+        has_cjk = bool(re.search(r"[ぁ-ゟ゠-ヿ一-龯]", joined_text))
+        ascii_letters = len(re.findall(r"[A-Za-z]", joined_text))
+        cjk_letters = len(re.findall(r"[ぁ-ゟ゠-ヿ一-龯]", joined_text))
+
+        # 명확히 가로로 긴 라틴/효과음 후보는 가로문으로 둔다.
+        if bw > bh * 1.45 and row_count <= 2 and col_count >= row_count:
+            return False
+        if ascii_letters > 0 and ascii_letters >= cjk_letters:
+            return False
+
+        # OCR 조각 자체가 세로로 긴 경우. CLOVA 일본어 세로문에서 가장 흔하다.
+        tall_items = 0
+        for it in items:
+            try:
+                _x, _y, iw, ih = it.get('rect', [0, 0, 1, 1])
+                if float(ih) >= max(1.0, float(iw)) * 1.15:
+                    tall_items += 1
+            except Exception:
+                pass
+        tall_ratio = tall_items / max(1, len(items))
+
+        if has_cjk and tall_ratio >= 0.45 and bh >= mh * 1.30:
+            return True
+
+        # 세로문은 보통 열 수보다 행/글자층이 많다. 반대로 2줄 가로문은 행 수가 적고 열 수가 많다.
+        if row_count >= col_count and bh >= mh * 1.60:
+            return True
+
+        # 한 열짜리 또는 짧은 여러 열 세로문 대응.
+        if has_cjk and col_count <= 3 and bh > bw * 0.90 and row_count >= 2:
+            return True
+
+        # 말풍선 내부의 여러 세로열이 하나의 contour로 잡힌 경우:
+        # 전체 박스가 아주 세로로 길지 않아도, CJK 조각들이 세로형이면 오른쪽→왼쪽 열 정렬이 안전하다.
+        if has_cjk and len(items) >= 2 and tall_ratio >= 0.35 and bh >= bw * 0.65:
+            return True
+
+        return False
+
+    def _manga_sort_japanese_or_chinese(self, items):
+        """일본어/중국어 선택 시: 세로문은 만화식, 가로문은 일반 가로문으로 결합한다."""
+        if self._looks_like_cjk_vertical(items):
+            return self._manga_sort_cjk_vertical(items)
+        return self._manga_sort_cjk_horizontal(items)
+
     def _manga_sort(self, items):
-        if not items: return ""
-        
-        # 말풍선 형태 판단 (세로형 vs 가로형)
-        avg_w = sum([it['rect'][2] for it in items]) / len(items)
-        avg_h = sum([it['rect'][3] for it in items]) / len(items)
-        is_vertical = avg_h > avg_w
+        if not items:
+            return ""
+        items = list(items or [])
+        lang = self._current_ocr_language()
 
-        if is_vertical:
-            # [세로형] 오른쪽 -> 왼쪽 (X 내림차순), 그 다음 위 -> 아래
-            items.sort(key=lambda v: (-v['cx'], v['cy']))
-        else:
-            # [가로형] 위 -> 아래 (Y 오름차순), 그 다음 왼쪽 -> 오른쪽
-            items.sort(key=lambda v: (v['cy'], v['cx']))
+        if lang == "en":
+            return self._manga_sort_latin_words(items)
+        if lang == "ko":
+            return self._manga_sort_korean_horizontal(items)
+        if lang in ("ja", "zh"):
+            return self._manga_sort_japanese_or_chinese(items)
 
-        return "".join([it['text'] for it in items])
+        # 캐시/구버전 값이 섞였을 때의 안전장치.
+        if self._is_latin_ocr_items(items):
+            return self._manga_sort_latin_words(items)
+        return self._manga_sort_japanese_or_chinese(items)
+
 
     def _make_ocr_item_payload(self, item):
         """
@@ -364,6 +732,8 @@ class MangaProcessEngine:
             'char_count': max(1, char_count),
             'source_provider': str(item.get('source_provider', '') or item.get('source', '') or ''),
             'locale': str(item.get('locale', '') or ''),
+            'detected_break': str(item.get('detected_break', '') or ''),
+            'order_index': item.get('order_index'),
         }
 
     def _make_ocr_items_payload(self, items):
@@ -437,6 +807,8 @@ class MangaProcessEngine:
     # ---------------------------------------------------------
     def _organize_blocks(self, data_list):
         if not data_list: return []
+        lang = self._current_ocr_language()
+        right_to_left_rows = lang in ("ja", "zh")
         
         # Y좌표(상단) 기준으로 1차 정렬
         data_list.sort(key=lambda x: x['rect'][1])
@@ -454,13 +826,13 @@ class MangaProcessEngine:
                 if abs(curr['rect'][1] - prev['rect'][1]) < 100:
                     current_row.append(curr)
                 else:
-                    # 줄이 바뀌면, 이전 줄을 '오른쪽->왼쪽' 정렬
-                    current_row.sort(key=lambda x: -x['rect'][0])
+                    # 일본어/중국어 만화는 오른쪽->왼쪽, 영어/한국어는 왼쪽->오른쪽으로 정렬
+                    current_row.sort(key=lambda x: -x['rect'][0] if right_to_left_rows else x['rect'][0])
                     rows.append(current_row)
                     current_row = [curr]
             
             # 마지막 줄 처리
-            current_row.sort(key=lambda x: -x['rect'][0])
+            current_row.sort(key=lambda x: -x['rect'][0] if right_to_left_rows else x['rect'][0])
             rows.append(current_row)
         
         final_list = []
@@ -557,7 +929,12 @@ class MangaProcessEngine:
                         'stroke_size': stroke_size,
                         'cx': cx,
                         'cy': cy,
-                        'rect': [bx, by, bw, bh]
+                        'rect': [bx, by, bw, bh],
+                        'char_count': max(1, len(''.join(ch for ch in str(text or '') if not ch.isspace()))),
+                        'source_provider': 'clova',
+                        'locale': self._current_ocr_language(),
+                        'detected_break': '',
+                        'order_index': None,
                     })
 
             return raw_items
@@ -697,6 +1074,7 @@ class MangaProcessEngine:
                 'ocr_items': ocr_items,
                 'ocr_items_all': ocr_items_all,
                 'ruby_ocr_items': ruby_ocr_items,
+                'ocr_lang': self._current_ocr_language(),
                 'avg_stroke': avg_stroke,
                 'use_inpaint': True,
                 'x_off': 0, 'y_off': 0
@@ -799,6 +1177,7 @@ class MangaProcessEngine:
                 'ocr_items': ocr_items,
                 'ocr_items_all': ocr_items_all,
                 'ruby_ocr_items': ruby_ocr_items,
+                'ocr_lang': self._current_ocr_language(),
                 'avg_stroke': avg_stroke,
                 'use_inpaint': True, 'x_off': 0, 'y_off': 0
             })
@@ -1170,7 +1549,115 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
         provider = str(getattr(Config, "INPAINT_PROVIDER", "replicate_lama") or "replicate_lama").lower()
         if provider == "replicate_stable":
             return self._call_stable_inpaint(image_path, bin_mask)
+        if provider == "gemini_inpaint":
+            return self._call_gemini_inpaint(image_path, bin_mask)
         return self._call_lama(image_path, bin_mask)
+
+    def _call_gemini_inpaint(self, image_path, mask_img):
+        """Gemini image model을 이용한 테스트용 인페인팅.
+
+        Gemini는 LaMa처럼 별도 mask 파라미터를 가진 전용 인페인팅 API가 아니라,
+        원본 이미지 + 마스크 이미지 + 프롬프트를 함께 주고 이미지 편집 결과를 받는 방식이다.
+        그래서 결과 품질은 모델/프롬프트/원본에 따라 달라질 수 있다.
+        """
+        import base64
+
+        key = str(getattr(Config, "GEMINI_API_KEY", "") or "").strip()
+        if not key:
+            raise ValueError("Gemini API Key가 비어있습니다.")
+
+        model = str(getattr(Config, "GEMINI_INPAINT_MODEL", "") or "gemini-2.5-flash-image").strip()
+        # gemini-2.5-flash-image-preview has been shut down; keep old cache/config from breaking.
+        if model == "gemini-2.5-flash-image-preview":
+            model = "gemini-2.5-flash-image"
+        prompt = str(getattr(Config, "GEMINI_INPAINT_PROMPT", "") or "").strip()
+        if not prompt:
+            prompt = (
+                "Remove the text only inside the white mask area and reconstruct the original manga background. "
+                "Keep all characters, panel borders, screentones, line art, and unmasked areas unchanged. "
+                "Return only the edited full image."
+            )
+
+        def _file_part(path):
+            ext = os.path.splitext(str(path))[1].lower()
+            mime = "image/png"
+            if ext in (".jpg", ".jpeg"):
+                mime = "image/jpeg"
+            elif ext == ".webp":
+                mime = "image/webp"
+            with open(path, "rb") as f:
+                data = base64.b64encode(f.read()).decode("ascii")
+            return {"inlineData": {"mimeType": mime, "data": data}}
+
+        ok, mask_png = cv2.imencode(".png", mask_img)
+        if not ok:
+            raise ValueError("Gemini 인페인팅용 마스크 PNG 생성 실패")
+        mask_part = {
+            "inlineData": {
+                "mimeType": "image/png",
+                "data": base64.b64encode(mask_png.tobytes()).decode("ascii"),
+            }
+        }
+
+        instruction = (
+            prompt
+            + "\n\nThe first image is the source manga page. The second image is a black-and-white mask. "
+            + "White pixels mark the exact area to edit. Black pixels must remain unchanged. "
+            + "Return a full-size edited image, not a crop."
+        )
+
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        payload = {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {"text": instruction},
+                        _file_part(image_path),
+                        mask_part,
+                    ],
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.1,
+            },
+        }
+
+        r = requests.post(url, params={"key": key}, json=payload, timeout=180)
+        if r.status_code != 200:
+            err_text = r.text[:800]
+            try:
+                err = r.json().get("error", {})
+                msg = str(err.get("message", "") or err_text)
+                code = int(err.get("code", r.status_code) or r.status_code)
+            except Exception:
+                msg = err_text
+                code = r.status_code
+            if code == 404 and "gemini-2.5-flash-image-preview" in msg:
+                raise ValueError(
+                    "Gemini Inpaint Error: 404 / gemini-2.5-flash-image-preview 모델은 더 이상 사용할 수 없습니다. "
+                    "API 설정의 Gemini 인페인팅 모델을 gemini-2.5-flash-image로 바꿔주세요. "
+                    f"원문: {msg[:400]}"
+                )
+            raise ValueError(f"Gemini Inpaint Error: {code} / {msg[:500]}")
+
+        data = r.json()
+        parts = []
+        try:
+            parts = data.get("candidates", [])[0].get("content", {}).get("parts", []) or []
+        except Exception:
+            parts = []
+
+        text_notes = []
+        for part in parts:
+            inline = part.get("inlineData") or part.get("inline_data") or {}
+            image_b64 = inline.get("data")
+            if image_b64:
+                return base64.b64decode(image_b64)
+            if part.get("text"):
+                text_notes.append(str(part.get("text") or ""))
+
+        raise ValueError("Gemini 인페인팅 이미지 응답이 비어있습니다. " + " ".join(text_notes)[:300])
 
     def _normalize_stable_model_name(self, model_name):
         model_name = str(model_name or "").strip()
@@ -1342,11 +1829,11 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
     # ---------------------------------------------------------
     # [CORE] 출력
     # ---------------------------------------------------------
-    def export_project_result(self, data, img_path, bg_data, font_name, stroke_size, fixed_font_size, output_root=None):
+    def export_project_result(self, data, img_path, bg_data, font_name, stroke_size, fixed_font_size, output_root=None, output_name_stem=None):
         """
         결과 출력:
         - project_dir/clean/Clean_XXXX.png: 인페인팅된 배경
-        - project_dir/Result/Result_XXXX.png: 최종 화면 이미지(텍스트 포함)
+        - project_dir/result/Result_XXXX.png: 최종 화면 이미지(텍스트 포함)
         - project_dir/scripts/Script_XXXX.jsx: 포토샵 텍스트 레이어 생성 스크립트
         - Photoshop 실행 완료 알림(alert)은 띄우지 않음
         """
@@ -1521,13 +2008,19 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
             project_dir = os.path.abspath(os.path.join(os.getcwd(), "Project_Result"))
 
         clean_dir = os.path.join(project_dir, "clean")
-        result_dir = os.path.join(project_dir, "Result")
+        result_dir = os.path.join(project_dir, "result")
         scripts_dir = os.path.join(project_dir, "scripts")
         os.makedirs(clean_dir, exist_ok=True)
         os.makedirs(result_dir, exist_ok=True)
         os.makedirs(scripts_dir, exist_ok=True)
 
-        name_no_ext = os.path.splitext(os.path.basename(img_path))[0]
+        # img_path는 실제 존재하는 원본 이미지 경로로 쓰고,
+        # 출력 파일명은 호출자가 별도로 넘긴 output_name_stem을 우선 사용한다.
+        # 이렇게 해야 원본 파일명 변경/표시명 변경 후에도 가상 경로를 실제 이미지처럼 읽는 문제가 없다.
+        name_no_ext = str(output_name_stem or "").strip()
+        if not name_no_ext:
+            name_no_ext = os.path.splitext(os.path.basename(img_path))[0]
+        name_no_ext = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", name_no_ext).strip(" .") or "output"
         clean_img_name = f"Clean_{name_no_ext}.png"
         result_img_name = f"Result_{name_no_ext}.png"
         clean_img_path = os.path.join(clean_dir, clean_img_name)

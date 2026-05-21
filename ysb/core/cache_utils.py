@@ -1,5 +1,5 @@
 from pathlib import Path
-from workspace_manager import cache_dir
+from ysb.core.workspace_manager import cache_dir
 
 CACHE_FOLDER_NAME = "cache"
 

@@ -45,7 +45,21 @@ def tr_shortcut(text, lang=LANG_KO, **kwargs):
     return tr_from_table(SHORTCUT_TR_KO_EN, text, lang, **kwargs)
 
 
-UI_KO_EN = {'.ysbt 확장자 연결': '.ysbt File Association',
+UI_KO_EN = {
+ '작업 로그': 'Work Log',
+ '로그 숨기기': 'Hide Log',
+ '로그 열기': 'Open Log',
+ '작업 로그를 아래 막대로 접습니다.': 'Collapse the work log to the bottom bar.',
+ '숨긴 작업 로그를 다시 엽니다.': 'Open the hidden work log again.',
+ '프로젝트 나가기': 'Exit Project',
+ '현재 프로젝트를 닫고 홈화면으로 이동합니다.': 'Close the current project and go to the Home screen.',
+ '페이지 목록': 'Page List',
+ '페이지 없음': 'No pages',
+ '프로젝트 생성 위치 없음': 'Project Location Not Found',
+ '마지막 프로젝트 생성 위치를 찾을 수 없습니다. 새 생성 위치를 선택해 주세요.': 'Could not find the last project creation location. Please choose a new location.',
+ '이미지 없이 YSBT 프로젝트 파일을 먼저 만들고, 나중에 이미지 불러오기로 페이지를 추가합니다.': 'Create the YSBT project file first without images, then add pages later with Import Images.',
+ '빈 YSBT 프로젝트를 만들 수 없습니다.': 'Could not create an empty YSBT project.',
+'.ysbt 확장자 연결': '.ysbt File Association',
  '.ysbt 확장자 연결 갱신': 'Refresh .ysbt Association',
  '.ysbt 확장자 연결 등록': 'Register .ysbt Association',
  '.ysbt 확장자 연결 등록/갱신 완료': '.ysbt association registered/refreshed.',
@@ -749,6 +763,32 @@ UI_KO_EN.update({
 })
 
 
+
+# v2.0.0 추가 메뉴/작업 문구 번역 보강
+UI_KO_EN.update({
+    '페이지 탭 표시명 설정': 'Page Tab Display Name Settings',
+    '출력 표시명 설정': 'Output Display Name Settings',
+    '출력물 삭제': 'Delete Outputs',
+    '클라우드 백업 삭제': 'Delete Cloud Backup',
+    '전체 이미지탭 삭제': 'Delete All Image Tabs',
+    '현재 페이지 이름 보기': 'Show Current Page Name',
+    '페이지 탭 파일명 변경': 'Rename Page Tab File Name',
+    '현재 페이지 원본 파일명 변경': 'Rename Current Page Source File',
+    '현재 이미지탭 삭제': 'Delete Current Image Tab',
+    '현재 텍스트 기준 영역 재설정': 'Reset Current Text Reference Area',
+    '일괄 텍스트 기준 영역 재설정': 'Batch Reset Text Reference Area',
+    '번역 내용 지우기 완료': 'Translation cleared',
+    '일괄 번역문 내용 지우기 완료': 'Batch translations cleared',
+    '출력물 삭제 확인': 'Confirm Delete Outputs',
+    '선택한 출력물을 삭제할까요?': 'Delete the selected outputs?',
+    '삭제할 출력물이 없습니다.': 'There are no outputs to delete.',
+    '먼저 프로젝트를 열어주세요.': 'Please open a project first.',
+    '일부 파일을 삭제하지 못했습니다.': 'Some files could not be deleted.',
+    '최종결과 이미지': 'Final Result Images',
+    '포토샵 스크립트': 'Photoshop Scripts',
+    'TXT 지문': 'TXT Text Extracts',
+})
+
 # Reverse lookup table for restoring simple fixed UI strings when switching back to Korean.
 # Values are generated from UI_KO_EN after the table is fully declared.
 UI_EN_KO = {en: ko for ko, en in UI_KO_EN.items()}
@@ -1383,3 +1423,142 @@ try:
     })
 except Exception:
     pass
+
+
+# v2.0.0 page tabs / drag-and-drop image insertion
+_V200_PAGE_TABS_UI_KO_EN = {
+    '페이지': 'Pages',
+    '페이지 없음': 'No pages',
+    '이미지 불러오기': 'Import Images',
+    '불러올 이미지 선택': 'Select Images to Import',
+    '페이지 삭제': 'Delete Page',
+    '이 페이지를 프로젝트에서 삭제할까요?': 'Delete this page from the project?',
+    '삭제': 'Delete',
+    '페이지 탭 표시명': 'Page Tab Display Name',
+    '출력 표시명': 'Output Display Name',
+    '원본 파일명': 'Original Filename',
+    '1p_원본 파일명': '1p_Original Filename',
+    '좌측 이미지 작업창 상단의 페이지 탭에 표시할 이름 형식을 정합니다. 기본값은 1p_원본 파일명입니다.': 'Choose the naming format shown on the page tabs above the left image workspace. The default is 1p_original filename.',
+    '결과물, 클린 이미지, 포토샵 스크립트 파일명에 사용할 페이지 이름 형식을 정합니다. 기본값은 1p_원본 파일명입니다.': 'Choose the naming format used for result images, clean images, and Photoshop script filenames. The default is 1p_original filename.',
+}
+UI_KO_EN.update(_V200_PAGE_TABS_UI_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _V200_PAGE_TABS_UI_KO_EN.items()})
+
+
+# v2.0.0 hotfix6: empty project creation dialog
+_V200_HOTFIX6_UI_KO_EN = {
+    '새 프로젝트': 'New Project',
+    '프로젝트 이름': 'Project Name',
+    '생성 위치': 'Creation Location',
+    '생성 경로': 'Creation Path',
+    '프로젝트 생성 위치 선택': 'Select Project Creation Location',
+    '이미지 없이 빈 작업 인터페이스를 먼저 만들고, 나중에 이미지 불러오기로 페이지를 추가합니다.': 'Create an empty workspace first, then add pages later with Import Images.',
+    '만들기': 'Create',
+    '프로젝트 생성 실패': 'Project Creation Failed',
+    '프로젝트 생성 위치를 만들 수 없습니다.': 'Could not create the project location.',
+    '빈 프로젝트를 만들 수 없습니다.': 'Could not create the empty project.',
+}
+UI_KO_EN.update(_V200_HOTFIX6_UI_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _V200_HOTFIX6_UI_KO_EN.items()})
+try:
+    SHORTCUT_TR_KO_EN.update({
+        '새 프로젝트': 'New Project',
+        '이미지 불러오기': 'Import Images',
+    })
+except Exception:
+    pass
+
+
+
+API_TR_KO_EN.update({
+    'Gemini Image Inpainting': 'Gemini Image Inpainting',
+    'Gemini API Key (shared with translation)': 'Gemini API Key (shared with translation)',
+    'Remove text inside the white mask and reconstruct the manga background': 'Remove text inside the white mask and reconstruct the manga background',
+})
+
+
+# v2.0.0 hotfix49 shortcut/dialog translation additions
+SHORTCUT_TR_KO_EN.update({
+    '페이지 탭 파일명 변경': 'Rename Page Tab File Name',
+    '현재 이미지탭 삭제': 'Delete Current Image Tab',
+    '전체 이미지탭 삭제': 'Delete All Image Tabs',
+})
+
+
+# v2.0.0 hotfix49 UI translation additions
+UI_KO_EN.update({
+    '페이지 탭 파일명 변경': 'Rename Page Tab File Name',
+    '현재 이미지탭 삭제': 'Delete Current Image Tab',
+    '전체 이미지탭 삭제': 'Delete All Image Tabs',
+    '현재 프로젝트의 작업 폴더로 이동하기': 'Open Current Project Work Folder',
+})
+UI_EN_KO = {en: ko for ko, en in UI_KO_EN.items()}
+
+
+# v2.0.0 hotfix52 help/about translations
+UI_KO_EN.update({
+    '도움말': 'Help',
+    '프로그램 정보': 'About',
+    'YSB Translator Tool / 역식붕이 툴': 'YSB Translator Tool / 역식붕이 툴',
+    '버전': 'Version',
+    '이 소프트웨어는 GNU General Public License v3.0에 따라 배포됩니다.': 'This software is distributed under the GNU General Public License v3.0.',
+    '이 애플리케이션은 PyQt6를 사용하므로, 오픈소스 배포판은 GPLv3 기준으로 제공됩니다.': 'Because this application uses PyQt6, the open-source distribution is provided under GPLv3.',
+    'YSB Translator Tool, 역식붕이 툴, ZeroStress8은 amule949가 사용하는 프로젝트명 및 표지입니다.': 'YSB Translator Tool, 역식붕이 툴, and ZeroStress8 are project names and marks used by amule949.',
+    'GPLv3 라이선스는 소스 코드에 적용되며, 프로젝트명·로고·브랜딩 사용 권리를 부여하지 않습니다.': 'The GPLv3 license applies to the source code and does not grant project name, logo, or branding usage rights.',
+    '자세한 내용은 LICENSE 및 TRADEMARKS.md를 참고하세요.': 'See LICENSE and TRADEMARKS.md for details.',
+})
+UI_EN_KO = {en: ko for ko, en in UI_KO_EN.items()}
+
+try:
+    SHORTCUT_TR_KO_EN.update({
+        '도움말': 'Help',
+        '프로그램 정보': 'About',
+    })
+except Exception:
+    pass
+
+
+# v2.0.0 OCR language combo translations
+API_TR_KO_EN.update({
+    'OCR 언어': 'OCR Language',
+    '일본어': 'Japanese',
+    '중국어': 'Chinese',
+    '한국어': 'Korean',
+    '영어': 'English',
+})
+
+# v2.0.0 cloud registration interlock translations
+UI_KO_EN.update({
+    '이미 Google Drive 계정이 등록되어 있습니다.\n\n다른 계정을 연결하려면 먼저 클라우드 등록 해제를 진행해 주세요.': 'A Google Drive account is already registered.\n\nTo connect a different account, unregister the current cloud account first.',
+    '이미 등록된 클라우드 계정이 있어 새 등록을 시작할 수 없습니다. 다른 계정을 연결하려면 먼저 등록 해제를 진행하세요.': 'A cloud account is already registered, so a new registration cannot be started. To connect a different account, unregister the current account first.',
+})
+
+# v2.0.0 font refresh translations
+UI_KO_EN.update({
+    '폰트 갱신': 'Refresh Fonts',
+    'Windows에 설치되어 있지만 목록에 보이지 않는 글꼴을 다시 찾습니다.': 'Search again for fonts installed in Windows but missing from the list.',
+    '폰트 갱신 확인': 'Refresh Fonts',
+    'Windows 글꼴 폴더와 사용자 글꼴 폴더를 다시 검색합니다.\n\n일부 글꼴은 Qt 기본 목록에 바로 보이지 않을 수 있어, 이 작업은 누락된 글꼴을 추가로 등록합니다.\n\n글꼴이 많으면 잠시 걸릴 수 있습니다. 계속할까요?': 'This will scan the Windows Fonts folder and your user Fonts folder again.\n\nSome fonts may not appear in Qt\'s default list, so this registers missing fonts as application fonts.\n\nIt may take a moment if you have many fonts. Continue?',
+    '폰트 갱신 완료': 'Font refresh complete',
+    '폰트 목록을 갱신했습니다.\n새로 추가된 글꼴 패밀리: {count}개': 'The font list has been refreshed.\nNew font families added: {count}',
+    '폰트 갱신 실패': 'Font refresh failed',
+    '폰트 갱신 중 오류가 발생했습니다.': 'An error occurred while refreshing fonts.',
+})
+
+# v2.0.0 path visibility option translations
+UI_KO_EN.update({
+    '로그창에 파일 위치 및 경로 표시': 'Show file locations and paths in logs',
+    '로그에 저장 위치, 출력 위치, 작업 폴더 같은 실제 파일 경로를 함께 표시합니다. 끄면 완료/실패 같은 결과 문구만 표시합니다.': 'Shows actual file paths such as save locations, output folders, and workspace folders in the log. When disabled, only result messages such as completion/failure are shown.',
+    '옵션 및 설정창에 캐시 위치 경로 표시': 'Show cache location paths in options and settings',
+    'API, 단축키 같은 옵션/설정 관리창에서 실제 캐시 파일 위치를 표시합니다. 끄면 캐시 경로는 숨깁니다.': 'Shows actual cache file locations in option/settings dialogs such as API and shortcut settings. When disabled, cache paths are hidden.',
+    '파일 경로 표시': 'File path display',
+    '로그와 설정창에 실제 파일 경로를 표시할지 정합니다. 기본값은 꺼짐이며, 필요한 경우에만 켜는 고급 정보입니다.': 'Choose whether to show actual file paths in logs and settings windows. This is off by default and is advanced information for users who need it.',
+    '파일 경로 표시 설정 저장 완료': 'File path display settings saved',
+    '표시': 'Show',
+    '경로 숨김': 'Path hidden',
+    '로그 경로 표시: ON': 'Log path display: ON',
+    '로그 경로 표시: OFF': 'Log path display: OFF',
+    '설정창 캐시 경로 표시: ON': 'Settings cache path display: ON',
+    '설정창 캐시 경로 표시: OFF': 'Settings cache path display: OFF',
+})
+UI_EN_KO = {en: ko for ko, en in UI_KO_EN.items()}

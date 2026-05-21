@@ -13,7 +13,7 @@ from PyQt6.QtGui import QKeySequence
 from PyQt6.QtCore import Qt, QEvent
 from PyQt6.QtWidgets import QKeySequenceEdit
 
-from cache_utils import get_cache_file
+from ysb.core.cache_utils import get_cache_file
 
 CACHE_FILE_NAME = "shortcut_cache.json"
 
@@ -28,7 +28,7 @@ LANG_KO = "ko"
 LANG_EN = "en"
 
 # Independent dialog translation table is centralized in lang_text.py.
-from lang_text import SHORTCUT_TR_KO_EN as TR_KO_EN
+from ysb.i18n.lang_text import SHORTCUT_TR_KO_EN as TR_KO_EN
 
 def resolve_ui_language(widget=None):
     cur = widget
@@ -294,9 +294,11 @@ DEFAULT_SHORTCUTS = {
 
     # 3. 프로젝트 옵션
     "project_new": "Ctrl+N",
+    "project_import_images": "Alt+O",
     "project_open": "Ctrl+O",
     "project_open_json": "Ctrl+Alt+O",
     "project_show_launcher": "Ctrl+Alt+Home",
+    "project_exit": "Alt+Q",
     "project_save": "Ctrl+S",
     "project_save_as": "Ctrl+Shift+S",
     "project_recover_last_work": "Ctrl+Alt+Shift+B",
@@ -304,33 +306,43 @@ DEFAULT_SHORTCUTS = {
     # 3-2. 설정 / 옵션
     "option_settings_overview": "Ctrl+Alt+S",
 
-    "option_auto_save_mode": "Ctrl+Alt+1",
-    "option_theme_settings": "Ctrl+Alt+Shift+F9",
-    "option_language_settings": "Ctrl+Alt+Shift+L",
-    "option_api_settings": "Ctrl+Alt+2",
-    "option_shortcut_settings": "Ctrl+Alt+3",
-    "option_macro_settings": "Ctrl+Alt+4",
-    "option_text_preset_settings": "Ctrl+Alt+5",
-    "option_item_text_preset_settings": "Ctrl+Alt+6",
-    "option_translation_prompt": "Ctrl+Alt+7",
-    "option_glossary": "Ctrl+Alt+8",
+    "option_auto_save_mode": "Ctrl+Alt+Shift+1",
+    "option_theme_settings": "Ctrl+Alt+Shift+2",
+    "option_language_settings": "Ctrl+Alt+Shift+3",
+    "setting_page_tab_display_name": "Ctrl+Alt+Shift+4",
+    "setting_output_display_name": "Ctrl+Alt+Shift+5",
+    "option_api_settings": "Ctrl+Alt+1",
+    "option_shortcut_settings": "Ctrl+Alt+4",
+    "option_macro_settings": "Ctrl+Alt+5",
+    "option_text_preset_settings": "Ctrl+Alt+6",
+    "option_item_text_preset_settings": "Ctrl+Alt+7",
+    "option_translation_prompt": "Ctrl+Alt+2",
+    "option_glossary": "Ctrl+Alt+3",
     "option_analysis_mask_settings": "Ctrl+Alt+Shift+M",
-    "option_workspace_location": "Ctrl+Alt+9",
-    "option_cleanup_temp_files": "Ctrl+Alt+Shift+D",
-    "option_register_ysb": "Ctrl+Alt+0",
-    "option_unregister_ysbt": "Ctrl+Alt+Shift+0",
+    "option_workspace_location": "Ctrl+Alt+Shift+6",
+    "option_cleanup_temp_files": "Ctrl+Alt+Shift+7",
+    "option_cleanup_outputs": "Ctrl+Alt+Shift+Delete",
+    "option_register_ysb": "Ctrl+Alt+Shift+8",
+    "option_unregister_ysbt": "Ctrl+Alt+Shift+9",
+    "setting_file_path_visibility": "Ctrl+Alt+Shift+0",
+    "help_about": "",
 
     # 3-3. 클라우드
-    "cloud_register": "Ctrl+Alt+Shift+1",
-    "cloud_unregister": "Ctrl+Alt+Shift+2",
-    "cloud_cache_backup": "Ctrl+Alt+Shift+3",
-    "cloud_cache_restore": "Ctrl+Alt+Shift+4",
-    "cloud_project_backup": "Ctrl+Alt+Shift+5",
+    "cloud_register": "Ctrl+Alt+Shift+F1",
+    "cloud_unregister": "Ctrl+Alt+Shift+F2",
+    "cloud_cache_backup": "Ctrl+Alt+Shift+F3",
+    "cloud_cache_restore": "Ctrl+Alt+Shift+F4",
+    "cloud_project_backup": "Ctrl+Alt+Shift+F5",
 
     # 4. 작업 옵션
     "work_tab_cycle": "Tab",
     "work_page_prev": "Alt+Left",
     "work_page_next": "Alt+Right",
+    "work_page_list": "Ctrl+F",
+    "work_page_full_name": "Alt+V",
+    "work_page_rename_source": "Ctrl+F2",
+    "work_page_delete_current": "Ctrl+Q",
+    "work_page_delete_all": "Ctrl+Shift+Q",
     "work_open_current_project_folder": "Ctrl+Alt+Shift+F",
     "work_analyze": "Ctrl+F5",
     "work_text_number_width": "Ctrl+Shift+W",
@@ -431,12 +443,14 @@ GROUPS = [
     ]),
     ("프로젝트 옵션", [
         ("project_new", "새로 만들기"),
+        ("project_import_images", "이미지 불러오기"),
         ("project_open", "열기"),
         ("project_open_json", "JSON으로 열기"),
         ("project_save", "저장하기"),
         ("project_save_as", "다른 이름으로 저장하기"),
         ("project_recover_last_work", "복구하기"),
         ("project_show_launcher", "홈화면으로 가기"),
+        ("project_exit", "프로젝트 나가기"),
         ("option_settings_overview", "설정 / 옵션"),
     ]),
     ("클라우드", [
@@ -450,23 +464,35 @@ GROUPS = [
         ("option_auto_save_mode", "자동저장 모드"),
         ("option_theme_settings", "테마 설정"),
         ("option_language_settings", "언어 설정"),
+        ("setting_page_tab_display_name", "페이지 탭 표시명 설정"),
+        ("setting_output_display_name", "출력 표시명 설정"),
         ("option_api_settings", "API 관리"),
         ("option_translation_prompt", "번역 프롬프트 입력"),
         ("option_glossary", "단어장"),
         ("option_analysis_mask_settings", "분석 마스크 확장 비율"),
+        ("option_cleanup_outputs", "출력물 삭제"),
         ("option_workspace_location", "작업 폴더 위치 변경"),
         ("option_cleanup_temp_files", "임시 파일 관리"),
         ("option_register_ysb", ".ysbt 확장자 연결 등록"),
         ("option_unregister_ysbt", ".ysbt 확장자 연결 해제"),
+        ("setting_file_path_visibility", "파일 경로 표시"),
         ("option_shortcut_settings", "단축키 통합 관리"),
         ("option_macro_settings", "매크로 관리"),
         ("option_text_preset_settings", "페이지 글꼴 프리셋 관리"),
         ("option_item_text_preset_settings", "개별 글꼴 프리셋 관리"),
     ]),
+    ("도움말", [
+        ("help_about", "프로그램 정보"),
+    ]),
     ("작업 옵션", [
         ("work_tab_cycle", "작업탭 변경"),
         ("work_page_prev", "이전 페이지"),
         ("work_page_next", "다음 페이지"),
+        ("work_page_list", "페이지 목록"),
+        ("work_page_full_name", "현재 페이지 이름 보기"),
+        ("work_page_rename_source", "페이지 탭 파일명 변경"),
+        ("work_page_delete_current", "현재 이미지탭 삭제"),
+        ("work_page_delete_all", "전체 이미지탭 삭제"),
         ("work_open_current_project_folder", "현재 프로젝트의 작업 폴더로 이동하기"),
         ("work_analyze", "개별 분석"),
         ("work_text_number_width", "텍스트 넘버 크기 변경"),
@@ -630,7 +656,7 @@ class ShortcutSettingsStore:
 
             # 특수문자 새 기본 단축키와 겹치는 기존 기능은 자동 이동한다.
             if merged_shortcuts.get("option_theme_settings") in {"Ctrl+Alt+Shift+T", "Ctrl+Alt+T"}:
-                merged_shortcuts["option_theme_settings"] = "Ctrl+Alt+Shift+F9"
+                merged_shortcuts["option_theme_settings"] = DEFAULT_SHORTCUTS.get("option_theme_settings", "Ctrl+Alt+Shift+2")
             if merged_shortcuts.get("work_clean_text") in {"Ctrl+Y", "Ctrl+Alt+Shift+Y"}:
                 merged_shortcuts["work_clean_text"] = "Ctrl+Alt+Shift+C"
 
@@ -644,6 +670,86 @@ class ShortcutSettingsStore:
                 merged_shortcuts["paint_mask_wrap_rect"] = DEFAULT_SHORTCUTS.get("paint_mask_wrap_rect", "Alt+Shift+R")
             if merged_shortcuts.get("paint_mask_wrap_free") == "F":
                 merged_shortcuts["paint_mask_wrap_free"] = DEFAULT_SHORTCUTS.get("paint_mask_wrap_free", "Alt+F")
+
+            # v2.0.0 페이지 탭 단축키 보정:
+            # Ctrl+Q는 현재 이미지탭 삭제, Ctrl+Shift+Q는 전체 이미지탭 삭제,
+            # 프로젝트 나가기는 Alt+Q로 이동한다.
+            page_tab_shortcut_defaults = {
+                "work_page_list": "Ctrl+F",
+                "work_page_full_name": "Alt+V",
+                "work_page_rename_source": "Ctrl+F2",
+                "work_page_delete_current": "Ctrl+Q",
+                "work_page_delete_all": "Ctrl+Shift+Q",
+                "project_exit": "Alt+Q",
+                "project_import_images": "Alt+O",
+            }
+            for _key, _fallback in page_tab_shortcut_defaults.items():
+                if merged_shortcuts.get(_key) in ("", None):
+                    merged_shortcuts[_key] = DEFAULT_SHORTCUTS.get(_key, _fallback)
+
+            # 구버전에서 project_exit가 Ctrl+Q를 점유하고 있었으면 Alt+Q로 이동한다.
+            if str(merged_shortcuts.get("project_exit") or "") == "Ctrl+Q":
+                merged_shortcuts["project_exit"] = "Alt+Q"
+
+            for _reserved_key, _reserved_value in page_tab_shortcut_defaults.items():
+                if not str(_reserved_value or ""):
+                    continue
+                for _key, _value in list(merged_shortcuts.items()):
+                    if _key != _reserved_key and str(_value) == _reserved_value:
+                        merged_shortcuts[_key] = DEFAULT_SHORTCUTS.get(_key, "")
+                        if str(merged_shortcuts.get(_key) or "") == _reserved_value:
+                            merged_shortcuts[_key] = ""
+
+            merged_shortcuts["work_page_list"] = "Ctrl+F"
+            merged_shortcuts["work_page_full_name"] = "Alt+V"
+            merged_shortcuts["work_page_rename_source"] = "Ctrl+F2"
+            merged_shortcuts["work_page_delete_current"] = "Ctrl+Q"
+            merged_shortcuts["work_page_delete_all"] = "Ctrl+Shift+Q"
+            merged_shortcuts["project_exit"] = "Alt+Q"
+            merged_shortcuts["project_import_images"] = "Alt+O"
+
+            # v2.0.0 hotfix50: Options / Settings menu shortcut layout.
+            # Options: main 7 items use Ctrl+Alt+1~7 in visible order.
+            option_menu_shortcut_layout = {
+                "option_api_settings": "Ctrl+Alt+1",
+                "option_translation_prompt": "Ctrl+Alt+2",
+                "option_glossary": "Ctrl+Alt+3",
+                "option_shortcut_settings": "Ctrl+Alt+4",
+                "option_macro_settings": "Ctrl+Alt+5",
+                "option_text_preset_settings": "Ctrl+Alt+6",
+                "option_item_text_preset_settings": "Ctrl+Alt+7",
+                # Keep these fixed and move them to the bottom of the Options menu.
+                "option_analysis_mask_settings": "Ctrl+Alt+Shift+M",
+                "option_cleanup_outputs": "Ctrl+Alt+Shift+Delete",
+            }
+            # Settings: keep visible order and use Ctrl+Alt+Shift+1~9.
+            settings_menu_shortcut_layout = {
+                "option_auto_save_mode": "Ctrl+Alt+Shift+1",
+                "option_theme_settings": "Ctrl+Alt+Shift+2",
+                "option_language_settings": "Ctrl+Alt+Shift+3",
+                "setting_page_tab_display_name": "Ctrl+Alt+Shift+4",
+                "setting_output_display_name": "Ctrl+Alt+Shift+5",
+                "option_workspace_location": "Ctrl+Alt+Shift+6",
+                "option_cleanup_temp_files": "Ctrl+Alt+Shift+7",
+                "option_register_ysb": "Ctrl+Alt+Shift+8",
+                "option_unregister_ysbt": "Ctrl+Alt+Shift+9",
+                "setting_file_path_visibility": "Ctrl+Alt+Shift+0",
+            }
+            # Cloud used to occupy Ctrl+Alt+Shift+1~5. Move it away so Settings shortcuts are not ambiguous.
+            cloud_shortcut_layout = {
+                "cloud_register": "Ctrl+Alt+Shift+F1",
+                "cloud_unregister": "Ctrl+Alt+Shift+F2",
+                "cloud_cache_backup": "Ctrl+Alt+Shift+F3",
+                "cloud_cache_restore": "Ctrl+Alt+Shift+F4",
+                "cloud_project_backup": "Ctrl+Alt+Shift+F5",
+            }
+            for _key, _value in {
+                **option_menu_shortcut_layout,
+                **settings_menu_shortcut_layout,
+                **cloud_shortcut_layout,
+            }.items():
+                if _key in merged_shortcuts:
+                    merged_shortcuts[_key] = _value
 
             # v1.8.1 마스크 커팅 단축키 보정:
             # Alt+D는 사각형 영역으로 이동하고, 기존 Alt+D였던 마스킹 칠하기는 Alt+Shift+D로 이동한다.
@@ -1430,8 +1536,9 @@ class MacroSettingsDialog(QDialog):
 
 
 class ShortcutSettingsDialog(QDialog):
-    def __init__(self, settings: ShortcutSettings, parent=None):
+    def __init__(self, settings: ShortcutSettings, parent=None, show_cache_path=False):
         super().__init__(parent)
+        self._show_cache_path = bool(show_cache_path)
         self._ui_language = resolve_ui_language(parent)
         self.setWindowTitle(tr_text("단축키 통합 관리", self._ui_language))
         self.resize(760, 760)
@@ -1459,17 +1566,19 @@ class ShortcutSettingsDialog(QDialog):
             shortcut_help_text = (
                 "Shortcuts are saved to the program cache file.\n"
                 "If you assign the same shortcut, it will be swapped with the existing item.\n"
-                "If you uncheck an item, that shortcut will be disabled and the input box will be cleared.\n"
-                "Cache path: "
+                "If you uncheck an item, that shortcut will be disabled and the input box will be cleared."
             )
+            if self._show_cache_path:
+                shortcut_help_text += "\nCache path: " + ShortcutSettingsStore.cache_path()
         else:
             shortcut_help_text = (
                 "단축키는 프로그램 폴더의 캐시 파일에 저장됩니다.\n"
                 "같은 단축키를 지정하면 기존 항목과 서로 교체됩니다.\n"
-                "체크를 끄면 해당 단축키는 사용하지 않으며 입력칸이 비워집니다.\n"
-                "캐시 위치: "
+                "체크를 끄면 해당 단축키는 사용하지 않으며 입력칸이 비워집니다."
             )
-        info = QLabel(shortcut_help_text + ShortcutSettingsStore.cache_path())
+            if self._show_cache_path:
+                shortcut_help_text += "\n캐시 위치: " + ShortcutSettingsStore.cache_path()
+        info = QLabel(shortcut_help_text)
         info.setWordWrap(True)
         layout.addWidget(info)
 

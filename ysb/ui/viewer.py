@@ -4,7 +4,7 @@ from PyQt6.QtWidgets import QGraphicsView, QGraphicsScene
 from PyQt6.QtGui import QPainter, QPen, QBrush, QColor, QImage, QPixmap, QFont, QPainterPath
 from PyQt6.QtCore import Qt, QRectF
 
-from graphics_items import ToggleBoxItem, TypesettingItem
+from ysb.engine.graphics_items import ToggleBoxItem, TypesettingItem
 
 
 class MuleImageViewer(QGraphicsView):

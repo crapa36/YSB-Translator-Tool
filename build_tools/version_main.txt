@@ -1,8 +1,8 @@
 # UTF-8
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 8, 1, 0),
-    prodvers=(1, 8, 1, 0),
+    filevers=(2, 0, 0, 0),
+    prodvers=(2, 0, 0, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -16,14 +16,14 @@ VSVersionInfo(
         '040904B0',
         [
           StringStruct('CompanyName', 'Zerostress8'),
-          StringStruct('FileDescription', 'YSBT Luncher'),
-          StringStruct('FileVersion', '1.8.1.0'),
-          StringStruct('InternalName', 'YSB_FILE_OPENER'),
-          StringStruct('OriginalFilename', 'YSBT Luncher.exe'),
+          StringStruct('FileDescription', 'YSB Translator Tool Main'),
+          StringStruct('FileVersion', '2.0.0.0'),
+          StringStruct('InternalName', 'YSB_MAIN'),
+          StringStruct('OriginalFilename', 'YSB_MAIN.exe'),
           StringStruct('ProductName', 'YSB Translator Tool'),
-          StringStruct('ProductVersion', '1.8.1.0'),
+          StringStruct('ProductVersion', '2.0.0.0'),
           StringStruct('YSBAppFamilyId', 'ZEROSTRESS8_YSB_TRANSLATOR_TOOL'),
-          StringStruct('YSBAppRole', 'YSB_FILE_OPENER')
+          StringStruct('YSBAppRole', 'YSB_MAIN')
         ]
       )
     ]),

@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
     QFrame, QWidget, QScrollArea
 )
 
-from cache_utils import get_cache_file
+from ysb.core.cache_utils import get_cache_file
 
 CACHE_FILE_NAME = "api_cache.json"
 
@@ -19,7 +19,7 @@ def cache_file():
 LANG_KO = "ko"
 LANG_EN = "en"
 
-from lang_text import API_TR_KO_EN
+from ysb.i18n.lang_text import API_TR_KO_EN
 
 def resolve_ui_language(widget=None):
     cur = widget
@@ -134,10 +134,12 @@ class ApiSettings:
     clova_api_url: str = ""
     clova_secret_key: str = ""
     clova_model: str = "clova_ocr_v2"
+    clova_ocr_language: str = "ja"
     # 과거 테스트 버전 호환용: JSON 경로 값은 로드만 유지하고 UI에서는 API Key 방식을 사용한다.
     google_vision_credential_json_path: str = ""
     google_vision_api_key: str = ""
     google_vision_model: str = "DOCUMENT_TEXT_DETECTION"
+    google_vision_ocr_language: str = "en"
     google_vision_language_hints: str = "ja,ko,en"
 
     # Translation API
@@ -163,6 +165,12 @@ class ApiSettings:
     repaint_model: str = "allenhooo/lama:cdac78a1bec5b23c07fd29692fb70baa513ea403a39e643c48ec5edadb15fe72"
     stable_inpaint_model: str = "stability-ai/stable-diffusion-inpainting:95b7223104132402a9ae91cc677285bc5eb997834bd2349fa486f53910fd68b3"
     stable_inpaint_prompt: str = "remove text and restore the original background"
+    gemini_inpaint_model: str = "gemini-2.5-flash-image"
+    gemini_inpaint_prompt: str = (
+        "Remove the text only inside the white mask area and reconstruct the original manga background. "
+        "Keep all characters, panel borders, screentones, line art, and unmasked areas unchanged. "
+        "Return only the edited full image."
+    )
 
 
 class ApiSettingsStore:
@@ -207,17 +215,20 @@ def apply_settings_to_config(settings: ApiSettings):
     """Inject cached API settings into manga_engine.Config."""
     try:
         import os as _os
-        from manga_engine import Config
+        from ysb.engine.manga_engine import Config
 
         # OCR
         Config.OCR_PROVIDER = (settings.selected_ocr_provider or "clova").strip() or "clova"
         Config.CLOVA_API_URL = settings.clova_api_url.strip()
         Config.CLOVA_SECRET_KEY = settings.clova_secret_key.strip()
         Config.CLOVA_MODEL = settings.clova_model.strip() or "clova_ocr_v2"
+        Config.CLOVA_OCR_LANGUAGE = (settings.clova_ocr_language or "ja").strip() or "ja"
         Config.GOOGLE_VISION_CREDENTIAL_JSON_PATH = settings.google_vision_credential_json_path.strip()  # 구버전 캐시 호환
         Config.GOOGLE_VISION_API_KEY = settings.google_vision_api_key.strip()
         Config.GOOGLE_VISION_MODEL = settings.google_vision_model.strip() or "DOCUMENT_TEXT_DETECTION"
-        Config.GOOGLE_VISION_LANGUAGE_HINTS = settings.google_vision_language_hints.strip() or "ja,ko,en"
+        Config.GOOGLE_VISION_OCR_LANGUAGE = (settings.google_vision_ocr_language or "en").strip() or "en"
+        # 구버전 호환용 값은 유지하되, UI에서는 더 이상 직접 입력받지 않는다.
+        Config.GOOGLE_VISION_LANGUAGE_HINTS = settings.google_vision_language_hints.strip() or Config.GOOGLE_VISION_OCR_LANGUAGE
 
         # Translation
         Config.TRANSLATION_PROVIDER = (settings.selected_translation_provider or "openai").strip() or "openai"
@@ -248,6 +259,16 @@ def apply_settings_to_config(settings: ApiSettings):
         Config.REPAINT_MODEL = Config.INPAINT_MODEL  # 구버전 호환
         Config.STABLE_INPAINT_MODEL = settings.stable_inpaint_model.strip() or "stability-ai/stable-diffusion-inpainting:95b7223104132402a9ae91cc677285bc5eb997834bd2349fa486f53910fd68b3"
         Config.STABLE_INPAINT_PROMPT = settings.stable_inpaint_prompt.strip() or "remove text and restore the original background"
+        gemini_inpaint_model = settings.gemini_inpaint_model.strip() or "gemini-2.5-flash-image"
+        # The old preview model was shut down; auto-migrate old cache values.
+        if gemini_inpaint_model == "gemini-2.5-flash-image":
+            gemini_inpaint_model = "gemini-2.5-flash-image"
+        Config.GEMINI_INPAINT_MODEL = gemini_inpaint_model
+        Config.GEMINI_INPAINT_PROMPT = settings.gemini_inpaint_prompt.strip() or (
+            "Remove the text only inside the white mask area and reconstruct the original manga background. "
+            "Keep all characters, panel borders, screentones, line art, and unmasked areas unchanged. "
+            "Return only the edited full image."
+        )
 
         if Config.REPLICATE_API_TOKEN:
             _os.environ["REPLICATE_API_TOKEN"] = Config.REPLICATE_API_TOKEN
@@ -256,8 +277,9 @@ def apply_settings_to_config(settings: ApiSettings):
 
 
 class ApiSettingsDialog(QDialog):
-    def __init__(self, settings: ApiSettings, parent=None):
+    def __init__(self, settings: ApiSettings, parent=None, show_cache_path=False):
         super().__init__(parent)
+        self._show_cache_path = bool(show_cache_path)
         self._ui_language = resolve_ui_language(parent)
         self._ui_theme = resolve_ui_theme(parent)
         self.setWindowTitle(tr_api("API 관리", self._ui_language))
@@ -294,10 +316,11 @@ class ApiSettingsDialog(QDialog):
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
-        cache = QLabel(tr_api("캐시 위치: ", self._ui_language) + ApiSettingsStore.cache_path(), self)
-        cache.setObjectName("SettingsDescription")
-        cache.setWordWrap(True)
-        layout.addWidget(cache)
+        if self._show_cache_path:
+            cache = QLabel(tr_api("캐시 위치: ", self._ui_language) + ApiSettingsStore.cache_path(), self)
+            cache.setObjectName("SettingsDescription")
+            cache.setWordWrap(True)
+            layout.addWidget(cache)
 
         scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
@@ -316,6 +339,7 @@ class ApiSettingsDialog(QDialog):
                 "title": "CLOVA OCR",
                 "fields": [
                     ("Model", "clova_model", False, "clova_ocr_v2"),
+                    ("OCR 언어", "clova_ocr_language", False, "일본어", "combo", [("일본어", "ja"), ("중국어", "zh"), ("한국어", "ko")]),
                     ("Invoke URL", "clova_api_url", False, "CLOVA OCR Invoke URL"),
                     ("Secret Key", "clova_secret_key", True, "CLOVA OCR Secret Key"),
                 ],
@@ -326,7 +350,7 @@ class ApiSettingsDialog(QDialog):
                 "fields": [
                     ("Model / Mode", "google_vision_model", False, "DOCUMENT_TEXT_DETECTION"),
                     ("API Key", "google_vision_api_key", True, "Google Cloud Vision API Key"),
-                    ("Language Hints", "google_vision_language_hints", False, "ja,ko,en"),
+                    ("OCR 언어", "google_vision_ocr_language", False, "영어", "combo", [("영어", "en"), ("일본어", "ja"), ("중국어", "zh"), ("한국어", "ko")]),
                 ],
             },
         ], "selected_ocr_provider")
@@ -347,6 +371,15 @@ class ApiSettingsDialog(QDialog):
                     ("Model", "stable_inpaint_model", False, "stability-ai/stable-diffusion-inpainting:95b72231..."),
                     ("Prompt", "stable_inpaint_prompt", False, "remove text and restore the original background"),
                     ("API Token", "stable_replicate_api_token", True, "Stable Replicate API Token"),
+                ],
+            },
+            {
+                "provider": "gemini_inpaint",
+                "title": "Gemini Image Inpainting",
+                "fields": [
+                    ("Model", "gemini_inpaint_model", False, "gemini-2.5-flash-image"),
+                    ("Prompt", "gemini_inpaint_prompt", False, "Remove text inside the white mask and reconstruct the manga background"),
+                    ("API Key", "gemini_api_key", True, "Gemini API Key (shared with translation)"),
                 ],
             },
         ], "selected_inpaint_provider")
@@ -486,25 +519,39 @@ class ApiSettingsDialog(QDialog):
             for r, field in enumerate(card["fields"]):
                 label, key, secret, placeholder = field[:4]
                 field_type = field[4] if len(field) >= 5 else "text"
+                field_choices = field[5] if len(field) >= 6 else []
                 lab = QLabel(tr_api(label, self._ui_language), item)
                 lab.setMinimumWidth(110)
                 grid.addWidget(lab, r, 0)
-                edit = QLineEdit(item)
-                edit.setText(str(data.get(key, "")))
-                edit.setPlaceholderText(placeholder)
-                if secret:
-                    edit.setEchoMode(QLineEdit.EchoMode.Password)
-                if field_type == "file":
-                    file_row = QHBoxLayout()
-                    file_row.setContentsMargins(0, 0, 0, 0)
-                    file_row.setSpacing(8)
-                    file_row.addWidget(edit, 1)
-                    btn_browse = QPushButton(tr_api("찾아보기", self._ui_language), item)
-                    btn_browse.clicked.connect(lambda _=False, e=edit: self.browse_json_file(e))
-                    file_row.addWidget(btn_browse)
-                    grid.addLayout(file_row, r, 1)
-                else:
+                if field_type == "combo":
+                    edit = QComboBox(item)
+                    for choice_label, choice_value in field_choices:
+                        edit.addItem(tr_api(choice_label, self._ui_language), str(choice_value))
+                    current_value = str(data.get(key, "") or "")
+                    found_index = edit.findData(current_value)
+                    if found_index < 0:
+                        found_index = edit.findText(current_value)
+                    if found_index < 0:
+                        found_index = 0
+                    edit.setCurrentIndex(found_index)
                     grid.addWidget(edit, r, 1)
+                else:
+                    edit = QLineEdit(item)
+                    edit.setText(str(data.get(key, "")))
+                    edit.setPlaceholderText(placeholder)
+                    if secret:
+                        edit.setEchoMode(QLineEdit.EchoMode.Password)
+                    if field_type == "file":
+                        file_row = QHBoxLayout()
+                        file_row.setContentsMargins(0, 0, 0, 0)
+                        file_row.setSpacing(8)
+                        file_row.addWidget(edit, 1)
+                        btn_browse = QPushButton(tr_api("찾아보기", self._ui_language), item)
+                        btn_browse.clicked.connect(lambda _=False, e=edit: self.browse_json_file(e))
+                        file_row.addWidget(btn_browse)
+                        grid.addLayout(file_row, r, 1)
+                    else:
+                        grid.addWidget(edit, r, 1)
                 self.edits.setdefault(key, []).append(edit)
             item_layout.addLayout(grid)
             block_layout.addWidget(item)
@@ -546,7 +593,11 @@ class ApiSettingsDialog(QDialog):
                 if id(edit) in seen:
                     continue
                 seen.add(id(edit))
-                edit.clear()
+                if isinstance(edit, QComboBox):
+                    if edit.count() > 0:
+                        edit.setCurrentIndex(0)
+                else:
+                    edit.clear()
 
     def _selected_provider_for(self, attr_name: str, default: str) -> str:
         group = self.button_groups.get(attr_name)
@@ -571,10 +622,16 @@ class ApiSettingsDialog(QDialog):
         # 같은 키가 여러 카드에 중복 표시될 수 있다.
         # 사용자가 어느 칸에 입력해도 저장되도록 비어있지 않은 값을 우선 사용한다.
         for edit in edits:
-            value = edit.text().strip()
+            if isinstance(edit, QComboBox):
+                value = str(edit.currentData() or edit.currentText() or "").strip()
+            else:
+                value = edit.text().strip()
             if value:
                 return value
-        return edits[0].text().strip()
+        first = edits[0]
+        if isinstance(first, QComboBox):
+            return str(first.currentData() or first.currentText() or "").strip()
+        return first.text().strip()
 
     def get_settings(self) -> ApiSettings:
         return ApiSettings(
@@ -584,10 +641,12 @@ class ApiSettingsDialog(QDialog):
             clova_api_url=self._first_edit_text("clova_api_url"),
             clova_secret_key=self._first_edit_text("clova_secret_key"),
             clova_model=self._first_edit_text("clova_model") or "clova_ocr_v2",
+            clova_ocr_language=self._first_edit_text("clova_ocr_language") or "ja",
             google_vision_credential_json_path=self.settings.google_vision_credential_json_path,
             google_vision_api_key=self._first_edit_text("google_vision_api_key"),
             google_vision_model=self._first_edit_text("google_vision_model") or "DOCUMENT_TEXT_DETECTION",
-            google_vision_language_hints=self._first_edit_text("google_vision_language_hints") or "ja,ko,en",
+            google_vision_ocr_language=self._first_edit_text("google_vision_ocr_language") or "en",
+            google_vision_language_hints=self.settings.google_vision_language_hints,
             openai_api_key=self._first_edit_text("openai_api_key"),
             deepseek_api_key=self._first_edit_text("deepseek_api_key"),
             google_translate_api_key=self._first_edit_text("google_translate_api_key"),
@@ -607,4 +666,10 @@ class ApiSettingsDialog(QDialog):
             repaint_model=self._first_edit_text("repaint_model") or "allenhooo/lama:cdac78a1bec5b23c07fd29692fb70baa513ea403a39e643c48ec5edadb15fe72",
             stable_inpaint_model=self._first_edit_text("stable_inpaint_model") or "stability-ai/stable-diffusion-inpainting:95b7223104132402a9ae91cc677285bc5eb997834bd2349fa486f53910fd68b3",
             stable_inpaint_prompt=self._first_edit_text("stable_inpaint_prompt") or "remove text and restore the original background",
+            gemini_inpaint_model=self._first_edit_text("gemini_inpaint_model") or "gemini-2.5-flash-image",
+            gemini_inpaint_prompt=self._first_edit_text("gemini_inpaint_prompt") or (
+                "Remove the text only inside the white mask area and reconstruct the original manga background. "
+                "Keep all characters, panel borders, screentones, line art, and unmasked areas unchanged. "
+                "Return only the edited full image."
+            ),
         )

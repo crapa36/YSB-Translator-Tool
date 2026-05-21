@@ -1,4 +1,5 @@
 import os
+import re
 import copy
 import cv2
 import numpy as np
@@ -48,6 +49,25 @@ def _download_replicate_output(output):
 def _imread_unicode(path: str):
     arr = np.fromfile(path, np.uint8)
     return cv2.imdecode(arr, cv2.IMREAD_COLOR)
+
+
+PAGE_DISPLAY_MODE_ORIGINAL = "original_name"
+PAGE_DISPLAY_MODE_PAGE_ORIGINAL = "1p_original_name"
+PAGE_DISPLAY_MODE_PAGE_NUMBER = "page001"
+DEFAULT_PAGE_DISPLAY_MODE = PAGE_DISPLAY_MODE_PAGE_ORIGINAL
+
+
+def _normalize_page_display_mode(value):
+    value = str(value or DEFAULT_PAGE_DISPLAY_MODE).strip()
+    if value in (PAGE_DISPLAY_MODE_ORIGINAL, PAGE_DISPLAY_MODE_PAGE_ORIGINAL, PAGE_DISPLAY_MODE_PAGE_NUMBER):
+        return value
+    return DEFAULT_PAGE_DISPLAY_MODE
+
+
+def _safe_page_file_stem(value, fallback="page"):
+    stem = os.path.splitext(os.path.basename(str(value or fallback)))[0].strip() or fallback
+    stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", stem).strip(" .")
+    return stem or fallback
 
 
 def _copy_mask(mask):
@@ -134,6 +154,7 @@ class UniversalBatchWorker(QThread):
         self.font_size = main_window.sb_font_size.value()
         self.mask_toggle_enabled = bool(getattr(main_window, "mask_toggle_enabled", False))
         self.project_dir = getattr(main_window, "project_dir", None)
+        self.output_display_name_mode = _normalize_page_display_mode(getattr(main_window, "output_display_name_mode", DEFAULT_PAGE_DISPLAY_MODE))
 
         # 시작 시점의 페이지 데이터를 스냅샷으로 복사한다.
         # 이렇게 해야 일괄 작업 중 화면/현재 페이지 상태가 다른 페이지에 섞이지 않는다.
@@ -187,6 +208,24 @@ class UniversalBatchWorker(QThread):
         except Exception:
             return fallback_path
         return fallback_path
+
+    def _output_display_stem(self, page_idx, path, curr_data):
+        original = ""
+        if isinstance(curr_data, dict):
+            original = curr_data.get("original_name") or ""
+        if not original:
+            original = os.path.basename(str(path or f"page{page_idx + 1:03d}.png"))
+        stem = _safe_page_file_stem(original, fallback=f"page{page_idx + 1:03d}")
+        mode = _normalize_page_display_mode(getattr(self, "output_display_name_mode", DEFAULT_PAGE_DISPLAY_MODE))
+        if mode == PAGE_DISPLAY_MODE_ORIGINAL:
+            return stem
+        if mode == PAGE_DISPLAY_MODE_PAGE_NUMBER:
+            return f"page{page_idx + 1:03d}"
+        return f"{page_idx + 1}p_{stem}"
+
+    def _path_for_output_display(self, page_idx, path, curr_data):
+        ext = os.path.splitext(str(path or ""))[1] or ".png"
+        return os.path.join(os.path.dirname(os.path.abspath(str(path or os.getcwd()))), self._output_display_stem(page_idx, path, curr_data) + ext)
 
     def run(self):
         total = len(self.paths)
@@ -288,6 +327,7 @@ class UniversalBatchWorker(QThread):
                         self.stroke_size,
                         self.font_size,
                         output_root=self.project_dir,
+                        output_name_stem=self._output_display_stem(i, path, curr_data),
                     )
                     payload = {}
 
@@ -317,7 +357,7 @@ class AnalysisWorker(QThread):
     def run(self):
         try:
             try:
-                from manga_engine import Config
+                from ysb.engine.manga_engine import Config
                 provider = str(getattr(Config, "OCR_PROVIDER", "clova") or "clova")
                 provider_name = "Google Vision" if provider == "google_vision" else "CLOVA"
             except Exception:
@@ -351,9 +391,14 @@ class InpaintWorker(QThread):
     def run(self):
         try:
             try:
-                from manga_engine import Config
+                from ysb.engine.manga_engine import Config
                 provider = str(getattr(Config, "INPAINT_PROVIDER", "replicate_lama") or "replicate_lama")
-                provider_name = "Stable Diffusion" if provider == "replicate_stable" else "LaMa"
+                if provider == "replicate_stable":
+                    provider_name = "Stable Diffusion"
+                elif provider == "gemini_inpaint":
+                    provider_name = "Gemini"
+                else:
+                    provider_name = "LaMa"
             except Exception:
                 provider_name = "인페인팅"
             self.log.emit(f"🎨 {provider_name} 인페인팅 시작...")

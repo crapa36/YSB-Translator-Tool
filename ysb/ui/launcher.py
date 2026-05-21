@@ -22,8 +22,8 @@ from PyQt6.QtWidgets import (
     QGridLayout, QScrollArea, QSizePolicy, QMenu
 )
 
-from cache_utils import get_cache_dir, get_cache_file
-from lang_text import tr_ui, normalize_language, LANG_KO, LANG_EN
+from ysb.core.cache_utils import get_cache_dir, get_cache_file
+from ysb.i18n.lang_text import tr_ui, normalize_language, LANG_KO, LANG_EN
 
 
 RECENT_PROJECTS_FILE = "recent_projects.json"
@@ -402,6 +402,7 @@ class RecentProjectCard(QFrame):
 
 class LauncherWidget(QWidget):
     newProjectRequested = pyqtSignal()
+    importImagesRequested = pyqtSignal()
     openProjectRequested = pyqtSignal()
     recoverRequested = pyqtSignal()
     cloudRequested = pyqtSignal()
@@ -480,6 +481,7 @@ class LauncherWidget(QWidget):
         sl.addSpacing(10)
 
         sl.addWidget(self._side_button("새 프로젝트 만들기", self.newProjectRequested.emit, primary=True))
+        sl.addWidget(self._side_button("이미지 불러오기", self.importImagesRequested.emit))
         sl.addWidget(self._side_button("프로젝트 열기", self.openProjectRequested.emit))
         sl.addWidget(self._side_button("마지막 작업 복구", self.recoverRequested.emit))
         sl.addSpacing(8)

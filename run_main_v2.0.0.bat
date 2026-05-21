@@ -1,14 +1,54 @@
 @echo off
-setlocal EnableExtensions
-cd /d "%~dp0"
+setlocal EnableExtensions EnableDelayedExpansion
 
-echo ==========================================
-echo  YSB Tool run launcher
-echo ==========================================
-echo.
+REM ==========================================================
+REM  YSB Translator Tool v2.0.0 - Source Run Launcher
+REM  - Creates/uses the virtual environment in the project root
+REM  - Works from project root or from a one-level subfolder
+REM ==========================================================
+
+set "SCRIPT_DIR=%~dp0"
+cd /d "%SCRIPT_DIR%"
+
+REM Find project root.
+REM Preferred: the folder where main.py and ysb\ exist.
+set "APP_ROOT="
+if exist "main.py" if exist "ysb\__init__.py" set "APP_ROOT=%CD%"
+
+if not defined APP_ROOT (
+    if exist "..\main.py" if exist "..\ysb\__init__.py" (
+        cd /d ".."
+        set "APP_ROOT=%CD%"
+    )
+)
+
+if not defined APP_ROOT (
+    echo.
+    echo [ERROR] Project root was not found.
+    echo Put this BAT in the project root folder, next to main.py and the ysb folder.
+    echo Or put it in a one-level subfolder under the project root.
+    echo.
+    pause
+    exit /b 1
+)
+
+cd /d "%APP_ROOT%"
 
 set "REQ_FILE=requirements_ysik_tool.txt"
 set "MAIN_FILE=main.py"
+set "VENV_DIR=%APP_ROOT%\.venv"
+set "VENV_PY=%VENV_DIR%\Scripts\python.exe"
+set "VENV_ACT=%VENV_DIR%\Scripts\activate.bat"
+
+set "PYTHONUTF8=1"
+set "PYTHONPATH=%APP_ROOT%;%PYTHONPATH%"
+
+echo ==========================================
+echo  YSB Translator Tool v2.0.0 - Run Source
+echo ==========================================
+echo Project root: %APP_ROOT%
+echo Virtual env : %VENV_DIR%
+echo.
 
 echo [1/5] Checking Python...
 
@@ -25,8 +65,9 @@ if "%errorlevel%"=="0" (
 )
 
 echo.
-echo Python was not found.
+echo [ERROR] Python was not found.
 echo Install Python first, and enable "Add Python to PATH".
+echo.
 pause
 exit /b 1
 
@@ -54,15 +95,16 @@ if not exist "%REQ_FILE%" (
 
 echo [3/5] Checking virtual environment...
 
-if not exist ".venv\Scripts\python.exe" (
-    echo Creating .venv...
-    %PY_CMD% -m venv .venv
+if not exist "%VENV_PY%" (
+    echo Creating virtual environment in project root...
+    echo %VENV_DIR%
+    %PY_CMD% -m venv "%VENV_DIR%"
     if errorlevel 1 goto VENV_FAIL
 )
 
 echo [4/5] Installing and checking libraries...
 
-call ".venv\Scripts\activate.bat"
+call "%VENV_ACT%"
 if errorlevel 1 goto ACTIVATE_FAIL
 
 python -m pip install --upgrade pip
@@ -109,13 +151,14 @@ echo [5/5] Running app...
 
 if not exist "%MAIN_FILE%" (
     echo.
-    echo main.py was not found.
-    echo Put this BAT in the same folder as main.py.
+    echo [ERROR] main.py was not found in project root.
+    echo Current folder: %CD%
+    echo.
     pause
     exit /b 1
 )
 
-python "%MAIN_FILE%"
+python "%MAIN_FILE%" %*
 
 echo.
 echo App closed.
@@ -124,29 +167,35 @@ exit /b 0
 
 :VENV_FAIL
 echo.
-echo Failed to create .venv.
+echo [ERROR] Failed to create virtual environment.
+echo Target: %VENV_DIR%
+echo.
 pause
 exit /b 1
 
 :ACTIVATE_FAIL
 echo.
-echo Failed to activate .venv.
+echo [ERROR] Failed to activate virtual environment.
+echo Target: %VENV_ACT%
+echo.
 pause
 exit /b 1
 
 :INSTALL_FAIL
 echo.
-echo Failed to install libraries.
+echo [ERROR] Failed to install libraries.
 echo Try this manually:
-echo .venv\Scripts\python.exe -m pip install --upgrade pip
-echo .venv\Scripts\python.exe -m pip install -r %REQ_FILE%
+echo "%VENV_PY%" -m pip install --upgrade pip
+echo "%VENV_PY%" -m pip install -r "%REQ_FILE%"
+echo.
 pause
 exit /b 1
 
 :IMPORT_FAIL
 echo.
-echo Import test failed.
+echo [ERROR] Import test failed.
 echo Try reinstalling libraries:
-echo .venv\Scripts\python.exe -m pip install --upgrade --force-reinstall -r %REQ_FILE%
+echo "%VENV_PY%" -m pip install --upgrade --force-reinstall -r "%REQ_FILE%"
+echo.
 pause
 exit /b 1

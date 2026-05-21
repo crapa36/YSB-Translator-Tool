@@ -32,11 +32,14 @@ YSB_COMPANY_NAME = "Zerostress8"
 YSB_PRODUCT_NAME = "YSB Translator Tool"
 YSB_APP_FAMILY_ID = "ZEROSTRESS8_YSB_TRANSLATOR_TOOL"
 YSB_ROLE_MAIN = "YSB_MAIN"
-YSB_ROLE_OPENER = "YSB_FILE_OPENER"
+YSB_ROLE_LAUNCHER = "YSB_LAUNCHER"
+YSB_ROLE_OPENER = YSB_ROLE_LAUNCHER
 
 MAIN_EXE_CANDIDATES = [
+    "역식붕이 툴 v2.0.0.exe",
     "역식붕이 툴 v1.8.1.exe",
     "역식붕이 툴.exe",
+    "YSB_Tool_v2.0.0.exe",
     "YSB_Tool_v1.8.1.exe",
     "YSB_Tool.exe",
 ]
@@ -81,22 +84,54 @@ def app_config_dir() -> Path:
 
 
 def resource_path(name: str) -> Path:
-    """PyInstaller onefile 내부/EXE 옆 리소스를 모두 찾는다."""
+    """PyInstaller onefile/onedir/소스 실행에서 런처 리소스를 안정적으로 찾는다.
+
+    v2.0.0 리팩토링 이후 스플래시와 아이콘은 assets/ 아래에서 관리한다.
+    기존 호출이 resource_path("ysb_splash.png")처럼 파일명만 넘겨도
+    assets/ysb_splash.png를 먼저 찾도록 보정한다.
+    """
+    rel = str(name).replace("\\", "/").lstrip("/")
+    aliases = {
+        "ysb_icon.ico": ["assets/YSB_icon.ico", "assets/ysb_icon.ico", "YSB_icon.ico", "ysb_icon.ico"],
+        "YSB_icon.ico": ["assets/YSB_icon.ico", "assets/ysb_icon.ico", "YSB_icon.ico", "ysb_icon.ico"],
+        "ysb_splash.png": ["assets/ysb_splash.png", "ysb_splash.png"],
+        "ysb_splash_boot.png": ["assets/ysb_splash_boot.png", "ysb_splash_boot.png"],
+        "ysb_logo.png": ["assets/ysb_logo.png", "ysb_logo.png"],
+    }
+    candidates = []
+    candidates.extend(aliases.get(rel, []))
+    candidates.append(rel)
+    if not rel.startswith("assets/"):
+        candidates.append(f"assets/{rel}")
+
+    seen = set()
+    unique_candidates = []
+    for item in candidates:
+        if item not in seen:
+            seen.add(item)
+            unique_candidates.append(item)
+
+    roots = []
     try:
         if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-            p = Path(sys._MEIPASS) / name
-            if p.exists():
-                return p
+            roots.append(Path(sys._MEIPASS))
     except Exception:
         pass
+
     try:
         here = Path(sys.executable if getattr(sys, "frozen", False) else __file__).resolve().parent
-        p = here / name
-        if p.exists():
-            return p
+        roots.append(here)
+        roots.extend(here.parents)
     except Exception:
         pass
-    return Path(name)
+
+    for root in roots:
+        for item in unique_candidates:
+            p = root / item
+            if p.exists():
+                return p
+
+    return Path(rel)
 
 
 def queue_path() -> Path:
@@ -130,7 +165,7 @@ def launcher_progress_path() -> Path:
 def show_error(message: str):
     if sys.platform.startswith("win"):
         try:
-            ctypes.windll.user32.MessageBoxW(None, str(message), "YSBT Luncher", 0x10)
+            ctypes.windll.user32.MessageBoxW(None, str(message), "YSB Launcher", 0x10)
             return
         except Exception:
             pass
@@ -142,7 +177,7 @@ def show_error(message: str):
 
 def opener_log(message: str):
     try:
-        p = app_config_dir() / "ysb_file_opener.log"
+        p = app_config_dir() / "ysb_launcher.log"
         p.parent.mkdir(parents=True, exist_ok=True)
         with open(p, "a", encoding="utf-8") as f:
             f.write(time.strftime("%Y-%m-%d %H:%M:%S") + " " + str(message) + "\n")
@@ -199,8 +234,9 @@ def append_queue(command: str, project_path: str = ""):
     payload = {
         "id": str(uuid.uuid4()),
         "command": str(command or "activate"),
-        "source": "YSBT Luncher",
+        "source": "YSB Launcher",
         "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "time_epoch": time.time(),
     }
     if project_path:
         payload["path"] = str(Path(project_path).resolve())
@@ -376,7 +412,7 @@ def is_ysb_main_exe_by_metadata(exe_path: Path) -> bool:
     return bool(family_ok and role_ok)
 
 
-def is_ysb_opener_exe_by_metadata(exe_path: Path) -> bool:
+def is_ysb_launcher_exe_by_metadata(exe_path: Path) -> bool:
     info = read_windows_exe_version_strings(exe_path)
     if not info:
         return False
@@ -394,7 +430,7 @@ def is_ysb_opener_exe_by_metadata(exe_path: Path) -> bool:
             or product == YSB_PRODUCT_NAME
         )
     )
-    role_ok = role == YSB_ROLE_OPENER or internal == YSB_ROLE_OPENER
+    role_ok = (role == YSB_ROLE_LAUNCHER or internal == YSB_ROLE_LAUNCHER)
     return bool(family_ok and role_ok)
 
 
@@ -493,7 +529,7 @@ def find_main_exe() -> Path | None:
 # 런처 1단계 로딩창
 # =========================================================
 class LauncherLoadingWindow:
-    """YSBT Luncher 전용 스플래시.
+    """YSB Launcher 전용 스플래시.
 
     런처가 실행한 경우에는 이 창 하나가 스플래시를 끝까지 소유한다.
     메인과 같은 500x500 기준, 하단 문구/퍼센트/진행바 1개만 표시한다.
@@ -751,7 +787,7 @@ def write_launcher_closed_signal(session_id: str, pid: int | None = None):
             "pid": int(pid or 0),
             "time_epoch": time.time(),
             "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "source": "YSBT Luncher",
+            "source": "YSB Launcher",
         }
         tmp = p.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -865,7 +901,7 @@ def write_association_preflight_status(status: str, detail: str = ""):
             "status": str(status),
             "detail": str(detail or ""),
             "time": time.time(),
-            "source": "YSBT Luncher",
+            "source": "YSB Launcher",
             "command": opener_association_command(),
         }
         tmp = p.with_suffix(".tmp")
@@ -917,7 +953,7 @@ def run_association_preflight_before_loading():
             "포터블 EXE를 새 버전으로 교체했거나, 파일 위치를 옮긴 경우에 생길 수 있습니다.\n\n"
             f"현재 등록된 실행 명령:\n{registered}\n\n"
             "현재 런처 기준으로 .ysbt 연결을 먼저 갱신할까요?\n\n"
-            "[예]를 누르면 .ysbt 파일 연결만 현재 YSBT Luncher 경로로 덮어씁니다. 프로젝트 파일은 변경되지 않습니다."
+            "[예]를 누르면 .ysbt 파일 연결만 현재 YSB Launcher 경로로 덮어씁니다. 프로젝트 파일은 변경되지 않습니다."
         )
         if messagebox_yes_no_topmost(".ysbt 확장자 연결 갱신", message, default_yes=True):
             try:
@@ -975,7 +1011,7 @@ def write_launcher_launch_debug(session_id: str | None, main_exe: Path | None = 
             "main_exe": str(main_exe or ""),
             "time_epoch": time.time(),
             "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "source": "YSBT Luncher",
+            "source": "YSB Launcher",
         }
         tmp = p.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -984,10 +1020,10 @@ def write_launcher_launch_debug(session_id: str | None, main_exe: Path | None = 
         pass
 
 
-def launch_main(launcher_session_id: str | None = None) -> subprocess.Popen | None:
+def launch_main(launcher_session_id: str | None = None, project_path: str | None = None) -> subprocess.Popen | None:
     main_exe = find_main_exe()
     if main_exe is None:
-        show_error("역식붕이 툴 실행 파일을 찾지 못했습니다.\nYSBT Luncher.exe를 메인 EXE와 같은 폴더에 두세요.")
+        show_error("역식붕이 툴 실행 파일을 찾지 못했습니다.\nYSB Launcher.exe를 메인 EXE와 같은 폴더에 두세요.")
         return None
 
     write_launcher_launch_debug(launcher_session_id, main_exe)
@@ -1012,8 +1048,11 @@ def launch_main(launcher_session_id: str | None = None) -> subprocess.Popen | No
         env.pop(key, None)
 
     try:
+        args = [str(main_exe)]
+        if project_path:
+            args.append(str(project_path))
         return subprocess.Popen(
-            [str(main_exe)],
+            args,
             cwd=str(main_exe.parent),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -1037,6 +1076,9 @@ def wait_for_main_start(window: LauncherLoadingWindow, timeout_sec: float | None
     timeout = timeout_sec if timeout_sec is not None else max(60.0, estimate * 4.0)
     start_time = time.time()
     saw_main_progress = False
+    last_main_progress_time = 0.0
+    last_main_progress_value = 0
+    last_main_progress_message = ""
 
     stage_messages = [
         (0, "실행 준비 중..."),
@@ -1057,9 +1099,33 @@ def wait_for_main_start(window: LauncherLoadingWindow, timeout_sec: float | None
             done = bool(progress_data.get("done")) or progress >= 100
 
             window.set_progress(progress, message, "")
+            now = time.time()
+            if progress != last_main_progress_value or message != last_main_progress_message:
+                last_main_progress_time = now
+                last_main_progress_value = progress
+                last_main_progress_message = message
+
             if done:
                 save_launch_duration_seconds(time.time() - start_time)
                 window.set_progress(100, message or "시작 완료", "")
+                time.sleep(0.05)
+                window.pump()
+                return True
+
+            # 메인 쪽에서 90%대 진행률을 쓴 뒤 마지막 100%/done 신호가 누락되는 경우가 있다.
+            # 이때 메인 창은 이미 뜰 수 있는데 런처 스플래시만 92% 같은 상태로 남는다.
+            # 90% 이상에서 진행률 갱신이 잠시 멈췄고 메인 프로세스가 살아 있으면 완료로 간주해 닫는다.
+            if (
+                progress >= 90
+                and last_main_progress_time
+                and (now - last_main_progress_time) > 1.25
+                and (
+                    main_is_running()
+                    or main_python_started(launched_pid=launched_pid, launched_after=launched_after, session_id=session_id)
+                )
+            ):
+                save_launch_duration_seconds(time.time() - start_time)
+                window.set_progress(100, "시작 완료", "")
                 time.sleep(0.05)
                 window.pump()
                 return True
@@ -1196,19 +1262,14 @@ def main() -> int:
             show_error(f"실행 중인 역식붕이 툴에 파일 열기 요청을 전달하지 못했습니다.\n{e}")
             return 1
 
-    # 메인 앱이 꺼져 있으면 큐에 먼저 기록하고, 런처 1단계 로딩창을 보여준다.
-    try:
-        append_open_queue(project_path)
-    except Exception as e:
-        show_error(f"프로젝트 열기 요청을 저장하지 못했습니다.\n{e}")
-        return 1
-
+    # 메인 앱이 꺼져 있으면 프로젝트 경로를 메인 인자로 직접 넘긴다.
+    # 큐만 남기면 첫 화면이 런처로 보이거나, 오래된 큐 때문에 이전 프로젝트가 열릴 수 있다.
     loading = LauncherLoadingWindow()
     loading.show()
     loading.set_progress(3, "역식붕이 툴 실행 중...", "메인 프로그램을 시작하고 있습니다.")
 
     launch_started = time.time()
-    proc = launch_main(launcher_session_id)
+    proc = launch_main(launcher_session_id, project_path=project_path)
     if proc is None:
         loading.close()
         return 1

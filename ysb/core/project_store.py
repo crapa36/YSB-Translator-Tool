@@ -28,6 +28,53 @@ def ensure_dir(path: str):
     os.makedirs(path, exist_ok=True)
 
 
+
+def safe_image_file_stem(name: str, fallback: str = "image") -> str:
+    """Windows 파일명으로 쓸 수 있게 최소 보정하되, 원본 이름은 최대한 보존한다."""
+    s = str(name or "").strip()
+    for ch in '<>:"/\\|?*':
+        s = s.replace(ch, "_")
+    s = s.rstrip(" .")
+    return s or fallback
+
+
+def unique_image_copy_name(src_path: Path, images_dir: str, used_stems: set[str] | None = None) -> str:
+    """원본 파일명 기반으로 복사 파일명을 만든다.
+
+    확장자가 달라도 표시명 stem이 겹치면 name(1), name(2) 형식으로 회피한다.
+    예: 0007.jpg가 있으면 0007.png는 0007(1).png로 저장.
+    """
+    used_stems = used_stems if used_stems is not None else set()
+    ext = src_path.suffix.lower() or ".png"
+    base = safe_image_file_stem(src_path.stem, fallback="image")
+    existing_stems = set(used_stems)
+    try:
+        for p in Path(images_dir).iterdir():
+            if p.is_file():
+                existing_stems.add(p.stem.lower())
+    except Exception:
+        pass
+
+    def candidate_name(n: int | None):
+        stem = base if n is None else f"{base}({n})"
+        return stem, f"{stem}{ext}"
+
+    stem, name = candidate_name(None)
+    if stem.lower() not in existing_stems and not os.path.exists(os.path.join(images_dir, name)):
+        used_stems.add(stem.lower())
+        return name
+
+    for n in range(1, 10000):
+        stem, name = candidate_name(n)
+        if stem.lower() not in existing_stems and not os.path.exists(os.path.join(images_dir, name)):
+            used_stems.add(stem.lower())
+            return name
+
+    fallback_stem = f"{base}({uuid.uuid4().hex[:8]})"
+    used_stems.add(fallback_stem.lower())
+    return f"{fallback_stem}{ext}"
+
+
 def relpath(path: str, root: str) -> str:
     return os.path.relpath(path, root).replace("\\", "/")
 
@@ -100,8 +147,8 @@ class ProjectStore:
         ensure_dir(os.path.join(self.project_dir, "final_paint"))
         ensure_dir(os.path.join(self.project_dir, "final_paint_above"))
         ensure_dir(os.path.join(self.project_dir, "scripts"))
-        ensure_dir(os.path.join(self.project_dir, "Result"))
-        ensure_dir(os.path.join(self.project_dir, "Txt"))
+        ensure_dir(os.path.join(self.project_dir, "result"))
+        ensure_dir(os.path.join(self.project_dir, "txt"))
 
     def create_from_images(self, project_dir: str, source_paths: List[str]) -> Tuple[List[str], Dict[int, dict]]:
         self.project_dir = project_dir
@@ -110,11 +157,12 @@ class ProjectStore:
         paths: List[str] = []
         data: Dict[int, dict] = {}
 
+        images_dir = os.path.join(self.project_dir, "images")
+        used_stems: set[str] = set()
         for i, src in enumerate(source_paths):
             src_path = Path(src)
-            ext = src_path.suffix.lower() or ".png"
-            dst_name = f"{i + 1:04d}{ext}"
-            dst = os.path.join(self.project_dir, "images", dst_name)
+            dst_name = unique_image_copy_name(src_path, images_dir, used_stems)
+            dst = os.path.join(images_dir, dst_name)
             shutil.copy2(src, dst)
 
             img = imread_unicode(dst)
@@ -132,7 +180,7 @@ class ProjectStore:
                 "working_source": None,
                 "final_paint": None,
                 "final_paint_above": None,
-                "original_name": src_path.name,
+                "original_name": dst_name,
             }
 
         self.ui_state = {"current_mode": 0, "view_states": {}}
@@ -200,20 +248,68 @@ class ProjectStore:
 
         self.init_dirs()
 
+        old_page_images: Dict[int, str] = {}
+        try:
+            if self.project_file and os.path.exists(self.project_file):
+                with open(self.project_file, "r", encoding="utf-8") as f:
+                    old_payload_for_images = json.load(f)
+                old_pages = old_payload_for_images.get("pages", []) if isinstance(old_payload_for_images, dict) else []
+                if isinstance(old_pages, list):
+                    for _i, _page in enumerate(old_pages):
+                        if isinstance(_page, dict) and _page.get("image"):
+                            old_page_images[_i] = os.path.abspath(abs_from_rel(self.project_dir, _page.get("image")))
+        except Exception:
+            old_page_images = {}
+
         pages = []
+        # 저장/작업 캐시 반영은 "새 이미지 추가"가 아니라 현재 페이지 목록을 저장하는 작업이다.
+        # 따라서 폴더에 같은 이름이 있다는 이유만으로 (1) 파일을 새로 만들면 안 된다.
+        # 현재 저장되는 페이지 목록 안에서만 이름 충돌을 피하고, 기존 파일은 덮어쓰기/재사용한다.
+        used_save_stems: set[str] = set()
         for i, image_path in enumerate(paths):
             curr = data.get(i, {})
 
-            # 이미지가 프로젝트 images 밖에 있으면 복사해서 프로젝트 내부로 고정
+            images_dir = os.path.join(self.project_dir, "images")
+            ensure_dir(images_dir)
             abs_image = os.path.abspath(image_path)
             project_abs = os.path.abspath(self.project_dir)
-            if not abs_image.startswith(project_abs):
-                ext = Path(image_path).suffix.lower() or ".png"
-                dst = os.path.join(self.project_dir, "images", f"{i + 1:04d}{ext}")
-                if os.path.abspath(image_path) != os.path.abspath(dst):
-                    shutil.copy2(image_path, dst)
-                image_path = dst
-                paths[i] = dst
+
+            ext = Path(image_path).suffix.lower() or ".png"
+            original_hint = curr.get("original_name") or os.path.basename(image_path)
+            hint = Path(str(original_hint))
+            base = safe_image_file_stem(hint.stem or Path(image_path).stem or f"page{i + 1:03d}", fallback=f"page{i + 1:03d}")
+            if hint.suffix:
+                # 실제 인코딩 변환은 하지 않으므로 확장자는 image_path 기준을 우선한다.
+                ext = Path(image_path).suffix.lower() or hint.suffix.lower() or ".png"
+
+            target_stem = base
+            if target_stem.lower() in used_save_stems:
+                for n in range(1, 10000):
+                    candidate_stem = f"{base}({n})"
+                    if candidate_stem.lower() not in used_save_stems:
+                        target_stem = candidate_stem
+                        break
+            used_save_stems.add(target_stem.lower())
+            desired_dst = os.path.join(images_dir, f"{target_stem}{ext}")
+
+            # 프로젝트 밖 이미지 또는 프로젝트 내부라도 원하는 기준 이름과 다른 경우만 복사/이동한다.
+            # save()는 저장 작업이므로 기존 desired_dst가 있으면 충돌로 보지 않고 덮어쓴다.
+            if os.path.abspath(image_path) != os.path.abspath(desired_dst):
+                try:
+                    if os.path.exists(image_path):
+                        shutil.copy2(image_path, desired_dst)
+                    else:
+                        desired_dst = image_path
+                except Exception:
+                    # 기존 저장 동작과 동일하게 상위에서 파일 없음/쓰기 실패를 알 수 있게 다시 던진다.
+                    raise
+                image_path = desired_dst
+                paths[i] = desired_dst
+            else:
+                image_path = desired_dst
+                paths[i] = desired_dst
+
+            curr["original_name"] = os.path.basename(image_path)
 
             page = {
                 "image": relpath(image_path, self.project_dir),
@@ -293,6 +389,33 @@ class ProjectStore:
                     page["final_paint_above"] = relpath(paint_path, self.project_dir)
 
             pages.append(page)
+
+        # 같은 페이지의 원본 이미지명이 바뀌었을 때, 예전 파일이 images 폴더에 남으면
+        # '구버전 이름'과 '새 이름'이 같이 보인다. 저장 완료 전 안전하게 정리한다.
+        # 단, 현재 pages가 참조하는 파일이거나 images 폴더 밖 파일은 삭제하지 않는다.
+        try:
+            current_image_abs = set()
+            for _page in pages:
+                if isinstance(_page, dict) and _page.get("image"):
+                    current_image_abs.add(os.path.abspath(abs_from_rel(self.project_dir, _page.get("image"))))
+            images_dir_abs = os.path.abspath(os.path.join(self.project_dir, "images"))
+            for _i, _old_abs in list(old_page_images.items()):
+                if not _old_abs:
+                    continue
+                if _old_abs in current_image_abs:
+                    continue
+                try:
+                    if os.path.commonpath([images_dir_abs, os.path.abspath(_old_abs)]) != images_dir_abs:
+                        continue
+                except Exception:
+                    continue
+                if os.path.exists(_old_abs):
+                    try:
+                        os.remove(_old_abs)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
         ui_state = getattr(self, "ui_state", None)
         if ui_state is None:
