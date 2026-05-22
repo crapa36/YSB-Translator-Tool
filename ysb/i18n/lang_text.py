@@ -764,7 +764,7 @@ UI_KO_EN.update({
 
 
 
-# v2.0.0 추가 메뉴/작업 문구 번역 보강
+# v2.0.1 추가 메뉴/작업 문구 번역 보강
 UI_KO_EN.update({
     '페이지 탭 표시명 설정': 'Page Tab Display Name Settings',
     '출력 표시명 설정': 'Output Display Name Settings',
@@ -1425,7 +1425,7 @@ except Exception:
     pass
 
 
-# v2.0.0 page tabs / drag-and-drop image insertion
+# v2.0.1 page tabs / drag-and-drop image insertion
 _V200_PAGE_TABS_UI_KO_EN = {
     '페이지': 'Pages',
     '페이지 없음': 'No pages',
@@ -1445,7 +1445,7 @@ UI_KO_EN.update(_V200_PAGE_TABS_UI_KO_EN)
 UI_EN_KO.update({en: ko for ko, en in _V200_PAGE_TABS_UI_KO_EN.items()})
 
 
-# v2.0.0 hotfix6: empty project creation dialog
+# v2.0.1 hotfix6: empty project creation dialog
 _V200_HOTFIX6_UI_KO_EN = {
     '새 프로젝트': 'New Project',
     '프로젝트 이름': 'Project Name',
@@ -1477,7 +1477,7 @@ API_TR_KO_EN.update({
 })
 
 
-# v2.0.0 hotfix49 shortcut/dialog translation additions
+# v2.0.1 hotfix49 shortcut/dialog translation additions
 SHORTCUT_TR_KO_EN.update({
     '페이지 탭 파일명 변경': 'Rename Page Tab File Name',
     '현재 이미지탭 삭제': 'Delete Current Image Tab',
@@ -1485,7 +1485,7 @@ SHORTCUT_TR_KO_EN.update({
 })
 
 
-# v2.0.0 hotfix49 UI translation additions
+# v2.0.1 hotfix49 UI translation additions
 UI_KO_EN.update({
     '페이지 탭 파일명 변경': 'Rename Page Tab File Name',
     '현재 이미지탭 삭제': 'Delete Current Image Tab',
@@ -1495,9 +1495,13 @@ UI_KO_EN.update({
 UI_EN_KO = {en: ko for ko, en in UI_KO_EN.items()}
 
 
-# v2.0.0 hotfix52 help/about translations
+# v2.0.1 hotfix52 help/about translations
 UI_KO_EN.update({
     '도움말': 'Help',
+    '프로그램 메뉴얼': 'Program Manual',
+    'YSB Tool 사이트로 가기': 'Go to YSB Tool Website',
+    '링크 열기 실패': 'Failed to Open Link',
+    '웹 브라우저로 링크를 열 수 없습니다.': 'Could not open the link in a web browser.',
     '프로그램 정보': 'About',
     'YSB Translator Tool / 역식붕이 툴': 'YSB Translator Tool / 역식붕이 툴',
     '버전': 'Version',
@@ -1512,13 +1516,45 @@ UI_EN_KO = {en: ko for ko, en in UI_KO_EN.items()}
 try:
     SHORTCUT_TR_KO_EN.update({
         '도움말': 'Help',
+        '프로그램 메뉴얼': 'Program Manual',
+        'YSB Tool 사이트로 가기': 'Go to YSB Tool Website',
+        '링크 열기 실패': 'Failed to Open Link',
+        '웹 브라우저로 링크를 열 수 없습니다.': 'Could not open the link in a web browser.',
         '프로그램 정보': 'About',
     })
 except Exception:
     pass
 
 
-# v2.0.0 OCR language combo translations
+# v2.0.1 hotfix53 site/support/version-check translations
+UI_KO_EN.update({
+    '버그제보 / 문의하기': 'Bug Report / Contact',
+    '새 버전을 사용할 수 있습니다.': 'A new version is available.',
+    '닫기': 'Close',
+    '업데이트 알림': 'Update Notification',
+    '다운로드 페이지에서 최신 버전을 받을 수 있습니다.': 'You can get the latest version from the download page.',
+    '현재 버전': 'Current Version',
+    '최신 버전': 'Latest Version',
+    '이번 버전은 다시 알리지 않음': 'Do not remind me about this version again',
+    '다운로드 페이지로 이동': 'Open Download Page',
+})
+UI_EN_KO = {en: ko for ko, en in UI_KO_EN.items()}
+
+try:
+    SHORTCUT_TR_KO_EN.update({
+        '버그제보 / 문의하기': 'Bug Report / Contact',
+                            '닫기': 'Close',
+        '업데이트 알림': 'Update Notification',
+        '현재 버전': 'Current Version',
+        '최신 버전': 'Latest Version',
+        '이번 버전은 다시 알리지 않음': 'Do not remind me about this version again',
+        '다운로드 페이지로 이동': 'Open Download Page',
+    })
+except Exception:
+    pass
+
+
+# v2.0.1 OCR language combo translations
 API_TR_KO_EN.update({
     'OCR 언어': 'OCR Language',
     '일본어': 'Japanese',
@@ -1527,13 +1563,13 @@ API_TR_KO_EN.update({
     '영어': 'English',
 })
 
-# v2.0.0 cloud registration interlock translations
+# v2.0.1 cloud registration interlock translations
 UI_KO_EN.update({
     '이미 Google Drive 계정이 등록되어 있습니다.\n\n다른 계정을 연결하려면 먼저 클라우드 등록 해제를 진행해 주세요.': 'A Google Drive account is already registered.\n\nTo connect a different account, unregister the current cloud account first.',
     '이미 등록된 클라우드 계정이 있어 새 등록을 시작할 수 없습니다. 다른 계정을 연결하려면 먼저 등록 해제를 진행하세요.': 'A cloud account is already registered, so a new registration cannot be started. To connect a different account, unregister the current account first.',
 })
 
-# v2.0.0 font refresh translations
+# v2.0.1 font refresh translations
 UI_KO_EN.update({
     '폰트 갱신': 'Refresh Fonts',
     'Windows에 설치되어 있지만 목록에 보이지 않는 글꼴을 다시 찾습니다.': 'Search again for fonts installed in Windows but missing from the list.',
@@ -1545,7 +1581,7 @@ UI_KO_EN.update({
     '폰트 갱신 중 오류가 발생했습니다.': 'An error occurred while refreshing fonts.',
 })
 
-# v2.0.0 path visibility option translations
+# v2.0.1 path visibility option translations
 UI_KO_EN.update({
     '로그창에 파일 위치 및 경로 표시': 'Show file locations and paths in logs',
     '로그에 저장 위치, 출력 위치, 작업 폴더 같은 실제 파일 경로를 함께 표시합니다. 끄면 완료/실패 같은 결과 문구만 표시합니다.': 'Shows actual file paths such as save locations, output folders, and workspace folders in the log. When disabled, only result messages such as completion/failure are shown.',

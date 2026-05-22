@@ -36,10 +36,10 @@ YSB_ROLE_LAUNCHER = "YSB_LAUNCHER"
 YSB_ROLE_OPENER = YSB_ROLE_LAUNCHER
 
 MAIN_EXE_CANDIDATES = [
-    "역식붕이 툴 v2.0.0.exe",
+    "역식붕이 툴 v2.0.1.exe",
     "역식붕이 툴 v1.8.1.exe",
     "역식붕이 툴.exe",
-    "YSB_Tool_v2.0.0.exe",
+    "YSB_Tool_v2.0.1.exe",
     "YSB_Tool_v1.8.1.exe",
     "YSB_Tool.exe",
 ]
@@ -86,7 +86,7 @@ def app_config_dir() -> Path:
 def resource_path(name: str) -> Path:
     """PyInstaller onefile/onedir/소스 실행에서 런처 리소스를 안정적으로 찾는다.
 
-    v2.0.0 리팩토링 이후 스플래시와 아이콘은 assets/ 아래에서 관리한다.
+    v2.0.1 리팩토링 이후 스플래시와 아이콘은 assets/ 아래에서 관리한다.
     기존 호출이 resource_path("ysb_splash.png")처럼 파일명만 넘겨도
     assets/ysb_splash.png를 먼저 찾도록 보정한다.
     """

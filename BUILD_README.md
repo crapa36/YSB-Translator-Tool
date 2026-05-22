@@ -1,4 +1,4 @@
-# YSB Translator Tool v2.0.0 Build Layout
+# YSB Translator Tool v2.0.1 Build Layout
 
 ## Placement
 
@@ -17,9 +17,9 @@ YSBTranslator/
 - requirements_ysik_tool.txt
 - cloud_oauth_client.json          # optional local file, do not commit publicly
 - cloud_oauth_client.example.json  # safe template for repository use
-- run_main_v2.0.0.bat
+- run_main_v2.0.1.bat
 - build_tools/
-  - build_exe_v2.0.0.bat
+  - build_exe_v2.0.1.bat
   - version_main.txt
   - version_launcher.txt
 ```
@@ -29,7 +29,7 @@ YSBTranslator/
 Run from the project root:
 
 ```bat
-run_main_v2.0.0.bat
+run_main_v2.0.1.bat
 ```
 
 This creates or reuses:
@@ -43,17 +43,17 @@ YSBTranslator/.venv/
 Run directly from `build_tools/`:
 
 ```bat
-build_tools\build_exe_v2.0.0.bat
+build_tools\build_exe_v2.0.1.bat
 ```
 
 The build script treats the parent folder of `build_tools/` as the project root.
-It reuses the root `.venv` created by `run_main_v2.0.0.bat`; if `.venv` does not exist, it creates it.
+It reuses the root `.venv` created by `run_main_v2.0.1.bat`; if `.venv` does not exist, it creates it.
 
 ## Build outputs
 
 ```text
 dist/
-- 역식붕이 툴 v2.0.0.exe
+- 역식붕이 툴 v2.0.1.exe
 - YSB_Launcher.exe
 ```
 
@@ -62,4 +62,4 @@ dist/
 - `ysb_launcher.py` is the official launcher entry point.
 - `YSB_Launcher.exe` is the official launcher executable name.
 - `version_launcher.txt` is the launcher version metadata file.
-- `version_opener.txt`, `YSB_FileOpener.exe`, and `YSBT Luncher.exe` are deprecated and not used in the v2.0.0 layout.
+- `version_opener.txt`, `YSB_FileOpener.exe`, and `YSBT Luncher.exe` are deprecated and not used in the v2.0.1 layout.

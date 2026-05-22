@@ -949,7 +949,7 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         try:
             version = str(APP_VERSION)
         except Exception:
-            version = "2.0.0"
+            version = "2.0.1"
 
         info = QLabel(
             self.tr_ui("버전") + f" {version}\n"
@@ -1145,6 +1145,10 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         settings_menu.addAction(self.actions["setting_file_path_visibility"])
 
         help_menu = menubar.addMenu(self.tr_ui("도움말")); self.help_menu = help_menu
+        help_menu.addAction(self.actions["help_program_manual"])
+        help_menu.addAction(self.actions["help_open_website"])
+        help_menu.addAction(self.actions["help_report_bug"])
+        help_menu.addSeparator()
         help_menu.addAction(self.actions["help_about"])
 
         self.setup_project_exit_button(menubar)
@@ -2333,6 +2337,9 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
             "cloud_cache_backup": "클라우드로 캐시 백업",
             "cloud_cache_restore": "클라우드에서 캐시 불러오기",
             "cloud_delete_backups": "클라우드 백업 삭제",
+            "help_program_manual": "프로그램 메뉴얼",
+            "help_open_website": "YSB Tool 사이트로 가기",
+            "help_report_bug": "버그제보 / 문의하기",
             "help_about": "프로그램 정보",
             "paint_magic_fill": "마스킹 칠하기",
             "paint_mask_wrap": "마스크 랩핑",

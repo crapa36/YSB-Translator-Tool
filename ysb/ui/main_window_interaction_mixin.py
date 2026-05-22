@@ -88,6 +88,9 @@ class MainWindowInteractionMixin:
         make_action("option_item_text_preset_settings", "개별 글꼴 프리셋 관리", self.open_item_text_preset_dialog)
 
         # 도움말
+        make_action("help_program_manual", "프로그램 메뉴얼", self.open_program_manual_url)
+        make_action("help_open_website", "YSB Tool 사이트로 가기", self.open_ysb_tool_site_url)
+        make_action("help_report_bug", "버그제보 / 문의하기", self.open_bug_report_url)
         make_action("help_about", "프로그램 정보", self.open_about_dialog)
 
         # 클라우드
@@ -109,6 +112,89 @@ class MainWindowInteractionMixin:
         make_action("final_paint_above_toggle", "텍스트 위 페인팅 ON/OFF", self.toggle_final_paint_above_text)
         make_action("final_paint_opacity_inc", "최종 브러시 불투명도 증가", lambda *args: self.adjust_final_paint_opacity(+5))
         make_action("final_paint_opacity_dec", "최종 브러시 불투명도 감소", lambda *args: self.adjust_final_paint_opacity(-5))
+
+    def open_external_url(self, url):
+        """도움말 메뉴에서 외부 웹페이지를 기본 브라우저로 연다."""
+        try:
+            ok = QDesktopServices.openUrl(QUrl(str(url)))
+            if not ok:
+                raise RuntimeError(self.tr_ui("웹 브라우저로 링크를 열 수 없습니다."))
+        except Exception as e:
+            try:
+                webbrowser.open(str(url))
+                return
+            except Exception:
+                pass
+            QMessageBox.warning(self, self.tr_ui("링크 열기 실패"), str(e))
+
+    def open_program_manual_url(self):
+        self.open_external_url(YSB_TOOL_MANUAL_URL)
+
+    def open_ysb_tool_site_url(self):
+        self.open_external_url(YSB_TOOL_SITE_URL)
+
+    def open_bug_report_url(self):
+        # 프로그램에서는 공식 지원 페이지를 경유하고,
+        # 사이트 안의 문의/버그제보 버튼이 GitHub Issues 작성 화면으로 이동한다.
+        self.open_external_url(YSB_TOOL_SUPPORT_URL)
+
+    def start_auto_version_check(self):
+        """Check latest version in the background after startup.
+
+        The app must stay usable without internet, so failures are intentionally
+        silent. Only a newer version shows a small dialog.
+        """
+        try:
+            if getattr(self, "_auto_version_check_started", False):
+                return
+            self._auto_version_check_started = True
+            worker = VersionCheckThread(APP_VERSION, timeout=5, parent=self)
+            self._auto_version_check_thread = worker
+            worker.version_info_ready.connect(self._on_auto_version_info_ready)
+            worker.version_check_failed.connect(self._on_auto_version_check_failed)
+            worker.finished.connect(worker.deleteLater)
+            worker.finished.connect(lambda: setattr(self, "_auto_version_check_thread", None))
+            worker.start()
+        except Exception:
+            pass
+
+    def _on_auto_version_check_failed(self, message):
+        # 인터넷이 없거나 사이트가 잠시 안 열려도 프로그램 사용은 막지 않는다.
+        try:
+            self._auto_version_check_error = str(message)
+        except Exception:
+            pass
+
+    def _on_auto_version_info_ready(self, info):
+        try:
+            if getattr(self, "_app_is_closing", False):
+                return
+            latest_version = str((info or {}).get("latest_version") or "").strip()
+            if not latest_version:
+                return
+            if _ysb_version_tuple(APP_VERSION) >= _ysb_version_tuple(latest_version):
+                return
+
+            options = load_app_options()
+            ignored = str(options.get(UPDATE_IGNORED_VERSION_KEY, "") or "").strip()
+            if ignored == latest_version:
+                return
+
+            dialog = UpdateAvailableDialog(self, current_version=APP_VERSION, version_info=info)
+            dialog.exec()
+
+            if dialog.ignore_this_version():
+                options[UPDATE_IGNORED_VERSION_KEY] = latest_version
+                save_app_options(options)
+                try:
+                    self.app_options = dict(options)
+                except Exception:
+                    pass
+
+            if getattr(dialog, "open_download_requested", False):
+                self.open_external_url(str(info.get("download_page_url") or YSB_TOOL_DOWNLOAD_PAGE_URL))
+        except Exception:
+            pass
 
     def apply_shortcuts(self):
         for key, action in self.actions.items():

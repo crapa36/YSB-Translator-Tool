@@ -15,30 +15,30 @@ Semi-automatic manga translation workstation with OCR, translation, masking, inp
 
 ## 실행 방법 / Run from source
 
-개발용으로 실행할 때는 프로젝트 루트의 `run_main_v2.0.0.bat`을 실행합니다.
+개발용으로 실행할 때는 프로젝트 루트의 `run_main_v2.0.1.bat`을 실행합니다.
 이 BAT는 프로젝트 루트에 `.venv`를 만들거나 기존 `.venv`를 재사용한 뒤 `main.py`를 실행합니다.
 
 ```text
 YSBTranslator/
-- run_main_v2.0.0.bat
+- run_main_v2.0.1.bat
 - main.py
 - ysb/
 - requirements_ysik_tool.txt
 - .venv/                  # 자동 생성
 ```
 
-For source execution, run `run_main_v2.0.0.bat` from the project root.
+For source execution, run `run_main_v2.0.1.bat` from the project root.
 It creates or reuses `.venv` in the project root and starts `main.py`.
 
 ## 빌드 방법 / Build
 
-EXE 빌드는 `build_tools/build_exe_v2.0.0.bat`을 실행합니다.
+EXE 빌드는 `build_tools/build_exe_v2.0.1.bat`을 실행합니다.
 빌드 스크립트는 한 단계 위 폴더를 프로젝트 루트로 인식하고, 루트의 `.venv`를 재사용합니다.
 
 ```text
 YSBTranslator/
 - build_tools/
-  - build_exe_v2.0.0.bat
+  - build_exe_v2.0.1.bat
   - version_main.txt
   - version_launcher.txt
 - assets/
@@ -51,7 +51,7 @@ YSBTranslator/
 
 ```text
 dist/
-- 역식붕이 툴 v2.0.0.exe
+- 역식붕이 툴 v2.0.1.exe
 - YSB_Launcher.exe
 ```
 
@@ -61,7 +61,7 @@ dist/
 YSBTranslator/
 - main.py
 - ysb_launcher.py
-- run_main_v2.0.0.bat
+- run_main_v2.0.1.bat
 - requirements_ysik_tool.txt
 - assets/
 - build_tools/
@@ -76,7 +76,7 @@ YSBTranslator/
 ```
 
 `ysb_launcher.py` is the official launcher entry point.
-The old `ysb_file_opener.py` path is deprecated and not required in the v2.0.0 layout.
+The old `ysb_file_opener.py` path is deprecated and not required in the v2.0.1 layout.
 
 ## License
 

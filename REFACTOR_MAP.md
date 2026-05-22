@@ -35,7 +35,7 @@ If a Windows file association still points to an old opener executable, unregist
 Build helper files are grouped under `build_tools/`.
 
 ```text
-build_tools/build_exe_v2.0.0.bat
+build_tools/build_exe_v2.0.1.bat
 build_tools/version_main.txt
 build_tools/version_launcher.txt
 ```

@@ -4,7 +4,7 @@ The application code is organized under the ``ysb`` package.
 This file is intentionally kept small so build scripts and users can keep
 running ``python main.py`` as before.
 
-v2.0.0 packaging note:
+v2.0.1 packaging note:
 Use a direct import instead of runpy/run_module so PyInstaller can follow the
 package graph without heavy blanket hidden-imports.
 """

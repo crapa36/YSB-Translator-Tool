@@ -20,6 +20,8 @@ import hashlib
 import hmac
 import threading
 import webbrowser
+import urllib.request
+import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
 from datetime import datetime, timezone
@@ -49,7 +51,7 @@ def resource_path(relative_path):
     일반 실행 / PyInstaller --onedir / PyInstaller --onefile 모두에서
     포함 리소스 파일 경로를 안정적으로 찾는다.
 
-    v2.0.0 리팩토링 이후 아이콘/스플래시/로고는 assets/ 아래에서 관리한다.
+    v2.0.1 리팩토링 이후 아이콘/스플래시/로고는 assets/ 아래에서 관리한다.
     기존 코드가 resource_path("ysb_icon.ico"), resource_path("ysb_splash.png")처럼
     루트 기준 이름을 넘겨도 assets/의 정식 파일을 먼저 찾도록 보정한다.
     """
@@ -398,9 +400,155 @@ def clamp_analysis_mask_min_px(value, default_value):
     return v
 
 
-APP_VERSION = "v2.0.0"
+APP_VERSION = "v2.0.1"
 APP_NAME_KO = "역식붕이 툴"
 APP_NAME_EN = "YSB Tool"
+YSB_TOOL_SITE_URL = "https://ysb-tool.com/"
+YSB_TOOL_MANUAL_URL = "https://ysb-tool.com/#manual"
+YSB_TOOL_SUPPORT_URL = "https://ysb-tool.com/support/"
+YSB_TOOL_BUG_REPORT_URL = "https://github.com/amule949/YSB-Translator-Tool/issues/new"
+YSB_TOOL_DOWNLOAD_PAGE_URL = "https://ysb-tool.com/#download"
+YSB_TOOL_VERSION_JSON_URL = "https://ysb-tool.com/version.json"
+UPDATE_IGNORED_VERSION_KEY = "ignored_update_version"
+
+
+def _ysb_version_display(value):
+    """Normalize remote version text to a compact v2.0.1 style label."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    match = re.search(r"v?\d+(?:\.\d+){1,3}", text, re.IGNORECASE)
+    if match:
+        version = match.group(0)
+        return version if version.lower().startswith("v") else "v" + version
+    return text
+
+
+def fetch_ysb_version_info(current_version=None, timeout=6):
+    """Fetch and normalize ysb-tool.com/version.json.
+
+    Used by the background startup check. Network failures are raised so
+    startup checks can silently ignore them.
+    """
+    version = str(current_version or APP_VERSION)
+    req = urllib.request.Request(
+        YSB_TOOL_VERSION_JSON_URL,
+        headers={"User-Agent": f"YSB-Tool/{version} VersionCheck"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        raw = response.read(1024 * 1024).decode("utf-8", errors="replace")
+    info = json.loads(raw)
+    if not isinstance(info, dict):
+        raise ValueError("version.json root must be an object")
+    latest_version_raw = str(info.get("latest_version") or info.get("version") or "").strip()
+    if not latest_version_raw:
+        raise ValueError("version.json에 latest_version 값이 없습니다.")
+    latest_version = _ysb_version_display(latest_version_raw)
+    display_name = _ysb_version_display(info.get("display_name") or latest_version_raw)
+    info["latest_version"] = latest_version
+    info["display_name"] = display_name or latest_version
+    info["download_page_url"] = str(info.get("download_page_url") or YSB_TOOL_DOWNLOAD_PAGE_URL).strip() or YSB_TOOL_DOWNLOAD_PAGE_URL
+    info["download_url"] = str(info.get("download_url") or "").strip()
+    return info
+
+
+class VersionCheckThread(QThread):
+    version_info_ready = pyqtSignal(dict)
+    version_check_failed = pyqtSignal(str)
+
+    def __init__(self, current_version=None, timeout=5, parent=None):
+        super().__init__(parent)
+        self.current_version = str(current_version or APP_VERSION)
+        self.timeout = timeout
+
+    def run(self):
+        try:
+            info = fetch_ysb_version_info(self.current_version, timeout=self.timeout)
+            self.version_info_ready.emit(info)
+        except Exception as e:
+            self.version_check_failed.emit(str(e))
+
+
+def _ysb_version_tuple(value):
+    """Return a comparable version tuple from strings like v2.0.1 or 2.0.1."""
+    nums = re.findall(r"\d+", str(value or ""))
+    if not nums:
+        return (0,)
+    return tuple(int(x) for x in nums[:4])
+
+
+class UpdateAvailableDialog(QDialog):
+    """Startup update notification dialog.
+
+    This appears only when the remote latest version is newer than the current
+    app version, and it can suppress the same latest version via app cache.
+    """
+
+    def __init__(self, parent=None, current_version=None, version_info=None):
+        super().__init__(parent)
+        self.parent_window = parent
+        self.current_version = str(current_version or APP_VERSION)
+        self.version_info = dict(version_info or {})
+        self.open_download_requested = False
+        self._build_ui()
+
+    def _tr(self, text):
+        parent = self.parent_window
+        try:
+            return parent.tr_ui(text) if parent is not None and hasattr(parent, "tr_ui") else text
+        except Exception:
+            return text
+
+    def _build_ui(self):
+        self.setWindowTitle(self._tr("업데이트 알림"))
+        self.setMinimumWidth(480)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        title = QLabel(self._tr("새 버전을 사용할 수 있습니다."))
+        f = title.font()
+        f.setPointSize(max(11, f.pointSize() + 2))
+        f.setBold(True)
+        title.setFont(f)
+        layout.addWidget(title)
+
+        msg = QLabel(self._tr("다운로드 페이지에서 최신 버전을 받을 수 있습니다."))
+        msg.setWordWrap(True)
+        layout.addWidget(msg)
+
+        latest_version = str(self.version_info.get("latest_version") or "").strip()
+        latest_display = str(self.version_info.get("display_name") or latest_version).strip() or latest_version
+
+        form = QFormLayout()
+        form.addRow(self._tr("현재 버전"), QLabel(self.current_version))
+        form.addRow(self._tr("최신 버전"), QLabel(latest_display))
+        layout.addLayout(form)
+
+        bottom = QHBoxLayout()
+        self.ignore_checkbox = QCheckBox(self._tr("이번 버전은 다시 알리지 않음"))
+        bottom.addWidget(self.ignore_checkbox)
+        bottom.addStretch(1)
+
+        download_button = QPushButton(self._tr("다운로드 페이지로 이동"))
+        download_button.clicked.connect(self._download)
+        close_button = QPushButton(self._tr("닫기"))
+        close_button.clicked.connect(self.accept)
+        bottom.addWidget(download_button)
+        bottom.addWidget(close_button)
+        layout.addLayout(bottom)
+
+    def ignore_this_version(self):
+        try:
+            return bool(self.ignore_checkbox.isChecked())
+        except Exception:
+            return False
+
+    def _download(self):
+        self.open_download_requested = True
+        self.accept()
+
 
 YSBT_EXTENSION = ".ysbt"
 YSBT_PROG_ID = "YSBTranslator.YSBTProject"
@@ -613,7 +761,7 @@ def _restart_python_executable():
 def restart_application_detached():
     """현재 프로세스를 종료하고 새 프로세스를 독립 재실행한다.
 
-    v2.0.0:
+    v2.0.1:
     - 가능하면 공식 YSB_Launcher.exe를 통해 재기동한다.
       그러면 위치 변경 후 재기동 중에도 런처 진행률 화면이 표시된다.
     - 런처가 없으면 기존처럼 메인 EXE를 직접 재실행한다.
@@ -723,7 +871,7 @@ def get_executable_for_association() -> str:
 def get_association_command() -> str:
     """.ysbt 더블클릭 시 Windows가 실행할 명령어.
 
-    v2.0.0 launcher policy:
+    v2.0.1 launcher policy:
     - YSB_Launcher.exe가 있으면 파일 연결은 공식 런처를 우선 사용한다.
     - 런처가 없으면 기존처럼 메인 EXE 또는 main.py로 fallback한다.
     """
@@ -1122,11 +1270,15 @@ class WorkspaceSetupDialog(QDialog):
             QMessageBox.warning(self, "Path Error" if self.ui_language == LANG_EN else "경로 오류", "The workspace folder path is invalid." if self.ui_language == LANG_EN else "작업 폴더 경로가 올바르지 않습니다.")
             return
 
+        # 첫 실행/복구 설정창에서는 기존 작업 폴더가 깨져 있을 수 있다.
+        # 이때 get_workspace_root()를 먼저 호출하면 깨진 경로에 cache/temp를 만들려다가
+        # WinError 5가 날 수 있으므로, 기존 설정값은 읽기만 하고 폴더를 만들지 않는다.
         try:
-            current = Path(load_workspace_config().get("workspace_root") or get_workspace_root()).resolve()
+            cfg_root_text = load_workspace_config().get("workspace_root")
+            current = Path(cfg_root_text).resolve() if cfg_root_text else default_workspace_root().resolve()
             target_resolved = target.resolve()
         except Exception:
-            current = Path(str(get_workspace_root()))
+            current = Path(str(default_workspace_root()))
             target_resolved = target
 
         restart_needed = (not self.first_run) and (current != target_resolved)
@@ -1135,25 +1287,31 @@ class WorkspaceSetupDialog(QDialog):
                 self.ed_path.setText(str(current))
                 return
 
-        # 언어 설정은 사용자가 확인/재기동 흐름을 승인한 뒤에만 저장한다.
-        try:
-            opts = load_app_options()
-            opts[UI_LANGUAGE_KEY] = normalize_ui_language(getattr(self, "ui_language", LANG_KO))
-            save_app_options(opts)
-        except Exception:
-            pass
-
         if not self._handle_association_choice():
             return
+
+        selected_language = normalize_ui_language(getattr(self, "ui_language", LANG_KO))
+
+        def save_selected_language():
+            # 언어 설정은 작업 폴더가 정상 확정된 뒤 저장한다.
+            # 저장 실패는 치명 오류로 보지 않는다. 다음 실행에서 기본 언어로만 돌아갈 수 있다.
+            try:
+                opts = load_app_options()
+                opts[UI_LANGUAGE_KEY] = selected_language
+                save_app_options(opts)
+            except Exception:
+                pass
 
         try:
             if self.first_run:
                 set_workspace_root(target)
+                save_selected_language()
                 self.saved_workspace_root = str(target)
                 QMessageBox.information(self, translate_ui_text("설정 완료", self.ui_language), f"{translate_ui_text('작업 폴더를 설정했습니다.', self.ui_language)}\n\n{target}")
             else:
                 if restart_needed:
                     schedule_workspace_root_change(target)
+                    save_selected_language()
                     self.saved_workspace_root = str(target)
                     self.accept()
                     restart_application_detached()
@@ -1161,6 +1319,7 @@ class WorkspaceSetupDialog(QDialog):
                 else:
                     # 경로가 같으면 구조만 보장한다.
                     set_workspace_root(target)
+                    save_selected_language()
                     self.saved_workspace_root = str(target)
                     QMessageBox.information(self, translate_ui_text("설정 완료", self.ui_language), translate_ui_text("작업 폴더 설정을 저장했습니다.", self.ui_language))
         except Exception as e:
@@ -1497,7 +1656,7 @@ def get_file_opener_path() -> Path | None:
     - ProductName: YSB Translator Tool
     - InternalName 또는 YSBAppRole: YSB_LAUNCHER
 
-    v2.0.0부터 구형 YSB_FileOpener / YSBT Luncher 이름은 탐색하지 않는다.
+    v2.0.1부터 구형 YSB_FileOpener / YSBT Luncher 이름은 탐색하지 않는다.
     """
     try:
         search_dirs = []

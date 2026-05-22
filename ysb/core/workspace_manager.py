@@ -82,9 +82,9 @@ def user_documents_dir() -> Path:
     known = _windows_known_documents_dir()
     if known:
         return known
-    # Windows가 아니거나 API 조회에 실패한 경우에만 홈/Documents를 fallback으로 쓴다.
-    docs = _literal_home_documents_dir()
-    return docs if docs.exists() else Path.home()
+    # Known Folder 조회에 실패하더라도 사용자 홈 자체를 작업 기준으로 쓰지 않는다.
+    # Documents 폴더가 아직 없어도 이후 ensure 단계에서 안전하게 생성한다.
+    return _literal_home_documents_dir()
 
 
 def legacy_literal_workspace_root() -> Path:
@@ -159,10 +159,83 @@ def save_workspace_config(data: dict):
         json.dump(dict(data or {}), f, ensure_ascii=False, indent=2)
 
 
+def _is_other_windows_user_profile_path(root: str | Path) -> bool:
+    """다른 Windows 사용자 프로필 아래 경로인지 검사한다.
+
+    예: A PC에서 C:/Users/A/Documents/YSB_Translator를 백업한 뒤
+    B PC에서 복원하면 C:/Users/A/... 경로가 현재 PC에 남을 수 있다.
+    이 경로는 없거나 접근 권한이 없어 WinError 5로 이어질 수 있으므로 자동 복구한다.
+    """
+    if not sys.platform.startswith("win"):
+        return False
+    try:
+        root_path = Path(root).expanduser()
+        home_path = Path.home().expanduser()
+        root_parts = root_path.parts
+        home_parts = home_path.parts
+        if len(root_parts) >= 3 and len(home_parts) >= 3:
+            # Windows Path.parts 예: ('C:\\', 'Users', 'Amule', 'Documents', 'YSB_Translator')
+            same_drive = str(root_parts[0]).lower() == str(home_parts[0]).lower()
+            under_users = str(root_parts[1]).lower() == "users"
+            current_under_users = str(home_parts[1]).lower() == "users"
+            different_user = str(root_parts[2]).lower() != str(home_parts[2]).lower()
+            if same_drive and under_users and current_under_users and different_user:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _is_unsafe_workspace_root(root: str | Path) -> bool:
+    """작업 폴더로 쓰면 안 되는 사용자 프로필/문서 루트인지 검사한다.
+
+    깨진 설정 파일에 C:/Users/사용자 또는 Documents 자체가 저장되어 있으면
+    cache/temp/workspaces를 프로필 루트 바로 아래에 만들려고 하면서 권한 오류가 날 수 있다.
+    YSB_Translator 하위 폴더가 아닌 사용자 홈/문서 루트는 자동 보정 대상이다.
+    또한 다른 PC의 C:/Users/다른이름/... 경로가 복원된 경우도 현재 PC 기본값으로 복구한다.
+    """
+    try:
+        root_path = Path(root)
+    except Exception:
+        return True
+    try:
+        if _same_path(root_path, Path.home()):
+            return True
+    except Exception:
+        pass
+    try:
+        if _same_path(root_path, user_documents_dir()):
+            return True
+    except Exception:
+        pass
+    try:
+        if _is_other_windows_user_profile_path(root_path):
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def ensure_workspace_structure(root: str | Path):
-    root = Path(root)
+    root = Path(root).expanduser()
+    if _is_unsafe_workspace_root(root):
+        raise PermissionError(f"작업 폴더는 사용자 홈/문서 폴더 자체가 아니라 {APP_FOLDER_NAME} 폴더여야 합니다: {root}")
+    root.mkdir(parents=True, exist_ok=True)
     for name in ("cache", "temp", "workspaces"):
         (root / name).mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def ensure_workspace_writable(root: str | Path):
+    """작업 폴더 구조를 만들고 실제 쓰기 가능 여부까지 확인한다."""
+    root = ensure_workspace_structure(root)
+    test_path = root / ".ysb_write_test.tmp"
+    with open(test_path, "w", encoding="utf-8") as f:
+        f.write("ok")
+    try:
+        test_path.unlink()
+    except Exception:
+        pass
     return root
 
 
@@ -196,6 +269,16 @@ def apply_pending_workspace_move_if_needed() -> Path:
     current = Path(cfg.get("workspace_root") or default_root)
     pending = cfg.get("pending_workspace_root")
 
+    # 깨진 설정이 사용자 프로필/문서 루트 자체를 가리키면 먼저 안전한 기본값으로 복구한다.
+    # 이 단계에서 기존 current에 cache/temp를 만들지 않으므로 WinError 5 루프를 피할 수 있다.
+    if _is_unsafe_workspace_root(current):
+        ensure_workspace_writable(default_root)
+        cfg["workspace_root"] = str(default_root)
+        cfg.pop("pending_workspace_root", None)
+        save_workspace_config(cfg)
+        current = default_root
+        pending = None
+
     # hotfix16: 한국어 Windows/리디렉션 환경에서 Path.home()/Documents를 직접 만들어
     # 잘못된 Documents 폴더가 생긴 경우, 실제 Windows '문서' Known Folder로 자동 보정한다.
     # 단, 사용자가 직접 다른 경로를 지정한 경우까지 함부로 바꾸지 않기 위해
@@ -226,7 +309,7 @@ def apply_pending_workspace_move_if_needed() -> Path:
         except Exception:
             # 이동 실패 시 기존 루트를 유지한다. 실패 내용은 프로그램 시작 후 옵션 창에서 다시 처리하게 한다.
             current = Path(cfg.get("workspace_root") or default_root)
-    ensure_workspace_structure(current)
+    ensure_workspace_writable(current)
     return current
 
 
@@ -235,17 +318,20 @@ def get_workspace_root() -> Path:
 
 
 def set_workspace_root(path: str | Path):
+    # 먼저 대상 폴더를 만들고 쓰기 가능 여부를 확인한 뒤 설정 파일을 저장한다.
+    # 그래야 저장 실패/권한 실패 시 깨진 workspace_config.json이 남지 않는다.
+    target = ensure_workspace_writable(path)
     cfg = load_workspace_config()
-    cfg["workspace_root"] = str(Path(path))
+    cfg["workspace_root"] = str(target)
     cfg.pop("pending_workspace_root", None)
     save_workspace_config(cfg)
-    ensure_workspace_structure(path)
 
 
 def schedule_workspace_root_change(path: str | Path):
     cfg = load_workspace_config()
-    cfg.setdefault("workspace_root", str(get_workspace_root()))
-    cfg["pending_workspace_root"] = str(Path(path))
+    if not cfg.get("workspace_root") or _is_unsafe_workspace_root(cfg.get("workspace_root")):
+        cfg["workspace_root"] = str(get_workspace_root())
+    cfg["pending_workspace_root"] = str(Path(path).expanduser())
     save_workspace_config(cfg)
 
 

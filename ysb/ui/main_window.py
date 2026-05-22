@@ -182,6 +182,10 @@ class MainWindow(MainWindowInteractionMixin, MainWindowCloudMixin, MainWindowSet
         # 이미 켜진 앱에 파일 경로만 전달해 드래그앤드롭과 같은 빠른 열기를 구현한다.
         self.setup_external_open_queue_monitor()
 
+        # 사이트 버전 확인은 시작 후 백그라운드에서 조용히 수행한다.
+        # 인터넷이 없거나 실패해도 프로그램 사용에는 영향을 주지 않는다.
+        QTimer.singleShot(2500, self.start_auto_version_check)
+
     def showEvent(self, event):
         try:
             super().showEvent(event)

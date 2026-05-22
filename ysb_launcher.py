@@ -2,7 +2,7 @@
 
 Use this for .ysbt double-click launching / file association.
 
-v2.0.0 packaging note:
+v2.0.1 packaging note:
 Use a direct import instead of runpy/run_module so PyInstaller can keep the
 launcher bundle focused on ysb.core.ysb_launcher instead of guessing the whole
 application package.

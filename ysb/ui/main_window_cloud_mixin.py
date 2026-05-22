@@ -416,6 +416,28 @@ class MainWindowCloudMixin:
                     lbl.repaint()
             except Exception:
                 pass
+
+        # 같은 클라우드 허브 창을 닫지 않아도 등록/해제 버튼 상태가 즉시 바뀌게 한다.
+        registered = self.cloud_is_registered()
+        try:
+            btn = getattr(self, "_cloud_overview_register_button", None)
+            if btn is not None:
+                btn.setEnabled(not registered)
+                if registered:
+                    btn.setToolTip(self.tr_ui("이미 등록된 클라우드 계정이 있어 새 등록을 시작할 수 없습니다. 다른 계정을 연결하려면 먼저 등록 해제를 진행하세요."))
+                else:
+                    btn.setToolTip("")
+                btn.update()
+        except Exception:
+            pass
+        try:
+            btn = getattr(self, "_cloud_overview_unregister_button", None)
+            if btn is not None:
+                btn.setEnabled(registered)
+                btn.update()
+        except Exception:
+            pass
+
         try:
             if hasattr(self, "launcher_widget"):
                 self.launcher_widget.repaint()
@@ -669,14 +691,9 @@ class MainWindowCloudMixin:
                     continue
                 yield p, Path("cache") / rel
 
-        # 작업 폴더 위치 설정은 Windows 사용자 설정 폴더에 있으므로 별도 포함한다.
-        try:
-            config_root = app_config_dir()
-            workspace_cfg = config_root / "workspace_config.json"
-            if workspace_cfg.exists():
-                yield workspace_cfg, Path("config") / "workspace_config.json"
-        except Exception:
-            pass
+        # 작업 폴더 위치(workspace_config.json)는 PC별 로컬 설정이다.
+        # 다른 PC에서 복원하면 Windows 사용자명이 달라져 경로가 깨질 수 있으므로
+        # 클라우드 캐시 백업에는 포함하지 않는다.
 
     def create_cache_backup_zip(self, include_api_keys=False, api_password=None):
         ts = time.strftime("%Y%m%d_%H%M%S")
@@ -888,12 +905,10 @@ class MainWindowCloudMixin:
                     if not str(dest).startswith(str(cache_root)):
                         continue
                 elif name.startswith("config/"):
-                    rel = Path(name[len("config/"):])
-                    if rel.name != "workspace_config.json":
-                        continue
-                    dest = (config_root / rel).resolve()
-                    if not str(dest).startswith(str(config_root)):
-                        continue
+                    # workspace_config.json은 PC별 작업 폴더 경로를 담는다.
+                    # A PC에서 만든 백업을 B PC에 복원할 때 사용자명/문서 경로가 달라질 수 있으므로
+                    # 기존 백업 ZIP 안에 들어 있어도 복원하지 않고 현재 PC 설정을 유지한다.
+                    continue
                 else:
                     continue
 
@@ -1147,21 +1162,16 @@ class MainWindowCloudMixin:
             ):
                 return
 
-            revoke_log = ""
+            # 등록 해제는 로컬 상태 삭제가 본작업이다.
+            # Google revoke 네트워크 요청을 먼저 실행하면 간헐적으로 UI가 멈춘 것처럼 보일 수 있으므로,
+            # 토큰 원문만 잠깐 보관한 뒤 로컬 파일을 즉시 삭제하고 화면을 먼저 갱신한다.
+            token_json_text = ""
             try:
-                if self.cloud_token_path().exists():
-                    try:
-                        InstalledAppFlow, Credentials, Request, build = self.import_google_oauth_modules()
-                        creds = Credentials.from_authorized_user_file(str(self.cloud_token_path()), ["https://www.googleapis.com/auth/drive.file"])
-                        try:
-                            creds.revoke(Request())
-                            revoke_log = "Google 인증 토큰 해제 요청 완료"
-                        except Exception as e:
-                            revoke_log = f"Google 인증 토큰 해제 요청 실패, 로컬 연결 정보만 삭제: {e}"
-                    except Exception as e:
-                        revoke_log = f"Google 라이브러리 로드 실패, 로컬 연결 정보만 삭제: {e}"
-            except Exception as e:
-                revoke_log = f"클라우드 등록 해제 사전 처리 중 예외, 로컬 연결 정보 삭제 진행: {e}"
+                token_path = self.cloud_token_path()
+                if token_path.exists():
+                    token_json_text = token_path.read_text(encoding="utf-8")
+            except Exception:
+                token_json_text = ""
 
             removed = []
             for p in (self.cloud_token_path(), self.cloud_config_path(), self.cloud_client_secret_path()):
@@ -1185,6 +1195,21 @@ class MainWindowCloudMixin:
                 self.log("☁️ 클라우드 등록 해제 완료")
             except Exception:
                 pass
+
+            # Google 서버 쪽 토큰 revoke는 보조 작업이다. 실패해도 로컬 등록 해제는 성공으로 본다.
+            if token_json_text:
+                def _best_effort_revoke(token_text):
+                    try:
+                        InstalledAppFlow, Credentials, Request, build = self.import_google_oauth_modules()
+                        info = json.loads(token_text)
+                        creds = Credentials.from_authorized_user_info(info, ["https://www.googleapis.com/auth/drive.file"])
+                        creds.revoke(Request())
+                    except Exception:
+                        pass
+                try:
+                    threading.Thread(target=_best_effort_revoke, args=(token_json_text,), daemon=True).start()
+                except Exception:
+                    pass
 
         self._cloud_action_dialog(
             "클라우드 등록 해제",
@@ -1587,9 +1612,15 @@ class MainWindowCloudMixin:
             btn = QPushButton(self.tr_ui(button_text), item)
             btn.setMinimumWidth(150)
             try:
-                if title_text == "클라우드 등록" and self.cloud_is_registered():
-                    btn.setEnabled(False)
-                    btn.setToolTip(self.tr_ui("이미 등록된 클라우드 계정이 있어 새 등록을 시작할 수 없습니다. 다른 계정을 연결하려면 먼저 등록 해제를 진행하세요."))
+                registered = self.cloud_is_registered()
+                if title_text == "클라우드 등록":
+                    self._cloud_overview_register_button = btn
+                    if registered:
+                        btn.setEnabled(False)
+                        btn.setToolTip(self.tr_ui("이미 등록된 클라우드 계정이 있어 새 등록을 시작할 수 없습니다. 다른 계정을 연결하려면 먼저 등록 해제를 진행하세요."))
+                elif title_text == "클라우드 등록 해제":
+                    self._cloud_overview_unregister_button = btn
+                    btn.setEnabled(registered)
             except Exception:
                 pass
             btn.clicked.connect(slot)

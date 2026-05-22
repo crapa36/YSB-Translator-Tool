@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-YSB Translator Tool v2.0.0 optimized onefile build driver.
+YSB Translator Tool v2.0.1 optimized onefile build driver.
 
 Hard constraints:
 - Keep onefile.
@@ -295,7 +295,7 @@ def launcher_args() -> list[str]:
 def build_main() -> None:
     args = pyinstaller_executable() + main_args() + [
         "--name",
-        "역식붕이 툴 v2.0.0",
+        "역식붕이 툴 v2.0.1",
         "--icon",
         str(ICON_FILE),
         "--version-file",
@@ -322,7 +322,7 @@ def main() -> int:
     if LOG_FILE.exists():
         LOG_FILE.unlink()
 
-    log("YSB Translator Tool v2.0.0 optimized onefile build driver")
+    log("YSB Translator Tool v2.0.1 optimized onefile build driver")
     log(f"Project root: {PROJECT_ROOT}")
     log(f"Build tools:  {BUILD_TOOLS_DIR}")
     log("Build policy: onefile kept, launcher splash kept, runtime assets only")
@@ -350,7 +350,7 @@ def main() -> int:
     build_main()
     build_launcher()
 
-    main_exe = DIST_DIR / "역식붕이 툴 v2.0.0.exe"
+    main_exe = DIST_DIR / "역식붕이 툴 v2.0.1.exe"
     launcher_exe = DIST_DIR / "YSB_Launcher.exe"
 
     require_file(main_exe, "Built main EXE")
