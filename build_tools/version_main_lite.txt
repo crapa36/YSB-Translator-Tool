@@ -1,0 +1,33 @@
+# UTF-8
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=(2, 1, 0, 0),
+    prodvers=(2, 1, 0, 0),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo([
+      StringTable(
+        '040904B0',
+        [
+          StringStruct('CompanyName', 'Zerostress8'),
+          StringStruct('FileDescription', 'YSB Translator Tool Lite Main'),
+          StringStruct('FileVersion', '2.1.0.0'),
+          StringStruct('InternalName', 'YSB_MAIN'),
+          StringStruct('OriginalFilename', 'YSB_Tool_Lite.exe'),
+          StringStruct('ProductName', 'YSB Translator Tool'),
+          StringStruct('ProductVersion', '2.1.0.0'),
+          StringStruct('YSBAppFamilyId', 'ZEROSTRESS8_YSB_TRANSLATOR_TOOL'),
+          StringStruct('YSBAppRole', 'YSB_MAIN'),
+          StringStruct('YSBEdition', 'lite')
+        ]
+      )
+    ]),
+    VarFileInfo([VarStruct('Translation', [1033, 1200])])
+  ]
+)

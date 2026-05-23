@@ -949,11 +949,12 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         try:
             version = str(APP_VERSION)
         except Exception:
-            version = "2.0.0"
+            version = "unknown"
 
         info = QLabel(
             self.tr_ui("버전") + f" {version}\n"
-            "© 2026 amule949\n\n"
+            "© 2026 amule949\n"
+            "Support Email: ysbtool.support@gmail.com\n\n"
             "GNU General Public License v3.0\n"
             + self.tr_ui("자세한 내용은 LICENSE 및 TRADEMARKS.md를 참고하세요.")
         )
@@ -1145,6 +1146,10 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         settings_menu.addAction(self.actions["setting_file_path_visibility"])
 
         help_menu = menubar.addMenu(self.tr_ui("도움말")); self.help_menu = help_menu
+        help_menu.addAction(self.actions["help_program_manual"])
+        help_menu.addAction(self.actions["help_open_website"])
+        help_menu.addAction(self.actions["help_report_bug"])
+        help_menu.addSeparator()
         help_menu.addAction(self.actions["help_about"])
 
         self.setup_project_exit_button(menubar)
@@ -1678,6 +1683,13 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         al = QHBoxLayout()
         al.setContentsMargins(0, 0, 0, 0)
         al.setSpacing(6)
+        self.cb_ocr_language = QComboBox()
+        self.cb_ocr_language.setFixedHeight(26)
+        self.cb_ocr_language.setMinimumWidth(92)
+        self.cb_ocr_language.setMaximumWidth(120)
+        self.refresh_ocr_language_combo(save=False)
+        self.cb_ocr_language.currentIndexChanged.connect(self.on_ocr_language_toolbar_changed)
+
         self.cb_trans_provider = QComboBox()
         self.cb_trans_provider.setFixedHeight(26)
         self.cb_trans_provider.addItem("OpenAI", "openai")
@@ -1708,10 +1720,10 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         self.btn_text_cleanup = QPushButton("🧹 텍스트 정리", clicked=self.clean_text_current)
         self.btn_text_cleanup.setFixedHeight(26)
 
+        al.addWidget(QLabel("OCR언어"))
+        al.addWidget(self.cb_ocr_language)
         al.addWidget(QLabel("번역AI"))
         al.addWidget(self.cb_trans_provider)
-        al.addWidget(QLabel("묶음"))
-        al.addWidget(self.sb_trans_chunk)
         al.addWidget(self.btn_translate)
         al.addWidget(self.btn_inpaint)
         al.addWidget(self.btn_text_cleanup)
@@ -1831,7 +1843,7 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         self.page_required_widgets = [
             getattr(self, 'tb', None), getattr(self, 'view', None), getattr(self, 'btn_prev_page', None), getattr(self, 'btn_next_page', None),
             getattr(self, 'cb_mode', None), getattr(self, 'btn_page', None), getattr(self, 'btn_text_mask_reanalyze', None), getattr(self, 'btn_analyze', None),
-            getattr(self, 'cb_trans_provider', None), getattr(self, 'sb_trans_chunk', None), getattr(self, 'btn_translate', None), getattr(self, 'btn_inpaint', None), getattr(self, 'btn_text_cleanup', None),
+            getattr(self, 'cb_ocr_language', None), getattr(self, 'cb_trans_provider', None), getattr(self, 'btn_translate', None), getattr(self, 'btn_inpaint', None), getattr(self, 'btn_text_cleanup', None),
             getattr(self, 'cb_show_final_text', None), getattr(self, 'tab', None), getattr(self, 'btn_export_result', None),
             getattr(self, 'page_tab_bar', None), getattr(self, 'btn_page_tab_menu', None),
         ]
@@ -2333,6 +2345,9 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
             "cloud_cache_backup": "클라우드로 캐시 백업",
             "cloud_cache_restore": "클라우드에서 캐시 불러오기",
             "cloud_delete_backups": "클라우드 백업 삭제",
+            "help_program_manual": "프로그램 메뉴얼",
+            "help_open_website": "YSB Tool 사이트로 가기",
+            "help_report_bug": "버그제보 / 문의하기",
             "help_about": "프로그램 정보",
             "paint_magic_fill": "마스킹 칠하기",
             "paint_mask_wrap": "마스크 랩핑",

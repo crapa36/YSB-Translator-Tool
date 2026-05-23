@@ -1,13 +1,15 @@
-"""YSB Translator Tool entry point.
+"""YSB Translator Tool compatibility/default entry point.
 
-The application code is organized under the ``ysb`` package.
-This file is intentionally kept small so build scripts and users can keep
-running ``python main.py`` as before.
+Source run BAT files are split into two explicit launchers:
+- run_lite_v2.1.0.bat
+- run_local_v2.1.0.bat
 
-v2.0.0 packaging note:
-Use a direct import instead of runpy/run_module so PyInstaller can follow the
-package graph without heavy blanket hidden-imports.
+Direct ``python main.py`` remains a compatibility/default Lite entry point.
 """
+
+from ysb.editions.current import set_current_edition
+
+set_current_edition("lite")
 
 from ysb.ui.main_window import run_app
 

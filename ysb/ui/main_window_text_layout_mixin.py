@@ -743,7 +743,12 @@ class MainWindowTextLayoutMixin:
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
 
-        info = QLabel(f"{self.tr_ui("저장 위치")}: {self.text_preset_dir()}")
+        save_location_label = self.tr_ui("저장 위치")
+        try:
+            preset_dir_display = str(self.text_preset_dir()) if bool(getattr(self, "show_cache_paths_in_settings", False)) else self.tr_ui("경로 숨김")
+        except Exception:
+            preset_dir_display = self.tr_ui("경로 숨김")
+        info = QLabel(f"{save_location_label}: {preset_dir_display}")
         info.setWordWrap(True)
         layout.addWidget(info)
 
@@ -1154,7 +1159,8 @@ class MainWindowTextLayoutMixin:
                     raw = json.load(f)
                 style = self.normalize_style_dict(raw.get("style") if isinstance(raw, dict) and "style" in raw else raw)
             except Exception as e:
-                QMessageBox.warning(dialog, self.tr_ui("불러오기 실패"), f"{self.tr_ui("프리셋 JSON을 읽지 못했습니다.")}\n{e}")
+                msg_text = self.tr_ui("프리셋 JSON을 읽지 못했습니다.")
+                QMessageBox.warning(dialog, self.tr_ui("불러오기 실패"), f"{msg_text}\n{e}")
                 return
             default_name = Path(path).stem
             name, ok = QInputDialog.getText(dialog, self.tr_ui("프리셋 이름"), self.tr_ui("추가할 프리셋 이름:"), text=default_name)
@@ -1242,7 +1248,13 @@ class MainWindowTextLayoutMixin:
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
 
-        info = QLabel(f"{self.tr_ui("저장 위치")}: {self.item_text_preset_dir()}\n{self.tr_msg("체크한 옵션만 프리셋에 포함됩니다. 이 창의 미리보기는 닫을 때 원래대로 복구됩니다.")}")
+        save_location_label = self.tr_ui("저장 위치")
+        preset_note = self.tr_msg("체크한 옵션만 프리셋에 포함됩니다. 이 창의 미리보기는 닫을 때 원래대로 복구됩니다.")
+        try:
+            preset_dir_display = str(self.item_text_preset_dir()) if bool(getattr(self, "show_cache_paths_in_settings", False)) else self.tr_ui("경로 숨김")
+        except Exception:
+            preset_dir_display = self.tr_ui("경로 숨김")
+        info = QLabel(f"{save_location_label}: {preset_dir_display}\n{preset_note}")
         info.setWordWrap(True)
         layout.addWidget(info)
 
@@ -1683,7 +1695,8 @@ class MainWindowTextLayoutMixin:
                     style = self.normalize_style_dict(raw)
                     inc = {k: True for k, _ in self.style_field_specs()}
             except Exception as e:
-                QMessageBox.warning(dialog, self.tr_ui("불러오기 실패"), f"{self.tr_ui("프리셋 JSON을 읽지 못했습니다.")}\n{e}")
+                msg_text = self.tr_ui("프리셋 JSON을 읽지 못했습니다.")
+                QMessageBox.warning(dialog, self.tr_ui("불러오기 실패"), f"{msg_text}\n{e}")
                 return
             default_name = Path(path).stem
             name, ok = QInputDialog.getText(dialog, self.tr_ui("프리셋 이름"), self.tr_ui("추가할 프리셋 이름:"), text=default_name)

@@ -27,16 +27,25 @@ def check_import(name: str, label: str | None = None) -> None:
     print(f"{label} OK" + (f": {path}" if path else ""))
 
 
+def normalize_edition(argv: list[str]) -> str:
+    edition = argv[1].lower().strip() if len(argv) >= 2 else "local"
+    if edition not in {"lite", "local"}:
+        raise ValueError("Usage: build_probe.py [lite|local]")
+    return edition
+
+
 def main() -> int:
+    edition = normalize_edition(sys.argv)
     print(f"Project root: {PROJECT_ROOT}")
     print(f"Python: {sys.version}")
+    print(f"Build probe edition: {edition}")
 
-    # Local package checks only. Do not import the actual UI modules here.
+    # Do not import the actual UI modules here.
     check_module_spec("ysb", "Local package ysb")
     check_module_spec("ysb.ui.main_window", "Local module ysb.ui.main_window")
     check_module_spec("ysb.core.ysb_launcher", "Local module ysb.core.ysb_launcher")
 
-    # Keep external checks short. Heavy optional API packages are checked at runtime.
+    # Common external checks.
     for name in [
         "PyQt6.QtCore",
         "PyQt6.QtGui",
@@ -47,6 +56,33 @@ def main() -> int:
         "PIL._imaging",
     ]:
         check_import(name)
+
+    # API/Lite checks. Local also uses API translation and API fallback paths.
+    for name in [
+        "openai",
+        "replicate",
+        "google.oauth2.credentials",
+        "google_auth_oauthlib.flow",
+        "googleapiclient.discovery",
+    ]:
+        check_module_spec(name, f"API dependency {name}")
+
+    if edition == "local":
+        # Local detector dependencies are intentionally checked by spec only.
+        # Importing torch here would slow every build probe.
+        for name in ["torch", "torchvision", "pyclipper", "shapely", "tqdm", "yaml"]:
+            check_module_spec(name, f"Local detector dependency {name}")
+
+        for name in ["paddle", "paddleocr", "pandas", "simple_lama_inpainting"]:
+            check_module_spec(name, f"Local model dependency {name}")
+
+        vendor = PROJECT_ROOT / "third_party" / "comic_text_detector"
+        model = vendor / "comic_text_detector.pt"
+        if not vendor.exists():
+            raise FileNotFoundError(f"comic_text_detector vendor folder not found: {vendor}")
+        if not model.exists():
+            raise FileNotFoundError(f"comic_text_detector model not found: {model}")
+        print(f"comic_text_detector vendor OK: {vendor}")
 
     print("Build environment check OK")
     return 0

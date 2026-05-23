@@ -1834,6 +1834,153 @@ class MainWindowProjectPagesMixin:
     def has_open_project(self):
         return bool(self.project_dir or self.paths)
 
+
+    def ensure_task_progress_overlay(self):
+        try:
+            overlay = getattr(self, "_task_progress_overlay", None)
+            if overlay is None:
+                overlay = CenterTaskProgressOverlay(self)
+                overlay.cancelRequested.connect(self.request_current_long_task_cancel)
+                self._task_progress_overlay = overlay
+            return overlay
+        except Exception:
+            return None
+
+    def ensure_task_alert_overlay(self):
+        try:
+            overlay = getattr(self, "_task_alert_overlay", None)
+            if overlay is None:
+                overlay = CenterTaskAlertOverlay(self)
+                self._task_alert_overlay = overlay
+            return overlay
+        except Exception:
+            return None
+
+    def pause_task_progress_overlay_for_alert(self, detail=None):
+        try:
+            overlay = getattr(self, "_task_progress_overlay", None)
+            if overlay is not None and overlay.isVisible():
+                overlay.set_paused(True, detail=detail)
+        except Exception:
+            pass
+
+    def show_task_alert_overlay(self, title="작업 알림", detail=""):
+        try:
+            self.pause_task_progress_overlay_for_alert(detail=detail)
+            overlay = self.ensure_task_alert_overlay()
+            if overlay is not None:
+                overlay.show_alert(title, detail)
+        except Exception:
+            pass
+
+    def _is_long_task_alert_message(self, message):
+        text = str(message or "")
+        if not text.strip():
+            return False
+        markers = ("❌", "⚠️", "오류", "에러", "실패", "Error", "ERROR", "Exception", "Traceback")
+        return any(m in text for m in markers)
+
+    def handle_long_task_message(self, message, *, current=None, total=None):
+        text = str(message or "")
+        try:
+            self.log(text)
+        except Exception:
+            pass
+        if self._is_long_task_alert_message(text):
+            self.update_task_progress_overlay(current=current, total=total, detail=text)
+            self.show_task_alert_overlay("작업 알림", text)
+            return
+        self.update_task_progress_overlay(current=current, total=total, detail=text)
+
+    def prepare_task_progress_overlay(self, title, detail="", total=0, cancellable=True):
+        """Prepare the center progress overlay without showing it yet.
+
+        The overlay should not appear while pre-flight validation dialogs are still
+        possible.  It is displayed lazily on the first worker progress/log signal,
+        which means a missing key / confirmation / early alert does not leave a
+        fake progress panel on screen.
+        """
+        try:
+            self._pending_task_progress_overlay = {
+                "title": str(title or "작업 중"),
+                "detail": str(detail or ""),
+                "total": int(total or 0) if str(total or "").strip() else 0,
+                "cancellable": bool(cancellable),
+            }
+            self.ensure_task_progress_overlay()
+        except Exception:
+            self._pending_task_progress_overlay = None
+
+    def show_task_progress_overlay(self, title, detail="", total=0, cancellable=True):
+        try:
+            self._pending_task_progress_overlay = None
+            overlay = self.ensure_task_progress_overlay()
+            if overlay is None:
+                return
+            overlay.show_task(title, detail, total=total, cancellable=cancellable)
+        except Exception:
+            pass
+
+    def update_task_progress_overlay(self, current=None, total=None, detail=None):
+        try:
+            overlay = getattr(self, "_task_progress_overlay", None)
+            pending = getattr(self, "_pending_task_progress_overlay", None)
+            if (overlay is None or not overlay.isVisible()) and pending:
+                overlay = self.ensure_task_progress_overlay()
+                if overlay is not None:
+                    show_detail = str(detail if detail is not None else pending.get("detail", ""))
+                    show_total = total if total is not None else pending.get("total", 0)
+                    overlay.show_task(
+                        pending.get("title", "작업 중"),
+                        show_detail,
+                        total=show_total,
+                        cancellable=pending.get("cancellable", True),
+                    )
+                    self._pending_task_progress_overlay = None
+            if overlay is not None and overlay.isVisible():
+                overlay.update_task(current=current, total=total, detail=detail)
+        except Exception:
+            pass
+
+    def hide_task_progress_overlay(self):
+        try:
+            self._pending_task_progress_overlay = None
+            overlay = getattr(self, "_task_progress_overlay", None)
+            if overlay is not None:
+                overlay.hide()
+            alert = getattr(self, "_task_alert_overlay", None)
+            if alert is not None:
+                alert.hide()
+        except Exception:
+            pass
+
+    def request_current_long_task_cancel(self):
+        """Cancel button handler for the center progress overlay.
+
+        Long OCR/API/local-model calls cannot always be interrupted in the middle of
+        the current request.  Workers stop before the next page/chunk/step.
+        """
+        self._long_task_cancel_requested = True
+        worker = None
+        for name in ("translation_worker", "bw", "iw", "w"):
+            try:
+                candidate = getattr(self, name, None)
+            except Exception:
+                candidate = None
+            if candidate is not None and hasattr(candidate, "stop"):
+                worker = candidate
+                try:
+                    candidate.stop()
+                except Exception:
+                    pass
+        self.update_task_progress_overlay(
+            detail="취소 요청됨. 현재 진행중인 과정이 완료 된 후 종료됩니다."
+        )
+        try:
+            self.log("⏹️ 취소 요청됨: 현재 진행중인 과정이 완료된 후 종료됩니다.")
+        except Exception:
+            pass
+
     def busy_reason_text(self, reason=""):
         reason = str(reason or "").strip()
         if reason:
@@ -1938,6 +2085,7 @@ class MainWindowProjectPagesMixin:
                 pass
 
             text = self.busy_reason_text(reason)
+            self.hide_task_progress_overlay()
             self.log(
                 f"✅ Busy finished: {text} / UI unlocked"
                 if getattr(self, "ui_language", LANG_KO) == LANG_EN else
@@ -3591,7 +3739,8 @@ class MainWindowProjectPagesMixin:
             self.log(f"📦 임시 프로젝트를 작업 폴더로 승격: {dst}")
             return True
         except Exception as e:
-            QMessageBox.critical(self, self.tr_ui("프로젝트 이동 실패"), f"{self.tr_ui("임시 프로젝트를 작업 폴더로 옮기지 못했습니다.")}\n{e}")
+            msg_text = self.tr_ui("임시 프로젝트를 작업 폴더로 옮기지 못했습니다.")
+            QMessageBox.critical(self, self.tr_ui("프로젝트 이동 실패"), f"{msg_text}\n{e}")
             return False
 
     def record_recovery_project_dir(self, project_dir):
@@ -4074,7 +4223,8 @@ class MainWindowProjectPagesMixin:
         else:
             project_file = path
         if os.path.basename(project_file) != PROJECT_FILENAME or not os.path.exists(project_file):
-            QMessageBox.warning(self, self.tr_ui("프로젝트 없음"), f"{self.tr_ui("열 수 있는 프로젝트 파일이 아닙니다.")}\n{path}")
+            msg_text = self.tr_ui("열 수 있는 프로젝트 파일이 아닙니다.")
+            QMessageBox.warning(self, self.tr_ui("프로젝트 없음"), f"{msg_text}\n{path}")
             return
         self.load_project_json(project_file)
         if external_request:
@@ -4937,7 +5087,8 @@ class MainWindowProjectPagesMixin:
             try:
                 package_project(self.project_dir, self.ysbt_package_path)
             except Exception as e:
-                QMessageBox.critical(self, self.tr_ui("YSBT 저장 실패"), f"{self.tr_ui("프로젝트는 작업 폴더에 저장했지만, YSBT 파일 저장에 실패했습니다.")}\n\n{e}")
+                msg_text = self.tr_ui("프로젝트는 작업 폴더에 저장했지만, YSBT 파일 저장에 실패했습니다.")
+                QMessageBox.critical(self, self.tr_ui("YSBT 저장 실패"), f"{msg_text}\n\n{e}")
                 self.has_unsaved_changes = True
                 return
             self.mark_saved_state()

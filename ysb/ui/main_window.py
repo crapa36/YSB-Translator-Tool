@@ -82,14 +82,14 @@ class MainWindow(MainWindowInteractionMixin, MainWindowCloudMixin, MainWindowSet
         self._current_work_mode = 0
         self._global_event_filter_installed = False
 
-        # 번역 묶음 수: 한 번의 API 요청에 몇 줄을 묶어 보낼지
-        # 번역 API별로 따로 기억한다.
+        # 번역 묶음 수: 한 번의 API 요청에 몇 줄을 묶어 보낼지.
+        # v2.1.0: 상단 툴바에서는 숨기고 API 관리 > 번역 탭에서 제공자별로 관리한다.
         self.trans_chunk_sizes = {
-            "openai": 20,
-            "deepseek": 8,
-            "google": 50,
-            "gemini": 10,
-            "custom": 20,
+            "openai": int(getattr(self.api_settings, "openai_chunk_size", 20) or 20),
+            "deepseek": int(getattr(self.api_settings, "deepseek_chunk_size", 8) or 8),
+            "google": int(getattr(self.api_settings, "google_translate_chunk_size", 50) or 50),
+            "gemini": int(getattr(self.api_settings, "gemini_chunk_size", 10) or 10),
+            "custom": int(getattr(self.api_settings, "custom_translation_chunk_size", 20) or 20),
         }
 
         self.default_text_color = "#000000"
@@ -182,6 +182,10 @@ class MainWindow(MainWindowInteractionMixin, MainWindowCloudMixin, MainWindowSet
         # 이미 켜진 앱에 파일 경로만 전달해 드래그앤드롭과 같은 빠른 열기를 구현한다.
         self.setup_external_open_queue_monitor()
 
+        # 사이트 버전 확인은 시작 후 백그라운드에서 조용히 수행한다.
+        # 인터넷이 없거나 실패해도 프로그램 사용에는 영향을 주지 않는다.
+        QTimer.singleShot(2500, self.start_auto_version_check)
+
     def showEvent(self, event):
         try:
             super().showEvent(event)
@@ -240,7 +244,7 @@ def run_app() -> None:
     # Windows 작업표시줄이 PyQt 기본 아이콘 대신 앱 아이콘을 잡도록 지정한다.
     try:
         import ctypes
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("YSB.YeoksikBoongi.Tool")
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(f"YSB.YeoksikBoongi.Tool.{APP_EDITION}")
     except Exception:
         pass
 

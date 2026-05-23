@@ -12,6 +12,13 @@ class MainWindowOperationsMixin:
         ApiSettingsStore.save(self.api_settings)
         apply_settings_to_config(self.api_settings)
         self.sync_translation_option_cache_to_config()
+        self.trans_chunk_sizes = {
+            "openai": int(getattr(self.api_settings, "openai_chunk_size", 20) or 20),
+            "deepseek": int(getattr(self.api_settings, "deepseek_chunk_size", 8) or 8),
+            "google": int(getattr(self.api_settings, "google_translate_chunk_size", 50) or 50),
+            "gemini": int(getattr(self.api_settings, "gemini_chunk_size", 10) or 10),
+            "custom": int(getattr(self.api_settings, "custom_translation_chunk_size", 20) or 20),
+        }
         if hasattr(self, "cb_trans_provider"):
             self.cb_trans_provider.blockSignals(True)
             try:
@@ -19,6 +26,8 @@ class MainWindowOperationsMixin:
                 self.on_translation_provider_changed(save=False)
             finally:
                 self.cb_trans_provider.blockSignals(False)
+        if hasattr(self, "refresh_ocr_language_combo"):
+            self.refresh_ocr_language_combo(save=False)
         self.restart_engine(show_error=True)
         self.log("🔑 API settings cache saved" if self.ui_language == LANG_EN else "🔑 API 설정 캐시 저장 완료")
 
@@ -54,6 +63,8 @@ class MainWindowOperationsMixin:
             self.log(f"📚 단어장 캐시 저장 완료 ({len(new_text):,}자)")
         else:
             self.log("📚 단어장 캐시 초기화 완료")
+
+
 
     def capture_magic_wand_state(self):
         """요술봉 미리보기 상태를 전역 Undo 스택에 같이 저장한다."""
@@ -883,9 +894,12 @@ class MainWindowOperationsMixin:
 
         target_idx = self.idx
         self.prepare_text_mask_slots_for_fresh_analysis(target_idx)
+        self._long_task_cancel_requested = False
+        self.prepare_task_progress_overlay("분석", "OCR/API 분석을 진행 중입니다.", total=0, cancellable=True)
         self.begin_busy_state("분석")
         self.w = AnalysisWorker(self.engine, self.get_inpainting_input_path(target_idx))
-        self.w.log.connect(self.log)
+        self._active_task_worker = self.w
+        self.w.log.connect(lambda msg: self.handle_long_task_message(msg))
         self.w.finished.connect(
             lambda o, d, mm, mi, page_idx=target_idx:
                 self.anal_end_for_page(page_idx, o, d, mm, mi, preserve_text_mask=False)
@@ -1066,6 +1080,7 @@ class MainWindowOperationsMixin:
         # 결과 반영 이후에는 이전 편집 Undo로 돌아가면 마스크/텍스트 상태가 꼬일 수 있으므로
         # 성공적으로 데이터에 적용된 뒤 Undo 체인을 끊는다.
         self.break_undo_chain("reanalyze" if preserve_text_mask else "analysis")
+        self._active_task_worker = None
         self.end_busy_state("텍스트 마스크 재분석" if preserve_text_mask else "분석")
         self.macro_mark_current_step_done("work_analyze")
 
@@ -1104,9 +1119,65 @@ class MainWindowOperationsMixin:
         return False
 
     def check_ocr_api_or_alert(self):
-        """선택된 OCR API 설정이 비어 있으면 작업 시작 전에 막고 API 관리창을 연다."""
+        """선택된 OCR/API/Local OCR 설정이 비어 있으면 작업 시작 전에 막는다."""
         settings = getattr(self, "api_settings", None) or ApiSettingsStore.load()
         provider = str(getattr(settings, "selected_ocr_provider", "clova") or "clova").lower()
+
+        if provider.startswith("local_") and provider != "local_paddle_ocr":
+            # Older test caches are normalized to the only supported Local OCR path.
+            provider = "local_paddle_ocr"
+            try:
+                settings.selected_ocr_provider = provider
+                ApiSettingsStore.save(settings)
+                self.api_settings = settings
+            except Exception:
+                pass
+
+        if provider == "local_paddle_ocr":
+            try:
+                from ysb.editions.current import is_local_edition
+                local_name = "LOCAL Paddle OCR"
+                if not is_local_edition():
+                    QMessageBox.critical(
+                        self,
+                        "Local OCR 사용 불가",
+                        f"{local_name}은 Local판 전용입니다.\nLite판에서는 CLOVA OCR 또는 Google Vision OCR을 선택해 주세요."
+                    )
+                    self.log(f"❌ {local_name}은 Local판에서만 사용할 수 있습니다.")
+                    return False
+                from ysb.engines.text_detection.comic_text_detector import ComicTextDetectorEngine
+                ok, reason = ComicTextDetectorEngine().available()
+                if not ok:
+                    QMessageBox.critical(
+                        self,
+                        "Local OCR 준비 필요",
+                        f"{local_name}을 실행할 수 없습니다.\n\n"
+                        "comic_text_detector 런타임/모델 파일을 확인해 주세요.\n\n"
+                        f"상세: {reason}"
+                    )
+                    self.log(f"❌ {local_name} 준비 실패: {reason}")
+                    return False
+                try:
+                    from ysb.editions.local.local_dependency_check import paddleocr_available
+                    if not paddleocr_available():
+                        QMessageBox.critical(
+                            self,
+                            "PaddleOCR 설치 필요",
+                            "LOCAL Paddle OCR 문자 인식에 필요한 paddleocr 패키지를 찾을 수 없습니다.\n\n"
+                            "setup_local_core_venv_v2_1_0.bat을 다시 실행하거나 requirements/local.txt 설치 상태를 확인해 주세요."
+                        )
+                        self.log("❌ paddleocr 패키지를 찾을 수 없습니다.")
+                        return False
+                except Exception as e:
+                    QMessageBox.critical(self, "PaddleOCR 확인 오류", f"paddleocr 설치 확인 중 오류가 발생했습니다.\n\n{e}")
+                    self.log(f"❌ paddleocr 설치 확인 오류: {e}")
+                    return False
+                return True
+            except Exception as e:
+                QMessageBox.critical(self, "Local OCR 오류", f"Local OCR 준비 확인 중 오류가 발생했습니다.\n\n{e}")
+                self.log(f"❌ Local OCR 준비 확인 오류: {e}")
+                return False
+
         if provider == "google_vision":
             if not str(getattr(settings, "google_vision_api_key", "") or "").strip():
                 return self._show_api_missing_and_open_settings(
@@ -1137,9 +1208,37 @@ class MainWindowOperationsMixin:
         provider_name_map = {
             "replicate_stable": "Replicate Stable Diffusion Inpainting",
             "gemini_inpaint": "Gemini Image Inpainting",
+            "local_lama": "LOCAL LaMa",
             "replicate_lama": "Replicate LaMa",
         }
         provider_name = provider_name_map.get(provider, "Replicate LaMa")
+
+        if provider == "local_lama":
+            try:
+                from ysb.editions.current import is_local_edition
+                if not is_local_edition():
+                    return self._show_api_missing_and_open_settings(
+                        "inpaint",
+                        provider_name,
+                        "LOCAL LaMa는 Local판 전용입니다.",
+                        "LOCAL LaMa is only available in the Local edition.",
+                    )
+                from simple_lama_inpainting import SimpleLama  # noqa: F401
+            except ImportError as e:
+                return self._show_api_missing_and_open_settings(
+                    "inpaint",
+                    provider_name,
+                    "LOCAL LaMa 패키지가 설치되어 있지 않습니다. setup_local_core_venv_v2_1_0.bat를 실행해 주세요.",
+                    "LOCAL LaMa package is not installed. Run setup_local_core_venv_v2_1_0.bat first.",
+                )
+            except Exception as e:
+                return self._show_api_missing_and_open_settings(
+                    "inpaint",
+                    provider_name,
+                    f"LOCAL LaMa 준비 확인 중 오류가 발생했습니다: {e}",
+                    f"LOCAL LaMa readiness check failed: {e}",
+                )
+            return True
 
         if provider == "gemini_inpaint":
             if not str(getattr(settings, "gemini_api_key", "") or "").strip():
@@ -1205,6 +1304,10 @@ class MainWindowOperationsMixin:
             }
             return mapping.get((code or "").lower(), str(code or "OpenAI"))
 
+        if provider in ("local_argos", "local_hf_jako", "local_hf_enko", "local_nllb"):
+            # Legacy local translation providers are no longer supported.
+            provider = "openai"
+
         provider_name = _provider_display_name(provider)
 
         if provider == "deepseek":
@@ -1252,9 +1355,6 @@ class MainWindowOperationsMixin:
             return
 
         try:
-            self.log("⏳ 번역 요청 중... (화면이 잠시 멈출 수 있습니다)")
-            QApplication.processEvents()
-
             texts = []
             target_rows = []
             for row in range(1, self.tab.rowCount()):
@@ -1276,54 +1376,117 @@ class MainWindowOperationsMixin:
             provider = self.cb_trans_provider.currentData()
             if not self.check_translation_api_key_or_alert(provider):
                 return
-            self.begin_busy_state("번역")
             chunk_size = self.get_current_translation_chunk_size()
             self.log(
                 f"🌐 번역 엔진: {self.cb_trans_provider.currentText()} / "
                 f"대상 {len(texts)}개 / 묶음 {chunk_size}개"
             )
-            res = self.engine.translate_text_batch(
+            self._translation_target_rows = list(target_rows)
+            self._translation_target_texts = list(texts)
+            self._long_task_cancel_requested = False
+            self.prepare_task_progress_overlay(
+                "번역",
+                f"번역 준비 중... 대상 {len(texts)}개 / 묶음 {chunk_size}개",
+                total=len(texts),
+                cancellable=True,
+            )
+            self.begin_busy_state("번역")
+            self.translation_worker = TranslationWorker(
+                self.engine,
                 texts,
                 provider=provider,
-                chunk_size=chunk_size
+                chunk_size=chunk_size,
             )
-
-            if len(res) != len(texts):
-                QMessageBox.warning(self, self.tr_ui("번역 개수 불일치"), self.tr_msg(f"요청 {len(texts)}개 / 응답 {len(res)}개\n\n밀림 방지를 위해 결과 반영을 중단했습니다."))
-                return
-
-            self.tab.blockSignals(True)
-            try:
-                for row, t in zip(target_rows, res):
-                    data_index = row - 1
-                    if data_index < 0 or data_index >= len(curr['data']):
-                        continue
-                    safe_text = str(t) if t is not None else ""
-                    curr['data'][data_index]['translated_text'] = safe_text
-                    self.tab.setItem(row, 3, QTableWidgetItem(safe_text))
-                self.paint_all_row_header()
-            finally:
-                self.tab.blockSignals(False)
-
-            self.tab.resizeRowsToContents()
-
-            # 최종 화면에서 번역을 실행한 경우, 번역문 갱신 후 화면도 한 번 갱신한다.
-            if self.cb_mode.currentIndex() == 4:
-                self.mode_chg(4)
-
-            self.log("✅ 번역 완료")
-            self.auto_save_project()
-
-            # 번역은 외부/API 결과를 텍스트 라인에 반영하는 작업 경계다.
-            # 성공 반영 후 이전 Undo 스택을 끊어 번역 전 편집 상태로 돌아가지 않게 한다.
-            self.break_undo_chain("translation")
+            self._active_task_worker = self.translation_worker
+            self.translation_worker.progress.connect(self.on_translation_worker_progress)
+            self.translation_worker.finished.connect(self.on_translation_worker_finished)
+            self.translation_worker.canceled.connect(self.on_translation_worker_canceled)
+            self.translation_worker.error.connect(self.on_translation_worker_error)
+            self.translation_worker.start()
+            return
 
         except Exception as e:
             import traceback
             traceback.print_exc()
             self.log(f"❌ 번역 중 에러 발생: {e}")
-            QMessageBox.critical(self, self.tr_ui("번역 오류"), f"{self.tr_ui("에러가 발생했습니다:")}\n{e}")
+            msg_text = self.tr_ui("에러가 발생했습니다:")
+            QMessageBox.critical(self, self.tr_ui("번역 오류"), f"{msg_text}\n{e}")
         finally:
+            try:
+                tw = getattr(self, "translation_worker", None)
+                if tw is None or not tw.isRunning():
+                    self.end_busy_state("번역")
+            except Exception:
+                self.end_busy_state("번역")
+
+
+    def on_translation_worker_progress(self, detail, current, total):
+        self.handle_long_task_message(str(detail), current=current, total=total)
+
+    def _apply_translation_results_to_current_page(self, res):
+        curr = self.data.get(self.idx)
+        if not curr or not curr.get('data'):
+            return False
+        target_rows = list(getattr(self, "_translation_target_rows", []) or [])
+        texts = list(getattr(self, "_translation_target_texts", []) or [])
+        if len(res) != len(target_rows):
+            QMessageBox.warning(
+                self,
+                self.tr_ui("번역 개수 불일치"),
+                self.tr_msg(f"요청 {len(target_rows)}개 / 응답 {len(res)}개\n\n밀림 방지를 위해 결과 반영을 중단했습니다."),
+            )
+            return False
+
+        self.tab.blockSignals(True)
+        try:
+            for row, t in zip(target_rows, res):
+                data_index = row - 1
+                if data_index < 0 or data_index >= len(curr['data']):
+                    continue
+                safe_text = str(t) if t is not None else ""
+                curr['data'][data_index]['translated_text'] = safe_text
+                self.tab.setItem(row, 3, QTableWidgetItem(safe_text))
+            self.paint_all_row_header()
+        finally:
+            self.tab.blockSignals(False)
+
+        self.tab.resizeRowsToContents()
+        if self.cb_mode.currentIndex() == 4:
+            self.mode_chg(4)
+        self.auto_save_project()
+        self.break_undo_chain("translation")
+        return True
+
+    def on_translation_worker_finished(self, res):
+        try:
+            if self._apply_translation_results_to_current_page(list(res or [])):
+                self.log("✅ 번역 완료")
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self.log(f"❌ 번역 결과 반영 중 오류: {e}")
+            QMessageBox.critical(self, self.tr_ui("번역 오류"), f"{self.tr_ui('에러가 발생했습니다:')}\n{e}")
+        finally:
+            self._active_task_worker = None
+            self.translation_worker = None
+            self.end_busy_state("번역")
+            self.macro_mark_current_step_done("work_translate")
+
+    def on_translation_worker_canceled(self, partial):
+        try:
+            self.log(f"⏹️ 번역 취소됨: 받은 결과 {len(partial or [])}개는 반영하지 않았습니다.")
+        finally:
+            self._active_task_worker = None
+            self.translation_worker = None
+            self.end_busy_state("번역")
+
+    def on_translation_worker_error(self, message):
+        try:
+            msg = f"❌ 번역 중 에러 발생: {message}"
+            self.handle_long_task_message(msg)
+        finally:
+            self._active_task_worker = None
+            self.translation_worker = None
             self.end_busy_state("번역")
 
     def clip_mask_to_checked_text_boxes(self, mask, data):
@@ -1409,9 +1572,12 @@ class MainWindowOperationsMixin:
             return
 
         self.log(f"🧾 인페인팅 입력: {input_path}")
+        self._long_task_cancel_requested = False
+        self.prepare_task_progress_overlay("인페인팅", "인페인팅 요청을 처리하는 중입니다.", total=0, cancellable=True)
         self.begin_busy_state("인페인팅")
         self.iw = InpaintWorker(self.engine, input_path, inpaint_data, inpaint_mask)
-        self.iw.log.connect(self.log)
+        self._active_task_worker = self.iw
+        self.iw.log.connect(lambda msg: self.handle_long_task_message(msg))
         self.iw.finished.connect(self.inpaint_end)
         self.iw.start()
 
@@ -1449,6 +1615,7 @@ class MainWindowOperationsMixin:
         # 인페인팅은 배경 이미지와 최종 페인팅 레이어 기준을 바꾸는 작업 경계다.
         # 성공 반영 후 이전 Undo 스택을 끊어 인페인팅 전 상태로 되돌아가지 않게 한다.
         self.break_undo_chain("inpaint")
+        self._active_task_worker = None
         self.end_busy_state("인페인팅")
         self.macro_mark_current_step_done("work_inpaint")
 
@@ -2290,6 +2457,123 @@ class MainWindowOperationsMixin:
             self.end_busy_state(title)
             self.macro_mark_current_step_done(self.macro_batch_key_for_mode("export"))
 
+    def parse_batch_page_selection_text(self, text, total_pages):
+        """사용자 입력(1-3, 1~3, 1,2,3)을 0-base 페이지 인덱스 목록으로 변환한다."""
+        raw = str(text or "").strip()
+        if not raw:
+            raise ValueError(self.tr_msg("페이지 선택 값을 입력해 주세요."))
+        if total_pages <= 0:
+            raise ValueError(self.tr_msg("작업할 페이지가 없습니다."))
+
+        # 1 - 3 / 1 ~ 3처럼 공백이 들어간 범위도 허용한다.
+        normalized = raw.replace("，", ",").replace("、", ",").replace("～", "~")
+        normalized = re.sub(r"\s*([-~])\s*", r"\1", normalized)
+        tokens = [t for t in re.split(r"[,\s]+", normalized) if t]
+        if not tokens:
+            raise ValueError(self.tr_msg("페이지 선택 값을 입력해 주세요."))
+
+        selected = set()
+        for token in tokens:
+            range_match = re.fullmatch(r"(\d+)([-~])(\d+)", token)
+            single_match = re.fullmatch(r"\d+", token)
+            if range_match:
+                start = int(range_match.group(1))
+                end = int(range_match.group(3))
+                if start > end:
+                    start, end = end, start
+                if start < 1 or end > total_pages:
+                    raise ValueError(self.tr_msg("페이지 범위가 프로젝트 페이지 수를 벗어났습니다."))
+                for page_no in range(start, end + 1):
+                    selected.add(page_no - 1)
+            elif single_match:
+                page_no = int(token)
+                if page_no < 1 or page_no > total_pages:
+                    raise ValueError(self.tr_msg("페이지 범위가 프로젝트 페이지 수를 벗어났습니다."))
+                selected.add(page_no - 1)
+            else:
+                raise ValueError(self.tr_msg("페이지 선택 형식을 확인해 주세요."))
+
+        if not selected:
+            raise ValueError(self.tr_msg("작업할 페이지가 없습니다."))
+        return sorted(selected)
+
+    def choose_batch_page_indices(self, title, mode):
+        """일괄 분석/번역/인페인팅 실행 전에 전체/지정 페이지 범위를 고른다."""
+        total_pages = len(self.paths)
+        dialog = QDialog(self)
+        dialog.setWindowTitle(self.tr_ui(title))
+        dialog.setModal(True)
+        dialog.resize(440, 190)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        desc = QLabel(self.tr_ui("작업할 페이지 범위를 선택하세요."), dialog)
+        desc.setWordWrap(True)
+        layout.addWidget(desc)
+
+        rb_all = QRadioButton(self.tr_ui("전체 페이지"), dialog)
+        rb_selected = QRadioButton(self.tr_ui("페이지 선택"), dialog)
+        rb_all.setChecked(True)
+
+        edit_pages = QLineEdit(dialog)
+        edit_pages.setPlaceholderText(self.tr_ui("예: 1-3, 1~3, 1,2,3"))
+        edit_pages.setEnabled(False)
+
+        selected_row = QHBoxLayout()
+        selected_row.setContentsMargins(0, 0, 0, 0)
+        selected_row.setSpacing(8)
+        selected_row.addWidget(rb_selected)
+        selected_row.addWidget(edit_pages, 1)
+
+        layout.addWidget(rb_all)
+        layout.addLayout(selected_row)
+
+        note = QLabel(self.tr_ui("쉼표와 범위를 섞어서 입력할 수 있습니다."), dialog)
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #8ea0b8;")
+        layout.addWidget(note)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dialog)
+        try:
+            buttons.button(QDialogButtonBox.StandardButton.Ok).setText(self.tr_ui("확인"))
+            buttons.button(QDialogButtonBox.StandardButton.Cancel).setText(self.tr_ui("취소"))
+        except Exception:
+            pass
+        layout.addWidget(buttons)
+
+        def sync_enabled():
+            edit_pages.setEnabled(rb_selected.isChecked())
+            if rb_selected.isChecked():
+                edit_pages.setFocus()
+
+        rb_selected.toggled.connect(sync_enabled)
+        rb_all.toggled.connect(sync_enabled)
+
+        result = {"accepted": False, "indices": list(range(total_pages)), "label": self.tr_ui("전체 페이지")}
+
+        def on_accept():
+            try:
+                if rb_selected.isChecked():
+                    indices = self.parse_batch_page_selection_text(edit_pages.text(), total_pages)
+                    result["indices"] = indices
+                    result["label"] = edit_pages.text().strip()
+                else:
+                    result["indices"] = list(range(total_pages))
+                    result["label"] = self.tr_ui("전체 페이지")
+                result["accepted"] = True
+                dialog.accept()
+            except Exception as e:
+                QMessageBox.warning(dialog, self.tr_ui("페이지 선택 오류"), str(e))
+
+        buttons.accepted.connect(on_accept)
+        buttons.rejected.connect(dialog.reject)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted or not result.get("accepted"):
+            return None, None
+        return result["indices"], result["label"]
+
     def run_batch(self, mode):
         if getattr(self, "is_batch_running", False):
             QMessageBox.information(self, self.tr_ui("일괄 작업 중"), self.tr_msg("이미 일괄 작업이 진행 중입니다.\n현재 작업이 끝난 뒤 다시 실행해 주세요."))
@@ -2318,13 +2602,21 @@ class MainWindowOperationsMixin:
         if mode == "translate":
             if not self.check_translation_api_key_or_alert(self.cb_trans_provider.currentData()):
                 return
-        if getattr(self, "ui_language", LANG_KO) == LANG_EN:
-            batch_message = f"Run {self.tr_ui(title)} on total {len(self.paths)} page(s)?"
+        selected_page_indices = list(range(len(self.paths)))
+        selected_page_label = self.tr_ui("전체 페이지")
+        if mode in ("analyze", "translate", "inpaint"):
+            selected_page_indices, selected_page_label = self.choose_batch_page_indices(title, mode)
+            if selected_page_indices is None:
+                self.log(f"↩️ {title} 취소")
+                return
         else:
-            batch_message = f"{title}을(를) 총 {len(self.paths)}페이지에 실행합니다."
-        if not self.confirm_batch_operation(title, batch_message):
-            self.log(f"↩️ {title} 취소")
-            return
+            if getattr(self, "ui_language", LANG_KO) == LANG_EN:
+                batch_message = f"Run {self.tr_ui(title)} on total {len(self.paths)} page(s)?"
+            else:
+                batch_message = f"{title}을(를) 총 {len(self.paths)}페이지에 실행합니다."
+            if not self.confirm_batch_operation(title, batch_message):
+                self.log(f"↩️ {title} 취소")
+                return
 
         # 일괄 시작 전 현재 페이지의 UI 상태를 한 번만 확정한다.
         # 일괄 분석은 일반 분석과 동일하게 기존 마스크를 무시하고 새로 따야 하므로
@@ -2338,16 +2630,66 @@ class MainWindowOperationsMixin:
 
         self.is_batch_running = True
         self.current_batch_mode = mode
+        self._batch_progress_done = 0
+        self._batch_total = len(selected_page_indices)
+        self._long_task_cancel_requested = False
+        self.prepare_task_progress_overlay(title, f"{title} 준비 중... ({self._batch_total}/{len(self.paths)}페이지)", total=self._batch_total, cancellable=True)
         self.begin_busy_state(title)
         self.set_project_action_interlock(True)
 
-        self.bw = UniversalBatchWorker(self, mode)
-        self.bw.progress.connect(self.log)
+        self.log(f"▶️ {title} 시작: {len(selected_page_indices)}/{len(self.paths)}페이지 ({selected_page_label})")
+        self.bw = UniversalBatchWorker(self, mode, page_indices=selected_page_indices)
+        self._active_task_worker = self.bw
+        self.bw.progress.connect(lambda msg: self.handle_long_task_message(msg))
+        if hasattr(self.bw, "active_item"):
+            self.bw.active_item.connect(self.on_batch_item_started)
         self.bw.finished_item.connect(self.on_batch_item_finished)
         self.bw.finished_all.connect(lambda m=mode: self.on_batch_finished(m))
         self.bw.start()
 
+    def batch_visual_mode_for(self, mode):
+        return {
+            "analyze": 1,
+            "translate": 4,
+            "inpaint": 4,
+        }.get(str(mode or ""), self.cb_mode.currentIndex() if hasattr(self, "cb_mode") else 0)
+
+    def show_batch_page_progress(self, page_index, mode=None, finished=False):
+        """일괄 작업 중 현재 처리/완료된 페이지를 화면에 보여준다.
+
+        일괄 작업은 worker 스레드가 self.data에 결과를 넘기고, 메인 스레드가
+        그 결과를 반영한다. 이때 화면을 전혀 움직이지 않으면 멈춘 것처럼 보여서
+        현재 페이지를 따라가게 하되, 화면 상태를 data로 다시 커밋하지는 않는다.
+        """
+        try:
+            if page_index < 0 or page_index >= len(self.paths):
+                return
+            self.idx = int(page_index)
+            target_mode = self.batch_visual_mode_for(mode)
+            if hasattr(self, "cb_mode") and 0 <= target_mode < self.cb_mode.count():
+                if self.cb_mode.currentIndex() != target_mode:
+                    self.cb_mode.setCurrentIndex(target_mode)
+            self.load()
+            try:
+                QApplication.processEvents()
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                self.log(f"⚠️ 일괄 작업 화면 갱신 실패: {e}")
+            except Exception:
+                pass
+
+    def on_batch_item_started(self, i, mode=None):
+        self.show_batch_page_progress(i, mode=mode, finished=False)
+
     def on_batch_item_finished(self, i, payload=None):
+        try:
+            self._batch_progress_done = int(getattr(self, "_batch_progress_done", 0) or 0) + 1
+            batch_total = int(getattr(self, "_batch_total", len(self.paths)) or len(self.paths))
+            self.update_task_progress_overlay(current=self._batch_progress_done, total=batch_total, detail=f"일괄 작업 진행: {self._batch_progress_done}/{batch_total}")
+        except Exception:
+            pass
         # workers.py가 payload를 넘기는 새 구조와, main.data를 직접 갱신하는 구 구조를 모두 지원한다.
         # 일괄 중에는 self.load()를 호출하지 않는다. 화면에 남은 마스크가 다른 페이지에 저장될 수 있기 때문.
         if i < 0 or i >= len(self.paths):
@@ -2399,6 +2741,32 @@ class MainWindowOperationsMixin:
             self.data[i]['mask_inpaint_off'] = None
             self.data[i]['mask_toggle_enabled'] = True
 
+        if getattr(self, "current_batch_mode", None) in ("analyze", "translate", "inpaint"):
+            self.show_batch_page_progress(i, mode=getattr(self, "current_batch_mode", None), finished=True)
+
+    def save_batch_results_without_ui_commit(self):
+        """일괄 결과를 저장하되 현재 화면 UI를 data에 다시 덮어쓰지 않는다.
+
+        일괄 작업 중 화면은 진행 상황 표시용으로 페이지를 따라간다.
+        여기서 auto_save_project()를 그대로 호출하면 commit_current_page_ui_to_data()가
+        아직 갱신 전/이전 페이지의 화면 위젯 상태를 현재 페이지 data에 덮어써서
+        취소 시 먼저 끝난 페이지 결과가 사라질 수 있다.
+        """
+        if not getattr(self, "project_dir", None):
+            return
+        if getattr(self, "auto_save_enabled", False):
+            self.save_project_store(self.project_store)
+            if getattr(self, "ysbt_package_path", None) and not getattr(self, "is_temp_project", False):
+                try:
+                    package_project(self.project_dir, self.ysbt_package_path)
+                except Exception as e:
+                    self.has_unsaved_changes = True
+                    self.log(f"⚠️ 일괄 작업 결과 패키지 저장 실패: {e}")
+                    return
+            self.has_unsaved_changes = bool(getattr(self, "is_temp_project", False) or not getattr(self, "ysbt_package_path", None))
+        else:
+            self.save_to_work_cache()
+
     def on_batch_finished(self, mode):
         self.is_batch_running = False
         self.set_project_action_interlock(False)
@@ -2410,7 +2778,9 @@ class MainWindowOperationsMixin:
             self.set_mask_toggle_safely(True)
 
         # 일괄 종료 후 한 번만 저장/로드한다.
-        self.auto_save_project()
+        # 일반 auto_save_project()는 현재 화면 UI를 data에 커밋하므로
+        # 취소된 일괄 작업의 이미 완료된 페이지 결과를 덮어쓸 수 있다.
+        self.save_batch_results_without_ui_commit()
 
         if self.paths:
             self.load()
@@ -2440,6 +2810,8 @@ class MainWindowOperationsMixin:
             self.break_undo_chain(batch_boundary_kind)
 
         self.current_batch_mode = None
+        self._active_task_worker = None
+        self._batch_total = None
         self.end_busy_state({
             "analyze": "일괄 분석",
             "translate": "일괄 번역",

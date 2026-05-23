@@ -7,6 +7,12 @@ import requests
 import time
 import math
 import uuid
+import copy
+import sys
+import tempfile
+import subprocess
+import shutil
+from pathlib import Path
 from openai import OpenAI
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -53,6 +59,13 @@ class Config:
     GOOGLE_VISION_MODEL = "DOCUMENT_TEXT_DETECTION"
     GOOGLE_VISION_OCR_LANGUAGE = "en"
     GOOGLE_VISION_LANGUAGE_HINTS = "ja,ko,en"
+
+    # [설정] Local OCR / comic_text_detector + PaddleOCR
+    LOCAL_PADDLE_MASK_DEVICE = "auto"
+    LOCAL_PADDLE_OCR_LANGUAGE = "ja"
+    # comic_text_detector input_size는 사용자 원본 이미지 크기가 아니라 모델 내부 리사이즈 캔버스다.
+    # UI에는 노출하지 않고 페이지 크기에 따라 자동 선택한다.
+    LOCAL_PADDLE_MASK_INPUT_SIZE = "auto"
     
     # [설정] OpenAI & Replicate
     TRANSLATION_PROVIDER = "openai"
@@ -322,6 +335,8 @@ class MangaProcessEngine:
         provider = str(getattr(Config, "OCR_PROVIDER", "clova") or "clova").strip().lower()
         if provider == "google_vision":
             return self._normalize_ocr_language(getattr(Config, "GOOGLE_VISION_OCR_LANGUAGE", "en"))
+        if provider == "local_paddle_ocr":
+            return self._normalize_ocr_language(getattr(Config, "LOCAL_PADDLE_OCR_LANGUAGE", "ja"))
         return self._normalize_ocr_language(getattr(Config, "CLOVA_OCR_LANGUAGE", "ja"))
 
     def _google_vision_response_to_raw_items(self, ocr_res, offset_x=0, offset_y=0):
@@ -398,6 +413,129 @@ class MangaProcessEngine:
         provider_text = ' '.join(str(it.get('source_provider', '') or '') for it in (items or []))
         return ascii_ratio >= 0.65 or ('en' in locale_text and 'google_vision' in provider_text)
 
+    def _english_spacing_words(self):
+        """Local PaddleOCR 영어 후처리용 보수적 단어 사전.
+
+        PaddleOCR은 만화 말풍선의 세로/좁은 영어 텍스트에서
+        afterleaving, theoperationsthe, backof 같은 붙은 단어를 자주 만든다.
+        외부 패키지 없이 안전하게 복원하기 위해 짧은 공통 단어 중심으로만 쓴다.
+        """
+        return {
+            "a", "an", "the", "and", "or", "but", "if", "then", "than", "that", "this", "these", "those",
+            "i", "me", "my", "mine", "you", "your", "he", "him", "his", "she", "her", "we", "our", "they", "them", "their",
+            "am", "is", "are", "was", "were", "be", "been", "being", "have", "has", "had", "do", "does", "did",
+            "will", "would", "can", "could", "should", "may", "might", "must", "need", "not", "no", "yes",
+            "to", "of", "in", "on", "at", "by", "for", "from", "with", "without", "into", "onto", "over", "under",
+            "after", "before", "back", "front", "behind", "inside", "outside", "through", "until", "again", "still",
+            "even", "so", "just", "simply", "only", "also", "too", "very", "really", "almost", "never", "ever",
+            "go", "goes", "going", "went", "gone", "run", "runs", "running", "ran", "leave", "leaves", "leaving", "left",
+            "look", "looks", "looking", "find", "found", "stop", "stops", "stopped", "move", "moves", "moving", "forward",
+            "know", "knows", "knew", "think", "thinks", "thought", "feel", "feels", "felt", "hear", "heard", "rang", "ring",
+            "mind", "reason", "away", "hero", "afraid", "alarm", "room", "operations", "operation", "sortie", "gate",
+            "open", "opens", "opening", "opened", "online", "begin", "begins", "beginning", "seconds", "second", "thirty",
+            "target", "identified", "identify", "tenma", "spiritual", "pressure", "rising", "transfer", "beep", "clack", "whirr",
+            "let", "lets", "let's", "im", "i'm", "ill", "i'll", "dont", "don't", "cant", "can't", "wont", "won't",
+            "its", "it's", "thats", "that's", "theres", "there's", "here", "there", "what", "where", "when", "why", "how",
+        }
+
+    def _restore_english_segment_case(self, segment, original_slice, is_first=False):
+        try:
+            if original_slice.isupper() and len(original_slice) > 1:
+                return segment.upper()
+            if original_slice[:1].isupper() or is_first:
+                if segment in ("i",):
+                    return "I"
+                if segment in ("i'm", "im"):
+                    return "I'm"
+                return segment[:1].upper() + segment[1:]
+        except Exception:
+            pass
+        if segment == "i":
+            return "I"
+        if segment in ("i'm", "im"):
+            return "I'm"
+        return segment
+
+    def _segment_english_compound_token(self, token):
+        """붙어버린 영어 알파벳 토큰을 공통 단어 기준으로 보수적으로 나눈다."""
+        token = str(token or "")
+        if len(token) < 8:
+            return token
+        # 약어/효과음 대문자는 건드리지 않는다.
+        if token.isupper() and len(token) <= 12:
+            return token
+
+        # CamelCase는 먼저 끊는다. 예: TargetidentifiedTenma -> Target identified Tenma
+        camel = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", token)
+        if camel != token:
+            parts = [self._segment_english_compound_token(part) for part in camel.split()]
+            return " ".join(part for part in parts if part)
+
+        # apostrophe가 들어간 토큰은 아래 사전 분할이 오히려 위험해서 대표 패턴만 처리한다.
+        token = re.sub(r"^(I['’]m)(?=[A-Za-z])", r"\1 ", token)
+        token = re.sub(r"^(I['’]ll)(?=[A-Za-z])", r"\1 ", token)
+        if " " in token:
+            return " ".join(self._segment_english_compound_token(part) for part in token.split())
+
+        if not re.fullmatch(r"[A-Za-z]+", token):
+            return token
+
+        lower = token.lower()
+        words = self._english_spacing_words()
+        if lower in words:
+            return token
+
+        n = len(lower)
+        # 너무 짧은 조각으로 과분할하지 않도록 1글자 단어는 i/a만 허용한다.
+        allowed_one = {"i", "a"}
+        inf = 10 ** 9
+        dp = [(inf, []) for _ in range(n + 1)]
+        dp[0] = (0.0, [])
+        max_word_len = 18
+
+        for i in range(n):
+            if dp[i][0] >= inf:
+                continue
+            for j in range(i + 1, min(n, i + max_word_len) + 1):
+                part = lower[i:j]
+                if part in words and (len(part) >= 2 or part in allowed_one):
+                    # 긴 단어를 조금 더 선호한다.
+                    cost = 1.0 + max(0, 6 - len(part)) * 0.08
+                    new_cost = dp[i][0] + cost
+                    if new_cost < dp[j][0]:
+                        dp[j] = (new_cost, dp[i][1] + [(i, j, part)])
+
+        if dp[n][0] >= inf:
+            return token
+
+        segments = dp[n][1]
+        if len(segments) <= 1:
+            return token
+
+        # 너무 많은 1~2글자 조각으로 쪼개진 결과는 위험하므로 취소한다.
+        short_count = sum(1 for _i, _j, part in segments if len(part) <= 2)
+        if short_count >= max(3, len(segments) // 2 + 1):
+            return token
+
+        out = []
+        for idx, (i, j, part) in enumerate(segments):
+            out.append(self._restore_english_segment_case(part, token[i:j], is_first=(idx == 0 and token[:1].isupper())))
+        return " ".join(out)
+
+    def _normalize_latin_spacing(self, text):
+        """영어 OCR 결과의 기본 공백/문장부호만 정리한다.
+
+        v2.1.0 Local OCR에서는 PaddleOCR의 언어 설정을 우선 신뢰한다.
+        별도 사전 기반 강제 띄어쓰기 복원은 정상 영어 OCR 결과를 망가뜨릴 수 있어 사용하지 않는다.
+        """
+        text = str(text or "").replace("’", "'")
+        text = re.sub(r"\s+([,\.\!\?;:…])", r"\1", text)
+        text = re.sub(r"([,\.\!\?;:])(?=[A-Za-z])", r"\1 ", text)
+        text = re.sub(r"([\(\[\{])\s+", r"\1", text)
+        text = re.sub(r"\s+([\)\]\}])", r"\1", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text
+
     def _manga_sort_latin_words(self, items):
         """Google Vision 영어 OCR용: word 단위 박스를 줄 단위로 묶고 공백을 복원한다."""
         items = list(items or [])
@@ -452,7 +590,7 @@ class MangaProcessEngine:
 
         # 번역 API에는 줄바꿈보다 공백이 더 안정적이다.
         # OCR 박스는 줄 단위로 잡되, 최종 원문은 한 문장처럼 공백으로 이어준다.
-        return " ".join(out_lines).strip()
+        return self._normalize_latin_spacing(" ".join(out_lines).strip())
 
     def _cluster_ocr_items(self, items, axis="y", tol=8.0):
         """중심 좌표 기준으로 OCR 조각을 줄/열 단위로 묶는다."""
@@ -513,15 +651,18 @@ class MangaProcessEngine:
             return 0.0, 0.0, 1.0, 1.0
 
     def _normalize_korean_spacing(self, text):
-        """한국어 OCR 결합 후 문장부호 주변의 어색한 공백을 정리한다."""
+        """한국어 OCR 결과의 기본 공백/문장부호만 정리한다.
+
+        한국어 자동 띄어쓰기는 별도 모델 없이는 위험하므로 Local OCR 단계에서는
+        사용자가 선택한 OCR 언어 모델의 결과를 우선 보존한다.
+        """
         text = str(text or '')
         text = re.sub(r"\s+", " ", text).strip()
-        # 닫는 문장부호 앞 공백 제거
         text = re.sub(r"\s+([,\.\!\?;:…、。！？・』」）］｝])", r"\1", text)
-        # 여는 괄호/따옴표 뒤 공백 제거
         text = re.sub(r"([\(\[\{『「（［｛])\s+", r"\1", text)
-        # 영문/숫자 사이가 아닌 하이픈 주변 공백은 과하게 건드리지 않는다.
-        return text.strip()
+        text = re.sub(r"([,\.\!\?;:])(?=[A-Za-z가-힣])", r"\1 ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text
 
     def _manga_sort_korean_horizontal(self, items):
         """한국어 OCR용: 줄은 위→아래, 줄 안은 왼쪽→오른쪽, 단어 공백은 보존/복원한다."""
@@ -861,6 +1002,10 @@ class MangaProcessEngine:
 
         h, w, _ = ori_img.shape
 
+        provider = str(getattr(Config, "OCR_PROVIDER", "clova") or "clova").strip().lower()
+        if provider == "local_paddle_ocr":
+            return self.analyze_image_local_paddle_mask(image_path, ori_img=ori_img)
+
         # 짧은 이미지든 긴 웹툰 이미지든 여기서 자동 처리
         # h <= OCR_TILE_HEIGHT면 단일 OCR
         # h > OCR_TILE_HEIGHT면 세로 분할 OCR
@@ -875,6 +1020,1062 @@ class MangaProcessEngine:
 
         return ori_img, grouped_data, mask_merge, mask_inpaint
 
+    def _normalize_local_detector_mask(self, mask, w, h, *, dilate_px=0):
+        """comic_text_detector 마스크를 YSB 내부 0/255 단일 채널 마스크로 정규화한다.
+
+        주의: v2.1.0 Local 테스트에서는 detector의 raw segmentation mask를
+        최종 인페인팅 마스크로 직접 사용하지 않는다. 이 함수는 디버그/호환용으로
+        남겨두고, 실제 LOCAL Paddle OCR 마스크는 _create_detector_candidate_mask()의
+        block/line 게이트를 통과한 안전 마스크를 사용한다.
+        """
+        from ysb.engines.text_detection.mask_preview import ensure_uint8_mask
+        clean = ensure_uint8_mask(mask, dilate_px=max(0, int(dilate_px or 0)))
+        if clean.shape[:2] != (h, w):
+            clean = cv2.resize(clean, (w, h), interpolation=cv2.INTER_NEAREST)
+        return clean
+
+    def _clamp_detector_box(self, bbox, w, h):
+        try:
+            x1, y1, x2, y2 = [int(round(float(v))) for v in bbox[:4]]
+        except Exception:
+            return None
+        if x2 < x1:
+            x1, x2 = x2, x1
+        if y2 < y1:
+            y1, y2 = y2, y1
+        x1 = max(0, min(w - 1, x1))
+        y1 = max(0, min(h - 1, y1))
+        x2 = max(0, min(w, x2))
+        y2 = max(0, min(h, y2))
+        if x2 <= x1 or y2 <= y1:
+            return None
+        return x1, y1, x2, y2
+
+    def _detector_block_is_reasonable(self, bbox, w, h):
+        """너무 크거나 너무 작은 detector block을 기본 마스크 후보에서 제외한다."""
+        box = self._clamp_detector_box(bbox, w, h)
+        if box is None:
+            return False
+        x1, y1, x2, y2 = box
+        bw = x2 - x1
+        bh = y2 - y1
+        area = bw * bh
+        page_area = max(1, int(w) * int(h))
+        if bw < 3 or bh < 3 or area < 9:
+            return False
+        # detector가 그림/배경을 큰 덩어리로 오검출했을 때 전체 페이지가 오염되는 걸 막는다.
+        # 말풍선 전체를 지우는 도구가 아니라 '텍스트 제거 마스크' 테스트이므로 1차 안전값은 낮게 둔다.
+        if area / page_area > 0.18:
+            return False
+        return True
+
+    def _local_detector_auto_input_size(self, w, h):
+        """comic_text_detector 모델 입력 크기를 페이지 크기에 맞춰 자동 선택한다.
+
+        여기서 말하는 input_size는 원본 이미지 크기가 아니라 detector가 내부적으로
+        이미지를 letterbox 리사이즈할 때 쓰는 추론 캔버스 크기다. 결과 좌표는 detector가
+        다시 원본 이미지 좌표로 되돌려주므로, 사용자가 페이지마다 직접 맞출 값이 아니다.
+        """
+        try:
+            configured = getattr(Config, "LOCAL_PADDLE_MASK_INPUT_SIZE", "auto")
+            if configured is None:
+                configured = "auto"
+            configured_s = str(configured).strip().lower()
+            if configured_s and configured_s not in ("auto", "자동"):
+                value = int(float(configured_s))
+                # comic_text_detector는 stride 64 계열이므로 64 배수로 정리한다.
+                value = max(512, min(2048, int(round(value / 64.0)) * 64))
+                return value
+        except Exception:
+            pass
+
+        max_side = max(int(w or 0), int(h or 0))
+        # 너무 크게 잡으면 CPU 환경에서 재분석이 무거워지므로 안전한 단계값만 사용한다.
+        if max_side >= 3000:
+            return 1536
+        if max_side >= 2000:
+            return 1280
+        return 1024
+
+    def _normalize_detector_source_mask(self, source_mask, w, h):
+        """comic_text_detector의 raw/refined mask를 원본 크기 단일 채널 0/255 마스크로 정규화한다."""
+        if source_mask is None:
+            return None
+        try:
+            arr = np.asarray(source_mask)
+            if arr.ndim == 3:
+                arr = cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY)
+            if arr.shape[:2] != (int(h), int(w)):
+                arr = cv2.resize(arr, (int(w), int(h)), interpolation=cv2.INTER_NEAREST)
+            arr = np.where(arr > 0, 255, 0).astype(np.uint8)
+            if cv2.countNonZero(arr) <= 0:
+                return None
+            return arr
+        except Exception:
+            return None
+
+    def _polygon_to_mask(self, pts, w, h, *, clamp_box=None):
+        """line polygon을 이미지 범위 안으로 정리한 뒤 마스크와 polygon 배열을 만든다."""
+        if not pts or len(pts) < 3:
+            return None, None
+        if clamp_box is not None:
+            x1, y1, x2, y2 = clamp_box
+        else:
+            x1, y1, x2, y2 = 0, 0, int(w) - 1, int(h) - 1
+        poly = []
+        for x, y in pts:
+            px = max(x1, min(x2, int(round(float(x)))))
+            py = max(y1, min(y2, int(round(float(y)))))
+            poly.append([px, py])
+        arr = np.array(poly, dtype=np.int32)
+        if arr.shape[0] < 3 or abs(cv2.contourArea(arr)) < 4:
+            return None, None
+        line_mask = np.zeros((int(h), int(w)), dtype=np.uint8)
+        cv2.fillPoly(line_mask, [arr], 255)
+        return line_mask, arr
+
+    def _close_line_mask_component(self, clipped_mask, poly_arr, w, h, *, close_px=0):
+        """line polygon 안에서만 detector 문자 마스크를 원본 크기로 되돌린다.
+
+        v2.1.0 Local detector 테스트에서는 내부 보정 확장값을 두지 않는다.
+        실제 작업 마스크의 확장은 옵션 > 분석 마스크 확장 비율 설정으로만 적용한다.
+        """
+        try:
+            if clipped_mask is None or cv2.countNonZero(clipped_mask) <= 0:
+                return None
+            x, y, ww, hh = cv2.boundingRect(poly_arr)
+            x = max(0, min(int(w) - 1, x))
+            y = max(0, min(int(h) - 1, y))
+            ww = max(1, min(int(w) - x, ww))
+            hh = max(1, min(int(h) - y, hh))
+            crop = clipped_mask[y:y + hh, x:x + ww].copy()
+            if crop.size <= 0 or cv2.countNonZero(crop) <= 0:
+                return None
+
+            close_px = max(0, int(close_px or 0))
+            if close_px > 0:
+                # 현재 close_px는 내부 기본값으로 쓰지 않는다.
+                # 향후 필요할 경우 옵션 > 분석 마스크 확장 비율 또는 별도 고급 옵션과 연결할 수 있도록 함수만 남긴다.
+                if hh >= ww * 1.35:
+                    kx = max(1, min(7, close_px * 2 + 1))
+                    ky = max(3, min(21, close_px * 4 + 1))
+                elif ww >= hh * 1.35:
+                    kx = max(3, min(21, close_px * 4 + 1))
+                    ky = max(1, min(7, close_px * 2 + 1))
+                else:
+                    kx = ky = max(3, min(15, close_px * 2 + 1))
+                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kx, ky))
+                crop = cv2.morphologyEx(crop, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+            out = np.zeros((int(h), int(w)), dtype=np.uint8)
+            out[y:y + hh, x:x + ww] = crop
+            return out
+        except Exception:
+            return None
+
+    def _create_detector_candidate_mask(self, blocks, w, h, *, source_mask=None):
+        """comic_text_detector 후보를 YSB용 안전 마스크로 만든다.
+
+        v2: raw/refined segmentation mask를 그대로 쓰지 않고, block/line 후보로 게이트를 건다.
+        - line polygon이 있으면 source mask를 line 안에서만 잘라서 문자 모양에 가깝게 합친다.
+        - source mask가 없거나 line 내부 픽셀이 비어 있으면 line polygon 채움으로만 fallback한다.
+        - line이 없는 block은 bbox 전체보다 source mask∩bbox를 우선 사용한다.
+        """
+        mask = np.zeros((int(h), int(w)), dtype=np.uint8)
+        used_blocks = 0
+        used_lines = 0
+        used_line_merged = 0
+        fallback_lines = 0
+
+        src = self._normalize_detector_source_mask(source_mask, w, h)
+        # 내부 확장/closing 기본값은 두지 않는다.
+        # 실제 마스크 확장은 옵션 > 분석 마스크 확장 비율 설정으로만 처리한다.
+        close_px = 0
+
+        for block in blocks or []:
+            bbox = getattr(block, 'bbox', None) or (0, 0, 0, 0)
+            box = self._clamp_detector_box(bbox, w, h)
+            if box is None or not self._detector_block_is_reasonable(box, w, h):
+                continue
+
+            x1, y1, x2, y2 = box
+            block_line_count = 0
+            block_used_any = False
+
+            for line in getattr(block, 'lines', []) or []:
+                pts = getattr(line, 'polygon', None) or []
+                line_region, arr = self._polygon_to_mask(pts, w, h, clamp_box=box)
+                if line_region is None or arr is None:
+                    continue
+
+                line_mask_to_add = None
+                if src is not None:
+                    clipped = cv2.bitwise_and(src, line_region)
+                    if cv2.countNonZero(clipped) >= 4:
+                        line_mask_to_add = self._close_line_mask_component(clipped, arr, w, h, close_px=close_px)
+                        if line_mask_to_add is not None and cv2.countNonZero(line_mask_to_add) > 0:
+                            # closing/dilation이 line 영역 밖으로 번지지 않도록 다시 한 번 게이트한다.
+                            line_mask_to_add = cv2.bitwise_and(line_mask_to_add, line_region)
+                            used_line_merged += 1
+
+                if line_mask_to_add is None or cv2.countNonZero(line_mask_to_add) <= 0:
+                    # source mask가 비어 있는 줄은 이전 안전 방식으로 fallback한다.
+                    # detector가 line을 잡았다는 사실은 활용하되, raw mask 전체 오염은 사용하지 않는다.
+                    line_mask_to_add = line_region
+                    fallback_lines += 1
+
+                mask = cv2.bitwise_or(mask, line_mask_to_add)
+                block_line_count += 1
+                block_used_any = True
+
+            if block_line_count <= 0:
+                block_mask_to_add = None
+                if src is not None:
+                    bbox_region = np.zeros((int(h), int(w)), dtype=np.uint8)
+                    cv2.rectangle(bbox_region, (x1, y1), (max(x1, x2 - 1), max(y1, y2 - 1)), 255, thickness=-1)
+                    clipped = cv2.bitwise_and(src, bbox_region)
+                    if cv2.countNonZero(clipped) >= 4:
+                        # line 정보가 없는 block은 bbox 안의 문자 segmentation만 사용한다.
+                        block_mask_to_add = clipped
+                if block_mask_to_add is None:
+                    # 마지막 fallback. line도 source mask도 없을 때만 bbox를 쓴다.
+                    block_mask_to_add = np.zeros((int(h), int(w)), dtype=np.uint8)
+                    cv2.rectangle(block_mask_to_add, (x1, y1), (max(x1, x2 - 1), max(y1, y2 - 1)), 255, thickness=-1)
+                mask = cv2.bitwise_or(mask, block_mask_to_add)
+                block_used_any = True
+            else:
+                used_lines += block_line_count
+
+            if block_used_any:
+                used_blocks += 1
+
+        stats = {
+            "used_blocks": int(used_blocks),
+            "used_lines": int(used_lines),
+            "used_line_merged": int(used_line_merged),
+            "fallback_lines": int(fallback_lines),
+        }
+        return mask, stats
+
+    def _estimate_detector_mask_expand_px(self, blocks, w, h, *, ratio=0.0, min_px=0):
+        """기존 '분석 마스크 확장 비율' 설정을 Local detector 마스크에 적용하기 위한 px 산출.
+
+        일반 API OCR 경로는 OCR 조각의 stroke_size를 기준으로 확장량을 잡는다.
+        Local detector 경로는 OCR 조각이 아직 없으므로, detector line polygon/bbox의 짧은 변을
+        stroke 후보로 보고 같은 ratio/min_px 규칙을 적용한다.
+        """
+        try:
+            ratio = max(0.0, float(ratio or 0.0))
+        except Exception:
+            ratio = 0.0
+        try:
+            min_px = max(0, int(min_px or 0))
+        except Exception:
+            min_px = 0
+
+        if ratio <= 0 and min_px <= 0:
+            return 0
+
+        samples = []
+        for block in blocks or []:
+            block_has_line = False
+            for line in getattr(block, 'lines', []) or []:
+                pts = getattr(line, 'polygon', None) or []
+                if len(pts) < 3:
+                    continue
+                try:
+                    arr = np.array(pts, dtype=np.int32).reshape((-1, 1, 2))
+                    _x, _y, rw, rh = cv2.boundingRect(arr)
+                    stroke = min(rw, rh) if min(rw, rh) > 0 else max(rw, rh)
+                    if stroke > 0:
+                        samples.append(float(stroke))
+                        block_has_line = True
+                except Exception:
+                    continue
+            if not block_has_line:
+                try:
+                    box = self._clamp_detector_box(getattr(block, 'bbox', None), w, h)
+                    if box is not None:
+                        x1, y1, x2, y2 = box
+                        rw = max(1, x2 - x1)
+                        rh = max(1, y2 - y1)
+                        stroke = min(rw, rh) if min(rw, rh) > 0 else max(rw, rh)
+                        if stroke > 0:
+                            samples.append(float(stroke))
+                except Exception:
+                    continue
+
+        if samples:
+            # 평균보다 중앙값이 큰 효과음/긴 말풍선에 덜 흔들린다.
+            stroke_ref = float(np.median(np.array(samples, dtype=np.float32)))
+        else:
+            stroke_ref = 0.0
+
+        px = int(stroke_ref * ratio) if ratio > 0 else 0
+        if min_px > 0:
+            px = max(px, min_px)
+        return max(0, int(px))
+
+    def _expand_detector_analysis_mask(self, base_mask, blocks, w, h, *, ratio=0.0, min_px=0):
+        """Local detector 기준 마스크에 기존 분석 마스크 확장 설정을 적용한다.
+
+        - 텍스트 마스크는 Config.MERGE_RATIO / MERGE_MIN_STROKE_PX
+        - 페인팅 마스크는 Config.INPAINT_RATIO / MIN_STROKE_PX
+        를 각각 사용한다.
+        API 관리에는 별도 마스크 확장값을 두지 않는다.
+        """
+        if base_mask is None:
+            return np.zeros((int(h), int(w)), dtype=np.uint8)
+        try:
+            mask = np.asarray(base_mask).copy()
+            if mask.ndim == 3:
+                mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+            if mask.shape[:2] != (int(h), int(w)):
+                mask = cv2.resize(mask, (int(w), int(h)), interpolation=cv2.INTER_NEAREST)
+            mask = np.where(mask > 0, 255, 0).astype(np.uint8)
+        except Exception:
+            return np.zeros((int(h), int(w)), dtype=np.uint8)
+
+        expand_px = self._estimate_detector_mask_expand_px(blocks, w, h, ratio=ratio, min_px=min_px)
+        if expand_px <= 0:
+            return mask
+
+        kernel_size = expand_px * 2 + 1
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+        return cv2.dilate(mask, kernel, iterations=1)
+
+    def _normalize_binary_work_mask(self, mask, w, h):
+        """YSB 작업 마스크를 원본 크기 0/255 단일 채널로 정규화한다."""
+        if mask is None:
+            return np.zeros((int(h), int(w)), dtype=np.uint8)
+        try:
+            src = np.asarray(mask)
+            if src.ndim == 3:
+                src = cv2.cvtColor(src, cv2.COLOR_BGR2GRAY)
+            if src.shape[:2] != (int(h), int(w)):
+                src = cv2.resize(src, (int(w), int(h)), interpolation=cv2.INTER_NEAREST)
+            return np.where(src > 0, 255, 0).astype(np.uint8)
+        except Exception:
+            return np.zeros((int(h), int(w)), dtype=np.uint8)
+
+    def _rect_mask_for_group(self, group, w, h):
+        """group의 현재 rect/vertices를 작은 마스크로 만든다."""
+        region = np.zeros((int(h), int(w)), dtype=np.uint8)
+        try:
+            x, y, rw, rh = [int(round(float(v))) for v in group.get('rect', [0, 0, 0, 0])[:4]]
+            x1 = max(0, min(int(w), x))
+            y1 = max(0, min(int(h), y))
+            x2 = max(0, min(int(w), x + max(0, rw)))
+            y2 = max(0, min(int(h), y + max(0, rh)))
+            if x2 > x1 and y2 > y1:
+                cv2.rectangle(region, (x1, y1), (x2 - 1, y2 - 1), 255, thickness=-1)
+        except Exception:
+            pass
+
+        for v_list in group.get('vertices_list', []) or []:
+            try:
+                pts = np.array(v_list, dtype=np.int32).reshape((-1, 1, 2))
+                if pts.shape[0] >= 3:
+                    cv2.fillPoly(region, [pts], 255)
+            except Exception:
+                continue
+        return region
+
+    def _align_local_groups_to_text_mask(self, grouped_data, text_mask, w, h):
+        """LOCAL OCR 분석 박스/OCR crop 기준을 실제 텍스트 마스크 기준으로 보정한다.
+
+        Local detector/OCR 경로의 분석 영역은 detector 글자 bbox가 아니라 실제로 생성된
+        텍스트 마스크의 연결 성분을 기준으로 만든다. OCR이 일부 실패하거나 detector block이
+        좁게 잡혀도, 마스크가 존재하면 그 마스크 성분은 반드시 하나의 텍스트 영역으로 표시되어야 한다.
+        """
+        mask = self._normalize_binary_work_mask(text_mask, w, h)
+        if cv2.countNonZero(mask) <= 0:
+            return grouped_data or []
+
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        components = []
+        for cnt in contours or []:
+            if cnt is None or abs(cv2.contourArea(cnt)) < 1:
+                continue
+            x, y, rw, rh = cv2.boundingRect(cnt)
+            if rw <= 0 or rh <= 0:
+                continue
+            comp_mask = np.zeros((int(h), int(w)), dtype=np.uint8)
+            cv2.drawContours(comp_mask, [cnt], -1, 255, thickness=-1)
+            components.append({
+                'rect': [int(x), int(y), int(rw), int(rh)],
+                'mask': comp_mask,
+                'area': int(cv2.countNonZero(comp_mask)),
+            })
+        if not components:
+            return grouped_data or []
+
+        # 각 기존 detector/OCR 그룹의 영역을 미리 계산한다. 다만 최종 분석 영역은
+        # 기존 그룹 수가 아니라 텍스트 마스크 연결 성분 수를 기준으로 새로 만든다.
+        group_regions = []
+        for group in grouped_data or []:
+            try:
+                group_regions.append((group, self._rect_mask_for_group(group, w, h)))
+            except Exception:
+                group_regions.append((group, np.zeros((int(h), int(w)), dtype=np.uint8)))
+
+        updated = []
+        matched_groups = set()
+        for comp_idx, comp in enumerate(components):
+            best_group = None
+            best_group_idx = -1
+            best_overlap = 0
+            for group_idx, (group, group_region) in enumerate(group_regions):
+                try:
+                    ov = cv2.countNonZero(cv2.bitwise_and(group_region, comp['mask']))
+                except Exception:
+                    ov = 0
+                if int(ov) > best_overlap:
+                    best_overlap = int(ov)
+                    best_group = group
+                    best_group_idx = group_idx
+
+            if best_group is not None and best_overlap > 0:
+                item = copy.deepcopy(best_group)
+                matched_groups.add(best_group_idx)
+            else:
+                item = {
+                    'id': int(comp_idx),
+                    'text': '',
+                    'translated_text': '',
+                    'ocr_items': [],
+                    'ocr_items_all': [],
+                    'ruby_ocr_items': [],
+                    'ocr_lang': 'local_mask',
+                    'avg_stroke': 0.0,
+                    'use_inpaint': True,
+                    'x_off': 0,
+                    'y_off': 0,
+                    'local_detector_only': True,
+                    'detector_engine': 'text_mask_component',
+                    'detector_group_count': 0,
+                }
+
+            x, y, rw, rh = comp['rect']
+            rect = [int(x), int(y), int(rw), int(rh)]
+            try:
+                avg_stroke = float(item.get('avg_stroke', 0) or 0)
+            except Exception:
+                avg_stroke = 0.0
+            if avg_stroke <= 0:
+                avg_stroke = max(1.0, min(float(rw), float(rh)) * 0.1)
+
+            item['rect'] = rect
+            item['mask_rect'] = rect
+            item['text_mask_rect'] = rect
+            item['ocr_crop_rect'] = rect
+            item['local_mask_aligned_rect'] = True
+            item['avg_stroke'] = avg_stroke
+            # 분석도/선택 영역/최종 인페인팅 클리핑 기준도 실제 텍스트 마스크 성분의 외접 사각형으로 통일한다.
+            item['vertices_list'] = [[[int(x), int(y)], [int(x + rw), int(y)], [int(x + rw), int(y + rh)], [int(x), int(y + rh)]]]
+            updated.append(item)
+
+        print(
+            f">>> [Local OCR] text-mask component based OCR/analysis rects: "
+            f"groups={len(updated)}, components={len(components)}, matched_groups={len(matched_groups)}"
+        )
+        return self._organize_blocks(updated) if updated else []
+
+    def _create_grouped_data_analysis_mask(self, grouped_data, w, h, *, ratio=0.0, min_px=0):
+        """분석 데이터(vertices_list)를 기준으로 텍스트/페인트 실제 작업 마스크를 만든다.
+
+        Local detector 재분석에서는 기존 데이터와 새 detector 데이터를 섞어 최종 data를 만든다.
+        이때 화면에 보이는 텍스트/페인트 마스크가 실제 작업 마스크와 다르면 수정이 불가능해지므로,
+        최종 grouped_data에서 각 설정값을 적용해 실제 표시/작업 마스크를 다시 만든다.
+        """
+        mask = np.zeros((int(h), int(w)), dtype=np.uint8)
+        try:
+            ratio = max(0.0, float(ratio or 0.0))
+        except Exception:
+            ratio = 0.0
+        try:
+            min_px = max(0, int(min_px or 0))
+        except Exception:
+            min_px = 0
+
+        for group in grouped_data or []:
+            try:
+                avg_stroke = float(group.get('avg_stroke', 0) or 0)
+            except Exception:
+                avg_stroke = 0.0
+            pad = int(avg_stroke * ratio) if ratio > 0 else 0
+            if min_px > 0:
+                pad = max(pad, min_px)
+
+            for v_list in group.get('vertices_list', []) or []:
+                try:
+                    pts = np.array(v_list, np.int32).reshape((-1, 1, 2))
+                    if pts.shape[0] < 3 or abs(cv2.contourArea(pts)) < 1:
+                        continue
+                    cv2.fillPoly(mask, [pts], 255)
+                    if pad > 0:
+                        cv2.polylines(mask, [pts], True, 255, thickness=pad * 2, lineType=cv2.LINE_AA)
+                except Exception:
+                    continue
+        return mask
+
+    def _detector_blocks_to_grouped_data_by_mask(self, blocks, w, h, *, grouping_mask=None, source_mask=None):
+        """comic_text_detector block들을 기존 분석 data 형식으로 변환한다.
+
+        단순히 block 하나당 박스 하나를 만들면, 실제 텍스트/페인트 마스크가 서로 붙었는데도
+        분석도에는 여러 박스로 남는다. 기존 API OCR 경로처럼 마스크가 연결된 후보는 하나의
+        분석 박스로 합치기 위해, 최종 텍스트 마스크의 연결 성분을 기준으로 block을 union한다.
+        """
+        blocks = list(blocks or [])
+        if not blocks:
+            return []
+
+        n = len(blocks)
+        parent = list(range(n))
+
+        def find(i):
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+
+        def union(a, b):
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[rb] = ra
+
+        mask_for_grouping = None
+        if grouping_mask is not None:
+            try:
+                mask_for_grouping = np.asarray(grouping_mask)
+                if mask_for_grouping.ndim == 3:
+                    mask_for_grouping = cv2.cvtColor(mask_for_grouping, cv2.COLOR_BGR2GRAY)
+                if mask_for_grouping.shape[:2] != (int(h), int(w)):
+                    mask_for_grouping = cv2.resize(mask_for_grouping, (int(w), int(h)), interpolation=cv2.INTER_NEAREST)
+                mask_for_grouping = np.where(mask_for_grouping > 0, 255, 0).astype(np.uint8)
+            except Exception:
+                mask_for_grouping = None
+
+        if mask_for_grouping is not None and cv2.countNonZero(mask_for_grouping) > 0 and n > 1:
+            block_masks = []
+            for block in blocks:
+                try:
+                    bm, _stats = self._create_detector_candidate_mask([block], w, h, source_mask=source_mask)
+                    block_masks.append(bm)
+                except Exception:
+                    block_masks.append(None)
+
+            contours, _ = cv2.findContours(mask_for_grouping, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for cnt in contours or []:
+                if cnt is None or cv2.contourArea(cnt) < 1:
+                    continue
+                component = np.zeros((int(h), int(w)), dtype=np.uint8)
+                cv2.drawContours(component, [cnt], -1, 255, thickness=-1)
+                included = []
+                for idx, bm in enumerate(block_masks):
+                    if bm is None:
+                        continue
+                    try:
+                        if cv2.countNonZero(cv2.bitwise_and(bm, component)) > 0:
+                            included.append(idx)
+                    except Exception:
+                        continue
+                if len(included) >= 2:
+                    first = included[0]
+                    for other in included[1:]:
+                        union(first, other)
+
+        buckets = {}
+        for idx, block in enumerate(blocks):
+            buckets.setdefault(find(idx), []).append(block)
+
+        grouped_data = []
+        for group_blocks in buckets.values():
+            item = self._detector_blocks_group_to_group_data(group_blocks, len(grouped_data))
+            if item is not None:
+                grouped_data.append(item)
+
+        return self._organize_blocks(grouped_data) if grouped_data else []
+
+    def _detector_blocks_group_to_group_data(self, blocks, index=0):
+        """여러 detector block을 하나의 분석 박스로 합친다."""
+        blocks = list(blocks or [])
+        if not blocks:
+            return None
+
+        vertices_list = []
+        xs = []
+        ys = []
+        stroke_samples = []
+
+        for block in blocks:
+            box = self._clamp_detector_box(getattr(block, 'bbox', None), 10**9, 10**9)
+            if box is not None:
+                x1, y1, x2, y2 = box
+                xs.extend([x1, x2])
+                ys.extend([y1, y2])
+
+            line_count = 0
+            for line in getattr(block, "lines", []) or []:
+                pts = getattr(line, "polygon", None) or []
+                if len(pts) >= 3:
+                    poly = []
+                    for x, y in pts:
+                        try:
+                            x = int(round(float(x)))
+                            y = int(round(float(y)))
+                            poly.append([x, y])
+                            xs.append(x)
+                            ys.append(y)
+                        except Exception:
+                            pass
+                    if len(poly) >= 3:
+                        vertices_list.append(poly)
+                        line_count += 1
+                        try:
+                            arr = np.array(poly, dtype=np.int32).reshape((-1, 1, 2))
+                            _x, _y, rw, rh = cv2.boundingRect(arr)
+                            stroke_samples.append(float(min(rw, rh) if min(rw, rh) > 0 else max(rw, rh)))
+                        except Exception:
+                            pass
+
+            if line_count <= 0 and box is not None:
+                x1, y1, x2, y2 = box
+                vertices_list.append([[x1, y1], [x2, y1], [x2, y2], [x1, y2]])
+                stroke_samples.append(float(min(max(1, x2 - x1), max(1, y2 - y1))))
+
+        if not xs or not ys or not vertices_list:
+            return None
+
+        x1, y1, x2, y2 = min(xs), min(ys), max(xs), max(ys)
+        rw = max(1, int(x2 - x1))
+        rh = max(1, int(y2 - y1))
+        avg_stroke = float(np.median(np.array(stroke_samples, dtype=np.float32))) if stroke_samples else max(1.0, min(rw, rh) * 0.1)
+
+        return {
+            'id': int(index),
+            'text': '',
+            'translated_text': '',
+            'rect': [int(x1), int(y1), rw, rh],
+            'vertices_list': vertices_list,
+            'ocr_items': [],
+            'ocr_items_all': [],
+            'ruby_ocr_items': [],
+            'ocr_lang': 'local_mask',
+            'avg_stroke': avg_stroke,
+            'use_inpaint': True,
+            'x_off': 0,
+            'y_off': 0,
+            'local_detector_only': True,
+            'detector_engine': 'comic_text_detector',
+            'detector_group_count': len(blocks),
+        }
+
+    def _detector_block_to_group(self, block, index=0):
+        """comic_text_detector block을 기존 분석 데이터 형식으로 변환한다.
+
+        현재 단계는 OCR 문자 인식 전 마스크 검증용이므로 text는 비워둔다.
+        대신 rect/vertices_list/use_inpaint를 채워 분석도와 마스크 슬롯에서 바로 확인할 수 있게 한다.
+        """
+        try:
+            x1, y1, x2, y2 = [int(v) for v in block.bbox[:4]]
+        except Exception:
+            x1 = y1 = x2 = y2 = 0
+        if x2 < x1:
+            x1, x2 = x2, x1
+        if y2 < y1:
+            y1, y2 = y2, y1
+        rw = max(1, x2 - x1)
+        rh = max(1, y2 - y1)
+
+        vertices_list = []
+        for line in getattr(block, "lines", []) or []:
+            pts = getattr(line, "polygon", None) or []
+            if len(pts) >= 3:
+                vertices_list.append([[int(x), int(y)] for x, y in pts])
+        if not vertices_list:
+            vertices_list = [[[x1, y1], [x2, y1], [x2, y2], [x1, y2]]]
+
+        font_size = getattr(block, "font_size", None)
+        try:
+            avg_stroke = float(font_size) if font_size is not None and float(font_size) > 0 else max(1.0, min(rw, rh) * 0.1)
+        except Exception:
+            avg_stroke = max(1.0, min(rw, rh) * 0.1)
+
+        return {
+            'id': int(index),
+            'text': '',
+            'translated_text': '',
+            'rect': [x1, y1, rw, rh],
+            'vertices_list': vertices_list,
+            'ocr_items': [],
+            'ocr_items_all': [],
+            'ruby_ocr_items': [],
+            'ocr_lang': 'local_mask',
+            'avg_stroke': avg_stroke,
+            'use_inpaint': True,
+            'x_off': 0,
+            'y_off': 0,
+            'local_detector_only': True,
+            'detector_engine': 'comic_text_detector',
+        }
+
+
+    def _crop_group_for_paddle_ocr(self, ori_img, group, w, h):
+        """PaddleOCR 입력 crop을 만든다.
+
+        Local detector 경로에서는 detector 문자 bbox보다 실제 텍스트 마스크 기준 rect가
+        더 믿을 만하다. _align_local_groups_to_text_mask()가 넣어둔 ocr_crop_rect를 우선 사용한다.
+        """
+        rect_source = group.get('ocr_crop_rect') or group.get('text_mask_rect') or group.get('mask_rect') or group.get('rect', [0, 0, 1, 1])
+        try:
+            x, y, rw, rh = [int(round(float(v))) for v in rect_source[:4]]
+        except Exception:
+            return None, 0, 0
+        if rw <= 0 or rh <= 0:
+            return None, 0, 0
+        try:
+            stroke = float(group.get('avg_stroke', 0) or 0)
+        except Exception:
+            stroke = 0.0
+
+        # 텍스트 마스크 rect는 이미 사용자가 설정한 확장값이 반영된 작업 영역이다.
+        # OCR에는 가장자리 잘림 방지를 위한 작은 여백만 추가한다.
+        if group.get('ocr_crop_rect') or group.get('text_mask_rect') or group.get('mask_rect'):
+            pad = max(2, min(8, int(stroke * 0.15)))
+        else:
+            pad = max(4, int(stroke * 0.35))
+        x1 = max(0, x - pad)
+        y1 = max(0, y - pad)
+        x2 = min(int(w), x + rw + pad)
+        y2 = min(int(h), y + rh + pad)
+        if x2 <= x1 or y2 <= y1:
+            return None, 0, 0
+        crop = ori_img[y1:y2, x1:x2].copy()
+        if crop.size <= 0:
+            return None, 0, 0
+        return crop, x1, y1
+
+    def _paddle_ocr_lines_to_raw_items(self, lines, offset_x=0, offset_y=0, *, locale='ja'):
+        """PaddleOCR wrapper 결과를 YSB raw_items 형식으로 변환한다."""
+        raw_items = []
+        for order_index, line in enumerate(lines or []):
+            try:
+                text = str(line.get('text', '') or '').strip()
+                if not text:
+                    continue
+                pts = []
+                for p in line.get('points', []) or []:
+                    try:
+                        pts.append([int(p[0]) + int(offset_x), int(p[1]) + int(offset_y)])
+                    except Exception:
+                        pass
+                if len(pts) < 3:
+                    continue
+                pts_arr = np.array(pts, dtype=np.int32)
+                rect_rot = cv2.minAreaRect(pts_arr)
+                (_cx, _cy), (rw, rh), _angle = rect_rot
+                stroke_size = min(rw, rh) if min(rw, rh) > 0 else max(rw, rh)
+                bx, by, bw, bh = cv2.boundingRect(pts_arr)
+                compact = ''.join(ch for ch in text if not ch.isspace())
+                raw_items.append({
+                    'text': text,
+                    'vertices': pts,
+                    'stroke_size': float(stroke_size or 0),
+                    'cx': float(bx + bw / 2),
+                    'cy': float(by + bh / 2),
+                    'rect': [int(bx), int(by), int(bw), int(bh)],
+                    'char_count': max(1, len(compact)),
+                    'source_provider': 'local_paddle_ocr',
+                    'locale': str(locale or ''),
+                    'detected_break': '',
+                    'order_index': order_index,
+                    'confidence': float(line.get('confidence', 0.0) or 0.0),
+                })
+            except Exception:
+                continue
+        return self._dedupe_ocr_items(raw_items)
+
+    def _apply_full_page_paddle_ocr_fallback(self, ori_img, grouped_data, paddle_engine, lang, device):
+        """Crop OCR가 모두 빈 결과일 때 전체 페이지 OCR 결과를 detector 그룹에 배정한다.
+
+        PaddleOCR은 너무 타이트한 세로 crop보다 전체 페이지/넓은 문맥에서 더 잘 읽는
+        경우가 있다. 특히 frozen Local 빌드에서 crop 단위 인식이 빈 결과로 떨어지면,
+        detector 박스는 유지한 채 전체 페이지 OCR 조각을 각 박스에 나눠 넣어 원문 칸이
+        통째로 비는 상황을 막는다.
+        """
+        if ori_img is None or not grouped_data:
+            return grouped_data or [], 0, ''
+        try:
+            from ysb.engines.ocr.base import OcrRequest
+            res = paddle_engine.run(OcrRequest(
+                image_path='',
+                language=lang,
+                options={
+                    'image_bgr': ori_img,
+                    'device': device,
+                    'scale': 1.5,
+                },
+            ))
+            if not res.ok:
+                return grouped_data, 0, str(res.error or '')
+            raw_items = self._paddle_ocr_lines_to_raw_items(res.lines, 0, 0, locale=lang)
+            if not raw_items:
+                return grouped_data, 0, ''
+
+            assigned = []
+            changed = 0
+            for group in grouped_data or []:
+                item = copy.deepcopy(group)
+                if str(item.get('text', '') or '').strip():
+                    assigned.append(item)
+                    continue
+                try:
+                    x, y, rw, rh = [int(round(float(v))) for v in item.get('rect', [0, 0, 1, 1])[:4]]
+                except Exception:
+                    assigned.append(item)
+                    continue
+                try:
+                    stroke = float(item.get('avg_stroke', 0) or 0)
+                except Exception:
+                    stroke = 0.0
+                pad = max(8, int(stroke * 0.8), int(min(max(rw, 1), max(rh, 1)) * 0.08))
+                x1, y1 = x - pad, y - pad
+                x2, y2 = x + rw + pad, y + rh + pad
+                hits = []
+                for raw in raw_items:
+                    try:
+                        cx = float(raw.get('cx', 0))
+                        cy = float(raw.get('cy', 0))
+                    except Exception:
+                        continue
+                    if x1 <= cx <= x2 and y1 <= cy <= y2:
+                        hits.append(raw)
+
+                if not hits:
+                    assigned.append(item)
+                    continue
+
+                main_text_items, ruby_items = self._split_main_and_ruby_items(hits)
+                new_text = self._manga_sort(main_text_items).strip()
+                if not new_text:
+                    assigned.append(item)
+                    continue
+
+                item['text'] = new_text
+                item['ocr_items'] = self._make_ocr_items_payload(main_text_items)
+                item['ocr_items_all'] = self._make_ocr_items_payload(hits)
+                item['ruby_ocr_items'] = self._make_ocr_items_payload(ruby_items)
+                item['ocr_lang'] = lang
+                item['local_detector_only'] = False
+                item['ocr_engine'] = 'paddleocr_fullpage_fallback'
+                item['detector_engine'] = item.get('detector_engine') or 'comic_text_detector'
+                try:
+                    item['avg_stroke'] = float(np.median(np.array([it.get('stroke_size', 0) for it in hits], dtype=np.float32)))
+                except Exception:
+                    pass
+                changed += 1
+                assigned.append(item)
+
+            return assigned, changed, ''
+        except Exception as e:
+            return grouped_data, 0, str(e)
+
+    def _apply_local_paddle_ocr_to_groups(self, ori_img, grouped_data):
+        """Local detector가 만든 영역을 PaddleOCR로 읽어 text/ocr_items를 채운다.
+
+        마스크와 박스 기준은 comic_text_detector 결과를 유지하고, PaddleOCR은 문자 인식만 담당한다.
+        인식 실패 시 기존 text/translated_text는 보존한다.
+        """
+        if ori_img is None or not grouped_data:
+            return grouped_data or []
+        h, w = ori_img.shape[:2]
+        lang = self._current_ocr_language()
+        device = str(getattr(Config, 'LOCAL_PADDLE_MASK_DEVICE', 'auto') or 'auto')
+
+        try:
+            from ysb.engines.ocr.base import OcrRequest
+            from ysb.engines.ocr.paddle_ocr import PaddleOcrEngine
+            paddle_engine = PaddleOcrEngine(language=lang, device=device)
+        except Exception as e:
+            print(f">>> [Local OCR] PaddleOCR 준비 실패: {e}")
+            return grouped_data
+
+        updated = []
+        ok_count = 0
+        err_count = 0
+        sample_errors = []
+        for group in grouped_data or []:
+            item = copy.deepcopy(group)
+            crop, ox, oy = self._crop_group_for_paddle_ocr(ori_img, item, w, h)
+            if crop is None:
+                updated.append(item)
+                continue
+            try:
+                res = paddle_engine.run(OcrRequest(
+                    image_path='',
+                    language=lang,
+                    options={
+                        'image_bgr': crop,
+                        'device': device,
+                        # 만화 작은 글자/세로문은 2배 확대가 초반 안정성이 좋다.
+                        'scale': 2.0,
+                    },
+                ))
+                if not res.ok:
+                    err_count += 1
+                    item['local_paddle_ocr_error'] = res.error
+                    if res.error and len(sample_errors) < 3:
+                        sample_errors.append(str(res.error))
+                    updated.append(item)
+                    continue
+
+                raw_items = self._paddle_ocr_lines_to_raw_items(res.lines, ox, oy, locale=lang)
+                if not raw_items:
+                    updated.append(item)
+                    continue
+
+                main_text_items, ruby_items = self._split_main_and_ruby_items(raw_items)
+                new_text = self._manga_sort(main_text_items).strip()
+                old_text = str(item.get('text', '') or '').strip()
+                if new_text:
+                    item['text'] = new_text
+                    item['ocr_items'] = self._make_ocr_items_payload(main_text_items)
+                    item['ocr_items_all'] = self._make_ocr_items_payload(raw_items)
+                    item['ruby_ocr_items'] = self._make_ocr_items_payload(ruby_items)
+                    item['ocr_lang'] = lang
+                    item['local_detector_only'] = False
+                    item['ocr_engine'] = 'paddleocr'
+                    item['detector_engine'] = item.get('detector_engine') or 'comic_text_detector'
+                    if old_text and old_text != new_text:
+                        # 원문이 바뀌면 기존 번역은 더 이상 신뢰하기 어렵다.
+                        item['translated_text'] = ''
+                    try:
+                        item['avg_stroke'] = float(np.median(np.array([it.get('stroke_size', 0) for it in raw_items], dtype=np.float32)))
+                    except Exception:
+                        pass
+                    ok_count += 1
+                updated.append(item)
+            except Exception as e:
+                err_count += 1
+                item['local_paddle_ocr_error'] = str(e)
+                if str(e) and len(sample_errors) < 3:
+                    sample_errors.append(str(e))
+                updated.append(item)
+
+        if ok_count <= 0 and updated:
+            fallback_updated, fallback_count, fallback_error = self._apply_full_page_paddle_ocr_fallback(
+                ori_img, updated, paddle_engine, lang, device
+            )
+            if fallback_count > 0:
+                updated = fallback_updated
+                ok_count = fallback_count
+                print(f">>> [Local OCR] PaddleOCR full-page fallback applied: ok={fallback_count}")
+            elif fallback_error:
+                print(f">>> [Local OCR] PaddleOCR full-page fallback failed: {fallback_error}")
+
+        print(f">>> [Local OCR] PaddleOCR text recognition: ok={ok_count}, errors={err_count}, groups={len(updated)}")
+        if sample_errors:
+            print(f">>> [Local OCR] PaddleOCR sample errors: {' | '.join(sample_errors)}")
+        return updated
+
+    def _apply_current_local_ocr_engine_to_groups(self, ori_img, grouped_data):
+        """Apply the single supported Local OCR reader.
+
+        v2.1.0 Local OCR keeps only the stable path:
+        comic_text_detector for masks/regions + PaddleOCR for text recognition.
+        Experimental OCR readers tested earlier are intentionally removed from
+        the regular Local build.
+        """
+        return self._apply_local_paddle_ocr_to_groups(ori_img, grouped_data)
+
+    def analyze_image_local_paddle_mask(self, image_path, ori_img=None):
+        """LOCAL Paddle OCR 선택 시 실행되는 Local 분석 경로.
+
+        comic_text_detector로 텍스트 영역/마스크를 만들고, PaddleOCR로
+        각 영역의 원문을 읽는다.
+        """
+        print(f">>> [Local OCR] comic_text_detector 마스크 분석: {os.path.basename(image_path)}")
+
+        if ori_img is None:
+            img_array = np.fromfile(image_path, np.uint8)
+            ori_img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+        if ori_img is None:
+            raise ValueError(f"이미지를 읽을 수 없습니다: {image_path}")
+        h, w = ori_img.shape[:2]
+
+        from ysb.engines.text_detection.base import TextDetectionRequest
+        from ysb.engines.text_detection.manager import detect_with_default_engine
+
+        input_size = self._local_detector_auto_input_size(w, h)
+        device = str(getattr(Config, "LOCAL_PADDLE_MASK_DEVICE", "auto") or "auto")
+
+        result = detect_with_default_engine(TextDetectionRequest(
+            image_path=image_path,
+            options={
+                "input_size": input_size,
+                "device": device,
+                "save_masks": False,
+                "keep_undetected_mask": True,
+            },
+        ))
+        if not result.ok:
+            raise ValueError(f"comic_text_detector 마스크 분석 실패: {result.error}")
+
+        # 1순위 개선: detector의 raw/refined segmentation mask를 직접 쓰지 않는다.
+        # raw mask는 머리카락·옷 주름·배경선까지 과하게 잡을 수 있으므로,
+        # block/line 후보를 게이트로 삼은 안전 마스크만 YSB 마스크 슬롯에 넣는다.
+        blocks = list(result.blocks or [])
+        safe_blocks = [
+            block for block in blocks
+            if self._detector_block_is_reasonable(getattr(block, 'bbox', (0, 0, 0, 0)), w, h)
+        ]
+        raw_payload = result.raw if isinstance(result.raw, dict) else {}
+        source_mask = raw_payload.get("mask_refined")
+        if source_mask is None:
+            source_mask = raw_payload.get("mask")
+
+        # detector는 확장 전 기준 후보 마스크만 만든다.
+        # 실제 텍스트/페인트 마스크 확장은 옵션 > 분석 마스크 확장 비율 창의 값을 사용한다.
+        # 같은 기능을 API 관리와 분석 옵션에 중복 배치하지 않기 위한 구조다.
+        base_mask, base_stats = self._create_detector_candidate_mask(
+            safe_blocks, w, h, source_mask=source_mask
+        )
+
+        mask_merge = self._expand_detector_analysis_mask(
+            base_mask, safe_blocks, w, h,
+            ratio=getattr(Config, 'MERGE_RATIO', 0.2),
+            min_px=getattr(Config, 'MERGE_MIN_STROKE_PX', 5),
+        )
+        mask_inpaint = self._expand_detector_analysis_mask(
+            base_mask, safe_blocks, w, h,
+            ratio=getattr(Config, 'INPAINT_RATIO', 0.1),
+            min_px=getattr(Config, 'MIN_STROKE_PX', 1),
+        )
+
+        # 분석도 박스도 실제 텍스트 마스크의 연결 상태를 반영한다.
+        # 가까운 텍스트 마스크가 확장 후 서로 붙으면 기존 API OCR 그룹화처럼 하나의 박스로 합친다.
+        grouped_data = self._detector_blocks_to_grouped_data_by_mask(
+            safe_blocks, w, h,
+            grouping_mask=mask_merge,
+            source_mask=source_mask,
+        )
+        grouped_data = self._align_local_groups_to_text_mask(grouped_data, mask_merge, w, h)
+        grouped_data = self._apply_current_local_ocr_engine_to_groups(ori_img, grouped_data)
+
+        merge_pixels = int(cv2.countNonZero(mask_merge)) if mask_merge is not None else 0
+        inpaint_pixels = int(cv2.countNonZero(mask_inpaint)) if mask_inpaint is not None else 0
+        print(
+            f">>> [Local OCR] comic_text_detector blocks={len(grouped_data)}, "
+            f"safe_blocks={base_stats.get('used_blocks', 0)}, "
+            f"safe_lines={base_stats.get('used_lines', 0)}, "
+            f"line_merged={base_stats.get('used_line_merged', 0)}, "
+            f"fallback_lines={base_stats.get('fallback_lines', 0)}, "
+            f"text_mask_pixels={merge_pixels}, paint_mask_pixels={inpaint_pixels}, "
+            f"raw_mask=line_gated, expand=analysis_mask_settings, input_size={input_size}"
+        )
+        return ori_img, grouped_data, mask_merge, mask_inpaint
+
     def _ocr_image_region(self, img_bgr, offset_x=0, offset_y=0):
         """
         img_bgr 일부 영역을 임시 파일로 저장해서 CLOVA OCR 호출.
@@ -886,6 +2087,11 @@ class MangaProcessEngine:
             cv2.imwrite(temp_path, img_bgr)
 
             provider = str(getattr(Config, "OCR_PROVIDER", "clova") or "clova").lower()
+
+            if provider == "local_paddle_ocr":
+                # Local OCR 경로는 전체 분석/마스크 기준 재분석에서 별도 처리한다.
+                # 타일 OCR API 경로로 떨어지지 않도록 빈 OCR 결과를 반환한다.
+                return []
 
             if provider == "google_vision":
                 ocr_res = self._call_google_vision_ocr(temp_path)
@@ -1103,6 +2309,508 @@ class MangaProcessEngine:
                     cv2.polylines(mask, [pts], True, 255, thickness=pad*2, lineType=cv2.LINE_AA)
         return mask
 
+    def _mask_components_to_local_grouped_data(self, mask, w, h, *, existing_data=None):
+        """현재 텍스트 마스크 자체를 기준으로 Local 분석 박스를 다시 만든다.
+
+        LOCAL Paddle OCR 재분석은 detector를 다시 돌려
+        마스크를 새로 만드는 작업이 아니다. 사용자가 지금 화면에서 보고 수정한 텍스트
+        마스크가 source of truth이므로, 그 마스크의 연결 성분을 기준으로 분석 영역만 다시
+        구성한다.
+        """
+        try:
+            src = np.asarray(mask)
+            if src.ndim == 3:
+                src = cv2.cvtColor(src, cv2.COLOR_BGR2GRAY)
+            if src.shape[:2] != (int(h), int(w)):
+                src = cv2.resize(src, (int(w), int(h)), interpolation=cv2.INTER_NEAREST)
+            src = np.where(src > 0, 255, 0).astype(np.uint8)
+        except Exception:
+            return []
+
+        contours, _ = cv2.findContours(src, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        grouped_data = []
+
+        # 기존 data와 겹치면 텍스트/번역을 가능한 한 보존한다. 현재 단계는 마스크 검증용이라
+        # 새 OCR 텍스트는 없지만, 수동 편집/기존 번역이 불필요하게 날아가는 것을 줄인다.
+        existing = list(existing_data or [])
+
+        def overlap_area(rect_a, rect_b):
+            try:
+                ax, ay, aw, ah = [int(v) for v in rect_a]
+                bx, by, bw, bh = [int(v) for v in rect_b]
+                ax2, ay2 = ax + aw, ay + ah
+                bx2, by2 = bx + bw, by + bh
+                ix1, iy1 = max(ax, bx), max(ay, by)
+                ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+                if ix2 <= ix1 or iy2 <= iy1:
+                    return 0
+                return int((ix2 - ix1) * (iy2 - iy1))
+            except Exception:
+                return 0
+
+        for cnt in contours or []:
+            if cnt is None:
+                continue
+            area = abs(cv2.contourArea(cnt))
+            if area < 2:
+                continue
+            x, y, rw, rh = cv2.boundingRect(cnt)
+            if rw <= 0 or rh <= 0:
+                continue
+
+            rect = [int(x), int(y), int(rw), int(rh)]
+
+            # 분석 박스는 연결된 현재 마스크 성분의 외접 박스로 둔다.
+            # 실제 텍스트 마스크는 아래 reanalysis 반환값에서 user_mask_bin을 그대로 보존한다.
+            vertices_list = [[[int(x), int(y)], [int(x + rw), int(y)], [int(x + rw), int(y + rh)], [int(x), int(y + rh)]]]
+            avg_stroke = float(max(1, min(rw, rh)))
+
+            best_old = None
+            best_overlap = 0
+            for old in existing:
+                ov = overlap_area(rect, old.get('rect', [0, 0, 0, 0]))
+                if ov > best_overlap:
+                    best_overlap = ov
+                    best_old = old
+
+            text = ''
+            translated_text = ''
+            ocr_items = []
+            ocr_items_all = []
+            ruby_ocr_items = []
+            if best_old is not None and best_overlap > 0:
+                text = str(best_old.get('text', '') or '')
+                translated_text = str(best_old.get('translated_text', '') or '')
+                ocr_items = copy.deepcopy(best_old.get('ocr_items', []) or [])
+                ocr_items_all = copy.deepcopy(best_old.get('ocr_items_all', []) or [])
+                ruby_ocr_items = copy.deepcopy(best_old.get('ruby_ocr_items', []) or [])
+                try:
+                    avg_stroke = float(best_old.get('avg_stroke', avg_stroke) or avg_stroke)
+                except Exception:
+                    pass
+
+            grouped_data.append({
+                'id': 0,
+                'text': text,
+                'translated_text': translated_text,
+                'rect': rect,
+                'mask_rect': rect,
+                'text_mask_rect': rect,
+                'ocr_crop_rect': rect,
+                'vertices_list': vertices_list,
+                'ocr_items': ocr_items,
+                'ocr_items_all': ocr_items_all,
+                'ruby_ocr_items': ruby_ocr_items,
+                'ocr_lang': 'local_mask',
+                'avg_stroke': avg_stroke,
+                'use_inpaint': True,
+                'x_off': 0,
+                'y_off': 0,
+                'local_detector_only': True,
+                'detector_engine': 'manual_mask_component',
+                'detector_group_count': 1,
+            })
+
+        return self._organize_blocks(grouped_data) if grouped_data else []
+
+    def _rect_overlap_area(self, rect_a, rect_b):
+        """[x, y, w, h] 두 사각형의 겹친 면적을 반환한다."""
+        try:
+            ax, ay, aw, ah = [int(v) for v in rect_a]
+            bx, by, bw, bh = [int(v) for v in rect_b]
+            ax2, ay2 = ax + aw, ay + ah
+            bx2, by2 = bx + bw, by + bh
+            ix1, iy1 = max(ax, bx), max(ay, by)
+            ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+            if ix2 <= ix1 or iy2 <= iy1:
+                return 0
+            return int((ix2 - ix1) * (iy2 - iy1))
+        except Exception:
+            return 0
+
+    def _best_existing_group_for_rect(self, rect, existing_data):
+        """현재 마스크 성분과 가장 많이 겹치는 기존 분석 그룹을 찾는다."""
+        best_old = None
+        best_overlap = 0
+        for old in list(existing_data or []):
+            ov = self._rect_overlap_area(rect, old.get('rect', [0, 0, 0, 0]))
+            if ov > best_overlap:
+                best_overlap = ov
+                best_old = old
+        return best_old, best_overlap
+
+    def _pad_from_stroke_settings(self, stroke_ref, *, ratio=0.0, min_px=0):
+        """분석 마스크 확장 비율/최소 px 설정을 실제 확장 px로 환산한다."""
+        try:
+            stroke_ref = float(stroke_ref or 0.0)
+        except Exception:
+            stroke_ref = 0.0
+        try:
+            ratio = max(0.0, float(ratio or 0.0))
+        except Exception:
+            ratio = 0.0
+        try:
+            min_px = max(0, int(min_px or 0))
+        except Exception:
+            min_px = 0
+
+        px = int(stroke_ref * ratio) if ratio > 0 and stroke_ref > 0 else 0
+        if min_px > 0:
+            px = max(px, min_px)
+        return max(0, int(px))
+
+    def _estimate_reanalysis_component_stroke(self, rect, existing_data):
+        """Local 재분석용 stroke 기준값을 추정한다.
+
+        전체 분석 때 detector가 만든 avg_stroke가 남아 있으면 그 값을 우선 사용한다.
+        없으면 현재 마스크 성분의 짧은 변을 보수적인 fallback으로 사용한다.
+        """
+        best_old, best_overlap = self._best_existing_group_for_rect(rect, existing_data)
+        if best_old is not None and best_overlap > 0:
+            try:
+                old_stroke = float(best_old.get('avg_stroke', 0) or 0)
+                if old_stroke > 0:
+                    return old_stroke
+            except Exception:
+                pass
+        try:
+            _x, _y, rw, rh = [int(v) for v in rect]
+            return float(max(1, min(rw, rh)))
+        except Exception:
+            return 1.0
+
+    def _erode_component_safely(self, component, erode_px):
+        """텍스트 마스크 확장분을 되돌리기 위해 성분을 침식한다.
+
+        침식으로 성분이 완전히 사라지면 사용자가 칠한 마스크를 잃지 않도록 원본 성분을 반환한다.
+        """
+        try:
+            erode_px = max(0, int(erode_px or 0))
+        except Exception:
+            erode_px = 0
+        if erode_px <= 0:
+            return component.copy()
+        k = max(1, erode_px * 2 + 1)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+        core = cv2.erode(component, kernel, iterations=1)
+        if cv2.countNonZero(core) <= 0:
+            return component.copy()
+        return core
+
+    def _dilate_component_safely(self, component, dilate_px):
+        """성분을 지정 px만큼 확장한다."""
+        try:
+            dilate_px = max(0, int(dilate_px or 0))
+        except Exception:
+            dilate_px = 0
+        if dilate_px <= 0:
+            return component.copy()
+        k = max(1, dilate_px * 2 + 1)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+        return cv2.dilate(component, kernel, iterations=1)
+
+    def _local_detector_base_mask_for_reanalysis(self, image_path, w, h):
+        """Local 재분석 페인트 마스크용 detector 기준 마스크를 다시 얻는다.
+
+        재분석의 텍스트 마스크는 사용자가 보고 수정한 작업 마스크라서 이미 텍스트 마스크
+        확장값이 들어가 있을 수 있다. 페인트 마스크를 이 마스크에서 기하학적으로 되돌리면
+        원래 detector의 글자 획/라인 정보가 손실되어 부정확해진다. 따라서 원본 이미지에
+        comic_text_detector를 다시 실행하고, 이후 현재 텍스트 마스크 안쪽에서만 사용할 기준
+        마스크를 만든다.
+        """
+        from ysb.engines.text_detection.base import TextDetectionRequest
+        from ysb.engines.text_detection.manager import detect_with_default_engine
+
+        input_size = self._local_detector_auto_input_size(w, h)
+        device = str(getattr(Config, "LOCAL_PADDLE_MASK_DEVICE", "auto") or "auto")
+
+        result = detect_with_default_engine(TextDetectionRequest(
+            image_path=image_path,
+            options={
+                "input_size": input_size,
+                "device": device,
+                "save_masks": False,
+                "keep_undetected_mask": True,
+            },
+        ))
+        if not result.ok:
+            return None, [], {}, f"comic_text_detector 재분석 실패: {result.error}"
+
+        blocks = list(result.blocks or [])
+        safe_blocks = [
+            block for block in blocks
+            if self._detector_block_is_reasonable(getattr(block, 'bbox', (0, 0, 0, 0)), w, h)
+        ]
+        raw_payload = result.raw if isinstance(result.raw, dict) else {}
+        source_mask = raw_payload.get("mask_refined")
+        if source_mask is None:
+            source_mask = raw_payload.get("mask")
+
+        base_mask, stats = self._create_detector_candidate_mask(
+            safe_blocks, w, h, source_mask=source_mask
+        )
+        return base_mask, safe_blocks, stats, ""
+
+    def _filter_detector_blocks_by_mask_overlap(self, blocks, gate_mask, w, h):
+        """현재 텍스트 마스크와 겹치는 detector block만 남긴다."""
+        if not blocks:
+            return []
+        try:
+            gate = np.asarray(gate_mask)
+            if gate.ndim == 3:
+                gate = cv2.cvtColor(gate, cv2.COLOR_BGR2GRAY)
+            if gate.shape[:2] != (int(h), int(w)):
+                gate = cv2.resize(gate, (int(w), int(h)), interpolation=cv2.INTER_NEAREST)
+            gate = np.where(gate > 0, 255, 0).astype(np.uint8)
+        except Exception:
+            gate = None
+        if gate is None or cv2.countNonZero(gate) <= 0:
+            return []
+
+        filtered = []
+        for block in blocks:
+            try:
+                x1, y1, x2, y2 = self._normalize_box(getattr(block, 'bbox', (0, 0, 0, 0)), w, h)
+            except Exception:
+                continue
+            if x2 <= x1 or y2 <= y1:
+                continue
+            roi = gate[y1:y2, x1:x2]
+            if roi.size > 0 and cv2.countNonZero(roi) > 0:
+                filtered.append(block)
+        return filtered
+
+    def _paint_mask_from_detector_inside_manual_text_mask(self, image_path, text_mask, w, h, *, existing_data=None):
+        """현재 텍스트 마스크 영역 안에서 detector 기준 마스크를 다시 찾아 페인트 마스크를 만든다.
+
+        원칙:
+        - 텍스트 마스크는 사용자가 수정한 현재 작업 마스크이므로 그대로 보존한다.
+        - 페인팅 마스크는 현재 텍스트 마스크를 그대로 확장/축소해서 만들지 않는다.
+        - 원본 이미지에 detector를 다시 돌려 실제 글자 후보 마스크를 얻고,
+          그중 현재 텍스트 마스크 안쪽과 겹치는 부분만 기준으로 삼는다.
+        - 이후 페인트 마스크 확장 비율/최소 확장 크기만 적용한다.
+        - 최종 결과는 현재 텍스트 마스크 바깥으로 튀어나가지 않게 한 번 더 자른다.
+        """
+        if text_mask is None:
+            return np.zeros((int(h), int(w)), dtype=np.uint8), "empty_text_mask"
+        try:
+            gate = np.asarray(text_mask)
+            if gate.ndim == 3:
+                gate = cv2.cvtColor(gate, cv2.COLOR_BGR2GRAY)
+            if gate.shape[:2] != (int(h), int(w)):
+                gate = cv2.resize(gate, (int(w), int(h)), interpolation=cv2.INTER_NEAREST)
+            gate = np.where(gate > 0, 255, 0).astype(np.uint8)
+        except Exception:
+            return np.zeros((int(h), int(w)), dtype=np.uint8), "invalid_text_mask"
+
+        if cv2.countNonZero(gate) <= 0:
+            return np.zeros((int(h), int(w)), dtype=np.uint8), "empty_text_mask"
+
+        base_mask, safe_blocks, stats, err = self._local_detector_base_mask_for_reanalysis(image_path, w, h)
+        if base_mask is None or err:
+            fallback = self._paint_mask_from_reanalysis_text_mask(gate, w, h, existing_data=existing_data)
+            return cv2.bitwise_and(fallback, gate), "fallback_erode:" + str(err or "no_base_mask")
+
+        # detector block이 현재 텍스트 마스크와 겹치는 것만 사용한다.
+        overlap_blocks = self._filter_detector_blocks_by_mask_overlap(safe_blocks, gate, w, h)
+        if overlap_blocks:
+            # 전체 base_mask를 그대로 쓰지 않고, 겹친 block만 다시 기준 마스크로 만든다.
+            # source_mask는 이미 base_mask에 반영되어 있으므로 여기서는 block 후보와 base_mask를 교차시킨다.
+            block_gate = np.zeros((int(h), int(w)), dtype=np.uint8)
+            for block in overlap_blocks:
+                try:
+                    x1, y1, x2, y2 = self._normalize_box(getattr(block, 'bbox', (0, 0, 0, 0)), w, h)
+                    if x2 > x1 and y2 > y1:
+                        cv2.rectangle(block_gate, (x1, y1), (max(x1, x2 - 1), max(y1, y2 - 1)), 255, thickness=-1)
+                except Exception:
+                    continue
+            detector_core = cv2.bitwise_and(base_mask, block_gate)
+        else:
+            detector_core = base_mask.copy()
+
+        # 현재 사용자가 승인한 텍스트 마스크 안쪽만 기준으로 삼는다.
+        detector_core = cv2.bitwise_and(detector_core, gate)
+
+        if cv2.countNonZero(detector_core) <= 0:
+            # detector 기준 마스크가 현재 수동 마스크 안에서 비면, 완전히 빈 페인트 마스크를 만들면
+            # 사용자가 당황할 수 있으므로 마지막 호환 fallback을 사용한다. 그래도 gate 밖은 잘라낸다.
+            fallback = self._paint_mask_from_reanalysis_text_mask(gate, w, h, existing_data=existing_data)
+            return cv2.bitwise_and(fallback, gate), "fallback_erode:empty_detector_overlap"
+
+        paint = self._expand_detector_analysis_mask(
+            detector_core, overlap_blocks or safe_blocks, w, h,
+            ratio=getattr(Config, 'INPAINT_RATIO', 0.1),
+            min_px=getattr(Config, 'MIN_STROKE_PX', 1),
+        )
+        # 최종 인페인트 마스크는 현재 텍스트 마스크 바깥으로 튀어나가지 않게 제한한다.
+        paint = cv2.bitwise_and(paint, gate)
+        return paint, f"detector_core:{int(cv2.countNonZero(detector_core))},blocks={len(overlap_blocks or safe_blocks)},stats={stats}"
+
+    def _paint_mask_from_reanalysis_text_mask(self, text_mask, w, h, *, existing_data=None):
+        """현재 텍스트 마스크를 기준으로 Local 재분석용 페인팅 마스크를 다시 만든다.
+
+        중요:
+        - 재분석의 입력 text_mask는 이미 '텍스트 마스크 확장 비율'이 적용된 실제 작업 마스크다.
+        - 이 마스크에 페인트 확장값을 또 더하면, 페인팅 마스크가 텍스트 마스크 확장값까지
+          그대로 물려받는 문제가 생긴다.
+        - 따라서 성분별로 텍스트 확장분을 먼저 되돌린 뒤, 페인트 마스크 확장값으로 다시 그린다.
+        """
+        if text_mask is None:
+            return np.zeros((int(h), int(w)), dtype=np.uint8)
+        try:
+            src = np.asarray(text_mask)
+            if src.ndim == 3:
+                src = cv2.cvtColor(src, cv2.COLOR_BGR2GRAY)
+            if src.shape[:2] != (int(h), int(w)):
+                src = cv2.resize(src, (int(w), int(h)), interpolation=cv2.INTER_NEAREST)
+            src = np.where(src > 0, 255, 0).astype(np.uint8)
+        except Exception:
+            return np.zeros((int(h), int(w)), dtype=np.uint8)
+
+        contours, _ = cv2.findContours(src, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        out = np.zeros((int(h), int(w)), dtype=np.uint8)
+
+        text_ratio = getattr(Config, 'MERGE_RATIO', 0.2)
+        text_min_px = getattr(Config, 'MERGE_MIN_STROKE_PX', 5)
+        paint_ratio = getattr(Config, 'INPAINT_RATIO', 0.1)
+        paint_min_px = getattr(Config, 'MIN_STROKE_PX', 1)
+
+        for cnt in contours or []:
+            if cnt is None:
+                continue
+            area = abs(cv2.contourArea(cnt))
+            if area < 1:
+                continue
+            x, y, rw, rh = cv2.boundingRect(cnt)
+            if rw <= 0 or rh <= 0:
+                continue
+
+            rect = [int(x), int(y), int(rw), int(rh)]
+            component = np.zeros((int(h), int(w)), dtype=np.uint8)
+            cv2.drawContours(component, [cnt], -1, 255, thickness=-1)
+
+            stroke_ref = self._estimate_reanalysis_component_stroke(rect, existing_data)
+            text_pad = self._pad_from_stroke_settings(
+                stroke_ref,
+                ratio=text_ratio,
+                min_px=text_min_px,
+            )
+            paint_pad = self._pad_from_stroke_settings(
+                stroke_ref,
+                ratio=paint_ratio,
+                min_px=paint_min_px,
+            )
+
+            # 현재 텍스트 마스크에 이미 반영된 텍스트 확장분을 제거한 뒤,
+            # 페인트 설정값만 다시 적용한다.
+            core = self._erode_component_safely(component, text_pad)
+            painted = self._dilate_component_safely(core, paint_pad)
+            out = cv2.bitwise_or(out, painted)
+
+        return out
+
+    def _expand_mask_components_for_analysis(self, base_mask, w, h, *, ratio=0.0, min_px=0):
+        """현재 마스크를 단순 확장한다.
+
+        기존 호환용 함수다. Local detector 재분석의 페인팅 마스크는
+        _paint_mask_from_reanalysis_text_mask()를 사용해 텍스트 확장분을 되돌린 뒤 다시 만든다.
+        """
+        if base_mask is None:
+            return np.zeros((int(h), int(w)), dtype=np.uint8)
+        try:
+            src = np.asarray(base_mask)
+            if src.ndim == 3:
+                src = cv2.cvtColor(src, cv2.COLOR_BGR2GRAY)
+            if src.shape[:2] != (int(h), int(w)):
+                src = cv2.resize(src, (int(w), int(h)), interpolation=cv2.INTER_NEAREST)
+            src = np.where(src > 0, 255, 0).astype(np.uint8)
+        except Exception:
+            return np.zeros((int(h), int(w)), dtype=np.uint8)
+
+        try:
+            ratio = max(0.0, float(ratio or 0.0))
+        except Exception:
+            ratio = 0.0
+        try:
+            min_px = max(0, int(min_px or 0))
+        except Exception:
+            min_px = 0
+
+        if ratio <= 0 and min_px <= 0:
+            return src.copy()
+
+        contours, _ = cv2.findContours(src, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        out = np.zeros((int(h), int(w)), dtype=np.uint8)
+        for cnt in contours or []:
+            if cnt is None:
+                continue
+            area = abs(cv2.contourArea(cnt))
+            if area < 1:
+                continue
+            x, y, rw, rh = cv2.boundingRect(cnt)
+            if rw <= 0 or rh <= 0:
+                continue
+            component = np.zeros((int(h), int(w)), dtype=np.uint8)
+            cv2.drawContours(component, [cnt], -1, 255, thickness=-1)
+            stroke_ref = float(max(1, min(rw, rh)))
+            pad = self._pad_from_stroke_settings(stroke_ref, ratio=ratio, min_px=min_px)
+            component = self._dilate_component_safely(component, pad)
+            out = cv2.bitwise_or(out, component)
+        return out
+
+    def _reanalyze_local_detector_from_manual_mask(self, image_path, ori_img, user_mask_bin, existing_data):
+        """LOCAL Paddle OCR용 재분석.
+
+        재분석은 '현재 텍스트 마스크를 detector로 다시 따는 작업'이 아니라,
+        사용자가 지금 화면에서 수정한 텍스트 마스크를 그대로 기준으로 삼아 분석 영역을
+        다시 구성하는 작업이다. detector를 처음부터 다시 돌려 현재 마스크를 덮어쓰지 않는다.
+        이후 PaddleOCR은 재구성된 각 영역의 원문만 다시 인식한다.
+        """
+        print(">>> [Re-Scan][Local OCR] 현재 텍스트 마스크 기준으로 분석 영역 재구성")
+        h, w = ori_img.shape[:2]
+
+        if user_mask_bin is None:
+            final_data = self._organize_blocks(copy.deepcopy(existing_data or [])) if existing_data else []
+            mask_merge = np.zeros((h, w), dtype=np.uint8)
+            mask_inpaint = self._create_grouped_data_analysis_mask(
+                final_data, w, h,
+                ratio=getattr(Config, 'INPAINT_RATIO', 0.1),
+                min_px=getattr(Config, 'MIN_STROKE_PX', 1),
+            )
+            return ori_img, final_data, mask_merge, mask_inpaint
+
+        try:
+            if user_mask_bin.ndim == 3:
+                user_mask_bin = cv2.cvtColor(user_mask_bin, cv2.COLOR_RGB2GRAY)
+        except Exception:
+            pass
+        user_mask_bin = np.where(np.asarray(user_mask_bin) > 0, 255, 0).astype(np.uint8)
+        if user_mask_bin.shape[:2] != (h, w):
+            user_mask_bin = cv2.resize(user_mask_bin, (w, h), interpolation=cv2.INTER_NEAREST)
+
+        final_data = self._mask_components_to_local_grouped_data(
+            user_mask_bin, w, h,
+            existing_data=existing_data,
+        )
+        # 텍스트 마스크는 사용자가 보고 수정한 현재 마스크를 그대로 유지한다.
+        mask_merge = user_mask_bin.copy()
+        # 페인팅 마스크는 현재 텍스트 마스크를 그대로 확장/축소해서 만들지 않는다.
+        # 원본 이미지에 detector를 다시 돌리고, 현재 텍스트 마스크 안쪽에서만 실제 글자 후보를
+        # 다시 찾은 뒤 페인트 마스크 확장 비율만 적용한다.
+        mask_inpaint, paint_source = self._paint_mask_from_detector_inside_manual_text_mask(
+            image_path, user_mask_bin, w, h,
+            existing_data=existing_data,
+        )
+        final_data = self._apply_current_local_ocr_engine_to_groups(ori_img, final_data)
+
+        print(
+            f">>> [Re-Scan][Local OCR] manual_mask_components={len(final_data)}, "
+            f"text_mask_pixels={int(cv2.countNonZero(mask_merge))}, "
+            f"paint_mask_pixels={int(cv2.countNonZero(mask_inpaint))}, "
+            f"paint_source={paint_source}"
+        )
+        return ori_img, final_data, mask_merge, mask_inpaint
+
     # ---------------------------------------------------------
     # [CORE] 재분석 (최종 완전체)
     # - 가위질(Erode) + Threshold 강화
@@ -1122,6 +2830,15 @@ class MangaProcessEngine:
         
         # 1. 마스크 전처리
         _, user_mask_bin = cv2.threshold(gray_mask, 127, 255, cv2.THRESH_BINARY)
+
+        provider = str(getattr(Config, "OCR_PROVIDER", "clova") or "clova").strip().lower()
+        if provider == "local_paddle_ocr":
+            # Local detector는 마스크/영역 기준 재분석을 사용한다.
+            # 기존 API OCR 재분석 경로로 보내면 빈 OCR 결과 때문에 분석도가 날아갈 수 있다.
+            return self._reanalyze_local_detector_from_manual_mask(
+                image_path, ori_img, user_mask_bin, existing_data
+            )
+
         kernel = np.ones((3,3), np.uint8)
         user_mask_bin_eroded = cv2.erode(user_mask_bin, kernel, iterations=1) 
         
@@ -1231,6 +2948,10 @@ class MangaProcessEngine:
         elif provider == "custom":
             if self.custom_translation_client is None or not getattr(Config, "CUSTOM_TRANSLATION_MODEL", ""):
                 raise ValueError("Custom 번역 API 설정이 비어있습니다. Base URL, Model, API Key를 확인해주세요.")
+        elif provider in ("local_argos", "local_hf_jako", "local_hf_enko", "local_nllb"):
+            provider = "openai"
+            if self.openai_client is None:
+                raise ValueError("OpenAI API 키가 비어있습니다.")
         else:
             if self.openai_client is None:
                 raise ValueError("OpenAI API 키가 비어있습니다.")
@@ -1289,118 +3010,6 @@ class MangaProcessEngine:
 
         return final_results
 
-    def _translate_text_chunk_google(self, texts):
-        """Google Cloud Translation Basic v2 API."""
-        key = getattr(Config, "GOOGLE_TRANSLATE_API_KEY", "").strip()
-        if not key:
-            raise ValueError("Google Translate API 키가 비어있습니다.")
-
-        url = "https://translation.googleapis.com/language/translate/v2"
-        payload = {
-            "q": [str(t or "") for t in texts],
-            "source": "ja",
-            "target": "ko",
-            "format": "text",
-        }
-        r = requests.post(url, params={"key": key}, json=payload, timeout=60)
-        if r.status_code != 200:
-            raise ValueError(f"Google Translate Error: {r.status_code} / {r.text[:300]}")
-        data = r.json()
-        translations = data.get("data", {}).get("translations", [])
-        results = []
-        for i, original in enumerate(texts):
-            if i < len(translations):
-                results.append(str(translations[i].get("translatedText", "")))
-            else:
-                results.append(str(original or ""))
-        return results
-
-    def _translate_text_chunk_gemini(self, texts, base_id=0):
-        """Google AI Studio Gemini API 번역."""
-        key = str(getattr(Config, "GEMINI_API_KEY", "") or "").strip()
-        if not key:
-            raise ValueError("Gemini API 키가 비어있습니다.")
-
-        model = str(getattr(Config, "GEMINI_TRANSLATION_MODEL", "gemini-2.5-flash-lite") or "gemini-2.5-flash-lite").strip()
-        prompt = self._build_translation_system_prompt()
-
-        input_items = []
-        for i, text in enumerate(texts):
-            input_items.append({"id": base_id + i, "text": text})
-
-        user_text = prompt.strip() + "\n\nINPUT JSON:\n" + json.dumps(input_items, ensure_ascii=False)
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-        payload = {
-            "contents": [
-                {"role": "user", "parts": [{"text": user_text}]}
-            ],
-            "generationConfig": {
-                "temperature": 0.2,
-                "responseMimeType": "application/json"
-            }
-        }
-
-        r = requests.post(url, params={"key": key}, json=payload, timeout=90)
-        if r.status_code != 200:
-            err_text = r.text[:800]
-            try:
-                err = r.json().get("error", {})
-                msg = str(err.get("message", "") or err_text)
-                code = int(err.get("code", r.status_code) or r.status_code)
-            except Exception:
-                msg = err_text
-                code = r.status_code
-
-            if code == 429:
-                raise ValueError(
-                    "Gemini Translate Error: 429 / Gemini API 할당량 또는 속도 제한을 초과했습니다. "
-                    "AI Studio의 Rate limits와 결제 설정을 확인해 주세요. 무료 등급에서 limit: 0으로 표시되면 "
-                    "해당 프로젝트에 사용 가능한 무료 할당량이 없거나 결제 설정이 필요한 상태일 수 있습니다. "
-                    f"원문: {msg[:400]}"
-                )
-            if code == 404:
-                raise ValueError(
-                    f"Gemini Translate Error: 404 / Gemini 모델명을 찾을 수 없습니다. 현재 모델명 '{model}'을 확인해 주세요. "
-                    "예: gemini-2.5-flash-lite"
-                )
-            raise ValueError(f"Gemini Translate Error: {code} / {msg[:500]}")
-        data = r.json()
-        candidates = data.get("candidates", [])
-        if not candidates:
-            raise ValueError("Gemini 번역 응답이 비어있습니다.")
-        parts = candidates[0].get("content", {}).get("parts", [])
-        content = "".join(str(part.get("text", "")) for part in parts).strip()
-        if not content:
-            raise ValueError("Gemini 번역 텍스트가 비어있습니다.")
-
-        if content.startswith("```json"):
-            content = content[7:]
-        if content.startswith("```"):
-            content = content[3:]
-        if content.endswith("```"):
-            content = content[:-3]
-
-        parsed = json.loads(content.strip())
-        items = parsed.get("items", []) if isinstance(parsed, dict) else parsed
-        by_id = {}
-        for item in items:
-            if isinstance(item, dict):
-                try:
-                    by_id[int(item.get("id"))] = str(item.get("translation", ""))
-                except Exception:
-                    pass
-
-        results = []
-        missing_ids = []
-        for i in range(len(texts)):
-            item_id = base_id + i
-            if item_id in by_id:
-                results.append(by_id[item_id])
-            else:
-                missing_ids.append(item_id)
-        if missing_ids:
-            raise ValueError(f"Gemini 번역 누락 ID 발생: {missing_ids}")
-        return results
 
     def _build_translation_system_prompt(self):
         """
@@ -1449,6 +3058,8 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
             return self._translate_text_chunk_google(texts)
         if provider == "gemini":
             return self._translate_text_chunk_gemini(texts, base_id)
+        if provider in ("local_argos", "local_hf_jako", "local_hf_enko", "local_nllb"):
+            provider = "openai"
 
         if provider == "deepseek":
             if self.deepseek_client is None:
@@ -1551,7 +3162,195 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
             return self._call_stable_inpaint(image_path, bin_mask)
         if provider == "gemini_inpaint":
             return self._call_gemini_inpaint(image_path, bin_mask)
+        if provider == "local_lama":
+            return self._call_local_lama(image_path, bin_mask)
         return self._call_lama(image_path, bin_mask)
+
+
+    def _find_local_lama_model_path(self):
+        """프로젝트 local_models 안의 LaMa torchscript 모델 파일을 찾는다.
+
+        simple-lama-inpainting은 환경변수 LAMA_MODEL에 로컬 모델 경로를 주면 자동 다운로드 대신
+        그 파일을 torch.jit.load()로 읽는다. 지원 기본 파일명은 big-lama.pt다.
+        """
+        roots = []
+        try:
+            roots.append(Path.cwd())
+        except Exception:
+            pass
+        try:
+            roots.append(Path(__file__).resolve().parents[2])
+        except Exception:
+            pass
+        try:
+            exe_dir = Path(getattr(sys, "executable", "")).resolve().parent
+            roots.append(exe_dir)
+        except Exception:
+            pass
+        try:
+            meipass = getattr(sys, "_MEIPASS", "")
+            if meipass:
+                roots.append(Path(meipass))
+        except Exception:
+            pass
+
+        # 중복 제거. PyInstaller onedir/source 양쪽에서 local_models를 찾기 위한 후보들이다.
+        uniq_roots = []
+        seen = set()
+        for root in roots:
+            try:
+                r = Path(root).resolve()
+                if r not in seen:
+                    seen.add(r)
+                    uniq_roots.append(r)
+            except Exception:
+                continue
+
+        candidates = []
+        for base in uniq_roots:
+            candidates.extend([
+                base / "local_models" / "lama" / "big-lama.pt",
+                base / "local_models" / "lama" / "simple_lama" / "big-lama.pt",
+                base / "local_models" / "simple_lama" / "big-lama.pt",
+                base / "local_models" / "big-lama.pt",
+            ])
+        for path in candidates:
+            try:
+                if path.exists() and path.is_file() and path.stat().st_size > 1024:
+                    return str(path)
+            except Exception:
+                continue
+        return ""
+
+    def _ascii_safe_local_lama_model_path(self, src_path):
+        """Return a model path that torch.jit.load can open safely on Windows.
+
+        일부 Windows/PyTorch 조합에서는 torchscript 모델 경로에 한글 같은 비 ASCII 문자가
+        들어가면 C++ fopen 단계에서 errno 42(Illegal byte sequence)가 발생할 수 있다.
+        프로젝트 경로가 한글이어도 LOCAL LaMa가 동작하도록, local_models/lama/big-lama.pt를
+        ASCII 경로의 사용자 캐시로 복사한 뒤 그 경로를 LAMA_MODEL에 넘긴다.
+        """
+        if not src_path:
+            return ""
+        try:
+            src = Path(src_path)
+            if not src.exists() or not src.is_file():
+                return str(src_path)
+        except Exception:
+            return str(src_path)
+
+        try:
+            str(src).encode("ascii")
+            return str(src)
+        except Exception:
+            pass
+
+        import shutil
+
+        candidates = []
+        local_appdata = os.environ.get("LOCALAPPDATA")
+        if local_appdata:
+            candidates.append(Path(local_appdata) / "YSBTranslator" / "local_models" / "lama" / "big-lama.pt")
+
+        # 최후 fallback: 드라이브 루트의 ASCII 폴더. 권한 문제 가능성이 있어 두 번째 후보로만 사용한다.
+        try:
+            drive = Path(src.anchor or "C:/")
+            candidates.append(drive / "YSBTranslatorCache" / "local_models" / "lama" / "big-lama.pt")
+        except Exception:
+            candidates.append(Path("C:/YSBTranslatorCache/local_models/lama/big-lama.pt"))
+
+        last_error = None
+        for dst in candidates:
+            try:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                need_copy = True
+                if dst.exists():
+                    try:
+                        need_copy = (dst.stat().st_size != src.stat().st_size)
+                    except Exception:
+                        need_copy = True
+                if need_copy:
+                    shutil.copy2(str(src), str(dst))
+                str(dst).encode("ascii")
+                print(f">>> [Local Inpaint] Staged LaMa model to ASCII path: {dst}")
+                return str(dst)
+            except Exception as e:
+                last_error = e
+                continue
+
+        print(f">>> [Local Inpaint] WARN: failed to stage LaMa model to ASCII path: {last_error}")
+        return str(src)
+
+    def _call_local_lama(self, image_path, mask_img):
+        """Run local LaMa inpainting using simple-lama-inpainting.
+
+        Returns PNG bytes so the existing inpainting workers can reuse the same
+        result pipeline used for API providers.
+        """
+        from io import BytesIO
+        from PIL import Image
+        import numpy as np
+
+        # simple-lama-inpainting은 LAMA_MODEL 환경변수를 지원한다.
+        # local_models/lama/big-lama.pt가 있으면 자동 다운로드/cache 대신 그 파일을 사용한다.
+        local_model_path = self._find_local_lama_model_path()
+        if local_model_path:
+            safe_model_path = self._ascii_safe_local_lama_model_path(local_model_path)
+            os.environ["LAMA_MODEL"] = safe_model_path
+            if safe_model_path != local_model_path:
+                print(f">>> [Local Inpaint] LOCAL LaMa model: {local_model_path}")
+                print(f">>> [Local Inpaint] LOCAL LaMa safe path: {safe_model_path}")
+            else:
+                print(f">>> [Local Inpaint] LOCAL LaMa model: {safe_model_path}")
+        else:
+            print(">>> [Local Inpaint] LOCAL LaMa model not found in local_models; using simple-lama cache/auto-download.")
+
+        try:
+            from simple_lama_inpainting import SimpleLama
+        except Exception as e:
+            raise ValueError(
+                "LOCAL LaMa를 사용할 수 없습니다. setup_local_core_venv_v2_1_0.bat를 먼저 실행해 주세요. "
+                f"원문 오류: {e}"
+            )
+
+        if not image_path or not os.path.exists(str(image_path)):
+            raise ValueError("LOCAL LaMa 입력 이미지 파일을 찾을 수 없습니다.")
+
+        image = Image.open(image_path).convert("RGB")
+        mask_arr = np.asarray(mask_img)
+        if mask_arr.ndim == 3:
+            mask_arr = cv2.cvtColor(mask_arr, cv2.COLOR_BGR2GRAY)
+        mask_arr = np.where(mask_arr > 10, 255, 0).astype("uint8")
+        if mask_arr.shape[:2] != (image.height, image.width):
+            mask_arr = cv2.resize(mask_arr, (image.width, image.height), interpolation=cv2.INTER_NEAREST)
+        if int(np.count_nonzero(mask_arr)) <= 0:
+            raise ValueError("LOCAL LaMa 인페인팅 마스크가 비어 있습니다.")
+        mask = Image.fromarray(mask_arr, mode="L")
+
+        model = getattr(self, "_local_lama_model", None)
+        if model is None:
+            print(">>> [Local Inpaint] Loading SimpleLaMa model...")
+            model = SimpleLama()
+            self._local_lama_model = model
+
+        print(">>> [Local Inpaint] Running LOCAL LaMa...")
+        result = model(image, mask)
+
+        if isinstance(result, Image.Image):
+            out_img = result.convert("RGB")
+        else:
+            arr = np.asarray(result)
+            if arr.ndim == 3 and arr.shape[0] in (3, 4) and arr.shape[-1] not in (3, 4):
+                arr = np.transpose(arr, (1, 2, 0))
+            if arr.dtype != np.uint8:
+                if arr.max() <= 1.5:
+                    arr = arr * 255.0
+                arr = np.clip(arr, 0, 255).astype("uint8")
+            out_img = Image.fromarray(arr).convert("RGB")
+
+        bio = BytesIO()
+        out_img.save(bio, format="PNG")
+        return bio.getvalue()
 
     def _call_gemini_inpaint(self, image_path, mask_img):
         """Gemini image model을 이용한 테스트용 인페인팅.

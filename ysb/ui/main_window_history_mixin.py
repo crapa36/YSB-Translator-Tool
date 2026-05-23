@@ -328,17 +328,72 @@ class MainWindowHistoryMixin:
     def get_linebreak_shortcut(self):
         return self.shortcut_settings.seq("text_linebreak")
 
+
+    def _ocr_language_options_for_provider(self, provider=None):
+        provider = str(provider or getattr(getattr(self, "api_settings", None), "selected_ocr_provider", "clova") or "clova")
+        if provider == "google_vision":
+            return [("영어", "en"), ("일본어", "ja"), ("중국어", "zh"), ("한국어", "ko")]
+        if provider == "local_paddle_ocr":
+            return [("일본어", "ja"), ("영어", "en"), ("한국어", "ko"), ("중국어", "zh")]
+        # CLOVA 기본
+        return [("일본어", "ja"), ("중국어", "zh"), ("한국어", "ko")]
+
+    def _current_ocr_language_value(self):
+        settings = getattr(self, "api_settings", None)
+        provider = str(getattr(settings, "selected_ocr_provider", "clova") or "clova")
+        if provider == "google_vision":
+            return str(getattr(settings, "google_vision_ocr_language", "en") or "en")
+        if provider == "local_paddle_ocr":
+            return str(getattr(settings, "local_paddle_ocr_language", "ja") or "ja")
+        return str(getattr(settings, "clova_ocr_language", "ja") or "ja")
+
+    def refresh_ocr_language_combo(self, save=False):
+        combo = getattr(self, "cb_ocr_language", None)
+        if combo is None:
+            return
+        provider = str(getattr(getattr(self, "api_settings", None), "selected_ocr_provider", "clova") or "clova")
+        current = self._current_ocr_language_value()
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            for label, value in self._ocr_language_options_for_provider(provider):
+                combo.addItem(self.tr_ui(label) if hasattr(self, "tr_ui") else label, value)
+            if not self.set_combo_current_data(combo, current):
+                combo.setCurrentIndex(0 if combo.count() else -1)
+        finally:
+            combo.blockSignals(False)
+
+    def on_ocr_language_toolbar_changed(self, *_args):
+        combo = getattr(self, "cb_ocr_language", None)
+        if combo is None or not hasattr(self, "api_settings"):
+            return
+        value = str(combo.currentData() or combo.currentText() or "").strip()
+        if not value:
+            return
+        provider = str(getattr(self.api_settings, "selected_ocr_provider", "clova") or "clova")
+        if provider == "google_vision":
+            self.api_settings.google_vision_ocr_language = value
+        elif provider == "local_paddle_ocr":
+            self.api_settings.local_paddle_ocr_language = value
+        else:
+            self.api_settings.clova_ocr_language = value
+        try:
+            ApiSettingsStore.save(self.api_settings)
+            apply_settings_to_config(self.api_settings)
+        except Exception:
+            pass
+
+    def _chunk_attr_for_provider(self, provider):
+        return {
+            "openai": "openai_chunk_size",
+            "deepseek": "deepseek_chunk_size",
+            "google": "google_translate_chunk_size",
+            "gemini": "gemini_chunk_size",
+            "custom": "custom_translation_chunk_size",
+        }.get(str(provider or "openai"), "openai_chunk_size")
+
     def on_translation_provider_changed(self, save=True):
         provider = self.cb_trans_provider.currentData() or "openai"
-        default_value = 8 if provider == "deepseek" else (50 if provider == "google" else (10 if provider == "gemini" else 20))
-        value = self.trans_chunk_sizes.get(provider, default_value)
-
-        self.sb_trans_chunk.blockSignals(True)
-        try:
-            self.sb_trans_chunk.setValue(int(value))
-        finally:
-            self.sb_trans_chunk.blockSignals(False)
-
         if save and hasattr(self, "api_settings"):
             try:
                 self.api_settings.selected_translation_provider = str(provider)
@@ -348,12 +403,21 @@ class MainWindowHistoryMixin:
                 pass
 
     def on_translation_chunk_changed(self, value):
+        # v2.1.0 이후 상단 툴바 묶음 입력은 제거되었다.
+        # 구버전/호환 위젯이 남아 있을 경우만 캐시에 반영한다.
         provider = self.cb_trans_provider.currentData() or "openai"
         self.trans_chunk_sizes[provider] = int(value)
 
     def get_current_translation_chunk_size(self):
         provider = self.cb_trans_provider.currentData() or "openai"
-        return int(self.trans_chunk_sizes.get(provider, self.sb_trans_chunk.value()))
+        attr = self._chunk_attr_for_provider(provider)
+        try:
+            value = int(getattr(self.api_settings, attr, 0) or 0)
+        except Exception:
+            value = 0
+        if value <= 0:
+            value = int(self.trans_chunk_sizes.get(provider, 8 if provider == "deepseek" else (50 if provider == "google" else (10 if provider == "gemini" else 20))))
+        return max(1, min(value, 100))
 
     def open_text_number_width_dialog(self):
         """분석도 노란 텍스트 번호 박스 너비를 즉시 조정한다."""

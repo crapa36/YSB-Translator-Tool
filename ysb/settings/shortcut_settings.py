@@ -325,6 +325,9 @@ DEFAULT_SHORTCUTS = {
     "option_register_ysb": "Ctrl+Alt+Shift+8",
     "option_unregister_ysbt": "Ctrl+Alt+Shift+9",
     "setting_file_path_visibility": "Ctrl+Alt+Shift+0",
+    "help_program_manual": "",
+    "help_open_website": "",
+    "help_report_bug": "",
     "help_about": "",
 
     # 3-3. 클라우드
@@ -482,6 +485,9 @@ GROUPS = [
         ("option_item_text_preset_settings", "개별 글꼴 프리셋 관리"),
     ]),
     ("도움말", [
+        ("help_program_manual", "프로그램 메뉴얼"),
+        ("help_open_website", "YSB Tool 사이트로 가기"),
+        ("help_report_bug", "버그제보 / 문의하기"),
         ("help_about", "프로그램 정보"),
     ]),
     ("작업 옵션", [
@@ -671,7 +677,7 @@ class ShortcutSettingsStore:
             if merged_shortcuts.get("paint_mask_wrap_free") == "F":
                 merged_shortcuts["paint_mask_wrap_free"] = DEFAULT_SHORTCUTS.get("paint_mask_wrap_free", "Alt+F")
 
-            # v2.0.0 페이지 탭 단축키 보정:
+            # v2.0.1 페이지 탭 단축키 보정:
             # Ctrl+Q는 현재 이미지탭 삭제, Ctrl+Shift+Q는 전체 이미지탭 삭제,
             # 프로젝트 나가기는 Alt+Q로 이동한다.
             page_tab_shortcut_defaults = {
@@ -708,7 +714,7 @@ class ShortcutSettingsStore:
             merged_shortcuts["project_exit"] = "Alt+Q"
             merged_shortcuts["project_import_images"] = "Alt+O"
 
-            # v2.0.0 hotfix50: Options / Settings menu shortcut layout.
+            # v2.0.1 hotfix50: Options / Settings menu shortcut layout.
             # Options: main 7 items use Ctrl+Alt+1~7 in visible order.
             option_menu_shortcut_layout = {
                 "option_api_settings": "Ctrl+Alt+1",

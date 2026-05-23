@@ -7,6 +7,15 @@ import time
 import uuid
 from pathlib import Path
 
+from ysb.version_info import (
+    APP_FAMILY_ID,
+    COMPANY_NAME,
+    PRODUCT_NAME,
+    YSB_ROLE_LAUNCHER as VERSION_ROLE_LAUNCHER,
+    YSB_ROLE_MAIN as VERSION_ROLE_MAIN,
+    main_exe_candidates,
+)
+
 try:
     import tkinter as tk
 except Exception:
@@ -28,21 +37,14 @@ MAX_LAUNCH_ESTIMATE_SEC = 60.0
 MAIN_EXE_MIN_SIZE_FOR_GUESS = 30 * 1024 * 1024  # 메인 EXE는 보통 런처보다 훨씬 크다.
 OPENER_EXE_MAX_SIZE_FOR_GUESS = 30 * 1024 * 1024
 
-YSB_COMPANY_NAME = "Zerostress8"
-YSB_PRODUCT_NAME = "YSB Translator Tool"
-YSB_APP_FAMILY_ID = "ZEROSTRESS8_YSB_TRANSLATOR_TOOL"
-YSB_ROLE_MAIN = "YSB_MAIN"
-YSB_ROLE_LAUNCHER = "YSB_LAUNCHER"
+YSB_COMPANY_NAME = COMPANY_NAME
+YSB_PRODUCT_NAME = PRODUCT_NAME
+YSB_APP_FAMILY_ID = APP_FAMILY_ID
+YSB_ROLE_MAIN = VERSION_ROLE_MAIN
+YSB_ROLE_LAUNCHER = VERSION_ROLE_LAUNCHER
 YSB_ROLE_OPENER = YSB_ROLE_LAUNCHER
 
-MAIN_EXE_CANDIDATES = [
-    "역식붕이 툴 v2.0.0.exe",
-    "역식붕이 툴 v1.8.1.exe",
-    "역식붕이 툴.exe",
-    "YSB_Tool_v2.0.0.exe",
-    "YSB_Tool_v1.8.1.exe",
-    "YSB_Tool.exe",
-]
+MAIN_EXE_CANDIDATES = main_exe_candidates()
 
 MAIN_EXE_SUBDIR_CANDIDATES = [
     "YSB",
@@ -53,6 +55,18 @@ MAIN_EXE_SUBDIR_CANDIDATES = [
     "app",
     "program",
 ]
+
+
+def infer_edition_from_main_exe(main_exe: Path | None) -> str:
+    """Infer Lite/Local for launcher diagnostics and source-like runs.
+
+Compiled main entry points select their own edition. This helper only sets an
+extra environment value so logs/runtime files know which distribution launched.
+"""
+    name = str(getattr(main_exe, "name", "") or "").lower()
+    if "local" in name:
+        return "local"
+    return "lite"
 
 
 
@@ -86,7 +100,7 @@ def app_config_dir() -> Path:
 def resource_path(name: str) -> Path:
     """PyInstaller onefile/onedir/소스 실행에서 런처 리소스를 안정적으로 찾는다.
 
-    v2.0.0 리팩토링 이후 스플래시와 아이콘은 assets/ 아래에서 관리한다.
+    v2.0.1 리팩토링 이후 스플래시와 아이콘은 assets/ 아래에서 관리한다.
     기존 호출이 resource_path("ysb_splash.png")처럼 파일명만 넘겨도
     assets/ysb_splash.png를 먼저 찾도록 보정한다.
     """
@@ -1036,6 +1050,7 @@ def launch_main(launcher_session_id: str | None = None, project_path: str | None
     env = os.environ.copy()
     # 메인 onefile EXE가 이전 _MEI를 재사용하지 않게 한다.
     env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    env["YSB_TOOL_EDITION"] = infer_edition_from_main_exe(main_exe)
     if launcher_session_id:
         env["YSB_LAUNCHER_SESSION_ID"] = str(launcher_session_id)
         env["YSB_SPLASH_OWNER"] = "launcher"

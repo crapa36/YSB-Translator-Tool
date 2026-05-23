@@ -134,12 +134,15 @@ def _build_inpainting_payload(mask_toggle_enabled, curr_data):
 
 class UniversalBatchWorker(QThread):
     progress = pyqtSignal(str)
+    # page index, mode
+    # 메인 UI가 현재 처리 중인 페이지로 따라가게 한다.
+    active_item = pyqtSignal(int, str)
     # page index, payload dict
     # payload는 메인 스레드에서 self.data[i]에 반영된다.
     finished_item = pyqtSignal(int, object)
     finished_all = pyqtSignal()
 
-    def __init__(self, main_window, mode):
+    def __init__(self, main_window, mode, page_indices=None):
         super().__init__()
         self.main = main_window
         self.mode = mode
@@ -148,6 +151,20 @@ class UniversalBatchWorker(QThread):
 
         # 스레드 안에서 UI 위젯을 직접 읽지 않도록 시작 시점 값만 복사
         self.paths = list(main_window.paths)
+        if page_indices is None:
+            self.page_indices = list(range(len(self.paths)))
+        else:
+            clean_indices = []
+            seen_indices = set()
+            for raw_idx in page_indices:
+                try:
+                    page_idx = int(raw_idx)
+                except Exception:
+                    continue
+                if 0 <= page_idx < len(self.paths) and page_idx not in seen_indices:
+                    clean_indices.append(page_idx)
+                    seen_indices.add(page_idx)
+            self.page_indices = clean_indices or list(range(len(self.paths)))
         self.provider = main_window.cb_trans_provider.currentData()
         self.font_family = main_window.cb_font.currentFont().family()
         self.stroke_size = main_window.sb_strk.value()
@@ -228,18 +245,26 @@ class UniversalBatchWorker(QThread):
         return os.path.join(os.path.dirname(os.path.abspath(str(path or os.getcwd()))), self._output_display_stem(page_idx, path, curr_data) + ext)
 
     def run(self):
-        total = len(self.paths)
+        selected_indices = list(getattr(self, "page_indices", None) or range(len(self.paths)))
+        total = len(selected_indices)
 
-        for i, path in enumerate(self.paths):
+        visual_modes = {"analyze", "translate", "inpaint"}
+
+        for order_idx, i in enumerate(selected_indices):
             if not self.is_running:
                 break
+            if i < 0 or i >= len(self.paths):
+                continue
 
+            path = self.paths[i]
             curr_data = self.data_snapshot.get(i, {})
             base_name = os.path.basename(path)
-            prefix = f"[{i + 1}/{total}]"
+            prefix = f"[{order_idx + 1}/{total}]"
 
             try:
                 payload = {}
+                if self.mode in visual_modes:
+                    self.active_item.emit(i, self.mode)
 
                 if self.mode == 'analyze':
                     self.progress.emit(f"{prefix} 분석: {base_name}")
@@ -253,6 +278,8 @@ class UniversalBatchWorker(QThread):
 
                 elif self.mode == 'translate':
                     if not curr_data.get('data'):
+                        self.progress.emit(f"{prefix} 번역 건너뜀: 분석 데이터 없음")
+                        self.finished_item.emit(i, {})
                         continue
 
                     self.progress.emit(f"{prefix} 번역: {base_name}")
@@ -261,6 +288,7 @@ class UniversalBatchWorker(QThread):
 
                     if not target_items:
                         self.progress.emit(f"{prefix} 번역 건너뜀: 체크된 항목 없음")
+                        self.finished_item.emit(i, {})
                         continue
 
                     texts = [item.get('text', '') for item in target_items]
@@ -278,9 +306,12 @@ class UniversalBatchWorker(QThread):
                     inpaint_data, inpaint_mask = _build_inpainting_payload(self.mask_toggle_enabled, curr_data)
 
                     if self.mask_toggle_enabled and not inpaint_data and inpaint_mask is None:
+                        self.progress.emit(f"{prefix} 인페인팅 건너뜀: ON 분석/선택 마스크 없음")
+                        self.finished_item.emit(i, {})
                         continue
                     if (not self.mask_toggle_enabled) and inpaint_mask is None:
                         self.progress.emit(f"{prefix} 인페인팅 건너뜀: OFF 페인팅 마스크 없음")
+                        self.finished_item.emit(i, {})
                         continue
 
                     self.progress.emit(f"{prefix} 인페인팅: {base_name}")
@@ -305,9 +336,13 @@ class UniversalBatchWorker(QThread):
                         payload = {}
                         self.progress.emit(f"{prefix} ⚠️ 인페인팅 결과 없음")
 
-                    # Replicate burst=1 제한 방지.
-                    # _call_lama 내부에서도 429 재시도하지만, 장 사이 기본 간격을 둬야 일괄 성공률이 높다.
-                    if i < total - 1:
+                    # Replicate burst=1 제한 방지. Local LaMa는 API 제한이 없으므로 대기하지 않는다.
+                    try:
+                        from ysb.engine.manga_engine import Config
+                        _provider = str(getattr(Config, "INPAINT_PROVIDER", "replicate_lama") or "replicate_lama").lower()
+                    except Exception:
+                        _provider = "replicate_lama"
+                    if order_idx < total - 1 and _provider != "local_lama":
                         time.sleep(5)
 
                 elif self.mode == 'refresh':
@@ -332,11 +367,18 @@ class UniversalBatchWorker(QThread):
                     payload = {}
 
                 self.finished_item.emit(i, payload)
+                if self.mode in visual_modes and order_idx < total - 1 and self.is_running:
+                    # 결과가 화면에 반영되는 것을 사용자가 확인할 수 있도록
+                    # 다음 페이지로 넘어가기 전 짧게 멈춘다.
+                    time.sleep(1.0)
 
             except Exception as e:
                 self.progress.emit(f"{prefix} ❌ 에러: {e}")
 
-        self.progress.emit(f"✅ 일괄 {self.mode} 완료!")
+        if self.is_running:
+            self.progress.emit(f"✅ 일괄 {self.mode} 완료!")
+        else:
+            self.progress.emit(f"⏹️ 일괄 {self.mode} 취소 요청 반영: 현재 항목 완료 후 중단")
         self.finished_all.emit()
 
     def stop(self):
@@ -353,13 +395,22 @@ class AnalysisWorker(QThread):
         self.path = path
         self.mask = _copy_mask(mask)
         self.data = _copy_data_list(data)
+        self.cancel_requested = False
+
+    def stop(self):
+        self.cancel_requested = True
 
     def run(self):
         try:
             try:
                 from ysb.engine.manga_engine import Config
                 provider = str(getattr(Config, "OCR_PROVIDER", "clova") or "clova")
-                provider_name = "Google Vision" if provider == "google_vision" else "CLOVA"
+                if provider == "google_vision":
+                    provider_name = "Google Vision"
+                elif provider == "local_paddle_ocr":
+                    provider_name = "LOCAL Paddle OCR"
+                else:
+                    provider_name = "CLOVA"
             except Exception:
                 provider_name = "OCR"
 
@@ -387,6 +438,10 @@ class InpaintWorker(QThread):
         self.path = path
         self.data = _copy_data_list(data)
         self.mask = _copy_mask(mask)
+        self.cancel_requested = False
+
+    def stop(self):
+        self.cancel_requested = True
 
     def run(self):
         try:
@@ -397,6 +452,8 @@ class InpaintWorker(QThread):
                     provider_name = "Stable Diffusion"
                 elif provider == "gemini_inpaint":
                     provider_name = "Gemini"
+                elif provider == "local_lama":
+                    provider_name = "LOCAL LaMa"
                 else:
                     provider_name = "LaMa"
             except Exception:
@@ -413,3 +470,59 @@ class InpaintWorker(QThread):
         except Exception as e:
             self.log.emit(f"❌ 오류 발생: {e}")
             self.finished.emit(b"")
+
+
+class TranslationWorker(QThread):
+    progress = pyqtSignal(str, int, int)  # detail, current, total
+    finished = pyqtSignal(object)
+    error = pyqtSignal(str)
+    canceled = pyqtSignal(object)
+
+    def __init__(self, engine, texts, provider="openai", chunk_size=20):
+        super().__init__()
+        self.engine = engine
+        self.texts = [str(t or "") for t in (texts or [])]
+        self.provider = provider or "openai"
+        try:
+            self.chunk_size = max(1, min(int(chunk_size or 20), 100))
+        except Exception:
+            self.chunk_size = 20
+        self.cancel_requested = False
+
+    def stop(self):
+        self.cancel_requested = True
+
+    def run(self):
+        total = len(self.texts)
+        results = []
+        try:
+            if total <= 0:
+                self.finished.emit([])
+                return
+            for start in range(0, total, self.chunk_size):
+                if self.cancel_requested:
+                    self.canceled.emit(results)
+                    return
+                end = min(total, start + self.chunk_size)
+                self.progress.emit(f"번역 중: {start + 1}-{end} / {total}", start, total)
+                chunk = self.texts[start:end]
+                translated = self.engine.translate_text_batch(
+                    chunk,
+                    provider=self.provider,
+                    chunk_size=len(chunk),
+                )
+                if translated is None:
+                    translated = []
+                translated = list(translated)
+                if len(translated) < len(chunk):
+                    translated.extend(chunk[len(translated):])
+                elif len(translated) > len(chunk):
+                    translated = translated[:len(chunk)]
+                results.extend(translated)
+                self.progress.emit(f"번역 완료: {end} / {total}", end, total)
+                if self.cancel_requested:
+                    self.canceled.emit(results)
+                    return
+            self.finished.emit(results)
+        except Exception as e:
+            self.error.emit(str(e))

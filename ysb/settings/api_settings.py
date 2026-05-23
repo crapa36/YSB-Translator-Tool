@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QGridLayout, QLabel, QLineEdit,
     QDialogButtonBox, QMessageBox, QCheckBox, QPushButton, QHBoxLayout,
     QGroupBox, QRadioButton, QButtonGroup, QComboBox, QFileDialog,
-    QFrame, QWidget, QScrollArea
+    QFrame, QWidget, QScrollArea, QTabWidget, QSpinBox
 )
 
 from ysb.core.cache_utils import get_cache_file
@@ -41,6 +41,19 @@ def tr_api(text, lang=LANG_KO):
     if str(lang).lower().startswith("en"):
         return API_TR_KO_EN.get(text, text)
     return text
+
+
+def _is_local_edition_runtime() -> bool:
+    """Return True only for the Local edition.
+
+    Lite and Local share most UI/code files, so Local-only providers must be
+    filtered at runtime instead of being hard-coded into the common API dialog.
+    """
+    try:
+        from ysb.editions.current import is_local_edition
+        return bool(is_local_edition())
+    except Exception:
+        return False
 
 
 def resolve_ui_theme(widget=None):
@@ -85,6 +98,25 @@ def api_dialog_soft_qss(theme="dark"):
             QCheckBox, QRadioButton { color:#202124; spacing:8px; }
             QCheckBox::indicator, QRadioButton::indicator { width:14px; height:14px; border:1px solid #8d96a4; background:#ffffff; }
             QCheckBox::indicator:checked, QRadioButton::indicator:checked { background:#4b8de8; border:1px solid #4b8de8; }
+            QTabWidget::pane {
+                border:1px solid #dfe5ef;
+                border-radius:0px;
+                background:#ffffff;
+                top:-1px;
+            }
+            QTabBar::tab {
+                background:#edf1f7;
+                color:#4b5563;
+                border:1px solid #d9e0ea;
+                border-bottom:none;
+                border-top-left-radius:10px;
+                border-top-right-radius:10px;
+                padding:4px 10px;
+                min-width:100px;
+            }
+            QTabBar::tab:selected { background:#ffffff; color:#1f232b; font-weight:700; }
+            QTabBar::tab:!selected { background:#edf1f7; color:#667085; }
+            QTabBar::tab:hover { background:#edf4ff; color:#111827; }
             QScrollBar:vertical { background:#eef1f6; width:12px; margin:0; border:0; }
             QScrollBar::handle:vertical { background:#c7ceda; min-height:30px; border-radius:5px; }
             QScrollBar::handle:vertical:hover { background:#aeb8c8; }
@@ -116,6 +148,25 @@ def api_dialog_soft_qss(theme="dark"):
         QCheckBox, QRadioButton { color:#f2f2f2; spacing:8px; }
         QCheckBox::indicator, QRadioButton::indicator { width:14px; height:14px; border:1px solid #72757f; background:#202228; }
         QCheckBox::indicator:checked, QRadioButton::indicator:checked { background:#5da9ff; border:1px solid #5da9ff; }
+        QTabWidget::pane {
+            border:1px solid #3b414c;
+            border-radius:0px;
+            background:#24282f;
+            top:-1px;
+        }
+        QTabBar::tab {
+            background:#2a2e36;
+            color:#b5bfce;
+            border:1px solid #3b414c;
+            border-bottom:none;
+            border-top-left-radius:10px;
+            border-top-right-radius:10px;
+            padding:4px 10px;
+            min-width:100px;
+        }
+        QTabBar::tab:selected { background:#333842; color:#ffffff; font-weight:700; }
+        QTabBar::tab:!selected { background:#2a2e36; color:#b5bfce; }
+        QTabBar::tab:hover { background:#38404c; color:#ffffff; }
         QScrollBar:vertical { background:#202228; width:12px; margin:0; border:0; }
         QScrollBar::handle:vertical { background:#454a55; min-height:30px; border-radius:5px; }
         QScrollBar::handle:vertical:hover { background:#5a6170; }
@@ -142,6 +193,11 @@ class ApiSettings:
     google_vision_ocr_language: str = "en"
     google_vision_language_hints: str = "ja,ko,en"
 
+    # Local OCR
+    # v2.1.0: comic_text_detector로 안전 마스크를 만들고 PaddleOCR로 문자 인식한다.
+    local_paddle_mask_device: str = "auto"
+    local_paddle_ocr_language: str = "ja"
+
     # Translation API
     openai_api_key: str = ""
     deepseek_api_key: str = ""
@@ -155,6 +211,14 @@ class ApiSettings:
     deepseek_model: str = "deepseek-v4-flash"
     google_translate_model: str = "google_translate_basic_v2"
     gemini_model: str = "gemini-2.5-flash-lite"
+
+    # Translation chunk sizes
+    # 상단 툴바에서는 숨기고, API 관리 > 번역 탭에서 제공자별로 관리한다.
+    openai_chunk_size: int = 20
+    deepseek_chunk_size: int = 8
+    google_translate_chunk_size: int = 50
+    gemini_chunk_size: int = 10
+    custom_translation_chunk_size: int = 20
 
     # Inpainting API
     # replicate_api_token은 구버전 캐시 호환용으로만 유지한다.
@@ -185,6 +249,24 @@ class ApiSettingsStore:
             base = asdict(ApiSettings())
             # 과거 캐시 호환: 알 수 없는 키는 무시하고, 새 키는 기본값 유지
             base.update({k: v for k, v in data.items() if k in base})
+
+            # v2.1.0: Local translation engines are hidden from the regular UI.
+            # Translation stays API-based because local translation models are too large for the core Local build.
+            legacy_provider = str(base.get("selected_translation_provider", "") or "").lower()
+            if legacy_provider in ("local_argos", "local_hf_jako", "local_hf_enko", "local_nllb"):
+                base["selected_translation_provider"] = "openai"
+
+            local_enabled = _is_local_edition_runtime()
+
+            # Lite판에서는 API 관리창과 실행 설정에서 Local 모델을 노출/사용하지 않는다.
+            # Local판에서만 안정 조합인 LOCAL Paddle OCR / LOCAL LaMa를 허용한다.
+            legacy_ocr_provider = str(base.get("selected_ocr_provider", "") or "").lower()
+            if legacy_ocr_provider.startswith("local_"):
+                base["selected_ocr_provider"] = "local_paddle_ocr" if local_enabled else "clova"
+
+            legacy_inpaint_provider = str(base.get("selected_inpaint_provider", "") or "").lower()
+            if legacy_inpaint_provider.startswith("local_"):
+                base["selected_inpaint_provider"] = "local_lama" if local_enabled else "replicate_lama"
 
             # v1.6 이전 캐시는 replicate_api_token 하나를 LaMa/Stable이 공유했다.
             # 새 구조에서는 두 토큰을 분리하되, 기존 사용자가 바로 깨지지 않도록 최초 로드 시 양쪽에 복사한다.
@@ -217,8 +299,12 @@ def apply_settings_to_config(settings: ApiSettings):
         import os as _os
         from ysb.engine.manga_engine import Config
 
+        local_enabled = _is_local_edition_runtime()
+
         # OCR
         Config.OCR_PROVIDER = (settings.selected_ocr_provider or "clova").strip() or "clova"
+        if Config.OCR_PROVIDER.startswith("local_"):
+            Config.OCR_PROVIDER = "local_paddle_ocr" if local_enabled else "clova"
         Config.CLOVA_API_URL = settings.clova_api_url.strip()
         Config.CLOVA_SECRET_KEY = settings.clova_secret_key.strip()
         Config.CLOVA_MODEL = settings.clova_model.strip() or "clova_ocr_v2"
@@ -229,7 +315,9 @@ def apply_settings_to_config(settings: ApiSettings):
         Config.GOOGLE_VISION_OCR_LANGUAGE = (settings.google_vision_ocr_language or "en").strip() or "en"
         # 구버전 호환용 값은 유지하되, UI에서는 더 이상 직접 입력받지 않는다.
         Config.GOOGLE_VISION_LANGUAGE_HINTS = settings.google_vision_language_hints.strip() or Config.GOOGLE_VISION_OCR_LANGUAGE
-
+        Config.LOCAL_PADDLE_MASK_DEVICE = (settings.local_paddle_mask_device or "auto").strip() or "auto"
+        Config.LOCAL_PADDLE_MASK_INPUT_SIZE = "auto"
+        Config.LOCAL_PADDLE_OCR_LANGUAGE = (settings.local_paddle_ocr_language or "ja").strip() or "ja"
         # Translation
         Config.TRANSLATION_PROVIDER = (settings.selected_translation_provider or "openai").strip() or "openai"
         Config.OPENAI_API_KEY = settings.openai_api_key.strip()
@@ -247,6 +335,8 @@ def apply_settings_to_config(settings: ApiSettings):
 
         # Inpainting
         Config.INPAINT_PROVIDER = (settings.selected_inpaint_provider or "replicate_lama").strip() or "replicate_lama"
+        if Config.INPAINT_PROVIDER.startswith("local_"):
+            Config.INPAINT_PROVIDER = "local_lama" if local_enabled else "replicate_lama"
 
         legacy_token = settings.replicate_api_token.strip()
         Config.LAMA_REPLICATE_API_TOKEN = (settings.lama_replicate_api_token.strip() or legacy_token)
@@ -322,18 +412,37 @@ class ApiSettingsDialog(QDialog):
             cache.setWordWrap(True)
             layout.addWidget(cache)
 
-        scroll = QScrollArea(self)
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        content = QWidget(self)
-        content.setObjectName("ApiDialogBody")
-        content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.setSpacing(12)
-        scroll.setWidget(content)
-        layout.addWidget(scroll, 1)
+        tabs = QTabWidget(self)
+        tabs.setObjectName("SettingsTabs")
+        tabs.setDocumentMode(False)
+        tabs.setMovable(False)
+        tabs.setUsesScrollButtons(False)
+        try:
+            tabs.tabBar().setExpanding(False)
+        except Exception:
+            pass
+        tabs.setStyleSheet("""
+            QTabWidget#SettingsTabs::pane { border:1px solid #3b414c; background:#24282f; top:-1px; }
+            QTabWidget#SettingsTabs QTabBar::tab {
+                background:#2a2e36; color:#b5bfce; border:1px solid #3b414c; border-bottom:none;
+                border-top-left-radius:8px; border-top-right-radius:8px;
+                padding:7px 18px; min-width:78px; font-weight:600;
+            }
+            QTabWidget#SettingsTabs QTabBar::tab:selected { background:#333842; color:#ffffff; font-weight:800; }
+            QTabWidget#SettingsTabs QTabBar::tab:hover { background:#38404c; color:#ffffff; }
+        """)
+        layout.addWidget(tabs, 1)
 
-        self._add_api_section(content_layout, "OCR API", [
+        ocr_content_layout, ocr_tab = self._create_api_tab_content()
+        inpaint_content_layout, inpaint_tab = self._create_api_tab_content()
+        trans_content_layout, trans_tab = self._create_api_tab_content()
+
+        tabs.addTab(ocr_tab, tr_api("OCR", self._ui_language))
+        tabs.addTab(inpaint_tab, tr_api("인페인팅", self._ui_language))
+        tabs.addTab(trans_tab, tr_api("번역", self._ui_language))
+
+        ocr_cards = [
+            {"_category": True, "title": "API 기반 모델", "description": "외부 OCR API를 사용하는 모델입니다. API 키나 URL이 필요합니다."},
             {
                 "provider": "clova",
                 "title": "CLOVA OCR",
@@ -353,9 +462,24 @@ class ApiSettingsDialog(QDialog):
                     ("OCR 언어", "google_vision_ocr_language", False, "영어", "combo", [("영어", "en"), ("일본어", "ja"), ("중국어", "zh"), ("한국어", "ko")]),
                 ],
             },
-        ], "selected_ocr_provider")
+        ]
+        if _is_local_edition_runtime():
+            ocr_cards.extend([
+                {"_category": True, "title": "LOCAL 모델", "description": "Local판에서만 사용하는 오프라인 OCR 모델입니다. API 키가 필요하지 않습니다."},
+                {
+                    "provider": "local_paddle_ocr",
+                    "title": "LOCAL Paddle OCR",
+                    "description": "Local판 전용 OCR입니다. comic_text_detector로 텍스트 영역/마스크를 안전하게 만들고, PaddleOCR로 각 영역의 원문을 인식합니다. raw mask는 직접 사용하지 않습니다.",
+                    "fields": [
+                        ("Device", "local_paddle_mask_device", False, "auto", "combo", [("자동", "auto"), ("CPU", "cpu"), ("CUDA", "cuda")]),
+                        ("OCR 언어", "local_paddle_ocr_language", False, "일본어", "combo", [("일본어", "ja"), ("영어", "en"), ("한국어", "ko"), ("중국어", "zh")]),
+                    ],
+                },
+            ])
+        self._add_api_section(ocr_content_layout, "OCR", ocr_cards, "selected_ocr_provider")
 
-        self._add_api_section(content_layout, tr_api("인페인팅 API", self._ui_language), [
+        inpaint_cards = [
+            {"_category": True, "title": "API 기반 모델", "description": "외부 API를 사용하는 인페인팅 모델입니다. API 키가 필요합니다."},
             {
                 "provider": "replicate_lama",
                 "title": "Replicate LaMa",
@@ -382,14 +506,27 @@ class ApiSettingsDialog(QDialog):
                     ("API Key", "gemini_api_key", True, "Gemini API Key (shared with translation)"),
                 ],
             },
-        ], "selected_inpaint_provider")
+        ]
+        if _is_local_edition_runtime():
+            inpaint_cards.extend([
+                {"_category": True, "title": "LOCAL 모델", "description": "Local판에서만 사용하는 오프라인 인페인팅 모델입니다. API 키가 필요하지 않습니다."},
+                {
+                    "provider": "local_lama",
+                    "title": "LOCAL LaMa",
+                    "description": "Local판 전용 인페인팅입니다. 현재 페인팅 마스크를 simple-lama-inpainting으로 로컬에서 지웁니다. API Key를 사용하지 않습니다.",
+                    "fields": [],
+                },
+            ])
+        self._add_api_section(inpaint_content_layout, tr_api("인페인팅", self._ui_language), inpaint_cards, "selected_inpaint_provider")
 
-        self._add_api_section(content_layout, tr_api("번역 API", self._ui_language), [
+        self._add_api_section(trans_content_layout, tr_api("번역", self._ui_language), [
+            {"_category": True, "title": "API 기반 모델", "description": "외부 API를 사용하는 번역 모델입니다. API 키가 필요합니다."},
             {
                 "provider": "openai",
                 "title": "OpenAI",
                 "fields": [
                     ("Model", "openai_model", False, "gpt-4o-mini"),
+                    ("묶음 수", "openai_chunk_size", False, 20, "spin", (1, 100)),
                     ("API Key", "openai_api_key", True, "OpenAI API Key"),
                 ],
             },
@@ -398,6 +535,7 @@ class ApiSettingsDialog(QDialog):
                 "title": "DeepSeek",
                 "fields": [
                     ("Model", "deepseek_model", False, "deepseek-chat"),
+                    ("묶음 수", "deepseek_chunk_size", False, 8, "spin", (1, 100)),
                     ("API Key", "deepseek_api_key", True, "DeepSeek API Key"),
                 ],
             },
@@ -406,6 +544,7 @@ class ApiSettingsDialog(QDialog):
                 "title": "Google Translate",
                 "fields": [
                     ("Model", "google_translate_model", False, "google_translate_basic_v2"),
+                    ("묶음 수", "google_translate_chunk_size", False, 50, "spin", (1, 100)),
                     ("API Key", "google_translate_api_key", True, "Google Translate API Key"),
                 ],
             },
@@ -414,6 +553,7 @@ class ApiSettingsDialog(QDialog):
                 "title": "Gemini / Google AI Studio",
                 "fields": [
                     ("Model", "gemini_model", False, "gemini-2.5-flash-lite"),
+                    ("묶음 수", "gemini_chunk_size", False, 10, "spin", (1, 100)),
                     ("API Key", "gemini_api_key", True, "Google AI Studio Gemini API Key"),
                 ],
             },
@@ -425,12 +565,15 @@ class ApiSettingsDialog(QDialog):
                     ("Preset Name", "custom_translation_preset_name", False, "OpenRouter / Groq / xAI"),
                     ("Base URL", "custom_translation_base_url", False, "https://api.x.ai/v1"),
                     ("Model", "custom_translation_model", False, "grok-4.3"),
+                    ("묶음 수", "custom_translation_chunk_size", False, 20, "spin", (1, 100)),
                     ("API Key", "custom_translation_api_key", True, "OpenAI-compatible API Key"),
                 ],
             },
         ], "selected_translation_provider")
 
-        content_layout.addStretch(1)
+        ocr_content_layout.addStretch(1)
+        inpaint_content_layout.addStretch(1)
+        trans_content_layout.addStretch(1)
 
         option_line = QHBoxLayout()
         self.show_keys = QCheckBox(tr_api("키 보이기", self._ui_language))
@@ -441,7 +584,7 @@ class ApiSettingsDialog(QDialog):
         btn_clear.clicked.connect(self.clear_all)
         option_line.addWidget(btn_clear)
         option_line.addStretch()
-        content_layout.addLayout(option_line)
+        layout.addLayout(option_line)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -451,6 +594,19 @@ class ApiSettingsDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+
+    def _create_api_tab_content(self):
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        content = QWidget(self)
+        content.setObjectName("ApiDialogBody")
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(12)
+        scroll.setWidget(content)
+        return content_layout, scroll
 
     def _add_separator(self, layout):
         # 새 카드형 UI에서는 굵은 구분선 대신 섹션 카드 자체의 여백/외곽선으로 구분한다.
@@ -485,6 +641,18 @@ class ApiSettingsDialog(QDialog):
         data = asdict(self.settings)
 
         for card in cards:
+            if card.get("_category"):
+                cat = QLabel(tr_api(str(card.get("title", "")), self._ui_language), block)
+                cat.setObjectName("SettingsItemTitle")
+                cat.setStyleSheet("font-size:14px; font-weight:800; margin-top:8px; padding-top:4px;")
+                block_layout.addWidget(cat)
+                cat_desc = str(card.get("description", "") or "").strip()
+                if cat_desc:
+                    cat_desc_label = QLabel(tr_api(cat_desc, self._ui_language), block)
+                    cat_desc_label.setObjectName("SettingsDescription")
+                    cat_desc_label.setWordWrap(True)
+                    block_layout.addWidget(cat_desc_label)
+                continue
             provider = card["provider"]
             item = QFrame(block)
             item.setObjectName("SettingsItem")
@@ -535,10 +703,25 @@ class ApiSettingsDialog(QDialog):
                         found_index = 0
                     edit.setCurrentIndex(found_index)
                     grid.addWidget(edit, r, 1)
+                elif field_type == "spin":
+                    edit = QSpinBox(item)
+                    min_v, max_v = (1, 100)
+                    try:
+                        if field_choices and len(field_choices) >= 2:
+                            min_v, max_v = int(field_choices[0]), int(field_choices[1])
+                    except Exception:
+                        min_v, max_v = (1, 100)
+                    edit.setRange(min_v, max_v)
+                    try:
+                        edit.setValue(int(data.get(key, placeholder) or placeholder or min_v))
+                    except Exception:
+                        edit.setValue(min_v)
+                    edit.setSuffix(" items" if self._ui_language == LANG_EN else "개")
+                    grid.addWidget(edit, r, 1)
                 else:
                     edit = QLineEdit(item)
                     edit.setText(str(data.get(key, "")))
-                    edit.setPlaceholderText(placeholder)
+                    edit.setPlaceholderText(str(placeholder))
                     if secret:
                         edit.setEchoMode(QLineEdit.EchoMode.Password)
                     if field_type == "file":
@@ -624,6 +807,8 @@ class ApiSettingsDialog(QDialog):
         for edit in edits:
             if isinstance(edit, QComboBox):
                 value = str(edit.currentData() or edit.currentText() or "").strip()
+            elif isinstance(edit, QSpinBox):
+                value = str(edit.value()).strip()
             else:
                 value = edit.text().strip()
             if value:
@@ -631,6 +816,8 @@ class ApiSettingsDialog(QDialog):
         first = edits[0]
         if isinstance(first, QComboBox):
             return str(first.currentData() or first.currentText() or "").strip()
+        if isinstance(first, QSpinBox):
+            return str(first.value()).strip()
         return first.text().strip()
 
     def get_settings(self) -> ApiSettings:
@@ -647,6 +834,8 @@ class ApiSettingsDialog(QDialog):
             google_vision_model=self._first_edit_text("google_vision_model") or "DOCUMENT_TEXT_DETECTION",
             google_vision_ocr_language=self._first_edit_text("google_vision_ocr_language") or "en",
             google_vision_language_hints=self.settings.google_vision_language_hints,
+            local_paddle_mask_device=self._first_edit_text("local_paddle_mask_device") or "auto",
+            local_paddle_ocr_language=self._first_edit_text("local_paddle_ocr_language") or "ja",
             openai_api_key=self._first_edit_text("openai_api_key"),
             deepseek_api_key=self._first_edit_text("deepseek_api_key"),
             google_translate_api_key=self._first_edit_text("google_translate_api_key"),
@@ -659,6 +848,11 @@ class ApiSettingsDialog(QDialog):
             deepseek_model=self._first_edit_text("deepseek_model") or "deepseek-v4-flash",
             google_translate_model=self._first_edit_text("google_translate_model") or "google_translate_basic_v2",
             gemini_model=self._first_edit_text("gemini_model") or "gemini-2.5-flash-lite",
+            openai_chunk_size=int(self._first_edit_text("openai_chunk_size") or 20),
+            deepseek_chunk_size=int(self._first_edit_text("deepseek_chunk_size") or 8),
+            google_translate_chunk_size=int(self._first_edit_text("google_translate_chunk_size") or 50),
+            gemini_chunk_size=int(self._first_edit_text("gemini_chunk_size") or 10),
+            custom_translation_chunk_size=int(self._first_edit_text("custom_translation_chunk_size") or 20),
             # 구버전 캐시 호환: replicate_api_token은 UI에서 더 이상 직접 쓰지 않는다.
             replicate_api_token=self.settings.replicate_api_token,
             lama_replicate_api_token=self._first_edit_text("lama_replicate_api_token") or self.settings.replicate_api_token,

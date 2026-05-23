@@ -88,6 +88,7 @@ class RecentProjectStore:
             normalized["page_count"] = _safe_int(normalized.get("page_count"), 0)
             normalized["last_opened_at"] = str(normalized.get("last_opened_at") or "")
             normalized["thumbnail_path"] = str(normalized.get("thumbnail_path") or "")
+            normalized["workspace_dir"] = os.path.abspath(str(normalized.get("workspace_dir") or "")) if normalized.get("workspace_dir") else ""
             normalized["cloud_backup_status"] = str(normalized.get("cloud_backup_status") or "local_only")
             normalized["file_exists"] = os.path.exists(normalized["ysbt_path"])
             out.append(normalized)
@@ -241,7 +242,7 @@ class RecentProjectStore:
             self.save(items)
         return repaired
 
-    def add_project(self, ysbt_path, title=None, page_count=0, thumbnail_path="", cloud_backup_status="local_only"):
+    def add_project(self, ysbt_path, title=None, page_count=0, thumbnail_path="", cloud_backup_status="local_only", workspace_dir=""):
         if not ysbt_path:
             return False
         abs_path = os.path.abspath(str(ysbt_path))
@@ -254,6 +255,7 @@ class RecentProjectStore:
             "title": str(title or Path(abs_path).stem),
             "ysbt_path": abs_path,
             "thumbnail_path": str(thumbnail_path or ""),
+            "workspace_dir": os.path.abspath(str(workspace_dir or "")) if workspace_dir else "",
             "last_opened_at": _now_iso(),
             "page_count": _safe_int(page_count, 0),
             "file_exists": os.path.exists(abs_path),

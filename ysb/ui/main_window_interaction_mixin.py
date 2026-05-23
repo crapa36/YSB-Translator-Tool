@@ -88,6 +88,9 @@ class MainWindowInteractionMixin:
         make_action("option_item_text_preset_settings", "개별 글꼴 프리셋 관리", self.open_item_text_preset_dialog)
 
         # 도움말
+        make_action("help_program_manual", "프로그램 메뉴얼", self.open_program_manual_url)
+        make_action("help_open_website", "YSB Tool 사이트로 가기", self.open_ysb_tool_site_url)
+        make_action("help_report_bug", "버그제보 / 문의하기", self.open_bug_report_url)
         make_action("help_about", "프로그램 정보", self.open_about_dialog)
 
         # 클라우드
@@ -109,6 +112,89 @@ class MainWindowInteractionMixin:
         make_action("final_paint_above_toggle", "텍스트 위 페인팅 ON/OFF", self.toggle_final_paint_above_text)
         make_action("final_paint_opacity_inc", "최종 브러시 불투명도 증가", lambda *args: self.adjust_final_paint_opacity(+5))
         make_action("final_paint_opacity_dec", "최종 브러시 불투명도 감소", lambda *args: self.adjust_final_paint_opacity(-5))
+
+    def open_external_url(self, url):
+        """도움말 메뉴에서 외부 웹페이지를 기본 브라우저로 연다."""
+        try:
+            ok = QDesktopServices.openUrl(QUrl(str(url)))
+            if not ok:
+                raise RuntimeError(self.tr_ui("웹 브라우저로 링크를 열 수 없습니다."))
+        except Exception as e:
+            try:
+                webbrowser.open(str(url))
+                return
+            except Exception:
+                pass
+            QMessageBox.warning(self, self.tr_ui("링크 열기 실패"), str(e))
+
+    def open_program_manual_url(self):
+        self.open_external_url(YSB_TOOL_MANUAL_URL)
+
+    def open_ysb_tool_site_url(self):
+        self.open_external_url(YSB_TOOL_SITE_URL)
+
+    def open_bug_report_url(self):
+        # 프로그램에서는 공식 지원 페이지를 경유하고,
+        # 사이트 안의 문의/버그제보 버튼이 GitHub Issues 작성 화면으로 이동한다.
+        self.open_external_url(YSB_TOOL_SUPPORT_URL)
+
+    def start_auto_version_check(self):
+        """Check latest version in the background after startup.
+
+        The app must stay usable without internet, so failures are intentionally
+        silent. Only a newer version shows a small dialog.
+        """
+        try:
+            if getattr(self, "_auto_version_check_started", False):
+                return
+            self._auto_version_check_started = True
+            worker = VersionCheckThread(APP_VERSION, timeout=5, parent=self)
+            self._auto_version_check_thread = worker
+            worker.version_info_ready.connect(self._on_auto_version_info_ready)
+            worker.version_check_failed.connect(self._on_auto_version_check_failed)
+            worker.finished.connect(worker.deleteLater)
+            worker.finished.connect(lambda: setattr(self, "_auto_version_check_thread", None))
+            worker.start()
+        except Exception:
+            pass
+
+    def _on_auto_version_check_failed(self, message):
+        # 인터넷이 없거나 사이트가 잠시 안 열려도 프로그램 사용은 막지 않는다.
+        try:
+            self._auto_version_check_error = str(message)
+        except Exception:
+            pass
+
+    def _on_auto_version_info_ready(self, info):
+        try:
+            if getattr(self, "_app_is_closing", False):
+                return
+            latest_version = str((info or {}).get("latest_version") or "").strip()
+            if not latest_version:
+                return
+            if _ysb_version_tuple(APP_VERSION) >= _ysb_version_tuple(latest_version):
+                return
+
+            options = load_app_options()
+            ignored = str(options.get(UPDATE_IGNORED_VERSION_KEY, "") or "").strip()
+            if ignored == latest_version:
+                return
+
+            dialog = UpdateAvailableDialog(self, current_version=APP_VERSION, version_info=info)
+            dialog.exec()
+
+            if dialog.ignore_this_version():
+                options[UPDATE_IGNORED_VERSION_KEY] = latest_version
+                save_app_options(options)
+                try:
+                    self.app_options = dict(options)
+                except Exception:
+                    pass
+
+            if getattr(dialog, "open_download_requested", False):
+                self.open_external_url(str(info.get("download_page_url") or YSB_TOOL_DOWNLOAD_PAGE_URL))
+        except Exception:
+            pass
 
     def apply_shortcuts(self):
         for key, action in self.actions.items():
@@ -1368,6 +1454,7 @@ class MainWindowInteractionMixin:
                 page_count=len(getattr(self, "paths", []) or []),
                 thumbnail_path=thumb,
                 cloud_backup_status="local_only",
+                workspace_dir=getattr(self, "project_dir", "") or "",
             )
             self.refresh_launcher()
             return True
@@ -1386,12 +1473,91 @@ class MainWindowInteractionMixin:
         except Exception:
             pass
 
+    def _find_recent_project_workspace_folder(self, package_path):
+        """최근 프로젝트 카드의 .ysbt 경로에서 실제 작업 폴더를 찾는다.
+
+        최근 프로젝트의 "폴더 위치 열기"는 .ysbt가 저장된 문서 폴더가 아니라
+        workspaces 아래의 해당 프로젝트 작업 폴더를 우선 열어야 한다.
+        """
+        raw = str(package_path or "").strip().strip('"')
+        if not raw:
+            return None
+        try:
+            package_abs = os.path.abspath(os.path.expandvars(os.path.expanduser(raw)))
+        except Exception:
+            package_abs = raw
+
+        # 현재 열려 있는 프로젝트라면 이미 알고 있는 project_dir이 가장 정확하다.
+        try:
+            current_package = getattr(self, "ysbt_package_path", None)
+            current_dir = getattr(self, "project_dir", None)
+            if current_package and current_dir:
+                if os.path.abspath(str(current_package)).lower() == os.path.abspath(str(package_abs)).lower():
+                    if os.path.isdir(str(current_dir)):
+                        return os.path.abspath(str(current_dir))
+        except Exception:
+            pass
+
+        manifest = {}
+        project_uuid = ""
+        try:
+            if os.path.isfile(package_abs):
+                manifest = read_ysb_manifest(package_abs) or {}
+                project_uuid = str(manifest.get("project_uuid") or "")
+        except Exception:
+            manifest = {}
+            project_uuid = ""
+
+        try:
+            root = Path(str(workspaces_dir()))
+            if not root.exists():
+                return None
+
+            package_key = os.path.abspath(str(package_abs)).lower()
+            uuid_match = None
+            for child in root.iterdir():
+                try:
+                    if not child.is_dir():
+                        continue
+                    if not (child / PROJECT_FILENAME).exists():
+                        continue
+                    manifest_path = child / "manifest.json"
+                    if not manifest_path.exists():
+                        continue
+                    with open(manifest_path, "r", encoding="utf-8") as f:
+                        m = json.load(f)
+                    if not isinstance(m, dict):
+                        continue
+                    src = str(m.get("package_source") or "")
+                    src_key = os.path.abspath(src).lower() if src else ""
+                    child_uuid = str(m.get("project_uuid") or "")
+
+                    # 같은 .ysbt 경로가 기록된 폴더를 최우선으로 연다.
+                    if src_key and src_key == package_key:
+                        if (not project_uuid) or (child_uuid == project_uuid):
+                            return str(child)
+                    # 예전 기록처럼 package_source가 없거나 경로가 바뀐 경우 UUID로 보조 매칭한다.
+                    if project_uuid and child_uuid == project_uuid and uuid_match is None:
+                        uuid_match = str(child)
+                except Exception:
+                    continue
+            if uuid_match:
+                return uuid_match
+
+            # 예상 폴더명도 한 번 더 확인한다.
+            if project_uuid:
+                expected = root / f"{clean_workspace_name(Path(package_abs).stem)}_{project_uuid[:8]}"
+                if expected.exists() and expected.is_dir():
+                    return str(expected)
+        except Exception:
+            pass
+        return None
+
     def _open_path_location_in_file_manager(self, path, select_file=True):
         """파일/폴더 위치를 OS 파일 관리자에서 연다.
 
-        홈화면 최근 프로젝트의 "폴더 위치 열기"는 .ysbt 파일의 부모 폴더를
-        열어야 한다. 기존 QDesktopServices.openUrl(QUrl.fromLocalFile(folder))만
-        쓰면 Windows 환경/상대경로/현재 작업 디렉터리 상태에 따라 바탕화면 같은
+        Windows에서 QDesktopServices.openUrl(QUrl.fromLocalFile(folder))만 쓰면
+        상대경로/현재 작업 디렉터리 상태에 따라 바탕화면이나 문서 폴더 같은
         엉뚱한 위치가 열릴 수 있어, Windows에서는 explorer.exe를 직접 호출한다.
         """
         raw = str(path or "").strip().strip('"')
@@ -1423,8 +1589,16 @@ class MainWindowInteractionMixin:
         return folder
 
     def reveal_recent_project_in_folder(self, path):
+        """최근 프로젝트 카드의 [폴더 위치 열기].
+
+        이 메뉴에서 말하는 위치는 내부 작업 폴더(workspaces)가 아니라
+        사용자가 저장한 .ysbt 파일이 있는 폴더다.
+        이전 패치에서 작업 폴더를 우선 열도록 바꾸면서 여러 최근 항목이
+        모두 문서/YSB_Translator/workspaces 쪽으로 열리는 혼동이 생겼으므로
+        여기서는 항상 recent_projects.json에 기록된 .ysbt_path 기준으로 연다.
+        """
         try:
-            self._open_path_location_in_file_manager(path, select_file=True)
+            self._open_path_location_in_file_manager(path, select_file=False)
         except Exception as e:
             QMessageBox.warning(self, self.tr_ui("폴더 열기 실패"), str(e))
 
