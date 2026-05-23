@@ -19,12 +19,12 @@ if "%CHOICE_VALUE%"=="2" goto BUILD_LOCAL
 goto END
 
 :BUILD_LITE
-call "%BUILD_TOOLS_DIR%build_lite_exe_v2.1.0.bat"
+call "%BUILD_TOOLS_DIR%build_lite_exe.bat"
 set "RC=%ERRORLEVEL%"
 goto END_WITH_CODE
 
 :BUILD_LOCAL
-call "%BUILD_TOOLS_DIR%build_local_exe_v2.1.0.bat"
+call "%BUILD_TOOLS_DIR%build_local_exe.bat"
 set "RC=%ERRORLEVEL%"
 goto END_WITH_CODE
 

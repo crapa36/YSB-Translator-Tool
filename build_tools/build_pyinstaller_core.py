@@ -3,8 +3,8 @@
 YSB Translator Tool split PyInstaller build core.
 
 Use the small edition drivers instead of building both editions together:
-- build_pyinstaller_lite_v2.1.0.py  -> Lite/API package only
-- build_pyinstaller_local_v2.1.0.py -> Local package only
+- build_pyinstaller_lite.py  -> Lite/API package only
+- build_pyinstaller_local.py -> Local package only
 
 Policy:
 - One source tree.
@@ -122,9 +122,9 @@ def require_dir(path: Path, label: str) -> None:
 
 
 def pyinstaller_executable() -> list[str]:
-    exe = PROJECT_ROOT / ".venv" / "Scripts" / "pyinstaller.exe"
-    if exe.exists():
-        return [str(exe)]
+    # Use the current Python interpreter to launch PyInstaller.
+    # This avoids stale/broken pyinstaller.exe launchers after build-tool renames
+    # or virtualenv rebuilds.
     return [sys.executable, "-m", "PyInstaller"]
 
 
@@ -215,6 +215,59 @@ def generate_version_files() -> None:
     )
 
 
+
+def _tail_file(path: Path, lines: int = 120) -> list[str]:
+    try:
+        if not path.exists() or not path.is_file():
+            return []
+        text = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        return text[-lines:]
+    except Exception as exc:
+        return [f"[failed to read {path}: {exc}]"]
+
+
+def _dump_pyinstaller_diagnostics(label: str) -> None:
+    """Write likely PyInstaller diagnostic files into the build log.
+
+    Some PyInstaller failures do not print a helpful final traceback to stdout,
+    especially when a Windows GUI build exits during analysis.  Dumping the
+    generated warn/xref-like files makes the next failure actionable.
+    """
+    log("")
+    log(f"--- PyInstaller diagnostics after failure: {label} ---")
+    candidates: list[Path] = []
+
+    build_dir = PROJECT_ROOT / "build"
+    if build_dir.exists():
+        for pattern in (
+            "**/warn-*.txt",
+            "**/*.log",
+            "**/*.toc",
+        ):
+            try:
+                candidates.extend(build_dir.glob(pattern))
+            except Exception:
+                pass
+
+    # PyInstaller may write spec files in the project root before failing.
+    try:
+        candidates.extend(PROJECT_ROOT.glob("*.spec"))
+    except Exception:
+        pass
+
+    seen: set[Path] = set()
+    useful = [p for p in candidates if p.exists() and p.is_file() and p not in seen and not seen.add(p)]
+    if not useful:
+        log("No extra PyInstaller diagnostic files were found.")
+        return
+
+    for path in useful[:12]:
+        log("")
+        log(f"[diagnostic file] {path}")
+        # .toc and .spec files can be huge; only tail them.
+        for line in _tail_file(path, lines=80):
+            log(line)
+
 def run_command(args: list[str], label: str) -> None:
     log("")
     log(f"=== {label} ===")
@@ -240,6 +293,7 @@ def run_command(args: list[str], label: str) -> None:
 
     ret = proc.wait()
     if ret != 0:
+        _dump_pyinstaller_diagnostics(label)
         raise RuntimeError(f"{label} failed with exit code {ret}")
 
 
@@ -283,8 +337,9 @@ def base_args(onefile: bool) -> list[str]:
         "--noconfirm",
         "--clean",
         "--windowed",
+        "--noupx",
         "--log-level",
-        "WARN",
+        os.environ.get("YSB_PYINSTALLER_LOG_LEVEL", "INFO"),
         "--paths",
         str(PROJECT_ROOT),
     ]
@@ -682,6 +737,38 @@ def cleanup_intermediate_outputs() -> None:
         remove_path(spec)
 
 
+RUNTIME_LEFTOVER_NAMES = {
+    "ysb_startup_stage.log",
+    "ysb_startup_crash.log",
+    "ysb_startup_faulthandler.log",
+    "ysb_runtime_debug.log",
+    "ysb_paddle_ocr_worker.log",
+}
+
+
+def cleanup_runtime_leftovers(package_dir: Path) -> None:
+    """Remove release-package diagnostic leftovers before final output.
+
+    These files may be created during local test runs, but final Lite/Local
+    packages should only contain user-facing executables and required runtime
+    files.
+    """
+    if not package_dir.exists():
+        return
+    for name in RUNTIME_LEFTOVER_NAMES:
+        remove_path(package_dir / name)
+    for pattern in ("ysb_startup_*.log", "ysb_runtime_debug*.log"):
+        for path in package_dir.glob(pattern):
+            remove_path(path)
+    local_runtime = package_dir / "local_runtime"
+    if local_runtime.exists():
+        for name in RUNTIME_LEFTOVER_NAMES:
+            remove_path(local_runtime / name)
+        for pattern in ("ysb_startup_*.log", "ysb_runtime_debug*.log", "ysb_paddle_ocr_worker*.log"):
+            for path in local_runtime.glob(pattern):
+                remove_path(path)
+
+
 def prepare_lite_package() -> None:
     lite_exe = DIST_DIR / f"{LITE_NAME}.exe"
     launcher_exe = DIST_DIR / f"{LAUNCHER_NAME}.exe"
@@ -694,6 +781,7 @@ def prepare_lite_package() -> None:
 
     shutil.copy2(lite_exe, lite_stage / lite_exe.name)
     shutil.copy2(launcher_exe, lite_stage / launcher_exe.name)
+    cleanup_runtime_leftovers(lite_stage)
 
     cleanup_intermediate_outputs()
 
@@ -833,22 +921,6 @@ def copy_local_ocr_runtime(local_stage: Path) -> None:
     log(f"Portable OCR Python runtime size: {format_bytes(folder_size(portable_python_dir))}")
     log(f"Portable OCR Python runtime prepare time: {elapsed:.1f}s")
 
-    helper = runtime_stage / "run_paddle_ocr_worker_probe.bat"
-    helper.write_text(
-        "@echo off\n"
-        "chcp 65001 >nul\n"
-        "cd /d %~dp0\\..\n"
-        "set PYTHONUTF8=1\n"
-        "set PYTHONIOENCODING=utf-8\n"
-        "set FLAGS_use_mkldnn=0\n"
-        "set FLAGS_use_onednn=0\n"
-        "echo External PaddleOCR worker portable runtime probe\n"
-        "local_runtime\\python\\python.exe local_runtime\\paddle_ocr_worker.py --help\n"
-        "echo.\n"
-        "local_runtime\\python\\python.exe -c \"import sys, paddle, paddleocr, pandas; print(sys.version); print('paddle=', paddle.__version__); print('paddleocr ok'); print('pandas=', pandas.__version__)\"\n"
-        "pause\n",
-        encoding="utf-8",
-    )
 
 def prepare_local_package() -> None:
     local_dir = DIST_DIR / LOCAL_NAME
@@ -870,32 +942,7 @@ def prepare_local_package() -> None:
 
     copy_local_ocr_runtime(local_stage)
 
-    # Runtime diagnostic helper.  This is intentionally left in the Local
-    # package so a windowed-startup crash can be reproduced with a visible
-    # console and a small log file without rebuilding.
-    debug_bat = local_stage / "run_local_debug_console_v2.1.0.bat"
-    debug_bat.write_text(
-        "@echo off\n"
-        "chcp 65001 >nul\n"
-        "cd /d %~dp0\n"
-        "set PYTHONUTF8=1\n"
-        "set PYTHONIOENCODING=utf-8\n"
-        "set PYTHONFAULTHANDLER=1\n"
-        "set QT_DEBUG_PLUGINS=1\n"
-        "set YSB_DEBUG_STARTUP=1\n"
-        "echo [YSB Local Debug] start: %date% %time% > ysb_runtime_debug.log\n"
-        "echo [YSB Local Debug] folder: %cd% >> ysb_runtime_debug.log\n"
-        f"echo [YSB Local Debug] exe: {LOCAL_NAME}.exe >> ysb_runtime_debug.log\n"
-        "echo. >> ysb_runtime_debug.log\n"
-        f"\"{LOCAL_NAME}.exe\" >> ysb_runtime_debug.log 2>&1\n"
-        "echo. >> ysb_runtime_debug.log\n"
-        "echo [YSB Local Debug] exit code: %errorlevel% >> ysb_runtime_debug.log\n"
-        "echo.\n"
-        "echo Debug log written: %cd%\\ysb_runtime_debug.log\n"
-        "echo Startup logs, if created: %cd%\\ysb_startup_*.log\n"
-        "pause\n",
-        encoding="utf-8",
-    )
+    cleanup_runtime_leftovers(local_stage)
 
     cleanup_intermediate_outputs()
 
@@ -903,7 +950,6 @@ def prepare_local_package() -> None:
     log("Local package prepared:")
     log(f"Local package folder: {local_stage}")
     log(f"Local package size: {format_bytes(folder_size(local_stage))}")
-    log(f"Local debug runner: {debug_bat}")
 
 
 def validate_layout(edition: str) -> None:

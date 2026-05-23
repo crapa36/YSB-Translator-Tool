@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Safe bootstrap driver for YSB v2.1.0 builds.
+"""Safe bootstrap driver for YSB builds.
 
 This script intentionally moves the fragile BAT logic into Python so a double-
 clicked build file does not close before showing the real error.  The BAT only
@@ -174,27 +174,28 @@ def install_requirements(edition: str, logger: Logger) -> None:
     steps.append(("build requirements", PROJECT_ROOT / "requirements" / "build.txt"))
 
     logger.write("[2/9] Upgrading pip...")
-    run([str(PY_EXE), "-m", "pip", "install", "--upgrade", "pip"], logger, "Upgrade pip")
+    # Keep pip below 26 for now. Some binary-heavy local packages changed resolver/log behavior in newer pip releases.
+    run([str(PY_EXE), "-m", "pip", "install", "--upgrade", "pip<26", "--prefer-binary"], logger, "Upgrade pip")
 
     index = 3
     for label, req in steps:
         if not req.exists():
             if label == "build requirements":
                 logger.write(f"[{index}/9] {label} file missing; installing PyInstaller directly...")
-                run([str(PIP_EXE), "install", "--upgrade", "pyinstaller"], logger, "Install PyInstaller")
+                run([str(PY_EXE), "-m", "pip", "install", "--upgrade", "--prefer-binary", "pyinstaller"], logger, "Install PyInstaller")
             else:
                 logger.write(f"[{index}/9] {label} file missing, skipped: {req}")
             index += 1
             continue
         logger.write(f"[{index}/9] Installing {label}...")
-        run([str(PIP_EXE), "install", "-r", str(req)], logger, f"Install {label}")
+        run([str(PY_EXE), "-m", "pip", "install", "--prefer-binary", "-r", str(req)], logger, f"Install {label}")
         index += 1
 
 
 def main(argv: list[str]) -> int:
     edition = (argv[1] if len(argv) > 1 else "").lower().strip()
     if edition not in VALID_EDITIONS:
-        print("Usage: python build_edition_bootstrap_v2_1_0.py [lite|local]")
+        print("Usage: python build_edition_bootstrap.py [lite|local]")
         return 2
 
     logger = Logger(build_bootstrap_log_path(edition))
@@ -212,7 +213,9 @@ def main(argv: list[str]) -> int:
         run([str(PY_EXE), str(BUILD_TOOLS_DIR / "build_probe.py"), edition], logger, f"Probe {edition}")
 
         logger.write(f"[8/9] Building {edition.capitalize()} package only...")
-        driver = BUILD_TOOLS_DIR / f"build_pyinstaller_{edition}_v2.1.0.py"
+        driver = BUILD_TOOLS_DIR / f"build_pyinstaller_{edition}.py"
+        if not driver.exists():
+            raise FileNotFoundError(f"Build driver not found: {driver}")
         run([str(PY_EXE), str(driver)], logger, f"Build {edition}")
 
         logger.write("")

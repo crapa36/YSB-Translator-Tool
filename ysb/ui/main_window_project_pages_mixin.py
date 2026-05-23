@@ -4349,7 +4349,7 @@ class MainWindowProjectPagesMixin:
         self.app_options["analysis_number_box_width"] = int(getattr(self, "analysis_number_box_width", 40))
         self.app_options[PAGE_TAB_DISPLAY_MODE_KEY] = normalize_page_display_mode(getattr(self, "page_tab_display_name_mode", DEFAULT_PAGE_DISPLAY_MODE))
         self.app_options[OUTPUT_DISPLAY_MODE_KEY] = normalize_page_display_mode(getattr(self, "output_display_name_mode", DEFAULT_PAGE_DISPLAY_MODE))
-        self.app_options[LOG_PANEL_COLLAPSED_KEY] = bool(getattr(self, "log_panel_collapsed", False))
+        self.app_options[LOG_PANEL_COLLAPSED_KEY] = bool(getattr(self, "log_panel_collapsed", DEFAULT_LOG_PANEL_COLLAPSED))
         self.app_options[SHOW_PATHS_IN_LOG_KEY] = bool(getattr(self, "show_paths_in_log", False))
         self.app_options[SHOW_CACHE_PATHS_IN_SETTINGS_KEY] = bool(getattr(self, "show_cache_paths_in_settings", False))
         self.app_options["temp_auto_cleanup_enabled"] = bool(self.app_options.get("temp_auto_cleanup_enabled", True))

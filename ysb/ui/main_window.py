@@ -58,6 +58,7 @@ class MainWindow(MainWindowInteractionMixin, MainWindowCloudMixin, MainWindowSet
         self.output_display_name_mode = normalize_page_display_mode(self.app_options.get(OUTPUT_DISPLAY_MODE_KEY, DEFAULT_PAGE_DISPLAY_MODE))
         self.show_paths_in_log = bool(self.app_options.get(SHOW_PATHS_IN_LOG_KEY, False))
         self.show_cache_paths_in_settings = bool(self.app_options.get(SHOW_CACHE_PATHS_IN_SETTINGS_KEY, False))
+        self.log_panel_collapsed = bool(self.app_options.get(LOG_PANEL_COLLAPSED_KEY, DEFAULT_LOG_PANEL_COLLAPSED))
         self.work_project_store = None
         self.work_project_dir = None
         self.has_unsaved_changes = False

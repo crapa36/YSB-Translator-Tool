@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-from build_pyinstaller_v2_1_0_core import build_edition, log
+from build_pyinstaller_core import build_edition, log
 
 
 if __name__ == "__main__":

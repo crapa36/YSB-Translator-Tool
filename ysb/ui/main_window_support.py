@@ -143,6 +143,9 @@ DEFAULT_ANALYSIS_PAINT_MASK_EXPAND_RATIO = 0.10
 DEFAULT_ANALYSIS_TEXT_MASK_MIN_EXPAND_PX = 5
 DEFAULT_ANALYSIS_PAINT_MASK_MIN_EXPAND_PX = 1
 LOG_PANEL_COLLAPSED_KEY = "log_panel_collapsed"
+# 기본값: 배포판 첫 실행 시 작업 로그창은 접힌 상태로 시작한다.
+# 사용자가 로그 열기/숨기기를 누르면 app_options.json에 저장된 상태를 우선한다.
+DEFAULT_LOG_PANEL_COLLAPSED = True
 SHOW_PATHS_IN_LOG_KEY = "show_paths_in_log"
 SHOW_CACHE_PATHS_IN_SETTINGS_KEY = "show_cache_paths_in_settings"
 

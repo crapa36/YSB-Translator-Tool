@@ -11,7 +11,7 @@ set "PYTHONIOENCODING=utf-8"
 
 title YSB Tool Lite Build
 
-echo YSB Tool Lite v2.1.0 build bootstrap
+echo YSB Tool Lite build bootstrap
 echo Project root: %PROJECT_ROOT%
 echo.
 
@@ -47,13 +47,13 @@ if not defined PY_CMD (
 echo Using build Python: %PY_CMD%
 %PY_CMD% --version
 
-%PY_CMD% "%BUILD_TOOLS_DIR%build_edition_bootstrap_v2_1_0.py" lite
+%PY_CMD% "%BUILD_TOOLS_DIR%build_edition_bootstrap.py" lite
 set "RC=%ERRORLEVEL%"
 
 echo.
 if not "%RC%"=="0" (
     echo Lite build failed. Exit code: %RC%
-    echo A bootstrap log should be in the project root: build_bootstrap_lite_v2.1.0.log
+    echo A bootstrap log should be in the project root: build_bootstrap_lite_v*.log
     goto :END_FAIL_CODE
 )
 

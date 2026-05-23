@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from pathlib import Path
+import os
 import sys
 from typing import Any
 
@@ -42,6 +43,49 @@ def _install_numpy_compat_aliases() -> None:
             np.int0 = np.intp  # type: ignore[attr-defined]
     except Exception:
         pass
+
+
+
+def _normalize_torch_device(torch_module: Any, device: str) -> str:
+    """Return a safe device string for release builds.
+
+    The bundled comic_text_detector model can be saved from a CUDA machine.
+    On CPU-only PCs, torch.load() must map storages to CPU or loading fails with:
+    "Attempting to deserialize object on a CUDA device...".
+
+    For YSB release builds, CPU is the safe default.  CUDA is used only when the
+    caller explicitly asks for it and the current torch runtime reports it as
+    available.
+    """
+    dev = str(device or "cpu").strip().lower()
+    if dev in ("cuda", "gpu") and bool(getattr(torch_module, "cuda", None)) and torch_module.cuda.is_available():
+        return "cuda"
+    return "cpu"
+
+
+@contextmanager
+def _torch_load_map_location(device: str):
+    """Temporarily make vendor torch.load() safe on CPU-only machines."""
+    import torch
+
+    original_load = torch.load
+    target = "cuda" if str(device).lower().startswith("cuda") and torch.cuda.is_available() else "cpu"
+    target_device = torch.device(target)
+
+    def _safe_load(*args, **kwargs):
+        # In CPU mode, override any missing/unsafe vendor map_location.
+        # This prevents CUDA-saved checkpoints from crashing on CPU-only PCs.
+        if target == "cpu":
+            kwargs["map_location"] = target_device
+        else:
+            kwargs.setdefault("map_location", target_device)
+        return original_load(*args, **kwargs)
+
+    torch.load = _safe_load  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        torch.load = original_load  # type: ignore[assignment]
 
 
 class ComicTextDetectorEngine:
@@ -86,28 +130,33 @@ class ComicTextDetectorEngine:
                 except ValueError:
                     pass
 
-    def _load_detector(self, *, input_size: int = 1024, device: str = "auto"):
-        if self._detector is not None and self._device == device and self._input_size == input_size:
-            return self._detector
-
+    def _load_detector(self, *, input_size: int = 1024, device: str = "cpu"):
         ok, reason = self.available()
         if not ok:
             raise RuntimeError(reason)
+
+        # Release default: do not auto-touch CUDA.  Many user PCs have no CUDA
+        # runtime, partially installed drivers, or CPU-only Torch.  CPU mode is
+        # slower but portable.
+        os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 
         with self._vendor_import_path():
             _install_numpy_compat_aliases()
             import torch
             from inference import TextDetector
 
-            if device == "auto":
-                device = "cuda" if torch.cuda.is_available() else "cpu"
-            self._detector = TextDetector(
-                model_path=str(self.model_path),
-                input_size=input_size,
-                device=device,
-                act="leaky",
-            )
-            self._device = device
+            resolved_device = _normalize_torch_device(torch, device)
+            if self._detector is not None and self._device == resolved_device and self._input_size == input_size:
+                return self._detector
+
+            with _torch_load_map_location(resolved_device):
+                self._detector = TextDetector(
+                    model_path=str(self.model_path),
+                    input_size=input_size,
+                    device=resolved_device,
+                    act="leaky",
+                )
+            self._device = resolved_device
             self._input_size = input_size
             return self._detector
 
@@ -143,7 +192,7 @@ class ComicTextDetectorEngine:
 
             options = request.options or {}
             input_size = int(options.get("input_size", 1024))
-            device = str(options.get("device", "auto"))
+            device = str(options.get("device", "cpu"))
             save_masks = bool(options.get("save_masks", False))
             output_dir = Path(options.get("output_dir") or image_path.parent)
             keep_undetected_mask = bool(options.get("keep_undetected_mask", True))
