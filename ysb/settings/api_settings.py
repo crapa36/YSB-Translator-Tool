@@ -262,7 +262,10 @@ class ApiSettingsStore:
             # Local판에서만 안정 조합인 LOCAL Paddle OCR / LOCAL LaMa를 허용한다.
             legacy_ocr_provider = str(base.get("selected_ocr_provider", "") or "").lower()
             if legacy_ocr_provider.startswith("local_"):
-                base["selected_ocr_provider"] = "local_paddle_ocr" if local_enabled else "clova"
+                if local_enabled and legacy_ocr_provider in ("local_paddle_ocr", "local_manga_ocr"):
+                    base["selected_ocr_provider"] = legacy_ocr_provider
+                else:
+                    base["selected_ocr_provider"] = "local_paddle_ocr" if local_enabled else "clova"
 
             legacy_inpaint_provider = str(base.get("selected_inpaint_provider", "") or "").lower()
             if legacy_inpaint_provider.startswith("local_"):
@@ -304,7 +307,10 @@ def apply_settings_to_config(settings: ApiSettings):
         # OCR
         Config.OCR_PROVIDER = (settings.selected_ocr_provider or "clova").strip() or "clova"
         if Config.OCR_PROVIDER.startswith("local_"):
-            Config.OCR_PROVIDER = "local_paddle_ocr" if local_enabled else "clova"
+            if local_enabled and Config.OCR_PROVIDER in ("local_paddle_ocr", "local_manga_ocr"):
+                Config.OCR_PROVIDER = Config.OCR_PROVIDER
+            else:
+                Config.OCR_PROVIDER = "local_paddle_ocr" if local_enabled else "clova"
         Config.CLOVA_API_URL = settings.clova_api_url.strip()
         Config.CLOVA_SECRET_KEY = settings.clova_secret_key.strip()
         Config.CLOVA_MODEL = settings.clova_model.strip() or "clova_ocr_v2"
@@ -469,11 +475,17 @@ class ApiSettingsDialog(QDialog):
                 {
                     "provider": "local_paddle_ocr",
                     "title": "LOCAL Paddle OCR",
-                    "description": "Local판 전용 OCR입니다. comic_text_detector로 텍스트 영역/마스크를 안전하게 만들고, PaddleOCR로 각 영역의 원문을 인식합니다. raw mask는 직접 사용하지 않습니다.",
+                    "description": "Local판 전용 OCR입니다. 이미지 안의 텍스트 영역을 찾아 PaddleOCR로 원문을 인식합니다.",
                     "fields": [
                         ("Device", "local_paddle_mask_device", False, "auto", "combo", [("자동", "auto"), ("CPU", "cpu"), ("CUDA", "cuda")]),
                         ("OCR 언어", "local_paddle_ocr_language", False, "일본어", "combo", [("일본어", "ja"), ("영어", "en"), ("한국어", "ko"), ("중국어", "zh")]),
                     ],
+                },
+                {
+                    "provider": "local_manga_ocr",
+                    "title": "LOCAL Manga OCR",
+                    "description": "Local판 전용 일본어 만화 OCR입니다. 일본어 만화 원문 인식에 특화된 모델을 사용합니다.",
+                    "fields": [],
                 },
             ])
         self._add_api_section(ocr_content_layout, "OCR", ocr_cards, "selected_ocr_provider")

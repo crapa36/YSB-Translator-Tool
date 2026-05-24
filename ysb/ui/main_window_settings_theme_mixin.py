@@ -922,6 +922,7 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         menu.addAction(self.actions["option_translation_prompt"])
         menu.addAction(self.actions["option_glossary"])
         menu.addAction(self.actions["option_analysis_mask_settings"])
+        menu.addAction(self.actions["option_ocr_analysis_regions"])
         menu.addSeparator()
         menu.addAction(self.actions["option_shortcut_settings"])
         menu.addAction(self.actions["option_macro_settings"])
@@ -1067,41 +1068,64 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         project_menu.addAction(self.actions["option_settings_overview"])
 
         work_menu = menubar.addMenu(self.tr_ui("작업")); self.work_menu = work_menu
-        work_menu.addAction(self.actions["work_tab_cycle"])
-        work_menu.addAction(self.actions["work_page_prev"])
-        work_menu.addAction(self.actions["work_page_next"])
-        work_menu.addAction(self.actions["work_page_list"])
-        work_menu.addAction(self.actions["work_page_full_name"])
+        work_menu.addSection(self.tr_ui("기본동작"))
+        work_menu.addAction(self.actions["work_source_compare"])
+        work_menu.addAction(self.actions["work_open_current_project_folder"])
+        work_menu.addAction(self.actions["work_export"])
+        work_menu.addSeparator()
+
+        work_menu.addSection(self.tr_ui("페이지탭"))
         work_menu.addAction(self.actions["work_page_rename_source"])
         work_menu.addAction(self.actions["work_page_delete_current"])
         work_menu.addSeparator()
-        work_menu.addAction(self.actions["work_open_current_project_folder"])
-        work_menu.addSeparator()
+
+        work_menu.addSection(self.tr_ui("작업류"))
         work_menu.addAction(self.actions["work_analyze"])
-        work_menu.addAction(self.actions["work_text_number_width"])
         work_menu.addAction(self.actions["work_translate"])
         work_menu.addAction(self.actions["work_inpaint"])
-        work_menu.addAction(self.actions["work_inpaint_source"])
-        work_menu.addAction(self.actions["work_restore_original_source"])
+        work_menu.addSeparator()
+
+        work_menu.addSection(self.tr_ui("텍스트 수정류"))
         work_menu.addAction(self.actions["work_extract_text"])
         work_menu.addAction(self.actions["work_import_translation"])
         work_menu.addAction(self.actions["work_clear_translation"])
         work_menu.addAction(self.actions["work_clean_text"])
+        work_menu.addSeparator()
+
+        work_menu.addSection(self.tr_ui("이미지 교체류"))
+        work_menu.addAction(self.actions["work_inpaint_source"])
+        if "final_paint_to_background" in self.actions:
+            work_menu.addAction(self.actions["final_paint_to_background"])
+        work_menu.addAction(self.actions["work_restore_original_source"])
+        work_menu.addSeparator()
+
+        work_menu.addSection(self.tr_ui("기타 동작"))
+        work_menu.addAction(self.actions["work_quick_ocr"])
+        work_menu.addAction(self.actions["work_text_number_width"])
         work_menu.addAction(self.actions["work_reset_text_rects"])
-        work_menu.addAction(self.actions["work_export"])
 
         batch_menu = menubar.addMenu(self.tr_ui("일괄 작업")); self.batch_menu = batch_menu
-        batch_menu.addAction(self.actions["work_page_delete_all"])
+        batch_menu.addSection(self.tr_ui("기본 동작"))
+        batch_menu.addAction(self.actions["batch_export"])
         batch_menu.addSeparator()
+
+        batch_menu.addSection(self.tr_ui("일괄 작업류"))
         batch_menu.addAction(self.actions["batch_analyze"])
         batch_menu.addAction(self.actions["batch_translate"])
         batch_menu.addAction(self.actions["batch_inpaint"])
+        batch_menu.addSeparator()
+
+        batch_menu.addSection(self.tr_ui("텍스트 수정류"))
         batch_menu.addAction(self.actions["batch_extract_text"])
         batch_menu.addAction(self.actions["batch_import_translation"])
         batch_menu.addAction(self.actions["batch_clear_translation"])
         batch_menu.addAction(self.actions["batch_clean_text"])
+        batch_menu.addSeparator()
+
+        batch_menu.addSection(self.tr_ui("기타 동작"))
         batch_menu.addAction(self.actions["batch_reset_text_rects"])
-        batch_menu.addAction(self.actions["batch_export"])
+        if "work_page_delete_all" in self.actions:
+            batch_menu.addAction(self.actions["work_page_delete_all"])
 
         auto_menu = menubar.addMenu(self.tr_ui("자동화 작업")); self.auto_menu = auto_menu
         auto_menu.addAction(self.actions["auto_text_size_current"])
@@ -1130,6 +1154,7 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         option_menu.addAction(self.actions["option_item_text_preset_settings"])
         option_menu.addSeparator()
         option_menu.addAction(self.actions["option_analysis_mask_settings"])
+        option_menu.addAction(self.actions["option_ocr_analysis_regions"])
         option_menu.addAction(self.actions["option_cleanup_outputs"])
         settings_menu = menubar.addMenu(self.tr_ui("설정")); self.settings_menu = settings_menu
         settings_menu.addAction(self.actions["option_auto_save_mode"])
@@ -1197,6 +1222,12 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
 
         self.view = MuleImageViewer(self)
         self.view.scene.selectionChanged.connect(self.on_scene_selection_changed)
+        try:
+            self.view.installEventFilter(self)
+            self.view.viewport().installEventFilter(self)
+            self.view.viewport().setMouseTracking(True)
+        except Exception:
+            pass
 
         tb = QToolBar(orientation=Qt.Orientation.Vertical)
         tb.setStyleSheet("background:#24282f; border:1px solid #3b414c; border-radius:0px;")
@@ -1209,9 +1240,6 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         self.act_reanal.triggered.connect(self.reanalyze_mask)
         tb.addAction(self.act_reanal)
 
-        self.act_undo = QAction("↩️", self)
-        self.act_undo.triggered.connect(self.handle_general_undo)
-        tb.addAction(self.act_undo)
 
         self.act_magic = QAction("⭐", self)
         self.act_magic.triggered.connect(lambda *args: self.set_tool('magic_wand'))
@@ -1255,6 +1283,23 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         self.act_final_paint_color = QAction("", self)
         self.act_final_paint_color.triggered.connect(lambda *args: self.pick_color("final_paint"))
         tb.addAction(self.act_final_paint_color)
+
+        self.act_final_area_paint = QAction("▦", self)
+        self.act_final_area_paint.setToolTip("")
+        self.act_final_area_paint.setStatusTip("")
+        self.act_final_area_paint.setWhatsThis("")
+        self.act_final_area_paint.triggered.connect(lambda *args: self.set_tool("area_paint"))
+        tb.addAction(self.act_final_area_paint)
+        try:
+            _area_paint_widget = tb.widgetForAction(self.act_final_area_paint)
+            if _area_paint_widget is not None:
+                _area_paint_widget.setToolTip("")
+                try:
+                    _area_paint_widget.clicked.connect(lambda checked=False: self.set_tool("area_paint"))
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
         self.act_final_text_tool = QAction("T", self)
         self.act_final_text_tool.triggered.connect(lambda *args: self.set_tool("final_text"))
@@ -1339,7 +1384,7 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
 
         self.final_edit_bar = QWidget()
         final_bar = QHBoxLayout(self.final_edit_bar)
-        final_bar.setContentsMargins(6, 4, 6, 4)
+        final_bar.setContentsMargins(6, 1, 6, 1)
         final_bar.setSpacing(6)
         self.final_item_font = QFontComboBox()
         self.final_item_font.setMinimumWidth(180)
@@ -1367,10 +1412,15 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         final_bar.addWidget(self.btn_item_align_right)
         self.final_edit_bar.hide()
         vl.addWidget(self.final_edit_bar)
+        try:
+            self.final_edit_bar.setFixedHeight(30)
+            self.final_edit_bar.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        except Exception:
+            pass
 
         self.final_paint_option_bar = QWidget()
         final_paint_bar = QHBoxLayout(self.final_paint_option_bar)
-        final_paint_bar.setContentsMargins(6, 4, 6, 4)
+        final_paint_bar.setContentsMargins(6, 1, 6, 1)
         final_paint_bar.setSpacing(6)
         self.sb_final_paint_opacity = QSpinBox()
         self.sb_final_paint_opacity.setRange(1, 100)
@@ -1384,10 +1434,39 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         final_paint_bar.addStretch()
         self.final_paint_option_bar.hide()
         vl.addWidget(self.final_paint_option_bar)
+        try:
+            self.final_paint_option_bar.setFixedHeight(30)
+            self.final_paint_option_bar.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        except Exception:
+            pass
+
+        self.area_paint_bar = QWidget()
+        area_paint_bar_lay = QHBoxLayout(self.area_paint_bar)
+        area_paint_bar_lay.setContentsMargins(6, 1, 6, 1)
+        area_paint_bar_lay.setSpacing(6)
+        self.btn_area_paint_rect = QPushButton(self.tr_ui("▭ 사각형"))
+        self.btn_area_paint_rect.setCheckable(True)
+        self.btn_area_paint_rect.clicked.connect(lambda checked=False: self.set_area_paint_shape("rect"))
+        self.btn_area_paint_free = QPushButton(self.tr_ui("✎ 자유형"))
+        self.btn_area_paint_free.setCheckable(True)
+        self.btn_area_paint_free.clicked.connect(lambda checked=False: self.set_area_paint_shape("free"))
+        area_paint_bar_lay.addWidget(QLabel(self.tr_ui("영역 페인팅")))
+        area_paint_bar_lay.addWidget(self.btn_area_paint_rect)
+        area_paint_bar_lay.addWidget(self.btn_area_paint_free)
+        area_paint_bar_lay.addWidget(QLabel(self.tr_ui("선택한 영역을 현재 최종 페인팅 색상으로 채웁니다.")))
+        area_paint_bar_lay.addStretch()
+        self.area_paint_bar.hide()
+        vl.addWidget(self.area_paint_bar)
+        try:
+            self.area_paint_bar.setFixedHeight(30)
+            self.area_paint_bar.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        except Exception:
+            pass
+        self.set_area_paint_shape("rect", silent=True)
 
         self.magic_wand_bar = QWidget()
         magic_bar = QHBoxLayout(self.magic_wand_bar)
-        magic_bar.setContentsMargins(6, 4, 6, 4)
+        magic_bar.setContentsMargins(6, 1, 6, 1)
         magic_bar.setSpacing(6)
         self.sb_magic_tolerance = QSpinBox()
         self.sb_magic_tolerance.setRange(0, 255)
@@ -1414,11 +1493,16 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         magic_bar.addStretch()
         self.magic_wand_bar.hide()
         vl.addWidget(self.magic_wand_bar)
+        try:
+            self.magic_wand_bar.setFixedHeight(30)
+            self.magic_wand_bar.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        except Exception:
+            pass
         self.sb_magic_tolerance.valueChanged.connect(self.on_magic_wand_tolerance_changed)
 
         self.mask_wrap_bar = QWidget()
         mask_wrap_bar_lay = QHBoxLayout(self.mask_wrap_bar)
-        mask_wrap_bar_lay.setContentsMargins(6, 4, 6, 4)
+        mask_wrap_bar_lay.setContentsMargins(6, 1, 6, 1)
         mask_wrap_bar_lay.setSpacing(6)
         self.btn_mask_wrap_rect = QPushButton(self.tr_ui("▭ 사각형"))
         self.btn_mask_wrap_rect.setCheckable(True)
@@ -1433,11 +1517,16 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         mask_wrap_bar_lay.addStretch()
         self.mask_wrap_bar.hide()
         vl.addWidget(self.mask_wrap_bar)
+        try:
+            self.mask_wrap_bar.setFixedHeight(30)
+            self.mask_wrap_bar.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        except Exception:
+            pass
         self.set_mask_wrap_shape("rect", silent=True)
 
         self.mask_cut_bar = QWidget()
         mask_cut_bar_lay = QHBoxLayout(self.mask_cut_bar)
-        mask_cut_bar_lay.setContentsMargins(6, 4, 6, 4)
+        mask_cut_bar_lay.setContentsMargins(6, 1, 6, 1)
         mask_cut_bar_lay.setSpacing(6)
         self.btn_mask_cut_rect = QPushButton(self.tr_ui("▭ 사각형"))
         self.btn_mask_cut_rect.setCheckable(True)
@@ -1458,9 +1547,99 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         mask_cut_bar_lay.addStretch()
         self.mask_cut_bar.hide()
         vl.addWidget(self.mask_cut_bar)
+        try:
+            self.mask_cut_bar.setFixedHeight(30)
+            self.mask_cut_bar.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        except Exception:
+            pass
         self.set_mask_cut_shape("rect", silent=True)
 
-        vl.addWidget(self.view)
+        self.ocr_region_bar = QWidget()
+        ocr_region_bar_lay = QHBoxLayout(self.ocr_region_bar)
+        ocr_region_bar_lay.setContentsMargins(6, 1, 6, 1)
+        ocr_region_bar_lay.setSpacing(6)
+        self.btn_ocr_region_rect = QPushButton(self.tr_ui("▭ 사각형"))
+        self.btn_ocr_region_rect.setCheckable(True)
+        self.btn_ocr_region_rect.clicked.connect(lambda checked=False: self.set_ocr_region_shape("rect"))
+        self.btn_ocr_region_free = QPushButton(self.tr_ui("✎ 자유형"))
+        self.btn_ocr_region_free.setCheckable(True)
+        self.btn_ocr_region_free.clicked.connect(lambda checked=False: self.set_ocr_region_shape("free"))
+        self.btn_ocr_region_finish = QPushButton(self.tr_ui("분석 영역 지정 종료"))
+        self.btn_ocr_region_finish.clicked.connect(self.finish_ocr_analysis_region_selection)
+        ocr_region_bar_lay.addWidget(QLabel(self.tr_ui("OCR 분석 영역")))
+        ocr_region_bar_lay.addWidget(self.btn_ocr_region_rect)
+        ocr_region_bar_lay.addWidget(self.btn_ocr_region_free)
+        ocr_region_bar_lay.addWidget(QLabel(self.tr_ui("OCR이 읽을 범위를 드래그로 지정합니다.")))
+        ocr_region_bar_lay.addStretch()
+        ocr_region_bar_lay.addWidget(self.btn_ocr_region_finish)
+        self.ocr_region_bar.hide()
+        vl.addWidget(self.ocr_region_bar)
+        try:
+            self.ocr_region_bar.setFixedHeight(30)
+            self.ocr_region_bar.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        except Exception:
+            pass
+        self.set_ocr_region_shape("rect", silent=True)
+
+        self.source_compare_bar = QWidget()
+        source_compare_bar_lay = QHBoxLayout(self.source_compare_bar)
+        source_compare_bar_lay.setContentsMargins(6, 1, 6, 1)
+        source_compare_bar_lay.setSpacing(6)
+        source_compare_bar_lay.addStretch()
+
+        self.source_compare_controls = QWidget()
+        source_compare_controls_lay = QHBoxLayout(self.source_compare_controls)
+        source_compare_controls_lay.setContentsMargins(0, 0, 0, 0)
+        source_compare_controls_lay.setSpacing(6)
+        self.cb_source_compare_sync = QCheckBox(self.tr_ui("스크롤 동기화"))
+        self.cb_source_compare_sync.setChecked(True)
+        self.cb_source_compare_sync.toggled.connect(self.on_source_compare_sync_toggled)
+        self.btn_source_compare_close = QPushButton(self.tr_ui("원본 비교창 끄기"))
+        self.btn_source_compare_close.clicked.connect(self.close_source_compare_view)
+        source_compare_controls_lay.addWidget(self.cb_source_compare_sync)
+        source_compare_controls_lay.addWidget(self.btn_source_compare_close)
+        source_compare_bar_lay.addWidget(self.source_compare_controls)
+        self.source_compare_controls.hide()
+        self.source_compare_bar.hide()
+        vl.addWidget(self.source_compare_bar)
+        try:
+            self.source_compare_bar.setFixedHeight(30)
+            self.source_compare_bar.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        except Exception:
+            pass
+
+        self.source_compare_view = QGraphicsView()
+        self.source_compare_scene = QGraphicsScene(self.source_compare_view)
+        self.source_compare_view.setScene(self.source_compare_scene)
+        self.source_compare_view.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self.source_compare_view.setBackgroundBrush(QBrush(QColor(30, 30, 30)))
+        self.source_compare_view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        self.source_compare_view.setMinimumWidth(0)
+        try:
+            self.source_compare_view.viewport().installEventFilter(self)
+        except Exception:
+            pass
+        self.source_compare_view.hide()
+
+        self.source_compare_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.source_compare_splitter.setHandleWidth(6)
+        self.source_compare_splitter.addWidget(self.source_compare_view)
+        self.source_compare_splitter.addWidget(self.view)
+        self.source_compare_splitter.setChildrenCollapsible(True)
+        self.source_compare_splitter.setCollapsible(0, True)
+        self.source_compare_splitter.setCollapsible(1, False)
+        self.source_compare_splitter.setStretchFactor(0, 1)
+        self.source_compare_splitter.setStretchFactor(1, 2)
+        self.source_compare_splitter.setSizes([0, 1200])
+        vl.addWidget(self.source_compare_splitter)
+
+        try:
+            self.source_compare_splitter.splitterMoved.connect(lambda pos, index: self.schedule_source_compare_sync(0))
+            self.view.horizontalScrollBar().valueChanged.connect(lambda value: self.schedule_source_compare_sync(0))
+            self.view.verticalScrollBar().valueChanged.connect(lambda value: self.schedule_source_compare_sync(0))
+        except Exception:
+            pass
+
         ll.addWidget(vc)
 
         cl = QHBoxLayout()
@@ -1848,7 +2027,7 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
             getattr(self, 'page_tab_bar', None), getattr(self, 'btn_page_tab_menu', None),
         ]
         self.page_required_action_keys = [
-            'work_analyze', 'paint_reanalyze', 'work_translate', 'work_inpaint', 'work_inpaint_source',
+            'work_analyze', 'work_quick_ocr', 'paint_reanalyze', 'work_translate', 'work_inpaint', 'work_inpaint_source',
             'batch_analyze', 'batch_translate', 'batch_inpaint', 'work_page_prev', 'work_page_next', 'work_page_list', 'work_page_full_name',
         ]
         self.update_color_button_styles()
@@ -2287,26 +2466,30 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
             "project_recover_last_work": "복구하기",
             "option_settings_overview": "설정 / 옵션",
             "work_tab_cycle": "작업탭 변경",
+            "paint_undo": "작업 취소",
+            "paint_redo": "작업 재실행",
             "work_page_prev": "이전 페이지",
             "work_page_next": "다음 페이지",
             "work_page_list": "페이지 목록",
             "work_page_full_name": "현재 페이지 이름 보기",
             "work_page_rename_source": "페이지 탭 파일명 변경",
-            "work_page_delete_current": "현재 이미지탭 삭제",
-            "work_page_delete_all": "전체 이미지탭 삭제",
+            "work_page_delete_current": "현재 페이지 탭 삭제",
+            "work_page_delete_all": "전체 페이지 탭 삭제",
             "work_open_current_project_folder": "현재 프로젝트의 작업 폴더로 이동하기",
-            "work_analyze": "개별 분석",
+            "work_analyze": "분석",
+            "work_quick_ocr": "빠른 OCR 설정",
+            "quick_ocr_execute": "빠른 OCR 실행",
             "work_text_number_width": "텍스트 넘버 크기 변경",
-            "work_translate": "개별 번역",
-            "work_inpaint": "개별 인페인팅",
+            "work_translate": "번역",
+            "work_inpaint": "인페인팅",
             "work_inpaint_source": "인페인팅을 원본으로",
             "work_restore_original_source": "원본으로 돌아가기",
-            "work_extract_text": "개별 지문 추출",
-            "work_import_translation": "개별 번역문 불러오기",
+            "work_extract_text": "지문 추출",
+            "work_import_translation": "번역문 불러오기",
             "work_clear_translation": "번역문 내용 지우기",
-            "work_clean_text": "개별 텍스트 정리",
-            "work_reset_text_rects": "현재 텍스트 기준 영역 재설정",
-            "work_export": "개별 출력",
+            "work_clean_text": "텍스트 정리",
+            "work_reset_text_rects": "현재 텍스트 기준으로 영역 재설정",
+            "work_export": "출력",
             "batch_analyze": "일괄 분석",
             "batch_translate": "일괄 번역",
             "batch_inpaint": "일괄 인페인팅",
@@ -2314,7 +2497,7 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
             "batch_import_translation": "일괄 번역문 불러오기",
             "batch_clear_translation": "일괄 번역문 내용 지우기",
             "batch_clean_text": "일괄 텍스트 정리",
-            "batch_reset_text_rects": "일괄 텍스트 기준 영역 재설정",
+            "batch_reset_text_rects": "일괄 현재 텍스트 기준으로 영역 재설정",
             "batch_export": "일괄 출력",
             "auto_text_size_current": "자동 텍스트 크기 조정",
             "auto_text_size_batch": "일괄 자동 텍스트 크기 조정",
@@ -2330,6 +2513,7 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
             "option_translation_prompt": "번역 프롬프트 입력",
             "option_glossary": "단어장",
             "option_analysis_mask_settings": "분석 마스크 확장 비율",
+            "option_ocr_analysis_regions": "OCR 분석 범위 지정",
             "option_cleanup_outputs": "출력물 삭제",
             "option_workspace_location": "작업 폴더 위치 변경",
             "option_workspace_reset_default": "작업 폴더 위치 기본값으로 변경",
@@ -2357,11 +2541,11 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
             "paint_mask_toggle": "마스크 ON/OFF",
             "view_text_toggle": "텍스트 표시 ON/OFF",
             "final_paint_color": "최종 페인팅 색상",
-            "final_paint_to_background": "최종 페인팅을 배경으로 반영",
+            "final_paint_to_background": "최종 페인팅을 배경에 반영",
             "final_text_tool": "최종 텍스트 도구",
             "final_paint_above_toggle": "텍스트 위 페인팅 ON/OFF",
-            "final_paint_opacity_inc": "최종 브러시 불투명도 증가",
-            "final_paint_opacity_dec": "최종 브러시 불투명도 감소",
+            "final_paint_opacity_inc": "브러시 불투명도 증가",
+            "final_paint_opacity_dec": "브러시 불투명도 감소",
         }
         for key, ko in action_ko.items():
             action = self.actions.get(key)
@@ -2462,6 +2646,10 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
                 self.btn_mask_cut_rect.setText(self.tr_ui("▭ 사각형"))
             if hasattr(self, "btn_mask_cut_free"):
                 self.btn_mask_cut_free.setText(self.tr_ui("✎ 자유형"))
+            if hasattr(self, "btn_area_paint_rect"):
+                self.btn_area_paint_rect.setText(self.tr_ui("▭ 사각형"))
+            if hasattr(self, "btn_area_paint_free"):
+                self.btn_area_paint_free.setText(self.tr_ui("✎ 자유형"))
             if hasattr(self, "btn_translate"):
                 self.btn_translate.setText(self.tr_ui("🌐 번역"))
             if hasattr(self, "btn_inpaint"):

@@ -1,9 +1,7 @@
-# External PaddleOCR worker portable Python runtime dependencies.
-# This set is installed into local_runtime/python/Lib/site-packages by the Local build.
-# Keep this focused on OCR only; comic_text_detector and LaMa stay frozen in the Local EXE.
+# Legacy combined OCR worker requirements file.
+# The build now uses split runtime requirement files:
+# - requirements/paddle_ocr_worker.txt
+# - requirements/manga_ocr_worker.txt
+# Keep this file for compatibility with older scripts.
 
-numpy==1.26.4
-paddlepaddle==3.2.2
-paddleocr==3.5.0
-pandas
-setuptools==81.0.0
+-r paddle_ocr_worker.txt

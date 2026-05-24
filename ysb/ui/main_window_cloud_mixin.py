@@ -669,10 +669,11 @@ class MainWindowCloudMixin:
 
     def iter_cache_backup_sources(self, include_api_keys=False):
         """백업할 작업환경 캐시 파일 목록을 (실제경로, ZIP 내부경로)로 반환한다.
-        API 키 제외가 기본이며, cloud/work_sessions 같은 임시성/토큰성 폴더는 제외한다.
+        API 키 제외가 기본이며, cloud/work_sessions/imported_fonts 같은 임시성/대용량 폴더는 제외한다.
+        폰트 파일은 용량과 라이선스 문제를 피하기 위해 캐시 백업에 포함하지 않는다.
         """
         cache_root = get_cache_dir()
-        excluded_dirs = {"cloud", "work_sessions", "__pycache__", "recent_thumbnails"}
+        excluded_dirs = {"cloud", "work_sessions", "__pycache__", "recent_thumbnails", "imported_fonts"}
         excluded_files = {
             "google_drive_token.json",
             "cloud_config.json",
@@ -699,6 +700,7 @@ class MainWindowCloudMixin:
         # 작업 폴더 위치(workspace_config.json)는 PC별 로컬 설정이다.
         # 다른 PC에서 복원하면 Windows 사용자명이 달라져 경로가 깨질 수 있으므로
         # 클라우드 캐시 백업에는 포함하지 않는다.
+        # imported_fonts 폴더의 실제 폰트 파일도 용량/라이선스 문제를 피하기 위해 백업하지 않는다.
 
     def create_cache_backup_zip(self, include_api_keys=False, api_password=None):
         ts = time.strftime("%Y%m%d_%H%M%S")
@@ -902,7 +904,7 @@ class MainWindowCloudMixin:
 
                 if name.startswith("cache/"):
                     rel = Path(name[len("cache/"):])
-                    if rel.parts and rel.parts[0] in ("cloud", "work_sessions", "__pycache__"):
+                    if rel.parts and rel.parts[0] in ("cloud", "work_sessions", "__pycache__", "recent_thumbnails", "imported_fonts"):
                         continue
                     if rel.name == "api_cache.json" and not apply_api_keys:
                         continue
@@ -1230,7 +1232,7 @@ class MainWindowCloudMixin:
             self._cloud_info_row(
                 layout,
                 "백업 대상",
-                "옵션, 단축키, 매크로, 글꼴 프리셋, 번역 프롬프트, 단어장 같은 작업환경 캐시를 클라우드에 백업합니다.",
+                "옵션, 단축키, 매크로, 글꼴 프리셋, 번역 프롬프트, 단어장 같은 작업환경 캐시를 클라우드에 백업합니다. 불러온 폰트 파일 자체는 용량과 라이선스 문제를 피하기 위해 백업하지 않습니다.",
             )
             api_box = QFrame(dlg)
             api_box.setObjectName("SettingsItem")
@@ -1646,7 +1648,7 @@ class MainWindowCloudMixin:
         )
         add_cloud_item(
             "클라우드로 캐시 백업",
-            "옵션, 단축키, 매크로, 프리셋, 프롬프트, 단어장 같은 작업환경 캐시를 백업합니다. API 키는 체크박스로 별도 선택하며, 포함 시 업로드 전 암호화와 불러오기 시 복호화가 필수입니다.",
+            "옵션, 단축키, 매크로, 프리셋, 프롬프트, 단어장 같은 작업환경 캐시를 백업합니다. 불러온 폰트 파일 자체는 백업하지 않습니다. API 키는 체크박스로 별도 선택하며, 포함 시 업로드 전 암호화와 불러오기 시 복호화가 필수입니다.",
             "캐시 백업",
             self.cloud_backup_cache,
         )

@@ -16,6 +16,7 @@ set "CHOICE_VALUE=%ERRORLEVEL%"
 
 if "%CHOICE_VALUE%"=="1" goto BUILD_LITE
 if "%CHOICE_VALUE%"=="2" goto BUILD_LOCAL
+if "%CHOICE_VALUE%"=="3" goto END
 goto END
 
 :BUILD_LITE
@@ -27,6 +28,7 @@ goto END_WITH_CODE
 call "%BUILD_TOOLS_DIR%build_local_exe.bat"
 set "RC=%ERRORLEVEL%"
 goto END_WITH_CODE
+
 
 :END_WITH_CODE
 exit /b %RC%

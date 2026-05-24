@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QGridLayout, QLabel, QDialogButtonBox,
     QTabWidget, QWidget, QPushButton, QHBoxLayout, QMessageBox, QScrollArea,
     QCheckBox, QInputDialog, QLineEdit, QListWidget, QListWidgetItem,
-    QAbstractItemView
+    QAbstractItemView, QFrame, QSizePolicy
 )
 from PyQt6.QtGui import QKeySequence
 from PyQt6.QtCore import Qt, QEvent
@@ -69,41 +69,32 @@ def resolve_ui_theme(widget=None):
 
 
 def shortcut_dialog_qss(theme=THEME_DARK):
-    """단축키/매크로/프리셋 계열 창 공통 몽글 카드 스타일."""
+    """단축키/매크로/프리셋 계열 창 공통 카드형 스타일."""
     if str(theme).lower() == THEME_LIGHT:
         return """
-            QDialog, QWidget { background-color:#f4f6fa; color:#22252b; }
+            QDialog { background:#f4f6fa; color:#22252b; }
+            QScrollArea { background:transparent; border:0; }
             QLabel { color:#22252b; }
-            QTabWidget::pane {
-                border:1px solid #dfe5ef;
-                border-radius:0px;
+            QFrame#SettingsBlock {
                 background:#ffffff;
-                top:-1px;
-            }
-            QTabBar::tab {
-                background:#edf1f7;
-                color:#4b5563;
-                border:1px solid #d9e0ea;
-                border-bottom:none;
-                border-top-left-radius:10px;
-                border-top-right-radius:10px;
-                padding:4px 10px;
-                min-width:100px;
-            }
-            QTabBar::tab:selected { background:#ffffff; color:#1f232b; font-weight:700; }
-            QTabBar::tab:!selected { background:#edf1f7; color:#667085; }
-            QTabBar::tab:hover { background:#edf4ff; color:#111827; }
-            QScrollArea, QListWidget, QTableWidget, QTreeWidget {
-                background:#ffffff;
-                color:#22252b;
                 border:1px solid #dfe5ef;
-                border-radius:0px;
-                alternate-background-color:#f7f9fd;
-                selection-background-color:#dbeafe;
-                selection-color:#111827;
+                border-radius:16px;
             }
+            QFrame#SettingsItem {
+                background:#f9fbfe;
+                border:1px solid #e4eaf3;
+                border-radius:14px;
+            }
+            QFrame#SettingsItem[shortcutEnabled="false"] {
+                background:#eef1f6;
+                border:1px solid #d7dde8;
+            }
+            QLabel#SettingsItemTitle { font-size:13px; font-weight:700; color:#1f232b; }
+            QLabel#SettingsTitle, QLabel#SettingsDialogTitle { font-size:22px; font-weight:800; color:#1f232b; }
+            QLabel#SettingsSectionTitle { font-size:16px; font-weight:750; color:#1f232b; }
+            QLabel#SettingsDescription { color:#667085; line-height:140%; }
             QLineEdit, QTextEdit, QPlainTextEdit, QKeySequenceEdit, QComboBox, QSpinBox, QDoubleSpinBox {
-                background-color:#ffffff;
+                background:#ffffff;
                 color:#22252b;
                 border:1px solid #cfd7e5;
                 border-radius:0px;
@@ -113,64 +104,76 @@ def shortcut_dialog_qss(theme=THEME_DARK):
             }
             QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QKeySequenceEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {
                 border:1px solid #8fb4e8;
+                background:#ffffff;
             }
-QCheckBox, QRadioButton { color:#22252b; spacing:9px; }
+            QCheckBox, QRadioButton { color:#22252b; spacing:9px; }
             QCheckBox::indicator, QRadioButton::indicator {
                 width:15px; height:15px;
                 border:1px solid #aab4c3;
                 background:#ffffff;
                 border-radius:0px;
             }
-            QRadioButton::indicator { border-radius:0px; }
             QCheckBox::indicator:checked, QRadioButton::indicator:checked { background:#7aa8e8; border:1px solid #7aa8e8; }
             QPushButton {
-                background-color:#f8fafc;
+                background:#f8fafc;
                 color:#22252b;
                 border:1px solid #cfd7e5;
                 border-radius:0px;
                 padding:4px 10px;
             }
-            QPushButton:hover { background-color:#edf4ff; border-color:#aac4e8; }
-            QPushButton:pressed { background-color:#e3edf9; }
-            QDialogButtonBox QPushButton { min-width:64px; }
+            QPushButton:hover { background:#edf4ff; border-color:#aac4e8; }
+            QPushButton:pressed { background:#e3edf9; }
+            QPushButton:disabled { background:#edf0f5; color:#9aa4b2; border-color:#dde3ec; }
+            QTabWidget::pane { border:1px solid #dfe5ef; border-radius:0px; background:#ffffff; top:-1px; }
+            QTabBar::tab {
+                background:#edf1f7;
+                color:#4b5563;
+                border:1px solid #d9e0ea;
+                border-bottom:none;
+                border-top-left-radius:10px;
+                border-top-right-radius:3px;
+                padding:4px 10px;
+                min-width:0px;
+            }
+            QTabBar::tab:selected { background:#ffffff; color:#1f232b; font-weight:700; }
+            QListWidget, QTableWidget, QTreeWidget {
+                background:#ffffff;
+                color:#22252b;
+                border:1px solid #dfe5ef;
+                border-radius:0px;
+                alternate-background-color:#f7f9fd;
+                selection-background-color:#dbeafe;
+                selection-color:#111827;
+            }
             QScrollBar:vertical { background:#eef2f8; width:12px; margin:0; border:0; border-radius:0px; }
             QScrollBar::handle:vertical { background:#cbd5e1; min-height:30px; border-radius:0px; }
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }
             QToolTip { background:#ffffff; color:#111827; border:1px solid #cfd7e5; border-radius:0px; padding:5px; }
         """
     return """
-        QDialog, QWidget { background-color:#202226; color:#f2f4f8; }
+        QDialog { background:#202226; color:#f2f4f8; }
+        QScrollArea { background:transparent; border:0; }
         QLabel { color:#f2f4f8; }
-        QTabWidget::pane {
+        QFrame#SettingsBlock {
+            background:#282c33;
             border:1px solid #3b414c;
-            border-radius:0px;
+            border-radius:16px;
+        }
+        QFrame#SettingsItem {
             background:#24282f;
-            top:-1px;
+            border:1px solid #363c47;
+            border-radius:14px;
         }
-        QTabBar::tab {
-            background:#2a2e36;
-            color:#b5bfce;
-            border:1px solid #3b414c;
-            border-bottom:none;
-            border-top-left-radius:10px;
-            border-top-right-radius:10px;
-            padding:4px 10px;
-            min-width:100px;
+        QFrame#SettingsItem[shortcutEnabled="false"] {
+            background:#20242b;
+            border:1px solid #323844;
         }
-        QTabBar::tab:selected { background:#333842; color:#ffffff; font-weight:700; }
-        QTabBar::tab:!selected { background:#2a2e36; color:#b5bfce; }
-        QTabBar::tab:hover { background:#38404c; color:#ffffff; }
-        QScrollArea, QListWidget, QTableWidget, QTreeWidget {
-            background:#24282f;
-            color:#f2f4f8;
-            border:1px solid #3b414c;
-            border-radius:0px;
-            alternate-background-color:#282d35;
-            selection-background-color:#3d587d;
-            selection-color:#ffffff;
-        }
+        QLabel#SettingsItemTitle { font-size:13px; font-weight:700; color:#ffffff; }
+        QLabel#SettingsTitle, QLabel#SettingsDialogTitle { font-size:22px; font-weight:800; color:#ffffff; }
+        QLabel#SettingsSectionTitle { font-size:16px; font-weight:750; color:#ffffff; }
+        QLabel#SettingsDescription { color:#b5bfce; line-height:140%; }
         QLineEdit, QTextEdit, QPlainTextEdit, QKeySequenceEdit, QComboBox, QSpinBox, QDoubleSpinBox {
-            background-color:#1f2228;
+            background:#1f2228;
             color:#f5f7fb;
             border:1px solid #434a56;
             border-radius:0px;
@@ -182,25 +185,45 @@ QCheckBox, QRadioButton { color:#22252b; spacing:9px; }
             border:1px solid #7ea2d6;
             background:#222630;
         }
-QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
+        QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         QCheckBox::indicator, QRadioButton::indicator {
             width:15px; height:15px;
             border:1px solid #6f7786;
             background:#1f2228;
             border-radius:0px;
         }
-        QRadioButton::indicator { border-radius:0px; }
         QCheckBox::indicator:checked, QRadioButton::indicator:checked { background:#78a6e6; border:1px solid #78a6e6; }
         QPushButton {
-            background-color:#333843;
+            background:#333843;
             color:#f2f4f8;
             border:1px solid #555d6c;
             border-radius:0px;
             padding:4px 10px;
         }
-        QPushButton:hover { background-color:#3d4654; border-color:#718098; }
-        QPushButton:pressed { background-color:#2b303a; }
-        QDialogButtonBox QPushButton { min-width:64px; }
+        QPushButton:hover { background:#3d4654; border-color:#718098; }
+        QPushButton:pressed { background:#2b303a; }
+        QPushButton:disabled { background:#2a2d33; color:#858d9a; border-color:#3f4550; }
+        QTabWidget::pane { border:1px solid #3b414c; border-radius:0px; background:#24282f; top:-1px; }
+        QTabBar::tab {
+            background:#2a2e36;
+            color:#b5bfce;
+            border:1px solid #3b414c;
+            border-bottom:none;
+            border-top-left-radius:10px;
+            border-top-right-radius:3px;
+            padding:4px 10px;
+            min-width:0px;
+        }
+        QTabBar::tab:selected { background:#333842; color:#ffffff; font-weight:700; }
+        QListWidget, QTableWidget, QTreeWidget {
+            background:#24282f;
+            color:#f2f4f8;
+            border:1px solid #3b414c;
+            border-radius:0px;
+            alternate-background-color:#282d35;
+            selection-background-color:#3d587d;
+            selection-color:#ffffff;
+        }
         QScrollBar:vertical { background:#20242b; width:12px; margin:0; border:0; border-radius:0px; }
         QScrollBar::handle:vertical { background:#424a57; min-height:30px; border-radius:0px; }
         QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }
@@ -255,6 +278,7 @@ DEFAULT_SHORTCUTS = {
     "paint_magic_expand_inc": "Ctrl+Shift+'",
     "paint_magic_expand_dec": "Ctrl+Shift+;",
     "paint_magic_fill": "Alt+Shift+D",
+    "paint_area_fill": "J",
      "paint_mask_wrap": "W",
     "paint_mask_cut": "C",
     "paint_mask_wrap_rect": "Alt+D",
@@ -274,9 +298,10 @@ DEFAULT_SHORTCUTS = {
     "text_letter_spacing": "Ctrl+Alt+W",
     "text_char_width": "Ctrl+Alt+E",
     "text_char_height": "Ctrl+Alt+R",
-    "text_bold_toggle": "Ctrl+Alt+T",
-    "text_italic_toggle": "Ctrl+Alt+Y",
-    "text_strike_toggle": "Ctrl+Alt+U",
+    "text_bold_toggle": "Ctrl+Alt+B",
+    "text_italic_toggle": "Ctrl+Alt+M",
+    "text_strike_toggle": "Ctrl+Alt+N",
+    "text_transform_toggle": "Ctrl+T",
 
     # 2. 텍스트 입력 옵션
     # 사용자가 'Shift'라고 적어준 항목은 실제 입력 충돌 방지를 위해 Shift+Enter로 처리
@@ -319,6 +344,7 @@ DEFAULT_SHORTCUTS = {
     "option_translation_prompt": "Ctrl+Alt+2",
     "option_glossary": "Ctrl+Alt+3",
     "option_analysis_mask_settings": "Ctrl+Alt+Shift+M",
+    "option_ocr_analysis_regions": "Ctrl+Shift+Alt+A",
     "option_workspace_location": "Ctrl+Alt+Shift+6",
     "option_cleanup_temp_files": "Ctrl+Alt+Shift+7",
     "option_cleanup_outputs": "Ctrl+Alt+Shift+Delete",
@@ -335,10 +361,10 @@ DEFAULT_SHORTCUTS = {
     "cloud_unregister": "Ctrl+Alt+Shift+F2",
     "cloud_cache_backup": "Ctrl+Alt+Shift+F3",
     "cloud_cache_restore": "Ctrl+Alt+Shift+F4",
-    "cloud_project_backup": "Ctrl+Alt+Shift+F5",
 
     # 4. 작업 옵션
     "work_tab_cycle": "Tab",
+    "work_source_compare": "Ctrl+Alt+Shift+V",
     "work_page_prev": "Alt+Left",
     "work_page_next": "Alt+Right",
     "work_page_list": "Ctrl+F",
@@ -348,10 +374,12 @@ DEFAULT_SHORTCUTS = {
     "work_page_delete_all": "Ctrl+Shift+Q",
     "work_open_current_project_folder": "Ctrl+Alt+Shift+F",
     "work_analyze": "Ctrl+F5",
+    "work_quick_ocr": "Ctrl+J",
+    "quick_ocr_execute": "",
     "work_text_number_width": "Ctrl+Shift+W",
     "work_translate": "Ctrl+F6",
     "work_inpaint": "Ctrl+F7",
-    "work_inpaint_source": "Ctrl+Shift+T",
+    "work_inpaint_source": "Ctrl+Alt+P",
     "work_restore_original_source": "Ctrl+Shift+R",
     "work_extract_text": "Ctrl+L",
     "work_import_translation": "Ctrl+K",
@@ -359,7 +387,7 @@ DEFAULT_SHORTCUTS = {
     "work_clean_text": "Ctrl+Alt+Shift+C",
     "work_reset_text_rects": "Ctrl+G",
     "work_export": "Ctrl+E",
-    "view_text_toggle": "Ctrl+T",
+    "view_text_toggle": "Ctrl+Alt+V",
 
     # 5. 자동화 작업 옵션
     "auto_text_size_current": "Ctrl+B",
@@ -392,15 +420,13 @@ DEFAULT_SHORTCUTS = {
 }
 
 GROUPS = [
-    ("그림판 옵션", [
+    ("그림판", [
         ("paint_move", "이동"),
         ("paint_brush", "브러시"),
         ("paint_erase", "지우개"),
-        ("paint_zoom_in", "확대"),
-        ("paint_zoom_out", "축소"),
+        ("paint_zoom_in", "브러시 확대"),
+        ("paint_zoom_out", "브러시 축소"),
         ("paint_reanalyze", "재분석"),
-        ("paint_undo", "작업 취소"),
-        ("paint_redo", "작업 재실행"),
         ("paint_magic_select", "요술봉 선택"),
         ("paint_magic_expand", "요술봉 영역 확장"),
         ("paint_magic_tolerance_inc", "요술봉 허용범위 증가"),
@@ -408,30 +434,19 @@ GROUPS = [
         ("paint_magic_expand_inc", "요술봉 확장범위 증가"),
         ("paint_magic_expand_dec", "요술봉 확장범위 감소"),
         ("paint_magic_fill", "마스킹 칠하기"),
+        ("paint_area_fill", "영역 페인팅"),
         ("paint_mask_wrap", "마스크 랩핑"),
         ("paint_mask_cut", "마스크 커팅"),
         ("paint_mask_wrap_rect", "마스크 선택 사각형"),
         ("paint_mask_wrap_free", "마스크 선택 자유형"),
         ("paint_mask_toggle", "페인팅 마스크 ON/OFF"),
         ("final_paint_color", "최종 페인팅 색상"),
-        ("final_paint_to_background", "최종 페인팅을 배경으로 반영"),
         ("final_text_tool", "최종 텍스트 도구"),
         ("final_paint_above_toggle", "텍스트 위 페인팅 ON/OFF"),
-        ("final_paint_opacity_inc", "최종 브러시 불투명도 증가"),
-        ("final_paint_opacity_dec", "최종 브러시 불투명도 감소"),
+        ("final_paint_opacity_inc", "브러시 불투명도 증가"),
+        ("final_paint_opacity_dec", "브러시 불투명도 감소"),
     ]),
-    ("글꼴 상세 옵션", [
-        ("text_font_size", "글꼴 크기"),
-        ("text_stroke_size", "획 크기"),
-        ("text_line_spacing", "행간"),
-        ("text_letter_spacing", "자간"),
-        ("text_char_width", "너비"),
-        ("text_char_height", "높이"),
-        ("text_bold_toggle", "굵게"),
-        ("text_italic_toggle", "기울이기"),
-        ("text_strike_toggle", "취소선"),
-    ]),
-    ("텍스트 입력 옵션", [
+    ("텍스트 입력", [
         ("text_linebreak", "줄내림"),
         ("text_ellipsis", "말줄임표(…)"),
         ("text_horizontal_dash", "가로장음(―)"),
@@ -444,7 +459,29 @@ GROUPS = [
         ("text_black_circle", "검은 동그라미(●)"),
         ("text_middle_dot", "가운뎃점(·)"),
     ]),
-    ("프로젝트 옵션", [
+    ("글꼴", [
+        ("item_font_select", "폰트"),
+        ("text_font_size", "문자 크기"),
+        ("item_font_inc", "문자 확대"),
+        ("item_font_dec", "문자 축소"),
+        ("text_stroke_size", "획 크기"),
+        ("item_stroke_inc", "획 확대"),
+        ("item_stroke_dec", "획 축소"),
+        ("text_line_spacing", "행간"),
+        ("text_letter_spacing", "자간"),
+        ("text_char_width", "문자 너비"),
+        ("text_char_height", "문자 높이"),
+        ("text_bold_toggle", "굵게하기"),
+        ("text_italic_toggle", "기울이기"),
+        ("text_strike_toggle", "취소선"),
+        ("text_transform_toggle", "텍스트 변형"),
+        ("item_align_left", "왼쪽 정렬"),
+        ("item_align_center", "중앙정렬"),
+        ("item_align_right", "오른쪽 정렬"),
+        ("item_text_color", "문자 색상 팔레트"),
+        ("item_stroke_color", "획 색상 팔레트"),
+    ]),
+    ("프로젝트", [
         ("project_new", "새로 만들기"),
         ("project_import_images", "이미지 불러오기"),
         ("project_open", "열기"),
@@ -454,30 +491,78 @@ GROUPS = [
         ("project_recover_last_work", "복구하기"),
         ("project_show_launcher", "홈화면으로 가기"),
         ("project_exit", "프로젝트 나가기"),
-        ("option_settings_overview", "설정 / 옵션"),
+    ]),
+    ("작업", [
+        ("work_tab_cycle", "작업탭 변경"),
+        ("work_source_compare", "원본 비교창 열기"),
+        ("paint_undo", "작업 취소"),
+        ("paint_redo", "작업 재실행"),
+        ("work_page_prev", "이전 페이지"),
+        ("work_page_next", "다음 페이지"),
+        ("work_page_list", "페이지 목록"),
+        ("work_page_full_name", "현재 페이지 이름 보기"),
+        ("work_page_rename_source", "페이지 탭 파일명 변경"),
+        ("work_page_delete_current", "현재 페이지 탭 삭제"),
+        ("work_open_current_project_folder", "현재 프로젝트의 작업 폴더로 이동하기"),
+        ("work_analyze", "분석"),
+        ("work_quick_ocr", "빠른 OCR 설정"),
+        ("work_text_number_width", "텍스트 넘버 크기 변경"),
+        ("work_translate", "번역"),
+        ("work_inpaint", "인페인팅"),
+        ("work_inpaint_source", "인페인팅을 원본으로"),
+        ("final_paint_to_background", "최종 페인팅을 배경에 반영"),
+        ("work_restore_original_source", "원본으로 돌아가기"),
+        ("work_extract_text", "지문 추출"),
+        ("work_import_translation", "번역문 불러오기"),
+        ("work_clear_translation", "번역문 내용 지우기"),
+        ("work_clean_text", "텍스트 정리"),
+        ("work_reset_text_rects", "현재 텍스트 기준으로 영역 재설정"),
+        ("work_export", "출력"),
+        ("view_text_toggle", "텍스트 표시 ON/OFF"),
+    ]),
+    ("일괄 작업", [
+        ("batch_analyze", "일괄 분석"),
+        ("batch_translate", "일괄 번역"),
+        ("batch_inpaint", "일괄 인페인팅"),
+        ("batch_extract_text", "일괄 지문 추출"),
+        ("batch_import_translation", "일괄 번역문 불러오기"),
+        ("batch_clear_translation", "일괄 번역문 내용 지우기"),
+        ("batch_clean_text", "일괄 텍스트 정리"),
+        ("batch_reset_text_rects", "일괄 현재 텍스트 기준으로 영역 재설정"),
+        ("batch_export", "일괄 출력"),
+        ("work_page_delete_all", "전체 페이지 탭 삭제"),
+    ]),
+    ("자동화 작업", [
+        ("auto_text_size_current", "자동 텍스트 크기 조정"),
+        ("auto_text_size_batch", "일괄 자동 텍스트 크기 조정"),
+        ("auto_linebreak_current", "자동 줄 내림"),
+        ("auto_linebreak_batch", "일괄 자동 줄 내림"),
     ]),
     ("클라우드", [
         ("cloud_register", "클라우드 등록"),
         ("cloud_unregister", "클라우드 등록 해제"),
         ("cloud_cache_backup", "클라우드로 캐시 백업"),
         ("cloud_cache_restore", "클라우드에서 캐시 불러오기"),
-        ("cloud_project_backup", "현재 프로젝트 클라우드에 백업하기"),
     ]),
-    ("설정 / 옵션", [
-        ("option_auto_save_mode", "자동저장 모드"),
-        ("option_theme_settings", "테마 설정"),
-        ("option_language_settings", "언어 설정"),
-        ("setting_page_tab_display_name", "페이지 탭 표시명 설정"),
-        ("setting_output_display_name", "출력 표시명 설정"),
+    ("옵션", [
         ("option_api_settings", "API 관리"),
         ("option_translation_prompt", "번역 프롬프트 입력"),
         ("option_glossary", "단어장"),
         ("option_analysis_mask_settings", "분석 마스크 확장 비율"),
+        ("option_ocr_analysis_regions", "OCR 분석 범위 지정"),
         ("option_cleanup_outputs", "출력물 삭제"),
         ("option_workspace_location", "작업 폴더 위치 변경"),
         ("option_cleanup_temp_files", "임시 파일 관리"),
         ("option_register_ysb", ".ysbt 확장자 연결 등록"),
         ("option_unregister_ysbt", ".ysbt 확장자 연결 해제"),
+    ]),
+    ("설정", [
+        ("option_settings_overview", "설정 / 옵션"),
+        ("option_auto_save_mode", "자동저장 모드"),
+        ("option_theme_settings", "테마 설정"),
+        ("option_language_settings", "언어 설정"),
+        ("setting_page_tab_display_name", "페이지 탭 표시명 설정"),
+        ("setting_output_display_name", "출력 표시명 설정"),
         ("setting_file_path_visibility", "파일 경로 표시"),
         ("option_shortcut_settings", "단축키 통합 관리"),
         ("option_macro_settings", "매크로 관리"),
@@ -490,61 +575,10 @@ GROUPS = [
         ("help_report_bug", "버그제보 / 문의하기"),
         ("help_about", "프로그램 정보"),
     ]),
-    ("작업 옵션", [
-        ("work_tab_cycle", "작업탭 변경"),
-        ("work_page_prev", "이전 페이지"),
-        ("work_page_next", "다음 페이지"),
-        ("work_page_list", "페이지 목록"),
-        ("work_page_full_name", "현재 페이지 이름 보기"),
-        ("work_page_rename_source", "페이지 탭 파일명 변경"),
-        ("work_page_delete_current", "현재 이미지탭 삭제"),
-        ("work_page_delete_all", "전체 이미지탭 삭제"),
-        ("work_open_current_project_folder", "현재 프로젝트의 작업 폴더로 이동하기"),
-        ("work_analyze", "개별 분석"),
-        ("work_text_number_width", "텍스트 넘버 크기 변경"),
-        ("work_translate", "개별 번역"),
-        ("work_inpaint", "개별 인페인팅"),
-        ("work_inpaint_source", "인페인팅을 원본으로"),
-        ("work_restore_original_source", "원본으로 돌아가기"),
-        ("work_extract_text", "개별 지문 추출"),
-        ("work_import_translation", "개별 번역문 불러오기"),
-        ("work_clear_translation", "번역문 내용 지우기"),
-        ("work_clean_text", "개별 텍스트 정리"),
-        ("work_reset_text_rects", "현재 텍스트 기준 영역 재설정"),
-        ("work_export", "개별 출력"),
-        ("view_text_toggle", "텍스트 표시 ON/OFF"),
-    ]),
-    ("자동화 작업 옵션", [
-        ("auto_text_size_current", "자동 텍스트 크기 조정"),
-        ("auto_text_size_batch", "일괄 자동 텍스트 크기 조정"),
-        ("auto_linebreak_current", "자동 줄 내림"),
-        ("auto_linebreak_batch", "일괄 자동 줄 내림"),
-    ]),
-    ("일괄 작업 옵션", [
-        ("batch_analyze", "일괄 분석"),
-        ("batch_translate", "일괄 번역"),
-        ("batch_inpaint", "일괄 인페인팅"),
-        ("batch_extract_text", "일괄 지문 추출"),
-        ("batch_import_translation", "일괄 번역문 불러오기"),
-        ("batch_clear_translation", "일괄 번역문 내용 지우기"),
-        ("batch_clean_text", "일괄 텍스트 정리"),
-        ("batch_reset_text_rects", "일괄 텍스트 기준 영역 재설정"),
-        ("batch_export", "일괄 출력"),
-    ]),
-    ("개별 텍스트 작업 옵션", [
-        ("item_font_select", "글꼴 선택"),
-        ("item_font_inc", "글꼴 확대"),
-        ("item_font_dec", "글꼴 축소"),
-        ("item_align_left", "왼쪽 정렬"),
-        ("item_align_center", "가운데 정렬"),
-        ("item_align_right", "오른쪽 정렬"),
-        ("item_stroke_inc", "획 확대"),
-        ("item_stroke_dec", "획 축소"),
-        ("item_text_color", "문자 색상 팔레트"),
-        ("item_stroke_color", "획 색상 팔레트"),
+    ("기타", [
+        ("quick_ocr_execute", "빠른 OCR 실행"),
     ]),
 ]
-
 
 
 
@@ -562,6 +596,47 @@ def shortcut_group_rows():
         for key, label in group_rows:
             rows.append((key, label, group_title))
     return rows
+
+
+SHORTCUT_GROUP_SECTIONS = {
+    "작업": [
+        ("기본동작", ["work_tab_cycle", "work_source_compare", "paint_undo", "paint_redo", "work_open_current_project_folder", "work_export"]),
+        ("페이지탭", ["work_page_prev", "work_page_next", "work_page_list", "work_page_full_name", "work_page_rename_source", "work_page_delete_current"]),
+        ("작업류", ["work_analyze", "work_translate", "work_inpaint"]),
+        ("텍스트 수정류", ["work_extract_text", "work_import_translation", "work_clear_translation", "work_clean_text"]),
+        ("이미지 교체류", ["work_inpaint_source", "final_paint_to_background", "work_restore_original_source"]),
+        ("기타 동작", ["work_quick_ocr", "work_text_number_width", "work_reset_text_rects"]),
+    ],
+    "일괄 작업": [
+        ("기본 동작", ["batch_export"]),
+        ("일괄 작업류", ["batch_analyze", "batch_translate", "batch_inpaint"]),
+        ("텍스트 수정류", ["batch_extract_text", "batch_import_translation", "batch_clear_translation", "batch_clean_text"]),
+        ("기타 동작", ["batch_reset_text_rects", "work_page_delete_all"]),
+    ],
+}
+
+
+def shortcut_section_rows(group_title: str, rows):
+    row_map = {key: label for key, label in rows}
+    used = set()
+    sections = []
+    predefined = SHORTCUT_GROUP_SECTIONS.get(group_title, [])
+    for section_title, keys in predefined:
+        section_rows = []
+        for key in keys:
+            if key in row_map:
+                section_rows.append((key, row_map[key]))
+                used.add(key)
+        if section_rows:
+            sections.append((section_title, section_rows))
+    leftover = [(key, label) for key, label in rows if key not in used]
+    if leftover:
+        # 작업/일괄 작업처럼 별도 블록 구성을 가진 탭의 남은 항목만 기타 동작으로 보낸다.
+        # 그 외 탭은 탭 이름 자체가 곧 큰 분류이므로 "그림판 관련 단축키"처럼 표시한다.
+        sections.append(("기타 동작" if predefined else group_title, leftover))
+    if not sections:
+        sections.append((group_title, rows))
+    return sections
 
 
 @dataclass
@@ -678,7 +753,7 @@ class ShortcutSettingsStore:
                 merged_shortcuts["paint_mask_wrap_free"] = DEFAULT_SHORTCUTS.get("paint_mask_wrap_free", "Alt+F")
 
             # v2.0.1 페이지 탭 단축키 보정:
-            # Ctrl+Q는 현재 이미지탭 삭제, Ctrl+Shift+Q는 전체 이미지탭 삭제,
+            # Ctrl+Q는 현재 페이지 탭 삭제, Ctrl+Shift+Q는 전체 페이지 탭 삭제,
             # 프로젝트 나가기는 Alt+Q로 이동한다.
             page_tab_shortcut_defaults = {
                 "work_page_list": "Ctrl+F",
@@ -726,6 +801,7 @@ class ShortcutSettingsStore:
                 "option_item_text_preset_settings": "Ctrl+Alt+7",
                 # Keep these fixed and move them to the bottom of the Options menu.
                 "option_analysis_mask_settings": "Ctrl+Alt+Shift+M",
+                "option_ocr_analysis_regions": "Ctrl+Shift+Alt+A",
                 "option_cleanup_outputs": "Ctrl+Alt+Shift+Delete",
             }
             # Settings: keep visible order and use Ctrl+Alt+Shift+1~9.
@@ -747,7 +823,6 @@ class ShortcutSettingsStore:
                 "cloud_unregister": "Ctrl+Alt+Shift+F2",
                 "cloud_cache_backup": "Ctrl+Alt+Shift+F3",
                 "cloud_cache_restore": "Ctrl+Alt+Shift+F4",
-                "cloud_project_backup": "Ctrl+Alt+Shift+F5",
             }
             for _key, _value in {
                 **option_menu_shortcut_layout,
@@ -756,6 +831,43 @@ class ShortcutSettingsStore:
             }.items():
                 if _key in merged_shortcuts:
                     merged_shortcuts[_key] = _value
+
+            # v2.2.0 hotfix: 단축키 관리의 글꼴 탭 기본값을 새 표준으로 정리한다.
+            font_shortcut_layout = {
+                "item_font_select": "F1",
+                "text_font_size": "Ctrl+Alt+A",
+                "item_font_inc": "=",
+                "item_font_dec": "-",
+                "text_stroke_size": "Ctrl+Alt+S",
+                "item_stroke_inc": "Ctrl+=",
+                "item_stroke_dec": "Ctrl+-",
+                "text_line_spacing": "Ctrl+Alt+Q",
+                "text_letter_spacing": "Ctrl+Alt+W",
+                "text_char_width": "Ctrl+Alt+E",
+                "text_char_height": "Ctrl+Alt+R",
+                "text_bold_toggle": "Ctrl+Alt+B",
+                "text_italic_toggle": "Ctrl+Alt+M",
+                "text_strike_toggle": "Ctrl+Alt+N",
+                "text_transform_toggle": "Ctrl+T",
+                "item_align_left": "F2",
+                "item_align_center": "F3",
+                "item_align_right": "F4",
+                "item_text_color": "F6",
+                "item_stroke_color": "F7",
+            }
+            for _key, _value in font_shortcut_layout.items():
+                if _key in merged_shortcuts:
+                    merged_shortcuts[_key] = _value
+
+            # v2.2.0 작업 메뉴 재분류/신규 도구 단축키 표준값.
+            if "work_inpaint_source" in merged_shortcuts:
+                merged_shortcuts["work_inpaint_source"] = "Ctrl+Alt+P"
+            if "paint_area_fill" in merged_shortcuts and not str(merged_shortcuts.get("paint_area_fill") or ""):
+                merged_shortcuts["paint_area_fill"] = "J"
+            if "text_transform_toggle" in merged_shortcuts:
+                merged_shortcuts["text_transform_toggle"] = "Ctrl+T"
+            if "view_text_toggle" in merged_shortcuts and merged_shortcuts.get("view_text_toggle") in {"Ctrl+T", "", None}:
+                merged_shortcuts["view_text_toggle"] = "Ctrl+Alt+V"
 
             # v1.8.1 마스크 커팅 단축키 보정:
             # Alt+D는 사각형 영역으로 이동하고, 기존 Alt+D였던 마스킹 칠하기는 Alt+Shift+D로 이동한다.
@@ -858,6 +970,61 @@ class MacroFunctionSelectDialog(QDialog):
         self.build_shortcut_index()
         self.refill()
         self.refresh_current_actions()
+
+    def collect_extra_shortcut_references(self):
+        records = []
+        seen = set()
+
+        for idx, macro in enumerate(getattr(self.settings, "macros", []) or []):
+            if not macro.get("enabled", True):
+                continue
+            shortcut = str(macro.get("shortcut", "") or "").strip()
+            if not shortcut:
+                continue
+            try:
+                seq = QKeySequence(shortcut)
+                display_shortcut = seq.toString(QKeySequence.SequenceFormat.NativeText) or shortcut
+            except Exception:
+                display_shortcut = shortcut
+            name = str(macro.get("name") or "매크로").strip() or "매크로"
+            key = f"__macro__:{idx}:{name}"
+            records.append({
+                "key": key,
+                "label": f"매크로: {name}",
+                "shortcut": display_shortcut,
+                "description": "매크로 관리에서 등록한 사용자 매크로 단축키입니다.",
+            })
+            seen.add(key)
+
+        parent = self.parent()
+        item_presets = getattr(parent, "item_text_presets", {}) if parent is not None else {}
+        if isinstance(item_presets, dict):
+            for name, preset in sorted(item_presets.items(), key=lambda x: str(x[0])):
+                if not isinstance(preset, dict):
+                    continue
+                if not preset.get("enabled", True):
+                    continue
+                shortcut = str(preset.get("shortcut", "") or "").strip()
+                if not shortcut:
+                    continue
+                try:
+                    seq = QKeySequence(shortcut)
+                    display_shortcut = seq.toString(QKeySequence.SequenceFormat.NativeText) or shortcut
+                except Exception:
+                    display_shortcut = shortcut
+                label_name = str(name)
+                key = f"__item_preset__:{label_name}"
+                records.append({
+                    "key": key,
+                    "label": f"개별 글꼴 프리셋: {label_name}",
+                    "shortcut": display_shortcut,
+                    "description": "개별 글꼴 프리셋 관리에서 등록한 사용자 단축키입니다.",
+                })
+                seen.add(key)
+
+        return records
+
+
 
     def normalize_shortcut_text(self, value):
         value = str(value or "").strip()
@@ -1541,6 +1708,167 @@ class MacroSettingsDialog(QDialog):
         return self.settings
 
 
+
+
+def shortcut_item_description(key: str, label: str, group_title: str, lang=LANG_KO) -> str:
+    explicit = {
+        "paint_move": "캔버스 이동 모드로 전환합니다.",
+        "paint_brush": "브러시 도구로 직접 칠합니다.",
+        "paint_erase": "브러시로 칠한 내용을 지웁니다.",
+        "paint_zoom_in": "브러시 크기를 키웁니다.",
+        "paint_zoom_out": "브러시 크기를 줄입니다.",
+        "paint_reanalyze": "현재 화면의 마스크를 기준으로 다시 분석합니다.",
+        "paint_undo": "마지막 작업을 되돌립니다.",
+        "paint_redo": "되돌린 작업을 다시 실행합니다.",
+        "paint_magic_select": "요술봉 선택 모드를 켭니다.",
+        "paint_magic_expand": "요술봉으로 선택한 영역을 확장합니다.",
+        "paint_magic_tolerance_inc": "요술봉 색상 허용범위를 올립니다.",
+        "paint_magic_tolerance_dec": "요술봉 색상 허용범위를 낮춥니다.",
+        "paint_magic_expand_inc": "요술봉 선택 영역의 확장값을 올립니다.",
+        "paint_magic_expand_dec": "요술봉 선택 영역의 확장값을 낮춥니다.",
+        "paint_magic_fill": "선택한 영역을 현재 색상으로 채웁니다.",
+        "paint_area_fill": "지정한 영역을 현재 페인팅 색상으로 채웁니다.",
+        "paint_mask_wrap": "마스크 랩핑은 지정한 영역의 마스크를 하나로 합치는 도구입니다.",
+        "paint_mask_cut": "마스크 커팅은 지정한 영역과 겹치는 마스크를 잘라내는 도구입니다.",
+        "paint_mask_wrap_rect": "마스크 선택 모양을 사각형으로 바꿉니다.",
+        "paint_mask_wrap_free": "마스크 선택 모양을 자유형으로 바꿉니다.",
+        "paint_mask_toggle": "분석 생성 마스크를 숨기고 사용자가 직접 마스크를 그릴 수 있는 기능입니다.",
+        "final_paint_color": "최종 페인팅 색상을 선택합니다.",
+        "final_paint_to_background": "최종 페인팅을 배경 이미지에 반영합니다.",
+        "final_text_tool": "최종결과 탭의 텍스트 도구로 전환합니다.",
+        "final_paint_above_toggle": "텍스트 위로 페인팅을 할지 텍스트 아래로 페인팅을 할지 선택합니다.",
+        "final_paint_opacity_inc": "브러시 불투명도를 올립니다.",
+        "final_paint_opacity_dec": "브러시 불투명도를 낮춥니다.",
+
+        "text_linebreak": "선택한 텍스트에 줄내림을 넣습니다.",
+        "text_ellipsis": "말줄임표 특수문자를 입력합니다.",
+        "text_horizontal_dash": "가로장음 특수문자를 입력합니다.",
+        "text_vertical_dash": "세로장음 특수문자를 입력합니다.",
+        "text_single_corner": "홑낫표 특수문자를 입력합니다.",
+        "text_double_corner": "겹낫표 특수문자를 입력합니다.",
+        "text_white_heart": "하얀 하트 특수문자를 입력합니다.",
+        "text_black_heart": "검은 하트 특수문자를 입력합니다.",
+        "text_music_note": "음표 특수문자를 입력합니다.",
+        "text_black_circle": "검은 동그라미 특수문자를 입력합니다.",
+        "text_middle_dot": "가운뎃점 특수문자를 입력합니다.",
+
+        "item_font_select": "폰트 설정창을 엽니다.",
+        "text_font_size": "문자 크기 입력칸에 포커싱을 줍니다.",
+        "item_font_inc": "선택한 텍스트의 문자 크기를 키웁니다.",
+        "item_font_dec": "선택한 텍스트의 문자 크기를 줄입니다.",
+        "text_stroke_size": "획 크기 입력칸에 포커싱을 줍니다.",
+        "item_stroke_inc": "선택한 텍스트의 획을 굵게 합니다.",
+        "item_stroke_dec": "선택한 텍스트의 획을 얇게 합니다.",
+        "text_line_spacing": "행간 입력칸에 포커싱을 줍니다.",
+        "text_letter_spacing": "자간 입력칸에 포커싱을 줍니다.",
+        "text_char_width": "문자 너비 입력칸에 포커싱을 줍니다.",
+        "text_char_height": "문자 높이 입력칸에 포커싱을 줍니다.",
+        "text_bold_toggle": "문자를 굵게 합니다.",
+        "text_italic_toggle": "문자를 기울입니다.",
+        "text_strike_toggle": "문자에 취소선을 그립니다.",
+        "text_transform_toggle": "선택한 텍스트의 변형 모드를 켜거나 끕니다.",
+        "item_align_left": "텍스트를 왼쪽 정렬합니다.",
+        "item_align_center": "텍스트를 가운데 정렬합니다.",
+        "item_align_right": "텍스트를 오른쪽 정렬합니다.",
+        "item_text_color": "문자 색상 팔레트를 엽니다.",
+        "item_stroke_color": "획 색상 팔레트를 엽니다.",
+
+        "project_new": "새 프로젝트를 지정하여 ysbt 파일을 생성합니다.",
+        "project_import_images": "이미지를 불러와 프로젝트를 시작하거나, 기존의 프로젝트에 이미지를 추가합니다.",
+        "project_open": "ysbt 파일을 엽니다.",
+        "project_open_json": "json 프로젝트 파일로 엽니다.",
+        "project_save": "현재 프로젝트를 저장합니다.",
+        "project_save_as": "현재 프로젝트를 다른 이름으로 저장합니다.",
+        "project_recover_last_work": "이전 작업 상태를 복구합니다.",
+        "project_show_launcher": "홈 화면으로 이동합니다.",
+        "project_exit": "현재 프로젝트를 닫습니다.",
+
+        "work_tab_cycle": "작업 탭을 순서대로 전환합니다.",
+        "work_source_compare": "왼쪽에 원본 탭 복사 화면을 열어 현재 작업 화면과 비교합니다.",
+        "work_page_prev": "이전 페이지로 이동합니다.",
+        "work_page_next": "다음 페이지로 이동합니다.",
+        "work_page_list": "페이지 목록 창을 엽니다.",
+        "work_page_full_name": "현재 페이지의 전체 이름을 확인합니다.",
+        "work_page_rename_source": "현재 페이지 탭의 파일명을 바꿉니다.",
+        "work_page_delete_current": "현재 페이지 탭을 삭제합니다.",
+        "work_page_delete_all": "현재 프로젝트의 모든 페이지 탭을 삭제합니다.",
+        "work_open_current_project_folder": "현재 프로젝트 작업 폴더를 엽니다.",
+        "work_analyze": "현재 페이지를 OCR 분석합니다.",
+        "work_quick_ocr": "빠른 OCR 설정창을 엽니다.",
+        "work_text_number_width": "텍스트 넘버 크기 설정을 엽니다.",
+        "work_translate": "현재 페이지를 번역합니다.",
+        "work_inpaint": "현재 페이지를 인페인팅합니다.",
+        "work_inpaint_source": "인페인팅 결과를 원본으로 반영합니다.",
+        "work_restore_original_source": "원본 이미지 상태로 되돌립니다.",
+        "work_extract_text": "현재 페이지의 지문을 추출합니다.",
+        "work_import_translation": "현재 페이지의 번역문을 불러옵니다.",
+        "work_clear_translation": "현재 페이지 번역문 내용을 비웁니다.",
+        "work_clean_text": "현재 페이지에서 체크 해제된 텍스트 라인을 정리합니다.",
+        "work_reset_text_rects": "현재 텍스트의 크기를 기준으로 텍스트 영역을 재설정합니다.",
+        "work_export": "현재 페이지를 출력합니다.",
+        "view_text_toggle": "최종결과 탭에서 번역문의 텍스트가 보이지 않게 숨깁니다.",
+
+        "batch_analyze": "여러 페이지를 한 번에 분석합니다.",
+        "batch_translate": "여러 페이지를 한 번에 번역합니다.",
+        "batch_inpaint": "여러 페이지를 한 번에 인페인팅합니다.",
+        "batch_extract_text": "전체 페이지의 지문을 한 번에 추출합니다.",
+        "batch_import_translation": "전체 페이지의 번역문을 불러옵니다.",
+        "batch_clear_translation": "전체 페이지 번역문 내용을 지웁니다.",
+        "batch_clean_text": "전체 페이지에서 체크 해제된 텍스트 라인을 정리합니다.",
+        "batch_reset_text_rects": "현재 텍스트의 크기를 기준으로 전체 페이지의 텍스트 영역을 재설정합니다.",
+        "batch_export": "전체 페이지를 한 번에 출력합니다.",
+
+        "auto_text_size_current": "현재 페이지 텍스트 크기를 자동 조정합니다.",
+        "auto_text_size_batch": "전체 페이지 텍스트 크기를 자동 조정합니다.",
+        "auto_linebreak_current": "현재 페이지 텍스트 줄내림을 자동 정리합니다.",
+        "auto_linebreak_batch": "전체 페이지 텍스트 줄내림을 자동 정리합니다.",
+
+        "cloud_register": "클라우드 백업 계정을 등록합니다.",
+        "cloud_unregister": "클라우드 등록을 해제합니다.",
+        "cloud_cache_backup": "옵션과 단축키 같은 캐시를 클라우드에 백업합니다.",
+        "cloud_cache_restore": "클라우드에 저장한 캐시를 불러옵니다.",
+        
+        "option_api_settings": "API 설정 관리창을 엽니다.",
+        "option_translation_prompt": "번역 프롬프트 설정창을 엽니다.",
+        "option_glossary": "단어장 관리창을 엽니다.",
+        "option_analysis_mask_settings": "분석/페인트 마스크 확장 비율을 설정합니다.",
+        "option_ocr_analysis_regions": "OCR 분석 범위 지정 기능을 엽니다.",
+        "option_cleanup_outputs": "출력물 정리 창을 엽니다.",
+        "option_workspace_location": "작업 폴더 위치를 바꿉니다.",
+        "option_cleanup_temp_files": "임시 파일 관리창을 엽니다.",
+        "option_register_ysb": ".ysbt 확장자 연결을 등록합니다.",
+        "option_unregister_ysbt": ".ysbt 확장자 연결을 해제합니다.",
+
+        "option_settings_overview": "설정 / 옵션 통합창을 엽니다.",
+        "option_auto_save_mode": "자동저장 모드를 켜거나 끕니다.",
+        "option_theme_settings": "테마 설정창을 엽니다.",
+        "option_language_settings": "언어 설정창을 엽니다.",
+        "setting_page_tab_display_name": "페이지 탭 표시명을 설정합니다.",
+        "setting_output_display_name": "출력 파일 표시명을 설정합니다.",
+        "setting_file_path_visibility": "로그창 경로 표시를 켜거나 끕니다.",
+        "option_shortcut_settings": "단축키 통합 관리창을 엽니다.",
+        "option_macro_settings": "매크로 관리창을 엽니다.",
+        "option_text_preset_settings": "페이지 글꼴 프리셋 관리창을 엽니다.",
+        "option_item_text_preset_settings": "개별 글꼴 프리셋 관리창을 엽니다.",
+
+        "help_program_manual": "프로그램 메뉴얼을 엽니다.",
+        "help_open_website": "YSB Tool 사이트로 이동합니다.",
+        "help_report_bug": "버그 제보 / 문의 페이지를 엽니다.",
+        "help_about": "프로그램 정보를 엽니다.",
+
+        "quick_ocr_execute": "지정한 단축키로 바로 빠른 OCR 드래그 모드를 시작합니다.",
+    }
+    text = explicit.get(key)
+    if not text:
+        text = f"{label} 기능을 실행합니다."
+    if str(lang).lower().startswith("en"):
+        # Keep English simple if a translation is missing.
+        text = {
+            "캔버스 이동 모드로 전환합니다.": "Switches to canvas move mode.",
+        }.get(text, text)
+    return tr_text(text, lang)
+
+
 class ShortcutSettingsDialog(QDialog):
     def __init__(self, settings: ShortcutSettings, parent=None, show_cache_path=False):
         super().__init__(parent)
@@ -1559,6 +1887,8 @@ class ShortcutSettingsDialog(QDialog):
         self.edits = {}
         self.checks = {}
         self.labels = {}
+        self.desc_labels = {}
+        self.item_frames = {}
         self.last_sequences = {}
         self.disabled_backup = {}
         self._handling_change = False
@@ -1568,65 +1898,230 @@ class ShortcutSettingsDialog(QDialog):
         self._pending_disabled_item_presets = set()
 
         layout = QVBoxLayout(self)
-        if self._ui_language == LANG_EN:
-            shortcut_help_text = (
-                "Shortcuts are saved to the program cache file.\n"
-                "If you assign the same shortcut, it will be swapped with the existing item.\n"
-                "If you uncheck an item, that shortcut will be disabled and the input box will be cleared."
-            )
-            if self._show_cache_path:
-                shortcut_help_text += "\nCache path: " + ShortcutSettingsStore.cache_path()
-        else:
-            shortcut_help_text = (
-                "단축키는 프로그램 폴더의 캐시 파일에 저장됩니다.\n"
-                "같은 단축키를 지정하면 기존 항목과 서로 교체됩니다.\n"
-                "체크를 끄면 해당 단축키는 사용하지 않으며 입력칸이 비워집니다."
-            )
-            if self._show_cache_path:
-                shortcut_help_text += "\n캐시 위치: " + ShortcutSettingsStore.cache_path()
-        info = QLabel(shortcut_help_text)
-        info.setWordWrap(True)
-        layout.addWidget(info)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
 
-        tabs = QTabWidget()
-        layout.addWidget(tabs)
+        title = QLabel(tr_text("단축키 통합 관리", self._ui_language))
+        title.setObjectName("SettingsDialogTitle")
+        layout.addWidget(title)
 
-        for title, rows in GROUPS:
+        intro_lines = [
+            tr_text("프로그램 전체 단축키를 한곳에서 관리합니다. 각 항목 설명을 보고 어떤 기능의 단축키를 바꾸는지 바로 확인할 수 있습니다.", self._ui_language),
+            tr_text("체크를 끄면 해당 단축키는 사용하지 않으며 입력칸이 비워집니다. 같은 단축키를 지정하면 기존 항목과 서로 교체됩니다.", self._ui_language),
+        ]
+        if self._show_cache_path:
+            intro_lines.append(tr_text("캐시 위치: ", self._ui_language) + ShortcutSettingsStore.cache_path())
+        intro = QLabel("\n".join(intro_lines))
+        intro.setObjectName("SettingsDescription")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText(tr_text("기능 이름을 입력하고 Enter, 또는 이 칸에 포커스를 둔 상태에서 단축키를 눌러 검색", self._ui_language))
+        self.search_edit.returnPressed.connect(self.apply_text_search)
+        self.search_edit.installEventFilter(self)
+        layout.addWidget(self.search_edit)
+
+        self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(False)
+        self.tabs.setUsesScrollButtons(True)
+        tab_bar = self.tabs.tabBar()
+        tab_bar.setExpanding(False)
+        tab_bar.setUsesScrollButtons(True)
+        layout.addWidget(self.tabs, 1)
+
+        self.tab_records = []
+        self.section_records = []
+        self.card_records = []
+        self.extra_shortcut_text_by_key = {}
+
+        for title_text, rows in GROUPS:
             page = QWidget()
             page_layout = QVBoxLayout(page)
+            page_layout.setContentsMargins(0, 0, 0, 0)
+            page_layout.setSpacing(0)
+
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)
-            inner = QWidget()
-            grid = QGridLayout(inner)
-            grid.setColumnStretch(2, 1)
-            grid.setHorizontalSpacing(10)
-            grid.setVerticalSpacing(6)
+            scroll.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-            for r, (key, label) in enumerate(rows):
-                chk = QCheckBox()
-                chk.setChecked(self.settings.is_enabled(key))
-                grid.addWidget(chk, r, 0)
+            outer = QWidget()
+            outer_layout = QVBoxLayout(outer)
+            outer_layout.setContentsMargins(10, 10, 10, 10)
+            outer_layout.setSpacing(10)
+            outer_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-                label_w = QLabel(tr_text(label, self._ui_language))
-                grid.addWidget(label_w, r, 1)
+            tab_record = {"title": title_text, "page": page, "sections": []}
 
-                edit = QKeySequenceEdit()
-                edit.setKeySequence(self.settings.seq(key))
-                grid.addWidget(edit, r, 2)
+            for section_name, section_rows in shortcut_section_rows(title_text, rows):
+                block = QFrame()
+                block.setObjectName("SettingsBlock")
+                block_layout = QVBoxLayout(block)
+                block_layout.setContentsMargins(12, 12, 12, 12)
+                block_layout.setSpacing(10)
 
-                self.checks[key] = chk
-                self.labels[key] = label_w
-                self.edits[key] = edit
-                self.last_sequences[key] = edit.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
+                section_title = QLabel(tr_text(section_name, self._ui_language))
+                section_title.setObjectName("SettingsSectionTitle")
+                block_layout.addWidget(section_title)
 
-                chk.toggled.connect(lambda checked, k=key: self.on_enabled_toggled(k, checked))
-                edit.editingFinished.connect(lambda k=key: self.on_editing_finished(k))
+                section_desc = QLabel(tr_text(f"{section_name} 관련 단축키를 관리합니다.", self._ui_language))
+                section_desc.setObjectName("SettingsDescription")
+                section_desc.setWordWrap(True)
+                block_layout.addWidget(section_desc)
 
-                self.apply_enabled_state(key, chk.isChecked())
+                section_record = {"title": section_name, "block": block, "cards": [], "tab": tab_record}
 
-            scroll.setWidget(inner)
+                for key, label in section_rows:
+                    item = QFrame()
+                    item.setObjectName("SettingsItem")
+                    item_layout = QHBoxLayout(item)
+                    item_layout.setContentsMargins(12, 10, 12, 10)
+                    item_layout.setSpacing(14)
+
+                    toggle_wrap = QWidget()
+                    toggle_wrap.setFixedWidth(32)
+                    toggle_layout = QVBoxLayout(toggle_wrap)
+                    toggle_layout.setContentsMargins(0, 0, 0, 0)
+                    toggle_layout.setSpacing(0)
+                    chk = QCheckBox()
+                    chk.setChecked(self.settings.is_enabled(key))
+                    toggle_layout.addStretch(1)
+                    toggle_layout.addWidget(chk, 0, alignment=Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
+                    toggle_layout.addStretch(1)
+                    item_layout.addWidget(toggle_wrap, 0, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+                    left_wrap = QWidget()
+                    left_layout = QVBoxLayout(left_wrap)
+                    left_layout.setContentsMargins(0, 0, 0, 0)
+                    left_layout.setSpacing(4)
+
+                    label_w = QLabel(tr_text(label, self._ui_language))
+                    label_w.setObjectName("SettingsItemTitle")
+                    left_layout.addWidget(label_w)
+
+                    desc_w = QLabel(shortcut_item_description(key, label, title_text, self._ui_language))
+                    desc_w.setObjectName("SettingsDescription")
+                    desc_w.setWordWrap(True)
+                    left_layout.addWidget(desc_w)
+
+                    item_layout.addWidget(left_wrap, 1)
+
+                    edit = QKeySequenceEdit()
+                    edit.setKeySequence(self.settings.seq(key))
+                    edit.setMinimumWidth(220)
+                    item_layout.addWidget(edit, 0, alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+                    self.checks[key] = chk
+                    self.labels[key] = label_w
+                    self.desc_labels[key] = desc_w
+                    self.item_frames[key] = item
+                    self.edits[key] = edit
+                    self.last_sequences[key] = edit.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
+
+                    chk.toggled.connect(lambda checked, k=key: self.on_enabled_toggled(k, checked))
+                    edit.editingFinished.connect(lambda k=key: self.on_editing_finished(k))
+
+                    self.apply_enabled_state(key, chk.isChecked())
+                    block_layout.addWidget(item)
+
+                    card_record = {
+                        "key": key,
+                        "label": label,
+                        "group": title_text,
+                        "section": section_name,
+                        "item": item,
+                        "section_record": section_record,
+                        "tab_record": tab_record,
+                    }
+                    section_record["cards"].append(card_record)
+                    self.card_records.append(card_record)
+
+                outer_layout.addWidget(block)
+                tab_record["sections"].append(section_record)
+                self.section_records.append(section_record)
+
+            if title_text == "기타":
+                extra_refs = self.collect_extra_shortcut_references()
+                if extra_refs:
+                    block = QFrame()
+                    block.setObjectName("SettingsBlock")
+                    block_layout = QVBoxLayout(block)
+                    block_layout.setContentsMargins(12, 12, 12, 12)
+                    block_layout.setSpacing(10)
+
+                    section_title = QLabel(tr_text("등록된 사용자 단축키", self._ui_language))
+                    section_title.setObjectName("SettingsSectionTitle")
+                    block_layout.addWidget(section_title)
+
+                    section_desc = QLabel(tr_text("매크로와 개별 글꼴 프리셋에 등록된 단축키를 함께 확인합니다.", self._ui_language))
+                    section_desc.setObjectName("SettingsDescription")
+                    section_desc.setWordWrap(True)
+                    block_layout.addWidget(section_desc)
+
+                    section_record = {"title": "등록된 사용자 단축키", "block": block, "cards": [], "tab": tab_record}
+                    for extra in extra_refs:
+                        key = extra["key"]
+                        label = extra["label"]
+                        shortcut = extra["shortcut"]
+                        desc = extra.get("description", "")
+
+                        item = QFrame()
+                        item.setObjectName("SettingsItem")
+                        item_layout = QHBoxLayout(item)
+                        item_layout.setContentsMargins(12, 10, 12, 10)
+                        item_layout.setSpacing(14)
+
+                        left_wrap = QWidget()
+                        left_layout = QVBoxLayout(left_wrap)
+                        left_layout.setContentsMargins(0, 0, 0, 0)
+                        left_layout.setSpacing(4)
+
+                        label_w = QLabel(tr_text(label, self._ui_language))
+                        label_w.setObjectName("SettingsItemTitle")
+                        left_layout.addWidget(label_w)
+
+                        desc_w = QLabel(tr_text(desc, self._ui_language))
+                        desc_w.setObjectName("SettingsDescription")
+                        desc_w.setWordWrap(True)
+                        left_layout.addWidget(desc_w)
+
+                        item_layout.addWidget(left_wrap, 1)
+
+                        shortcut_label = QLabel(shortcut)
+                        shortcut_label.setObjectName("SettingsItemTitle")
+                        shortcut_label.setMinimumWidth(180)
+                        shortcut_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                        item_layout.addWidget(shortcut_label, 0, alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+                        block_layout.addWidget(item)
+                        self.extra_shortcut_text_by_key[key] = shortcut
+
+                        card_record = {
+                            "key": key,
+                            "label": label,
+                            "group": title_text,
+                            "section": "등록된 사용자 단축키",
+                            "item": item,
+                            "section_record": section_record,
+                            "tab_record": tab_record,
+                            "readonly": True,
+                            "shortcut": shortcut,
+                            "description": desc,
+                            "filter_visible": True,
+                        }
+                        section_record["cards"].append(card_record)
+                        self.card_records.append(card_record)
+
+                    outer_layout.addWidget(block)
+                    tab_record["sections"].append(section_record)
+                    self.section_records.append(section_record)
+
+            outer_layout.addStretch(1)
+            scroll.setWidget(outer)
             page_layout.addWidget(scroll)
-            tabs.addTab(page, tr_text(title, self._ui_language))
+            self.tabs.addTab(page, tr_text(title_text, self._ui_language))
+            tab_record["index"] = self.tabs.indexOf(page)
+            self.tab_records.append(tab_record)
 
         btn_line = QHBoxLayout()
         reset_btn = QPushButton(tr_text("기본값 복구", self._ui_language))
@@ -1643,6 +2138,282 @@ class ShortcutSettingsDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+
+    def collect_extra_shortcut_references(self):
+        records = []
+        seen = set()
+
+        for idx, macro in enumerate(getattr(self.settings, "macros", []) or []):
+            if not macro.get("enabled", True):
+                continue
+            shortcut = str(macro.get("shortcut", "") or "").strip()
+            if not shortcut:
+                continue
+            try:
+                seq = QKeySequence(shortcut)
+                display_shortcut = seq.toString(QKeySequence.SequenceFormat.NativeText) or shortcut
+            except Exception:
+                display_shortcut = shortcut
+            name = str(macro.get("name") or "매크로").strip() or "매크로"
+            key = f"__macro__:{idx}:{name}"
+            records.append({
+                "key": key,
+                "label": f"매크로: {name}",
+                "shortcut": display_shortcut,
+                "description": "매크로 관리에서 등록한 사용자 매크로 단축키입니다.",
+            })
+            seen.add(key)
+
+        parent = self.parent()
+        item_presets = getattr(parent, "item_text_presets", {}) if parent is not None else {}
+        if isinstance(item_presets, dict):
+            for name, preset in sorted(item_presets.items(), key=lambda x: str(x[0])):
+                if not isinstance(preset, dict):
+                    continue
+                if not preset.get("enabled", True):
+                    continue
+                shortcut = str(preset.get("shortcut", "") or "").strip()
+                if not shortcut:
+                    continue
+                try:
+                    seq = QKeySequence(shortcut)
+                    display_shortcut = seq.toString(QKeySequence.SequenceFormat.NativeText) or shortcut
+                except Exception:
+                    display_shortcut = shortcut
+                label_name = str(name)
+                key = f"__item_preset__:{label_name}"
+                records.append({
+                    "key": key,
+                    "label": f"개별 글꼴 프리셋: {label_name}",
+                    "shortcut": display_shortcut,
+                    "description": "개별 글꼴 프리셋 관리에서 등록한 사용자 단축키입니다.",
+                })
+                seen.add(key)
+
+        return records
+
+
+
+    def normalize_shortcut_text(self, value):
+        value = str(value or "").strip()
+        if not value:
+            return ""
+        compact = (
+            value.replace(" ", "")
+            .replace("Control+", "Ctrl+")
+            .replace("control+", "ctrl+")
+            .replace("CTRL+", "Ctrl+")
+        )
+        try:
+            converted = QKeySequence(compact).toString(QKeySequence.SequenceFormat.PortableText)
+            if converted:
+                compact = converted.replace(" ", "")
+        except Exception:
+            pass
+        return compact.lower()
+
+    def key_token_from_event(self, event):
+        key_code = event.key()
+        punct = {
+            Qt.Key.Key_Comma: ",",
+            Qt.Key.Key_Period: ".",
+            Qt.Key.Key_Semicolon: ";",
+            Qt.Key.Key_Apostrophe: "'",
+            Qt.Key.Key_Slash: "/",
+            Qt.Key.Key_Backslash: "\\",
+            Qt.Key.Key_BracketLeft: "[",
+            Qt.Key.Key_BracketRight: "]",
+            Qt.Key.Key_Minus: "-",
+            Qt.Key.Key_Equal: "=",
+            Qt.Key.Key_Plus: "+",
+            Qt.Key.Key_QuoteDbl: '"',
+            Qt.Key.Key_Colon: ":",
+        }
+        if key_code in punct:
+            return punct[key_code]
+        for n in range(1, 36):
+            if key_code == getattr(Qt.Key, f"Key_F{n}", None):
+                return f"F{n}"
+        txt = event.text()
+        if txt and len(txt) == 1 and txt.isprintable():
+            return txt.upper()
+        return QKeySequence(key_code).toString(QKeySequence.SequenceFormat.PortableText)
+
+    def shortcut_text_from_event(self, event):
+        key_code = event.key()
+        if key_code in (
+            Qt.Key.Key_Control,
+            Qt.Key.Key_Shift,
+            Qt.Key.Key_Alt,
+            Qt.Key.Key_Meta,
+            Qt.Key.Key_unknown,
+            Qt.Key.Key_Return,
+            Qt.Key.Key_Enter,
+            Qt.Key.Key_Escape,
+            Qt.Key.Key_Backspace,
+            Qt.Key.Key_Delete,
+        ):
+            return ""
+        mods = event.modifiers()
+        # 검색어 입력 중 일반 문자 입력은 그대로 통과시킨다. 단축키 검색은 조합키 입력일 때만 실행한다.
+        if not (mods & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.MetaModifier)):
+            return ""
+        parts = []
+        if mods & Qt.KeyboardModifier.ControlModifier:
+            parts.append("Ctrl")
+        if mods & Qt.KeyboardModifier.AltModifier:
+            parts.append("Alt")
+        if mods & Qt.KeyboardModifier.ShiftModifier:
+            parts.append("Shift")
+        if mods & Qt.KeyboardModifier.MetaModifier:
+            parts.append("Meta")
+        token = self.key_token_from_event(event)
+        if not token:
+            return ""
+        seq_text = "+".join(parts + [token]) if parts else token
+        try:
+            portable = QKeySequence(seq_text).toString(QKeySequence.SequenceFormat.PortableText)
+            if portable:
+                return portable
+        except Exception:
+            pass
+        return seq_text
+
+    def eventFilter(self, obj, event):
+        if obj is getattr(self, "search_edit", None):
+            if event.type() == QEvent.Type.ShortcutOverride:
+                seq_text = self.shortcut_text_from_event(event)
+                if seq_text:
+                    event.accept()
+                    return True
+            if event.type() == QEvent.Type.KeyPress:
+                if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                    self.apply_text_search()
+                    return True
+                if event.key() == Qt.Key.Key_Escape:
+                    self.clear_shortcut_search()
+                    return True
+                seq_text = self.shortcut_text_from_event(event)
+                if seq_text:
+                    self.apply_shortcut_search(seq_text)
+                    return True
+        return super().eventFilter(obj, event)
+
+    def current_shortcut_text_for_key(self, key, portable=True):
+        if hasattr(self, "extra_shortcut_text_by_key") and key in self.extra_shortcut_text_by_key:
+            value = str(self.extra_shortcut_text_by_key.get(key) or "")
+            try:
+                seq = QKeySequence(value)
+                if seq and not seq.isEmpty():
+                    fmt = QKeySequence.SequenceFormat.PortableText if portable else QKeySequence.SequenceFormat.NativeText
+                    return seq.toString(fmt)
+            except Exception:
+                pass
+            return value
+
+        edit = self.edits.get(key)
+        if edit is not None:
+            seq = edit.keySequence()
+            if not seq or seq.isEmpty():
+                return ""
+            fmt = QKeySequence.SequenceFormat.PortableText if portable else QKeySequence.SequenceFormat.NativeText
+            return seq.toString(fmt)
+        value = self.settings.shortcuts.get(key, DEFAULT_SHORTCUTS.get(key, ""))
+        seq = QKeySequence(value)
+        fmt = QKeySequence.SequenceFormat.PortableText if portable else QKeySequence.SequenceFormat.NativeText
+        return seq.toString(fmt) if seq and not seq.isEmpty() else ""
+
+    def clear_shortcut_search(self):
+        if hasattr(self, "search_edit"):
+            self.search_edit.clear()
+        self.apply_filter(None)
+
+    def apply_text_search(self):
+        query = self.search_edit.text().strip().lower() if hasattr(self, "search_edit") else ""
+        if not query:
+            self.apply_filter(None)
+            return
+        matched = []
+        for card in self.card_records:
+            key = card["key"]
+            label = str(card.get("label", ""))
+            d_label = tr_text(label, self._ui_language)
+            group = str(card.get("group", ""))
+            section = str(card.get("section", ""))
+            desc = str(card.get("description", ""))
+            portable = self.current_shortcut_text_for_key(key, portable=True)
+            native = self.current_shortcut_text_for_key(key, portable=False)
+            hay = f"{label} {d_label} {group} {section} {desc} {portable} {native}".lower()
+            if query in hay:
+                matched.append(key)
+        if not matched:
+            QMessageBox.information(self, tr_text("검색 결과 없음", self._ui_language), tr_text("검색 결과가 없습니다.", self._ui_language))
+            return
+        self.apply_filter(set(matched))
+
+    def apply_shortcut_search(self, seq_text):
+        normalized = self.normalize_shortcut_text(seq_text)
+        if not normalized:
+            return
+        matched = []
+        for card in self.card_records:
+            key = card["key"]
+            chk = self.checks.get(key)
+            if chk is not None and not chk.isChecked():
+                continue
+            candidates = {
+                self.normalize_shortcut_text(self.current_shortcut_text_for_key(key, portable=True)),
+                self.normalize_shortcut_text(self.current_shortcut_text_for_key(key, portable=False)),
+            }
+            if normalized in candidates:
+                matched.append(key)
+        if not matched:
+            QMessageBox.information(self, tr_text("단축키 검색", self._ui_language), tr_text("해당 단축키는 없습니다.", self._ui_language))
+            return
+        # 검색창에는 사용자가 방금 누른 단축키를 표시해 현재 필터 상태를 알 수 있게 한다.
+        self.search_edit.setText(QKeySequence(seq_text).toString(QKeySequence.SequenceFormat.NativeText) or seq_text)
+        self.apply_filter(set(matched))
+
+    def apply_filter(self, matched_keys):
+        # 검색 기준은 항상 전체 원본 카드 목록이다.
+        # QWidget.isVisible()은 부모 탭이 숨겨지면 False가 되므로,
+        # 재검색/검색해제 때 숨겨진 탭이 영원히 제외되지 않도록 논리 상태를 따로 쓴다.
+        matched_keys = None if matched_keys is None else set(matched_keys)
+
+        for card in self.card_records:
+            visible = matched_keys is None or card["key"] in matched_keys
+            card["filter_visible"] = visible
+            card["item"].setVisible(visible)
+
+        for section in self.section_records:
+            visible = any(bool(card.get("filter_visible", True)) for card in section["cards"])
+            section["block"].setVisible(visible)
+            section["filter_visible"] = visible
+
+        first_visible_index = None
+        for tab in self.tab_records:
+            tab_visible = any(bool(section.get("filter_visible", True)) for section in tab["sections"])
+            idx = tab.get("index", -1)
+            tab["filter_visible"] = tab_visible
+            if idx >= 0:
+                try:
+                    self.tabs.setTabVisible(idx, tab_visible)
+                except Exception:
+                    self.tabs.setTabEnabled(idx, tab_visible)
+            if tab_visible and first_visible_index is None:
+                first_visible_index = idx
+
+        if first_visible_index is not None and first_visible_index >= 0:
+            current_idx = self.tabs.currentIndex()
+            current_visible = True
+            try:
+                current_visible = self.tabs.isTabVisible(current_idx)
+            except Exception:
+                current_visible = self.tabs.isTabEnabled(current_idx)
+            if not current_visible:
+                self.tabs.setCurrentIndex(first_visible_index)
+
 
 
     def ask_shortcut_conflict_question(self, *args, **kwargs):
@@ -1663,15 +2434,36 @@ class ShortcutSettingsDialog(QDialog):
     def apply_enabled_state(self, key: str, enabled: bool):
         edit = self.edits[key]
         label = self.labels.get(key)
+        desc = self.desc_labels.get(key)
+        item = self.item_frames.get(key)
 
         edit.setEnabled(enabled)
-        if label:
-            label.setEnabled(enabled)
+
+        if item is not None:
+            item.setProperty("shortcutEnabled", enabled)
+            style = item.style()
+            style.unpolish(item)
+            style.polish(item)
+            item.update()
 
         if enabled:
             edit.setStyleSheet("")
+            if label:
+                label.setStyleSheet("")
+            if desc:
+                desc.setStyleSheet("")
         else:
             edit.setStyleSheet(disabled_key_edit_qss(self._ui_theme))
+            if self._ui_theme == THEME_LIGHT:
+                muted_title = "color:#8b95a7;"
+                muted_desc = "color:#9aa3b2;"
+            else:
+                muted_title = "color:#8d97a6;"
+                muted_desc = "color:#768091;"
+            if label:
+                label.setStyleSheet(muted_title)
+            if desc:
+                desc.setStyleSheet(muted_desc)
 
     def on_enabled_toggled(self, key: str, checked: bool):
         if self._handling_change or getattr(self, "_shortcut_conflict_prompt_active", False):

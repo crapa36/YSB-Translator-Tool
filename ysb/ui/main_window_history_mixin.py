@@ -335,6 +335,8 @@ class MainWindowHistoryMixin:
             return [("영어", "en"), ("일본어", "ja"), ("중국어", "zh"), ("한국어", "ko")]
         if provider == "local_paddle_ocr":
             return [("일본어", "ja"), ("영어", "en"), ("한국어", "ko"), ("중국어", "zh")]
+        if provider == "local_manga_ocr":
+            return [("일본어", "ja")]
         # CLOVA 기본
         return [("일본어", "ja"), ("중국어", "zh"), ("한국어", "ko")]
 
@@ -345,6 +347,8 @@ class MainWindowHistoryMixin:
             return str(getattr(settings, "google_vision_ocr_language", "en") or "en")
         if provider == "local_paddle_ocr":
             return str(getattr(settings, "local_paddle_ocr_language", "ja") or "ja")
+        if provider == "local_manga_ocr":
+            return "ja"
         return str(getattr(settings, "clova_ocr_language", "ja") or "ja")
 
     def refresh_ocr_language_combo(self, save=False):
@@ -375,6 +379,8 @@ class MainWindowHistoryMixin:
             self.api_settings.google_vision_ocr_language = value
         elif provider == "local_paddle_ocr":
             self.api_settings.local_paddle_ocr_language = value
+        elif provider == "local_manga_ocr":
+            value = "ja"
         else:
             self.api_settings.clova_ocr_language = value
         try:
@@ -1494,6 +1500,8 @@ class MainWindowHistoryMixin:
 
     def can_general_undo(self):
         try:
+            if getattr(getattr(self, "view", None), "draw_mode", None) == 'ocr_region_select' and getattr(self, 'ocr_region_temp_history', None):
+                return True
             if getattr(self, "project_undo_stack", None):
                 return True
             if getattr(getattr(self, "view", None), "history", None):
@@ -1508,6 +1516,7 @@ class MainWindowHistoryMixin:
         return bool(getattr(self, "project_redo_stack", None))
 
     def set_history_button_tooltips(self):
+        """Keep quick undo/redo on the unified delayed tooltip system only."""
         def shortcut_text(key, fallback=""):
             try:
                 seq = self.shortcut_settings.seq(key)
@@ -1515,15 +1524,49 @@ class MainWindowHistoryMixin:
                 return txt or fallback
             except Exception:
                 return fallback
-        if hasattr(self, "btn_quick_undo"):
-            title = self.tr_ui("작업 취소")
-            desc = self.tr_msg("되돌릴 수 있는 작업이 있으면 이전 상태로 돌아갑니다.")
-            self.btn_quick_undo.setToolTip(f"{title} ({shortcut_text('paint_undo', 'Ctrl+Z')})\n{desc}")
-        if hasattr(self, "btn_quick_redo"):
-            title = self.tr_ui("작업 재실행")
-            desc = self.tr_msg("되돌린 작업을 다시 적용합니다.")
-            self.btn_quick_redo.setToolTip(f"{title} ({shortcut_text('paint_redo', 'Ctrl+Y')})\n{desc}")
 
+        def set_delayed(widget, title, shortcut, desc):
+            if widget is None:
+                return
+            try:
+                widget.setToolTip("")
+                action = widget.defaultAction() if hasattr(widget, "defaultAction") else None
+                if action is not None:
+                    action.setToolTip("")
+                    action.setStatusTip("")
+                    action.setWhatsThis("")
+            except Exception:
+                pass
+            try:
+                if hasattr(self, "register_delayed_tooltip"):
+                    self.register_delayed_tooltip(widget, title, shortcut, desc)
+                    return
+            except Exception:
+                pass
+            try:
+                widget.setProperty("delayed_tooltip_title", title)
+                widget.setProperty("delayed_tooltip_shortcut", shortcut)
+                widget.setProperty("delayed_tooltip_description", desc)
+                if hasattr(self, "_tooltip_rich_text"):
+                    widget.setProperty("delayed_tooltip_html", self._tooltip_rich_text(title, shortcut, desc))
+                widget.installEventFilter(self)
+            except Exception:
+                pass
+
+        if hasattr(self, "btn_quick_undo"):
+            set_delayed(
+                self.btn_quick_undo,
+                self.tr_ui("뒤로가기"),
+                shortcut_text("paint_undo", "Ctrl+Z"),
+                self.tr_msg("최근 작업을 되돌립니다."),
+            )
+        if hasattr(self, "btn_quick_redo"):
+            set_delayed(
+                self.btn_quick_redo,
+                self.tr_ui("앞으로 가기"),
+                shortcut_text("paint_redo", "Ctrl+Y"),
+                self.tr_msg("되돌린 작업을 다시 실행합니다."),
+            )
     def history_button_style(self, enabled):
         if enabled:
             return "background:#3b465a;color:#ffffff;border:1px solid #7f8ba3;font-weight:bold;"
@@ -1542,6 +1585,9 @@ class MainWindowHistoryMixin:
             pass
 
     def handle_general_undo(self):
+        if getattr(self.view, 'draw_mode', None) == 'ocr_region_select' and getattr(self, 'ocr_region_temp_history', None):
+            if self.undo_last_ocr_analysis_region_temp():
+                return
         if self.undo_project_action():
             return
         if self.log_undo_boundary_blocked():

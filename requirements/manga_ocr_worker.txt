@@ -1,0 +1,6 @@
+# External Manga OCR worker portable Python runtime dependencies.
+# Installed into local_runtime/manga_ocr/python/Lib/site-packages by the Local build.
+# Keep transformers on v4.x because manga-ocr-base is a VisionEncoderDecoder model.
+
+manga-ocr==0.1.14
+transformers>=4.25,<5

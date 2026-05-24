@@ -189,6 +189,7 @@ class UniversalBatchWorker(QThread):
                     'mask_toggle_enabled': False,
                     'use_inpainted_as_source': False,
                     'bg_clean': None,
+                    'ocr_analysis_regions': [],
                 }
             else:
                 self.data_snapshot[i] = {
@@ -202,6 +203,7 @@ class UniversalBatchWorker(QThread):
                     'use_inpainted_as_source': bool(src.get('use_inpainted_as_source', False)),
                     'bg_clean': src.get('bg_clean'),
                     'original_name': src.get('original_name'),
+                    'ocr_analysis_regions': copy.deepcopy(src.get('ocr_analysis_regions', []) or []),
                 }
 
     def _write_bg_clean_as_source(self, page_idx, curr_data, fallback_path):
@@ -268,7 +270,10 @@ class UniversalBatchWorker(QThread):
 
                 if self.mode == 'analyze':
                     self.progress.emit(f"{prefix} 분석: {base_name}")
-                    o, d, mm, mi = self.engine.analyze_image(path)
+                    o, d, mm, mi = self.engine.analyze_image(
+                        path,
+                        analysis_regions=copy.deepcopy(curr_data.get('ocr_analysis_regions', []) or []),
+                    )
                     payload = {
                         'ori': o,
                         'data': _copy_data_list(d),
@@ -389,12 +394,13 @@ class AnalysisWorker(QThread):
     finished = pyqtSignal(object, object, object, object)
     log = pyqtSignal(str)
 
-    def __init__(self, engine, path, mask=None, data=None):
+    def __init__(self, engine, path, mask=None, data=None, analysis_regions=None):
         super().__init__()
         self.engine = engine
         self.path = path
         self.mask = _copy_mask(mask)
         self.data = _copy_data_list(data)
+        self.analysis_regions = copy.deepcopy(analysis_regions or [])
         self.cancel_requested = False
 
     def stop(self):
@@ -409,6 +415,8 @@ class AnalysisWorker(QThread):
                     provider_name = "Google Vision"
                 elif provider == "local_paddle_ocr":
                     provider_name = "LOCAL Paddle OCR"
+                elif provider == "local_manga_ocr":
+                    provider_name = "LOCAL Manga OCR"
                 else:
                     provider_name = "CLOVA"
             except Exception:
@@ -418,14 +426,46 @@ class AnalysisWorker(QThread):
                 self.log.emit(f"🔄 {provider_name} OCR로 영역 재분석 중...")
                 o, d, mm, mi = self.engine.reanalyze_from_manual_mask(self.path, self.mask, self.data)
             else:
-                self.log.emit(f"🚀 {provider_name} 전체 분석 시작...")
-                o, d, mm, mi = self.engine.analyze_image(self.path)
+                if self.analysis_regions:
+                    self.log.emit(f"🚀 {provider_name} 지정 범위 분석 시작... ({len(self.analysis_regions)}개 영역)")
+                else:
+                    self.log.emit(f"🚀 {provider_name} 전체 분석 시작...")
+                o, d, mm, mi = self.engine.analyze_image(self.path, analysis_regions=self.analysis_regions)
             self.log.emit(f"✅ 완료 ({len(d)}개)")
             self.finished.emit(o, d, _copy_mask(mm), _copy_mask(mi))
         except Exception as e:
             import traceback
             traceback.print_exc()
             self.log.emit(f"❌ 오류: {e}")
+
+
+
+class QuickOCRWorker(QThread):
+    finished = pyqtSignal(str, object)
+    log = pyqtSignal(str)
+
+    def __init__(self, engine, path, rect_norm, provider=None, language=None):
+        super().__init__()
+        self.engine = engine
+        self.path = path
+        self.rect_norm = copy.deepcopy(rect_norm or [])
+        self.provider = provider
+        self.language = language
+
+    def run(self):
+        try:
+            text = self.engine.quick_ocr_image_region(
+                self.path,
+                self.rect_norm,
+                provider=self.provider,
+                language=self.language,
+            )
+            self.finished.emit(text or "", None)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self.log.emit(f"❌ 빠른 OCR 오류: {e}")
+            self.finished.emit("", str(e))
 
 
 class InpaintWorker(QThread):

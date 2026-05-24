@@ -1,8 +1,8 @@
 import copy
 import numpy as np
-from PyQt6.QtWidgets import QGraphicsView, QGraphicsScene
+from PyQt6.QtWidgets import QGraphicsView, QGraphicsScene, QGraphicsTextItem
 from PyQt6.QtGui import QPainter, QPen, QBrush, QColor, QImage, QPixmap, QFont, QPainterPath
-from PyQt6.QtCore import Qt, QRectF
+from PyQt6.QtCore import Qt, QRectF, QTimer
 
 from ysb.engine.graphics_items import ToggleBoxItem, TypesettingItem
 
@@ -46,6 +46,30 @@ class MuleImageViewer(QGraphicsView):
         self.mask_cut_points = []
         self.mask_cut_preview_item = None
         self.is_mask_cutting = False
+
+        self.ocr_region_shape = "rect"
+        self.ocr_region_start = None
+        self.ocr_region_points = []
+        self.ocr_region_preview_item = None
+        self.ocr_region_overlay_items = []
+        self.is_ocr_region_drawing = False
+
+        self.quick_ocr_start = None
+        self.quick_ocr_preview_item = None
+        self.is_quick_ocr_drawing = False
+        self.quick_ocr_current_rect_norm = None
+        self.quick_ocr_revision = 0
+        self.quick_ocr_last_requested_revision = -1
+        self.quick_ocr_hold_timer = QTimer(self)
+        self.quick_ocr_hold_timer.setSingleShot(True)
+        self.quick_ocr_hold_timer.timeout.connect(self._trigger_quick_ocr_if_still_holding)
+
+        self.area_paint_shape = "rect"
+        self.area_paint_start = None
+        self.area_paint_points = []
+        self.area_paint_preview_item = None
+        self.is_area_painting = False
+        self._area_paint_undo_key = None
 
     def _active_transform_item_obj(self):
         active = self.main.current_transform_data_item() if hasattr(self.main, 'current_transform_data_item') else None
@@ -173,6 +197,9 @@ class MuleImageViewer(QGraphicsView):
         self.magic_preview_items = []
         self.clear_mask_wrap_preview()
         self.clear_mask_cut_preview()
+        self.clear_ocr_region_preview()
+        self.clear_ocr_region_overlay()
+        self.clear_quick_ocr_preview()
         self.clear_paste_preview()
         self.history.clear()
         if hasattr(self.main, "update_undo_redo_buttons"):
@@ -197,6 +224,9 @@ class MuleImageViewer(QGraphicsView):
         self.paste_preview_items = []
         self.clear_mask_wrap_preview()
         self.clear_mask_cut_preview()
+        self.clear_ocr_region_preview()
+        self.clear_ocr_region_overlay()
+        self.clear_quick_ocr_preview()
         if bg is None:
             return
 
@@ -541,6 +571,336 @@ class MuleImageViewer(QGraphicsView):
         cv2.fillPoly(region, [np.array(arr, dtype=np.int32)], 255)
         return region
 
+    def clear_ocr_region_preview(self):
+        item = getattr(self, "ocr_region_preview_item", None)
+        if item is not None:
+            try:
+                self.scene.removeItem(item)
+            except Exception:
+                pass
+        self.ocr_region_preview_item = None
+
+    def clear_quick_ocr_preview(self):
+        item = getattr(self, "quick_ocr_preview_item", None)
+        if item is not None:
+            try:
+                self.scene.removeItem(item)
+            except Exception:
+                pass
+        self.quick_ocr_preview_item = None
+
+    def clear_ocr_region_overlay(self):
+        if not hasattr(self, "ocr_region_overlay_items"):
+            self.ocr_region_overlay_items = []
+        for item in list(self.ocr_region_overlay_items):
+            try:
+                if item.scene() is not None:
+                    self.scene.removeItem(item)
+            except Exception:
+                pass
+        self.ocr_region_overlay_items = []
+
+    def _ocr_region_preview_pen(self):
+        return QPen(QColor(45, 140, 255, 230), 2, Qt.PenStyle.SolidLine)
+
+    def _draw_ocr_region_preview(self, now):
+        self.clear_ocr_region_preview()
+        if self.ocr_region_start is None:
+            return
+        pen = self._ocr_region_preview_pen()
+        brush = QBrush(QColor(45, 140, 255, 90))
+        if getattr(self, "ocr_region_shape", "rect") == "rect":
+            rect = QRectF(self.ocr_region_start, now).normalized()
+            self.ocr_region_preview_item = self.scene.addRect(rect, pen, brush)
+        else:
+            path = QPainterPath()
+            points = list(getattr(self, "ocr_region_points", []) or [])
+            if not points:
+                points = [self.ocr_region_start, now]
+            path.moveTo(points[0])
+            for pt in points[1:]:
+                path.lineTo(pt)
+            self.ocr_region_preview_item = self.scene.addPath(path, pen, brush)
+        if self.ocr_region_preview_item is not None:
+            self.ocr_region_preview_item.setZValue(86)
+            self.ocr_region_preview_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+
+    def _draw_quick_ocr_preview(self, now):
+        self.clear_quick_ocr_preview()
+        if self.quick_ocr_start is None:
+            return
+        rect = QRectF(self.quick_ocr_start, now).normalized()
+        pen = QPen(QColor(45, 140, 255, 230), 2, Qt.PenStyle.DashLine)
+        brush = QBrush(QColor(45, 140, 255, 90))
+        self.quick_ocr_preview_item = self.scene.addRect(rect, pen, brush)
+        self.quick_ocr_preview_item.setZValue(87)
+        self.quick_ocr_preview_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+
+    def clear_area_paint_preview(self):
+        item = getattr(self, "area_paint_preview_item", None)
+        if item is not None:
+            try:
+                self.scene.removeItem(item)
+            except Exception:
+                pass
+        self.area_paint_preview_item = None
+
+    def _draw_area_paint_preview(self, now):
+        self.clear_area_paint_preview()
+        if self.area_paint_start is None:
+            return
+        color = QColor(str(getattr(self.main, "final_paint_color", "#FFFFFF") or "#FFFFFF"))
+        if not color.isValid():
+            color = QColor("#FFFFFF")
+        preview = QColor(color)
+        preview.setAlpha(90)
+        pen = QPen(QColor(255, 215, 0, 220), 2, Qt.PenStyle.DashLine)
+        brush = QBrush(preview)
+
+        if getattr(self, "area_paint_shape", "rect") == "free":
+            points = list(getattr(self, "area_paint_points", []) or [])
+            if len(points) < 2:
+                points = [self.area_paint_start, now]
+            path = QPainterPath(points[0])
+            for pt in points[1:]:
+                path.lineTo(pt)
+            path.lineTo(now)
+            self.area_paint_preview_item = self.scene.addPath(path, pen, brush)
+        else:
+            rect = QRectF(self.area_paint_start, now).normalized()
+            if rect.width() < 1 or rect.height() < 1:
+                return
+            self.area_paint_preview_item = self.scene.addRect(rect, pen, brush)
+        self.area_paint_preview_item.setZValue(88)
+        self.area_paint_preview_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+
+    def _area_paint_region_path(self, end_pos):
+        if self.area_paint_start is None:
+            return None
+        if getattr(self, "area_paint_shape", "rect") == "free":
+            points = list(getattr(self, "area_paint_points", []) or [])
+            if not points:
+                points = [self.area_paint_start]
+            points.append(end_pos)
+            if len(points) < 2:
+                return None
+            path = QPainterPath(points[0])
+            for pt in points[1:]:
+                path.lineTo(pt)
+            path.closeSubpath()
+            if path.boundingRect().width() < 2 or path.boundingRect().height() < 2:
+                return None
+            return path
+
+        rect = QRectF(self.area_paint_start, end_pos).normalized()
+        if rect.width() < 2 or rect.height() < 2:
+            return None
+        path = QPainterPath()
+        path.addRect(rect)
+        return path
+
+    def _apply_area_paint_rect(self, end_pos):
+        if self.area_paint_start is None:
+            return False
+        if getattr(self.main, "cb_mode", None) is None or self.main.cb_mode.currentIndex() != 4:
+            return False
+        target_item = self.final_paint_above_item if getattr(self.main, "final_paint_above_text", False) else self.final_paint_item
+        if target_item is None:
+            return False
+        region_path = self._area_paint_region_path(end_pos)
+        if region_path is None:
+            return False
+        pix = target_item.pixmap()
+        if pix.isNull():
+            return False
+        color = QColor(str(getattr(self.main, "final_paint_color", "#FFFFFF") or "#FFFFFF"))
+        if not color.isValid():
+            color = QColor("#FFFFFF")
+        opacity = max(1, min(100, int(getattr(self.main, "final_paint_opacity", 100) or 100)))
+        color.setAlpha(int(round(255 * opacity / 100)))
+        p = QPainter(pix)
+        p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.fillPath(region_path, QBrush(color))
+        p.end()
+        target_item.setPixmap(pix)
+        if target_item is self.final_paint_above_item:
+            self.final_paint_above_img = pix.toImage()
+        else:
+            self.final_paint_img = pix.toImage()
+        return True
+
+    def _scene_rect_bounds(self):
+        rect = self.scene.sceneRect()
+        return max(1.0, float(rect.width())), max(1.0, float(rect.height()))
+
+    def _norm_rect_from_scene(self, rect):
+        w, h = self._scene_rect_bounds()
+        x1 = max(0.0, min(w, float(rect.left())))
+        y1 = max(0.0, min(h, float(rect.top())))
+        x2 = max(0.0, min(w, float(rect.right())))
+        y2 = max(0.0, min(h, float(rect.bottom())))
+        if x2 <= x1 or y2 <= y1:
+            return None
+        return [x1 / w, y1 / h, x2 / w, y2 / h]
+
+    def _norm_points_from_scene(self, points):
+        w, h = self._scene_rect_bounds()
+        out = []
+        for pt in points or []:
+            x = max(0.0, min(w, float(pt.x()))) / w
+            y = max(0.0, min(h, float(pt.y()))) / h
+            out.append([x, y])
+        return out
+
+    def current_ocr_region_payload(self, end_pos):
+        if self.ocr_region_start is None:
+            return None
+        if getattr(self, "ocr_region_shape", "rect") == "rect":
+            rect = QRectF(self.ocr_region_start, end_pos).normalized()
+            norm_rect = self._norm_rect_from_scene(rect)
+            if not norm_rect:
+                return None
+            return {"shape": "rect", "rect_norm": norm_rect}
+        points = list(getattr(self, "ocr_region_points", []) or [])
+        if end_pos is not None:
+            points.append(end_pos)
+        norm_points = self._norm_points_from_scene(points)
+        if len(norm_points) < 3:
+            return None
+        return {"shape": "free", "points_norm": norm_points}
+
+    def quick_ocr_rect_payload(self, end_pos):
+        if self.quick_ocr_start is None:
+            return None
+        rect = QRectF(self.quick_ocr_start, end_pos).normalized()
+        return self._norm_rect_from_scene(rect)
+
+    def _quick_ocr_rect_changed_significantly(self, old_rect, new_rect, tolerance=0.004):
+        """빠른 OCR 드래그 중 손떨림 수준의 작은 이동은 같은 영역으로 본다.
+
+        tolerance는 정규화 좌표 기준이다. 0.004면 1000px 이미지에서 약 4px 정도라
+        사용자가 영역을 유지하고 있는 상태와 새 영역으로 옮긴 상태를 적당히 가른다.
+        """
+        if not old_rect or not new_rect:
+            return True
+        try:
+            old_vals = [float(x) for x in old_rect]
+            new_vals = [float(x) for x in new_rect]
+            if len(old_vals) != 4 or len(new_vals) != 4:
+                return True
+            return max(abs(a - b) for a, b in zip(old_vals, new_vals)) > float(tolerance)
+        except Exception:
+            return True
+
+    def _schedule_quick_ocr_hold_check(self, end_pos):
+        rect_norm = self.quick_ocr_rect_payload(end_pos)
+        old_rect = copy.deepcopy(getattr(self, "quick_ocr_current_rect_norm", None))
+        if not rect_norm:
+            if old_rect is not None:
+                self.quick_ocr_current_rect_norm = None
+                self.quick_ocr_revision += 1
+            return
+
+        if old_rect is not None and not self._quick_ocr_rect_changed_significantly(old_rect, rect_norm):
+            # 미세한 손떨림은 같은 영역으로 보고 기존 결과/타이머를 유지한다.
+            return
+
+        self.quick_ocr_current_rect_norm = copy.deepcopy(rect_norm)
+        self.quick_ocr_revision += 1
+        # 이미 인식된 결과가 있다면 새 영역을 읽는 동안에도 마우스를 떼기 전까지 유지한다.
+        try:
+            latest = str(getattr(self.main, "quick_ocr_latest_text", "") or "").strip()
+            if latest and hasattr(self.main, "show_quick_ocr_result_popup"):
+                self.main.show_quick_ocr_result_popup(latest)
+        except Exception:
+            pass
+        try:
+            self.quick_ocr_hold_timer.start(200)
+        except Exception:
+            pass
+
+    def _trigger_quick_ocr_if_still_holding(self):
+        if self.draw_mode != 'quick_ocr' or not getattr(self, "is_quick_ocr_drawing", False):
+            return
+        rect_norm = copy.deepcopy(getattr(self, "quick_ocr_current_rect_norm", None))
+        if not rect_norm:
+            return
+        revision = int(getattr(self, "quick_ocr_revision", 0) or 0)
+        if revision == int(getattr(self, "quick_ocr_last_requested_revision", -1) or -1):
+            return
+        self.quick_ocr_last_requested_revision = revision
+        if hasattr(self.main, "run_quick_ocr_region_live"):
+            self.main.run_quick_ocr_region_live(rect_norm, request_id=revision)
+        elif hasattr(self.main, "run_quick_ocr_region"):
+            self.main.run_quick_ocr_region(rect_norm)
+
+    def draw_ocr_analysis_regions(self, regions):
+        self.clear_ocr_region_overlay()
+        if not regions:
+            return
+        w, h = self._scene_rect_bounds()
+        red_pen = QPen(QColor(255, 40, 40, 240), 3, Qt.PenStyle.SolidLine)
+        no_brush = QBrush(Qt.BrushStyle.NoBrush)
+        label_font = QFont("Arial", 11, QFont.Weight.Bold)
+        for region in regions or []:
+            if not isinstance(region, dict):
+                continue
+            shape = str(region.get("shape") or "rect")
+            item = None
+            label_x = 0.0
+            label_y = 0.0
+            if shape == "free":
+                pts = region.get("points_norm") or []
+                if len(pts) < 3:
+                    continue
+                path = QPainterPath()
+                try:
+                    first = pts[0]
+                    path.moveTo(float(first[0]) * w, float(first[1]) * h)
+                    label_x = float(first[0]) * w
+                    label_y = float(first[1]) * h
+                    for pt in pts[1:]:
+                        path.lineTo(float(pt[0]) * w, float(pt[1]) * h)
+                    path.closeSubpath()
+                except Exception:
+                    continue
+                item = self.scene.addPath(path, red_pen, no_brush)
+            else:
+                r = region.get("rect_norm") or []
+                if len(r) < 4:
+                    continue
+                try:
+                    x1, y1, x2, y2 = [float(v) for v in r[:4]]
+                except Exception:
+                    continue
+                rect = QRectF(x1 * w, y1 * h, (x2 - x1) * w, (y2 - y1) * h).normalized()
+                if rect.width() < 1 or rect.height() < 1:
+                    continue
+                label_x, label_y = rect.left(), rect.top()
+                item = self.scene.addRect(rect, red_pen, no_brush)
+            if item is not None:
+                item.setZValue(84)
+                item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+                self.ocr_region_overlay_items.append(item)
+
+                text = self.scene.addText("OCR 분석 영역", label_font)
+                text.setDefaultTextColor(Qt.GlobalColor.black)
+                br = text.boundingRect()
+                pad_x, pad_y = 5.0, 2.0
+                label_bg = self.scene.addRect(
+                    QRectF(label_x, max(0.0, label_y - br.height() - pad_y * 2), br.width() + pad_x * 2, br.height() + pad_y * 2),
+                    QPen(Qt.PenStyle.NoPen),
+                    QBrush(QColor(255, 220, 40, 235))
+                )
+                label_bg.setZValue(85)
+                label_bg.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+                text.setPos(label_bg.rect().left() + pad_x, label_bg.rect().top() + pad_y)
+                text.setZValue(86)
+                text.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+                self.ocr_region_overlay_items.append(label_bg)
+                self.ocr_region_overlay_items.append(text)
+
     def clear_magic_wand_preview(self):
         if not hasattr(self, "magic_preview_items"):
             self.magic_preview_items = []
@@ -878,6 +1238,47 @@ class MuleImageViewer(QGraphicsView):
                 self.main.create_final_text_at(int(pt.x()), int(pt.y()))
                 return
 
+        if self.draw_mode == 'area_paint' and e.button() == Qt.MouseButton.LeftButton:
+            if getattr(self.main, "cb_mode", None) is None or self.main.cb_mode.currentIndex() != 4:
+                e.accept()
+                return
+            self.is_area_painting = True
+            self.area_paint_start = self.mapToScene(e.pos())
+            self.area_paint_points = [self.area_paint_start]
+            self._area_paint_undo_key = f"area_paint_{id(self)}"
+            try:
+                if hasattr(self.main, "begin_deferred_project_undo"):
+                    self.main.begin_deferred_project_undo(self._area_paint_undo_key, "영역 페인팅")
+            except Exception:
+                self._area_paint_undo_key = None
+            self._draw_area_paint_preview(self.area_paint_start)
+            e.accept()
+            return
+
+        if self.draw_mode == 'ocr_region_select' and e.button() == Qt.MouseButton.LeftButton:
+            self.is_ocr_region_drawing = True
+            self.ocr_region_start = self.mapToScene(e.pos())
+            self.ocr_region_points = [self.ocr_region_start]
+            self._draw_ocr_region_preview(self.ocr_region_start)
+            e.accept()
+            return
+
+        if self.draw_mode == 'quick_ocr' and e.button() == Qt.MouseButton.LeftButton:
+            self.is_quick_ocr_drawing = True
+            self.quick_ocr_start = self.mapToScene(e.pos())
+            self.quick_ocr_current_rect_norm = None
+            self.quick_ocr_revision += 1
+            self.quick_ocr_last_requested_revision = -1
+            try:
+                self.quick_ocr_hold_timer.stop()
+            except Exception:
+                pass
+            if hasattr(self.main, "begin_quick_ocr_drag"):
+                self.main.begin_quick_ocr_drag()
+            self._draw_quick_ocr_preview(self.quick_ocr_start)
+            e.accept()
+            return
+
         if self.draw_mode == 'mask_wrap' and e.button() == Qt.MouseButton.LeftButton:
             if getattr(self.main, "cb_mode", None) is None or self.main.cb_mode.currentIndex() not in (2, 3):
                 e.accept()
@@ -996,6 +1397,73 @@ class MuleImageViewer(QGraphicsView):
                 else:
                     self.unsetCursor()
 
+        if self.draw_mode == 'area_paint' and getattr(self, "is_area_painting", False):
+            now = self.mapToScene(e.pos())
+            if getattr(self, "area_paint_shape", "rect") == "free":
+                pts = getattr(self, "area_paint_points", []) or []
+                if not pts:
+                    self.area_paint_points = [now]
+                else:
+                    last = pts[-1]
+                    dx = now.x() - last.x()
+                    dy = now.y() - last.y()
+                    if (dx * dx + dy * dy) >= 9:
+                        pts.append(now)
+                        self.area_paint_points = pts
+            self._draw_area_paint_preview(now)
+            e.accept()
+            return
+
+        if self.draw_mode == 'ocr_region_select' and getattr(self, "is_ocr_region_drawing", False):
+            now = self.mapToScene(e.pos())
+            if getattr(self, "ocr_region_shape", "rect") == "free":
+                pts = getattr(self, "ocr_region_points", []) or []
+                if not pts:
+                    self.ocr_region_points = [now]
+                else:
+                    last = pts[-1]
+                    dx = now.x() - last.x()
+                    dy = now.y() - last.y()
+                    if (dx * dx + dy * dy) >= 9:
+                        pts.append(now)
+                        self.ocr_region_points = pts
+            self._draw_ocr_region_preview(now)
+            e.accept()
+            return
+
+        if self.draw_mode == 'quick_ocr' and getattr(self, "is_quick_ocr_drawing", False):
+            now = self.mapToScene(e.pos())
+            self._draw_quick_ocr_preview(now)
+            self._schedule_quick_ocr_hold_check(now)
+            e.accept()
+            return
+
+        if self.draw_mode == 'ocr_region_select' and getattr(self, "is_ocr_region_drawing", False):
+            end_pos = self.mapToScene(e.pos())
+            payload = self.current_ocr_region_payload(end_pos)
+            self.is_ocr_region_drawing = False
+            self.ocr_region_start = None
+            self.ocr_region_points = []
+            self.clear_ocr_region_preview()
+            if payload is not None and hasattr(self.main, "add_ocr_analysis_region_payload"):
+                self.main.add_ocr_analysis_region_payload(payload)
+            e.accept()
+            return
+
+        if self.draw_mode == 'quick_ocr' and getattr(self, "is_quick_ocr_drawing", False):
+            self.is_quick_ocr_drawing = False
+            self.quick_ocr_start = None
+            self.quick_ocr_current_rect_norm = None
+            try:
+                self.quick_ocr_hold_timer.stop()
+            except Exception:
+                pass
+            self.clear_quick_ocr_preview()
+            if hasattr(self.main, "finish_quick_ocr_drag"):
+                self.main.finish_quick_ocr_drag()
+            e.accept()
+            return
+
         if self.draw_mode == 'mask_wrap' and getattr(self, "is_mask_wrapping", False):
             now = self.mapToScene(e.pos())
             if getattr(self, "mask_wrap_shape", "rect") == "free":
@@ -1081,6 +1549,58 @@ class MuleImageViewer(QGraphicsView):
             e.accept()
             return
 
+        if self.draw_mode == 'area_paint' and getattr(self, "is_area_painting", False):
+            end_pos = self.mapToScene(e.pos())
+            self.is_area_painting = False
+            applied = self._apply_area_paint_rect(end_pos)
+            self.area_paint_start = None
+            self.area_paint_points = []
+            self.clear_area_paint_preview()
+            if applied and hasattr(self.main, "on_final_paint_edited"):
+                self.main.on_final_paint_edited()
+            if self._area_paint_undo_key and hasattr(self.main, "finish_deferred_project_undo"):
+                self.main.finish_deferred_project_undo(self._area_paint_undo_key, force=bool(applied), autosave=False)
+            self._area_paint_undo_key = None
+            e.accept()
+            return
+
+        if self.draw_mode == 'ocr_region_select' and getattr(self, "is_ocr_region_drawing", False):
+            end_pos = self.mapToScene(e.pos())
+            if getattr(self, "ocr_region_shape", "rect") == "free":
+                pts = getattr(self, "ocr_region_points", []) or []
+                if not pts:
+                    self.ocr_region_points = [end_pos]
+                else:
+                    last = pts[-1]
+                    dx = end_pos.x() - last.x()
+                    dy = end_pos.y() - last.y()
+                    if (dx * dx + dy * dy) >= 9:
+                        pts.append(end_pos)
+                        self.ocr_region_points = pts
+            payload = self.current_ocr_region_payload(end_pos)
+            self.is_ocr_region_drawing = False
+            self.ocr_region_start = None
+            self.ocr_region_points = []
+            self.clear_ocr_region_preview()
+            if payload is not None and hasattr(self.main, "add_ocr_analysis_region_payload"):
+                self.main.add_ocr_analysis_region_payload(payload)
+            e.accept()
+            return
+
+        if self.draw_mode == 'quick_ocr' and getattr(self, "is_quick_ocr_drawing", False):
+            self.is_quick_ocr_drawing = False
+            self.quick_ocr_start = None
+            self.quick_ocr_current_rect_norm = None
+            try:
+                self.quick_ocr_hold_timer.stop()
+            except Exception:
+                pass
+            self.clear_quick_ocr_preview()
+            if hasattr(self.main, "finish_quick_ocr_drag"):
+                self.main.finish_quick_ocr_drag()
+            e.accept()
+            return
+
         if self.draw_mode == 'mask_wrap' and getattr(self, "is_mask_wrapping", False):
             end_pos = self.mapToScene(e.pos())
             region = self._mask_wrap_region_np(end_pos)
@@ -1132,6 +1652,8 @@ class MuleImageViewer(QGraphicsView):
             factor = 1.25 if e.angleDelta().y() > 0 else 0.8
             self.scale(factor, factor)
             try:
+                if hasattr(self.main, "schedule_source_compare_sync"):
+                    self.main.schedule_source_compare_sync(0)
                 if hasattr(self.main, "remember_current_view_state"):
                     self.main.remember_current_view_state()
                 if hasattr(self.main, "auto_save_project"):
@@ -1141,3 +1663,8 @@ class MuleImageViewer(QGraphicsView):
             e.accept()
         else:
             super().wheelEvent(e)
+            try:
+                if hasattr(self.main, "schedule_source_compare_sync"):
+                    self.main.schedule_source_compare_sync(0)
+            except Exception:
+                pass

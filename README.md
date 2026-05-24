@@ -14,7 +14,6 @@
 
 v2.1.0부터 Lite / Local 분리 개발을 위한 기본 구조를 준비합니다.
 
-
 ```text
 Lite
 - 기존 API 기반 경량판
@@ -24,35 +23,6 @@ Local
 - Local판: comic_text_detector + PaddleOCR + LOCAL LaMa 중심 구성
 - onedir / 폴더형 빌드 대상
 ```
-
-### 배포 파일 선택
-
-```text
-YSB_Tool_Lite_2.1.0_Windows_x64
-YSB_Tool_Local_2.1.0_Windows_x64
-
-Lite판
-
-YSB_Tool_Lite_2.1.0_Windows_x64는 API 기반의 경량판입니다.
-
-OpenAI, CLOVA OCR, Replicate LaMa 등 외부 API를 사용하는 버전입니다.
-로컬 OCR 모델, 로컬 인페인팅 모델, 포터블 Python 런타임은 포함하지 않습니다.
-용량이 작고 실행/압축/배포가 가볍습니다.
-로컬 모델 설치 없이 API 중심으로 작업하려는 사용자에게 적합합니다.
-Local판
-
-YSB_Tool_Local_2.1.0_Windows_x64는 로컬 모델 기능을 포함한 폴더형 버전입니다.
-
-comic_text_detector 기반 텍스트 위치/마스크 감지를 포함합니다.
-LOCAL PaddleOCR을 이용한 로컬 OCR을 지원합니다.
-LOCAL LaMa 인페인팅을 지원합니다.
-PaddleOCR 실행을 위해 포터블 Python 런타임이 함께 포함됩니다.
-Lite판보다 용량이 크지만, 일부 작업을 API 없이 로컬에서 처리할 수 있습니다.
-로컬 OCR/마스크 감지/로컬 인페인팅을 사용하려는 사용자에게 적합합니다.
-
-
-
-
 
 ## 실행 방법 / Run from source
 
@@ -80,6 +50,27 @@ YSBTranslator/
   - build.txt
 - ysb/
 - .venv/                  # 자동 생성
+```
+
+## 빌드 방법 / Build
+
+분리 배포판 빌드는 아래 스크립트를 사용합니다.
+
+```bat
+build_tools\build_exe.bat
+```
+
+이 스크립트는 하나의 공유 `.venv`를 사용하고, Lite와 Local 패키지를 함께 생성합니다.
+
+```text
+dist/
+- 역식붕이 툴 Lite v2.1.0.exe
+- 역식붕이 툴 Local v2.1.0/
+- YSB_Launcher.exe
+- packages/
+  - YSB_Tool_Lite_v2.1.0.zip
+  - YSB_Tool_Local_v2.1.0.zip
+```
 
 ## 폴더 구조 / Source layout
 

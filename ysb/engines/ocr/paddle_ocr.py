@@ -67,7 +67,11 @@ def _app_root() -> Path:
 
 
 def _external_worker_file() -> Path:
-    return _app_root() / "local_runtime" / "paddle_ocr_worker.py"
+    root = _app_root()
+    preferred = root / "local_runtime" / "paddle" / "paddle_ocr_worker.py"
+    if preferred.exists():
+        return preferred
+    return root / "local_runtime" / "paddle_ocr_worker.py"
 
 
 def _external_worker_python() -> Path | None:
@@ -81,9 +85,12 @@ def _external_worker_python() -> Path | None:
         # Final Local distribution uses a self-contained embeddable Python
         # runtime, not a copied venv.  This makes the package portable across
         # other Windows PCs that do not have Python installed.
-        root / "local_runtime" / "python" / "python.exe",
+        root / "local_runtime" / "paddle" / "python" / "python.exe",
 
         # Backward-compatible/dev fallbacks.
+        root / "local_runtime" / "python" / "python.exe",
+        root / "local_runtime" / "paddle_ocr_venv" / "Scripts" / "python.exe",
+        root / "local_runtime" / "paddle_ocr_venv" / "bin" / "python",
         root / "local_runtime" / "ocr_venv" / "Scripts" / "python.exe",
         root / "local_runtime" / "ocr_venv" / "bin" / "python",
         root / ".venv" / "Scripts" / "python.exe",
@@ -142,7 +149,7 @@ class _ExternalPaddleWorkerClient:
         if not worker.exists():
             raise RuntimeError(f"External PaddleOCR worker not found: {worker}")
         if python is None:
-            raise RuntimeError("External PaddleOCR Python runtime not found. local_runtime/python/python.exe를 확인해 주세요.")
+            raise RuntimeError("External PaddleOCR Python runtime not found. local_runtime/paddle/python/python.exe를 확인해 주세요.")
 
         env = os.environ.copy()
         env.setdefault("PYTHONUTF8", "1")

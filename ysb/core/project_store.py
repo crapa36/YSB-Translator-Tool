@@ -181,6 +181,7 @@ class ProjectStore:
                 "final_paint": None,
                 "final_paint_above": None,
                 "original_name": dst_name,
+                "ocr_analysis_regions": [],
             }
 
         self.ui_state = {"current_mode": 0, "view_states": {}}
@@ -315,6 +316,7 @@ class ProjectStore:
                 "image": relpath(image_path, self.project_dir),
                 "original_name": curr.get("original_name", os.path.basename(image_path)),
                 "data": json_safe(curr.get("data", [])),
+                "ocr_analysis_regions": json_safe(curr.get("ocr_analysis_regions", [])),
             }
 
             mask_merge = curr.get("mask_merge")
@@ -527,6 +529,7 @@ class ProjectStore:
                 "final_paint": final_paint,
                 "final_paint_above": final_paint_above,
                 "original_name": page.get("original_name", os.path.basename(image_path)),
+                "ocr_analysis_regions": page.get("ocr_analysis_regions", []) if isinstance(page.get("ocr_analysis_regions", []), list) else [],
             }
 
         current_index = int(payload.get("current_index", 0))

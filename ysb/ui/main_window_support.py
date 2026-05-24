@@ -40,7 +40,7 @@ from ysb.settings.shortcut_settings import ShortcutSettingsStore, ShortcutSettin
 from ysb.ui.viewer import MuleImageViewer
 from ysb.engine.graphics_items import TypesettingItem, build_typesetting_text_path
 from ysb.ui.delegates import MultilineDelegate
-from ysb.services.workers import UniversalBatchWorker, AnalysisWorker, InpaintWorker, TranslationWorker
+from ysb.services.workers import UniversalBatchWorker, AnalysisWorker, InpaintWorker, TranslationWorker, QuickOCRWorker
 from ysb.core.cache_utils import get_cache_dir, get_cache_file
 from ysb.editions.current import get_current_edition
 from ysb.ui.launcher import LauncherWidget, RecentProjectStore
@@ -2595,8 +2595,15 @@ class FontSelectDialog(QDialog):
         self.style_combo = QComboBox(self)
         self.style_combo.setToolTip(translate_ui_text("Regular, Bold, DemiBold 같은 글꼴 스타일을 선택합니다.", self._ui_language))
         self.style_combo.currentIndexChanged.connect(self.on_style_changed)
+        self.import_font_btn = QPushButton(self.font_import_text("폰트 불러오기"), self)
+        self.import_font_btn.setToolTip(self.font_import_text("TTF, OTF, TTC 같은 폰트 파일을 불러옵니다."))
+        self.import_font_btn.clicked.connect(self.import_font_file)
+        style_row = QHBoxLayout()
+        style_row.setSpacing(6)
+        style_row.addWidget(self.style_combo, 1)
+        style_row.addWidget(self.import_font_btn)
         right_top.addWidget(style_label)
-        right_top.addWidget(self.style_combo)
+        right_top.addLayout(style_row)
         top.addLayout(right_top, 1)
 
         root.addLayout(top)
@@ -2695,6 +2702,171 @@ class FontSelectDialog(QDialog):
             "폰트 갱신 중 오류가 발생했습니다.": "An error occurred while refreshing fonts.",
         }
         return en.get(text, translate_ui_text(text, self._ui_language))
+
+    def font_import_text(self, text):
+        lang = str(getattr(self, "_ui_language", "ko") or "ko").lower()
+        if not lang.startswith("en"):
+            return translate_ui_text(text, self._ui_language)
+        en = {
+            "폰트 불러오기": "Import Font",
+            "TTF, OTF, TTC 같은 폰트 파일을 불러옵니다.": "Import font files such as TTF, OTF, or TTC.",
+            "폰트 파일 선택": "Select Font File",
+            "폰트 파일 (*.ttf *.otf *.ttc *.otc)": "Font Files (*.ttf *.otf *.ttc *.otc)",
+            "폰트 불러오기 방식": "Import Font Mode",
+            "프로그램에만 추가": "Add to this program only",
+            "Windows에 설치": "Install to Windows",
+            "폰트를 어디에 추가할까요?": "Where should this font be added?",
+            "폰트 불러오기 완료": "Font import complete",
+            "폰트를 불러왔습니다.": "The font has been imported.",
+            "추가된 글꼴": "Added font families",
+            "폰트 불러오기 실패": "Font import failed",
+            "폰트 파일을 불러오지 못했습니다.": "Could not import the font file.",
+            "Windows 설치는 Windows에서만 사용할 수 있습니다. 프로그램에만 추가합니다.": "Windows installation is only available on Windows. It will be added to this program only.",
+        }
+        return en.get(text, translate_ui_text(text, self._ui_language))
+
+    @classmethod
+    def imported_font_dir(cls):
+        try:
+            d = get_cache_dir() / "imported_fonts"
+            d.mkdir(parents=True, exist_ok=True)
+            return d
+        except Exception:
+            return None
+
+    @classmethod
+    def add_application_font_file(cls, path):
+        try:
+            font_id = QFontDatabase.addApplicationFont(str(path))
+        except Exception:
+            font_id = -1
+        if font_id is None or int(font_id) < 0:
+            return []
+        try:
+            cls._extra_font_ids.append(int(font_id))
+        except Exception:
+            pass
+        try:
+            families = [str(x) for x in QFontDatabase.applicationFontFamilies(int(font_id)) if str(x).strip()]
+        except Exception:
+            families = []
+        if families:
+            cls._extra_font_families = sorted(set(list(cls._extra_font_families) + families), key=lambda s: str(s).lower())
+        return families
+
+    @classmethod
+    def load_imported_program_fonts(cls):
+        d = cls.imported_font_dir()
+        if d is None:
+            return []
+        families = []
+        for path in sorted(d.glob("*")):
+            if path.suffix.lower() not in {".ttf", ".otf", ".ttc", ".otc"}:
+                continue
+            families.extend(cls.add_application_font_file(path))
+        return families
+
+    def copy_font_to_program(self, source_path):
+        folder = self.imported_font_dir()
+        if folder is None:
+            return Path(source_path)
+        src = Path(source_path)
+        dst = folder / src.name
+        if dst.exists():
+            stem = src.stem
+            suffix = src.suffix
+            n = 2
+            while True:
+                cand = folder / f"{stem}_{n}{suffix}"
+                if not cand.exists():
+                    dst = cand
+                    break
+                n += 1
+        shutil.copy2(src, dst)
+        return dst
+
+    def install_font_to_windows_user(self, source_path):
+        if not sys.platform.startswith("win"):
+            return self.copy_font_to_program(source_path)
+        src = Path(source_path)
+        folder = Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "Windows" / "Fonts"
+        folder.mkdir(parents=True, exist_ok=True)
+        dst = folder / src.name
+        if not dst.exists():
+            shutil.copy2(src, dst)
+        try:
+            import winreg
+            name = src.stem
+            ext = src.suffix.lower()
+            kind = "TrueType" if ext in {".ttf", ".ttc"} else "OpenType"
+            reg_name = f"{name} ({kind})"
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows NT\CurrentVersion\Fonts", 0, winreg.KEY_SET_VALUE) as key:
+                winreg.SetValueEx(key, reg_name, 0, winreg.REG_SZ, str(dst))
+        except Exception:
+            pass
+        try:
+            import ctypes
+            FR_PRIVATE = 0x10
+            ctypes.windll.gdi32.AddFontResourceExW(str(dst), 0, 0)
+            HWND_BROADCAST = 0xFFFF
+            WM_FONTCHANGE = 0x001D
+            ctypes.windll.user32.SendMessageTimeoutW(HWND_BROADCAST, WM_FONTCHANGE, 0, 0, 0, 1000, None)
+        except Exception:
+            pass
+        return dst
+
+    def import_font_file(self):
+        path, _filter = QFileDialog.getOpenFileName(
+            self,
+            self.font_import_text("폰트 파일 선택"),
+            "",
+            self.font_import_text("폰트 파일 (*.ttf *.otf *.ttc *.otc)"),
+        )
+        if not path:
+            return
+        options = [self.font_import_text("프로그램에만 추가"), self.font_import_text("Windows에 설치")]
+        choice, ok = QInputDialog.getItem(
+            self,
+            self.font_import_text("폰트 불러오기 방식"),
+            self.font_import_text("폰트를 어디에 추가할까요?"),
+            options,
+            0,
+            False,
+        )
+        if not ok:
+            return
+        try:
+            if choice == self.font_import_text("Windows에 설치"):
+                if not sys.platform.startswith("win"):
+                    QMessageBox.information(self, self.font_import_text("폰트 불러오기 방식"), self.font_import_text("Windows 설치는 Windows에서만 사용할 수 있습니다. 프로그램에만 추가합니다."))
+                    dst = self.copy_font_to_program(path)
+                else:
+                    dst = self.install_font_to_windows_user(path)
+            else:
+                dst = self.copy_font_to_program(path)
+            families = self.add_application_font_file(dst)
+            if not families:
+                raise RuntimeError(self.font_import_text("폰트 파일을 불러오지 못했습니다."))
+            try:
+                self.__class__._extra_font_scan_done = True
+                self.load_fonts()
+                self.selected_family = families[0]
+                self.filter_fonts(self.search_edit.text())
+                # 새로 추가한 글꼴을 바로 선택한다.
+                for i in range(self.font_list.count()):
+                    if self.font_list.item(i).text() == families[0]:
+                        self.font_list.setCurrentRow(i)
+                        break
+                self.on_font_selection_changed()
+            except Exception:
+                pass
+            QMessageBox.information(
+                self,
+                self.font_import_text("폰트 불러오기 완료"),
+                f"{self.font_import_text('폰트를 불러왔습니다.')}\n{self.font_import_text('추가된 글꼴')}: {', '.join(families)}",
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, self.font_import_text("폰트 불러오기 실패"), f"{self.font_import_text('폰트 파일을 불러오지 못했습니다.')}\n{exc}")
 
     def is_plain_enter_event(self, event):
         try:
@@ -2990,6 +3162,16 @@ class FontSelectDialog(QDialog):
             except Exception:
                 self.font_db = None
                 families = []
+
+        # 프로그램에 불러온 글꼴은 다음 실행에서도 보이도록 캐시 폴더에서 항상 등록한다.
+        # addApplicationFont()로 등록한 패밀리는 QFontDatabase.families() 호출 시점에 따라
+        # 바로 목록에 섞이지 않을 수 있으므로 반환값을 직접 목록에 합친다.
+        try:
+            imported_families = self.__class__.load_imported_program_fonts()
+            if imported_families:
+                families.extend(list(imported_families))
+        except Exception:
+            pass
 
         # 첫 진입에서는 Windows Fonts 폴더를 자동 스캔하지 않는다.
         # 사용자가 [폰트 갱신]을 눌러 명시적으로 요청한 경우에만 누락 글꼴을 보강한다.

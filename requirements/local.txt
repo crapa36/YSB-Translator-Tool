@@ -26,3 +26,7 @@ pandas
 numpy==1.26.4
 setuptools==81.0.0
 simple-lama-inpainting
+
+# Local Manga OCR runtime (dev/source mode)
+manga-ocr==0.1.14
+transformers>=4.25,<5

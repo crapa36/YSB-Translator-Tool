@@ -76,6 +76,7 @@ class MainWindow(MainWindowInteractionMixin, MainWindowCloudMixin, MainWindowSet
         self.inline_text_target = None
 
         self.text_clipboard = []
+        self.text_clipboard_is_plain = False
         self.text_paste_pending = False
         self.last_canvas_context_pos = None
 
@@ -139,7 +140,9 @@ class MainWindow(MainWindowInteractionMixin, MainWindowCloudMixin, MainWindowSet
         self._tooltip_timer.setSingleShot(True)
         self._tooltip_timer.timeout.connect(self._show_delayed_tooltip)
         self._tooltip_target = None
+        self._tooltip_visible_target = None
         self._tooltip_html = ""
+        self._tooltip_popup = None
 
         # 최종화면 텍스트 작업용 실행 취소 스택
         self.page_text_undo_stacks = {}

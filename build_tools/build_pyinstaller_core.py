@@ -65,13 +65,17 @@ THIRD_PARTY_DIR = PROJECT_ROOT / "third_party"
 COMIC_TEXT_DETECTOR_DIR = THIRD_PARTY_DIR / "comic_text_detector"
 LOCAL_RUNTIME_DIR = PROJECT_ROOT / "local_runtime"
 PADDLEOCR_WORKER_FILE = LOCAL_RUNTIME_DIR / "paddle_ocr_worker.py"
-OCR_WORKER_REQUIREMENTS = PROJECT_ROOT / "requirements" / "ocr_worker.txt"
+MANGA_OCR_WORKER_FILE = LOCAL_RUNTIME_DIR / "manga_ocr_worker.py"
+OCR_WORKER_REQUIREMENTS = PROJECT_ROOT / "requirements" / "ocr_worker.txt"  # legacy compatibility
+PADDLE_OCR_WORKER_REQUIREMENTS = PROJECT_ROOT / "requirements" / "paddle_ocr_worker.txt"
+MANGA_OCR_WORKER_REQUIREMENTS = PROJECT_ROOT / "requirements" / "manga_ocr_worker.txt"
 PORTABLE_PYTHON_VERSION = os.environ.get("YSB_PORTABLE_PYTHON_VERSION", "3.11.9").strip() or "3.11.9"
 PORTABLE_PYTHON_ZIP_NAME = f"python-{PORTABLE_PYTHON_VERSION}-embed-amd64.zip"
 PORTABLE_PYTHON_URL = f"https://www.python.org/ftp/python/{PORTABLE_PYTHON_VERSION}/{PORTABLE_PYTHON_ZIP_NAME}"
 RUNTIME_CACHE_DIR = BUILD_TOOLS_DIR / "runtime_cache"
 PADDLEOCR_MODELS_DIR = LOCAL_MODELS_DIR / "paddleocr"
 LAMA_MODELS_DIR = LOCAL_MODELS_DIR / "lama"
+MANGA_OCR_MODELS_DIR = LOCAL_MODELS_DIR / "manga_ocr"
 
 VERSION_LITE_MAIN = BUILD_TOOLS_DIR / "version_main_lite.txt"
 VERSION_LOCAL_MAIN = BUILD_TOOLS_DIR / "version_main_local.txt"
@@ -378,6 +382,7 @@ def local_hidden_imports() -> list[str]:
         # YSB Local adapters
         "ysb.engines.ocr.base",
         "ysb.engines.ocr.paddle_ocr",
+        "ysb.engines.ocr.manga_ocr",
         "ysb.engines.text_detection",
         "ysb.engines.text_detection.manager",
         "ysb.engines.text_detection.comic_text_detector",
@@ -743,6 +748,7 @@ RUNTIME_LEFTOVER_NAMES = {
     "ysb_startup_faulthandler.log",
     "ysb_runtime_debug.log",
     "ysb_paddle_ocr_worker.log",
+    "ysb_manga_ocr_worker.log",
 }
 
 
@@ -764,7 +770,7 @@ def cleanup_runtime_leftovers(package_dir: Path) -> None:
     if local_runtime.exists():
         for name in RUNTIME_LEFTOVER_NAMES:
             remove_path(local_runtime / name)
-        for pattern in ("ysb_startup_*.log", "ysb_runtime_debug*.log", "ysb_paddle_ocr_worker*.log"):
+        for pattern in ("ysb_startup_*.log", "ysb_runtime_debug*.log", "ysb_paddle_ocr_worker*.log", "ysb_manga_ocr_worker*.log"):
             for path in local_runtime.glob(pattern):
                 remove_path(path)
 
@@ -862,8 +868,8 @@ def _prune_runtime_tree(path: Path) -> None:
             pass
 
 
-def _install_ocr_worker_dependencies(target_site_packages: Path) -> None:
-    require_file(OCR_WORKER_REQUIREMENTS, "OCR worker requirements")
+def _install_worker_dependencies(requirements_file: Path, target_site_packages: Path, label: str) -> None:
+    require_file(requirements_file, f"{label} requirements")
     target_site_packages.mkdir(parents=True, exist_ok=True)
     args = [
         sys.executable,
@@ -875,34 +881,29 @@ def _install_ocr_worker_dependencies(target_site_packages: Path) -> None:
         "--target",
         str(target_site_packages),
         "-r",
-        str(OCR_WORKER_REQUIREMENTS),
+        str(requirements_file),
     ]
-    run_command(args, "Installing portable PaddleOCR worker dependencies")
+    run_command(args, f"Installing portable {label} dependencies")
 
 
-def copy_local_ocr_runtime(local_stage: Path) -> None:
-    """Copy the external PaddleOCR worker and portable Python runtime.
+def _prepare_portable_worker_runtime(runtime_root: Path, worker_file: Path, requirements_file: Path, label: str) -> None:
+    """Prepare one isolated portable Python runtime for a Local OCR worker.
 
-    The main Local EXE keeps comic_text_detector and LaMa frozen, but PaddleOCR
-    is intentionally run outside PyInstaller because Paddle/PaddleX dynamic
-    imports are brittle when frozen.  For distribution we use the Windows
-    embeddable Python runtime instead of copying a .venv, because venv folders
-    can contain machine-specific absolute paths and are not reliable on other
-    PCs.
+    Paddle OCR and Manga OCR intentionally use separate external runtimes.
+    This keeps the heavy dependency stacks replaceable and prevents one OCR
+    engine's packages from bloating or destabilizing the other.
     """
-    runtime_stage = local_stage / "local_runtime"
-    remove_path(runtime_stage)
-    runtime_stage.mkdir(parents=True, exist_ok=True)
+    remove_path(runtime_root)
+    runtime_root.mkdir(parents=True, exist_ok=True)
 
-    require_file(PADDLEOCR_WORKER_FILE, "External PaddleOCR worker")
-    shutil.copy2(PADDLEOCR_WORKER_FILE, runtime_stage / PADDLEOCR_WORKER_FILE.name)
+    require_file(worker_file, f"External {label} worker")
+    shutil.copy2(worker_file, runtime_root / worker_file.name)
 
-    portable_python_dir = runtime_stage / "python"
-    remove_path(portable_python_dir)
+    portable_python_dir = runtime_root / "python"
     portable_python_dir.mkdir(parents=True, exist_ok=True)
 
     log("")
-    log("Preparing portable PaddleOCR Python runtime...")
+    log(f"Preparing portable {label} Python runtime...")
     start = time.perf_counter()
     embed_zip = _ensure_portable_python_zip()
     log(f"Portable Python ZIP: {embed_zip}")
@@ -911,16 +912,91 @@ def copy_local_ocr_runtime(local_stage: Path) -> None:
     _configure_embeddable_python_path(portable_python_dir)
 
     site_packages = portable_python_dir / "Lib" / "site-packages"
-    _install_ocr_worker_dependencies(site_packages)
+    _install_worker_dependencies(requirements_file, site_packages, label)
     _prune_runtime_tree(site_packages)
 
     python_exe = portable_python_dir / "python.exe"
-    require_file(python_exe, "Portable PaddleOCR Python executable")
+    require_file(python_exe, f"Portable {label} Python executable")
     elapsed = time.perf_counter() - start
-    log(f"Portable OCR Python runtime prepared: {portable_python_dir}")
-    log(f"Portable OCR Python runtime size: {format_bytes(folder_size(portable_python_dir))}")
-    log(f"Portable OCR Python runtime prepare time: {elapsed:.1f}s")
+    log(f"Portable {label} Python runtime prepared: {portable_python_dir}")
+    log(f"Portable {label} Python runtime size: {format_bytes(folder_size(portable_python_dir))}")
+    log(f"Portable {label} Python runtime prepare time: {elapsed:.1f}s")
 
+
+def copy_local_ocr_runtime(local_stage: Path) -> None:
+    """Copy external OCR workers and their isolated portable runtimes.
+
+    The main Local EXE keeps comic_text_detector and LaMa frozen, but OCR
+    engines with large/dynamic dependency stacks run outside PyInstaller.
+
+    Final layout:
+    - local_runtime/paddle/paddle_ocr_worker.py
+    - local_runtime/paddle/python/python.exe
+    - local_runtime/manga_ocr/manga_ocr_worker.py
+    - local_runtime/manga_ocr/python/python.exe
+    """
+    runtime_stage = local_stage / "local_runtime"
+    remove_path(runtime_stage)
+    runtime_stage.mkdir(parents=True, exist_ok=True)
+
+    _prepare_portable_worker_runtime(
+        runtime_stage / "paddle",
+        PADDLEOCR_WORKER_FILE,
+        PADDLE_OCR_WORKER_REQUIREMENTS,
+        "Paddle OCR worker",
+    )
+    _prepare_portable_worker_runtime(
+        runtime_stage / "manga_ocr",
+        MANGA_OCR_WORKER_FILE,
+        MANGA_OCR_WORKER_REQUIREMENTS,
+        "Manga OCR worker",
+    )
+
+
+
+def copy_optional_local_model_folder(src: Path, local_stage: Path, relative_dest: str, label: str) -> None:
+    """Copy optional Local model folders to the package root.
+
+    Keep large model caches outside the PyInstaller internal data bundle so they
+    remain easy to replace/delete and can be excluded from lighter packages.
+    """
+    if not src.exists() or not src.is_dir():
+        log(f"[WARN] {label} folder not found, skipped: {src}")
+        return
+    dst = local_stage / relative_dest
+    remove_path(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    log(f"Copying {label} folder: {src} -> {dst}")
+    shutil.copytree(src, dst)
+    log(f"{label} folder size: {format_bytes(folder_size(dst))}")
+
+
+
+
+def copy_manga_ocr_model_cache_to_runtime(local_stage: Path) -> None:
+    """Copy Manga OCR model cache into local_runtime/manga_ocr/model_cache.
+
+    The development/source tree keeps the downloaded model under
+    local_models/manga_ocr, but the packaged Local build should not expose a
+    separate local_models folder just for Manga OCR.  The runtime and its model
+    travel together.
+    """
+    src = MANGA_OCR_MODELS_DIR
+    runtime_root = local_stage / "local_runtime" / "manga_ocr"
+    dst = runtime_root / "model_cache"
+    remove_path(dst)
+
+    if not src.exists() or not src.is_dir():
+        raise RuntimeError(
+            "Manga OCR model cache not found. "
+            f"Expected: {src}. "
+            "Run setup_manga_ocr_v2_2_0.bat first, then build the Local package again."
+        )
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    log(f"Copying Manga OCR model cache into runtime: {src} -> {dst}")
+    shutil.copytree(src, dst)
+    log(f"Manga OCR runtime model cache size: {format_bytes(folder_size(dst))}")
 
 def prepare_local_package() -> None:
     local_dir = DIST_DIR / LOCAL_NAME
@@ -941,6 +1017,14 @@ def prepare_local_package() -> None:
     shutil.copy2(launcher_exe, local_stage / launcher_exe.name)
 
     copy_local_ocr_runtime(local_stage)
+
+    # Manga OCR is a default Local OCR engine. Keep its model cache inside the
+    # Manga OCR runtime folder, just like an engine-private runtime asset:
+    #   local_runtime/manga_ocr/model_cache/huggingface/...
+    # Do not create a separate local_models folder in the final package.
+    # If the model cache is missing, fail the Local build instead of creating
+    # a half-working package.
+    copy_manga_ocr_model_cache_to_runtime(local_stage)
 
     cleanup_runtime_leftovers(local_stage)
 
@@ -973,7 +1057,9 @@ def validate_layout(edition: str) -> None:
         require_file(YSB_PACKAGE_DIR / "engines" / "ocr" / "base.py", "OCR base")
         require_file(YSB_PACKAGE_DIR / "engines" / "ocr" / "paddle_ocr.py", "PaddleOCR adapter")
         require_file(PADDLEOCR_WORKER_FILE, "External PaddleOCR worker")
-        require_file(OCR_WORKER_REQUIREMENTS, "OCR worker requirements")
+        require_file(MANGA_OCR_WORKER_FILE, "External Manga OCR worker")
+        require_file(PADDLE_OCR_WORKER_REQUIREMENTS, "Paddle OCR worker requirements")
+        require_file(MANGA_OCR_WORKER_REQUIREMENTS, "Manga OCR worker requirements")
         require_file(YSB_PACKAGE_DIR / "engines" / "text_detection" / "base.py", "text detection base")
         require_file(YSB_PACKAGE_DIR / "engines" / "text_detection" / "comic_text_detector.py", "comic_text_detector adapter")
 

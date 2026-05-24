@@ -2924,6 +2924,7 @@ class MainWindowTextLayoutMixin:
             return False
 
         self.text_clipboard = [copy.deepcopy(d) for d in data_items]
+        self.text_clipboard_is_plain = False
         self.log(f"📋 텍스트 복사 완료: {len(self.text_clipboard)}개")
         return True
 
@@ -3001,13 +3002,61 @@ class MainWindowTextLayoutMixin:
         self.log(f"📋 텍스트 붙여넣기 완료: {len(new_ids)}개")
         return True
 
+    def windows_clipboard_text(self):
+        try:
+            text = QApplication.clipboard().text()
+        except Exception:
+            text = ""
+        return str(text or "")
+
+    def make_text_clipboard_item_from_plain_text(self, text):
+        text = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not text:
+            return None
+        line_count = max(1, text.count("\n") + 1)
+        try:
+            font_size = int(self.sb_font_size.value())
+        except Exception:
+            font_size = 24
+        w = 320
+        h = max(70, int(font_size * (line_count + 1.4)))
+        return {
+            'id': 0,
+            'text': text,
+            'translated_text': text,
+            'rect': [0, 0, w, h],
+            'use_inpaint': True,
+            'font_family': self.cb_font.currentFont().family() if hasattr(self, 'cb_font') else 'Arial',
+            'font_size': font_size,
+            'stroke_width': int(self.sb_strk.value()) if hasattr(self, 'sb_strk') else 0,
+            'text_color': str(getattr(self, 'default_text_color', '#000000') or '#000000'),
+            'stroke_color': str(getattr(self, 'default_stroke_color', '#FFFFFF') or '#FFFFFF'),
+            'align': getattr(self, 'default_align', 'center'),
+            'x_off': 0,
+            'y_off': 0,
+            'manual_text_rect': True,
+            'text_anchor_mode': 'text',
+            'force_show': True,
+        }
+
+    def load_plain_text_clipboard_for_paste(self):
+        text = self.windows_clipboard_text()
+        item = self.make_text_clipboard_item_from_plain_text(text)
+        if not item:
+            return False
+        self.text_clipboard = [item]
+        self.text_clipboard_is_plain = True
+        return True
+
     def enter_text_paste_mode(self):
         """Ctrl+V는 즉시 붙여넣지 않고, 커서에 미리보기만 붙인 뒤 클릭 위치에 확정한다."""
         if self.cb_mode.currentIndex() != 4:
             return False
-        if not self.text_clipboard:
-            self.log("⚠️ 붙여넣을 텍스트가 없습니다.")
-            return False
+        if not self.text_clipboard or bool(getattr(self, "text_clipboard_is_plain", False)):
+            # Windows 클립보드 텍스트로 만든 임시 붙여넣기라면, Ctrl+V 때마다 최신 클립보드 내용으로 갱신한다.
+            if not self.load_plain_text_clipboard_for_paste() and not self.text_clipboard:
+                self.log("⚠️ 붙여넣을 텍스트가 없습니다.")
+                return False
 
         self.text_paste_pending = True
         self.set_tool("paste_text")

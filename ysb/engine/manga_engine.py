@@ -8,6 +8,7 @@ import time
 import math
 import uuid
 import copy
+import html
 import sys
 import tempfile
 import subprocess
@@ -63,6 +64,7 @@ class Config:
     # [설정] Local OCR / comic_text_detector + PaddleOCR
     LOCAL_PADDLE_MASK_DEVICE = "auto"
     LOCAL_PADDLE_OCR_LANGUAGE = "ja"
+    LOCAL_MANGA_OCR_LANGUAGE = "ja"
     # comic_text_detector input_size는 사용자 원본 이미지 크기가 아니라 모델 내부 리사이즈 캔버스다.
     # UI에는 노출하지 않고 페이지 크기에 따라 자동 선택한다.
     LOCAL_PADDLE_MASK_INPUT_SIZE = "auto"
@@ -337,6 +339,8 @@ class MangaProcessEngine:
             return self._normalize_ocr_language(getattr(Config, "GOOGLE_VISION_OCR_LANGUAGE", "en"))
         if provider == "local_paddle_ocr":
             return self._normalize_ocr_language(getattr(Config, "LOCAL_PADDLE_OCR_LANGUAGE", "ja"))
+        if provider == "local_manga_ocr":
+            return "ja"
         return self._normalize_ocr_language(getattr(Config, "CLOVA_OCR_LANGUAGE", "ja"))
 
     def _google_vision_response_to_raw_items(self, ocr_res, offset_x=0, offset_y=0):
@@ -991,7 +995,62 @@ class MangaProcessEngine:
     # ---------------------------------------------------------
     # [CORE] 전체 분석 - 공용 타일 OCR 사용
     # ---------------------------------------------------------
-    def analyze_image(self, image_path):
+    def _ocr_regions_to_mask(self, regions, w, h):
+        """저장된 OCR 분석 범위 목록을 0/255 마스크로 변환한다.
+
+        regions가 비어 있으면 None을 반환하며, 기존 전체 분석과 동일하게 동작한다.
+        """
+        if not regions:
+            return None
+        mask = np.zeros((int(h), int(w)), dtype=np.uint8)
+        for region in regions or []:
+            if not isinstance(region, dict):
+                continue
+            shape = str(region.get("shape") or "rect")
+            if shape == "free":
+                pts = []
+                for pt in region.get("points_norm") or []:
+                    if not isinstance(pt, (list, tuple)) or len(pt) < 2:
+                        continue
+                    x = max(0, min(int(w) - 1, int(round(float(pt[0]) * int(w)))))
+                    y = max(0, min(int(h) - 1, int(round(float(pt[1]) * int(h)))))
+                    pts.append([x, y])
+                if len(pts) >= 3:
+                    cv2.fillPoly(mask, [np.array(pts, dtype=np.int32)], 255)
+            else:
+                r = region.get("rect_norm") or []
+                if len(r) < 4:
+                    continue
+                try:
+                    x1, y1, x2, y2 = [float(v) for v in r[:4]]
+                except Exception:
+                    continue
+                x1 = max(0, min(int(w) - 1, int(round(x1 * int(w)))))
+                y1 = max(0, min(int(h) - 1, int(round(y1 * int(h)))))
+                x2 = max(0, min(int(w) - 1, int(round(x2 * int(w)))))
+                y2 = max(0, min(int(h) - 1, int(round(y2 * int(h)))))
+                if x2 > x1 and y2 > y1:
+                    cv2.rectangle(mask, (x1, y1), (x2, y2), 255, thickness=-1)
+        if cv2.countNonZero(mask) <= 0:
+            return None
+        return mask
+
+    def _filter_raw_items_by_mask(self, raw_items, mask):
+        if mask is None:
+            return raw_items or []
+        h, w = mask.shape[:2]
+        out = []
+        for item in raw_items or []:
+            try:
+                cx = max(0, min(w - 1, int(round(float(item.get('cx', 0))))))
+                cy = max(0, min(h - 1, int(round(float(item.get('cy', 0))))))
+                if mask[cy, cx] > 0:
+                    out.append(item)
+            except Exception:
+                continue
+        return out
+
+    def analyze_image(self, image_path, analysis_regions=None):
         print(f">>> [Analysis] 전체 분석: {os.path.basename(image_path)}")
 
         img_array = np.fromfile(image_path, np.uint8)
@@ -1003,17 +1062,35 @@ class MangaProcessEngine:
         h, w, _ = ori_img.shape
 
         provider = str(getattr(Config, "OCR_PROVIDER", "clova") or "clova").strip().lower()
-        if provider == "local_paddle_ocr":
-            return self.analyze_image_local_paddle_mask(image_path, ori_img=ori_img)
+        analysis_mask = self._ocr_regions_to_mask(analysis_regions, w, h)
+
+        if provider in ("local_paddle_ocr", "local_manga_ocr"):
+            return self.analyze_image_local_paddle_mask(image_path, ori_img=ori_img, analysis_mask=analysis_mask)
 
         # 짧은 이미지든 긴 웹툰 이미지든 여기서 자동 처리
         # h <= OCR_TILE_HEIGHT면 단일 OCR
         # h > OCR_TILE_HEIGHT면 세로 분할 OCR
-        raw_items = self._ocr_image_region_tiled(
-            ori_img,
-            offset_x=0,
-            offset_y=0
-        )
+        if analysis_mask is not None:
+            raw_items = []
+            contours, _ = cv2.findContours(analysis_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for cnt in contours or []:
+                if cnt is None or cv2.contourArea(cnt) < 4:
+                    continue
+                x, y, rw, rh = cv2.boundingRect(cnt)
+                pad = 4
+                x1 = max(0, x - pad); y1 = max(0, y - pad)
+                x2 = min(w, x + rw + pad); y2 = min(h, y + rh + pad)
+                crop = ori_img[y1:y2, x1:x2]
+                if crop.size <= 0:
+                    continue
+                raw_items.extend(self._ocr_image_region_tiled(crop, offset_x=x1, offset_y=y1))
+            raw_items = self._filter_raw_items_by_mask(self._dedupe_ocr_items(raw_items), analysis_mask)
+        else:
+            raw_items = self._ocr_image_region_tiled(
+                ori_img,
+                offset_x=0,
+                offset_y=0
+            )
 
         grouped_data, mask_merge = self._group_text_blocks_by_ratio(raw_items, w, h)
         mask_inpaint = self._create_ratio_mask(grouped_data, w, h)
@@ -1979,6 +2056,113 @@ class MangaProcessEngine:
             print(f">>> [Local OCR] PaddleOCR sample errors: {' | '.join(sample_errors)}")
         return updated
 
+    def _manga_ocr_lines_to_raw_items(self, lines, offset_x=0, offset_y=0, *, locale='ja'):
+        """Convert Manga OCR recognition-only output to one YSB OCR item per crop."""
+        raw_items = []
+        for order_index, line in enumerate(lines or []):
+            try:
+                text = str(line.get('text', '') or '').strip()
+                if not text:
+                    continue
+                pts = []
+                for p in line.get('points', []) or []:
+                    try:
+                        pts.append([int(p[0]) + int(offset_x), int(p[1]) + int(offset_y)])
+                    except Exception:
+                        pass
+                if len(pts) < 3:
+                    continue
+                pts_arr = np.array(pts, dtype=np.int32)
+                bx, by, bw, bh = cv2.boundingRect(pts_arr)
+                compact = ''.join(ch for ch in text if not ch.isspace())
+                raw_items.append({
+                    'text': text,
+                    'vertices': pts,
+                    'stroke_size': float(max(1, min(bw, bh) * 0.18)),
+                    'cx': float(bx + bw / 2),
+                    'cy': float(by + bh / 2),
+                    'rect': [int(bx), int(by), int(bw), int(bh)],
+                    'char_count': max(1, len(compact)),
+                    'source_provider': 'local_manga_ocr',
+                    'locale': str(locale or 'ja'),
+                    'detected_break': '',
+                    'order_index': order_index,
+                    'confidence': float(line.get('confidence', 1.0) or 1.0),
+                })
+            except Exception:
+                continue
+        return self._dedupe_ocr_items(raw_items)
+
+    def _apply_local_manga_ocr_to_groups(self, ori_img, grouped_data):
+        """comic_text_detector 영역/마스크를 유지하고 Manga OCR로 crop 원문만 읽는다."""
+        if ori_img is None or not grouped_data:
+            return grouped_data or []
+        h, w = ori_img.shape[:2]
+        try:
+            from ysb.engines.ocr.base import OcrRequest
+            from ysb.engines.ocr.manga_ocr import MangaOcrEngine
+            manga_engine = MangaOcrEngine(language='ja')
+        except Exception as e:
+            print(f">>> [Local OCR] Manga OCR 준비 실패: {e}")
+            return grouped_data
+
+        updated = []
+        ok_count = 0
+        err_count = 0
+        sample_errors = []
+        for group in grouped_data or []:
+            item = copy.deepcopy(group)
+            crop, ox, oy = self._crop_group_for_paddle_ocr(ori_img, item, w, h)
+            if crop is None:
+                updated.append(item)
+                continue
+            try:
+                res = manga_engine.run(OcrRequest(
+                    image_path='',
+                    language='ja',
+                    options={
+                        'image_bgr': crop,
+                        # manga-ocr는 말풍선/세로문 crop에서 확대 입력이 안정적인 편이다.
+                        'scale': 2.0,
+                    },
+                ))
+                if not res.ok:
+                    err_count += 1
+                    item['local_manga_ocr_error'] = res.error
+                    if res.error and len(sample_errors) < 3:
+                        sample_errors.append(str(res.error))
+                    updated.append(item)
+                    continue
+
+                raw_items = self._manga_ocr_lines_to_raw_items(res.lines, ox, oy, locale='ja')
+                new_text = ''
+                if raw_items:
+                    new_text = str(raw_items[0].get('text', '') or '').strip()
+                old_text = str(item.get('text', '') or '').strip()
+                if new_text:
+                    item['text'] = new_text
+                    item['ocr_items'] = self._make_ocr_items_payload(raw_items)
+                    item['ocr_items_all'] = self._make_ocr_items_payload(raw_items)
+                    item['ruby_ocr_items'] = []
+                    item['ocr_lang'] = 'ja'
+                    item['local_detector_only'] = False
+                    item['ocr_engine'] = 'manga_ocr'
+                    item['detector_engine'] = item.get('detector_engine') or 'comic_text_detector'
+                    if old_text and old_text != new_text:
+                        item['translated_text'] = ''
+                    ok_count += 1
+                updated.append(item)
+            except Exception as e:
+                err_count += 1
+                item['local_manga_ocr_error'] = str(e)
+                if str(e) and len(sample_errors) < 3:
+                    sample_errors.append(str(e))
+                updated.append(item)
+        print(f">>> [Local OCR] Manga OCR text recognition: ok={ok_count}, errors={err_count}, groups={len(updated)}")
+        if sample_errors:
+            print(f">>> [Local OCR] Manga OCR sample errors: {' | '.join(sample_errors)}")
+        return updated
+
     def _apply_current_local_ocr_engine_to_groups(self, ori_img, grouped_data):
         """Apply the single supported Local OCR reader.
 
@@ -1987,9 +2171,12 @@ class MangaProcessEngine:
         Experimental OCR readers tested earlier are intentionally removed from
         the regular Local build.
         """
+        provider = str(getattr(Config, "OCR_PROVIDER", "local_paddle_ocr") or "local_paddle_ocr").strip().lower()
+        if provider == "local_manga_ocr":
+            return self._apply_local_manga_ocr_to_groups(ori_img, grouped_data)
         return self._apply_local_paddle_ocr_to_groups(ori_img, grouped_data)
 
-    def analyze_image_local_paddle_mask(self, image_path, ori_img=None):
+    def analyze_image_local_paddle_mask(self, image_path, ori_img=None, analysis_mask=None):
         """LOCAL Paddle OCR 선택 시 실행되는 Local 분석 경로.
 
         comic_text_detector로 텍스트 영역/마스크를 만들고, PaddleOCR로
@@ -2030,6 +2217,26 @@ class MangaProcessEngine:
             block for block in blocks
             if self._detector_block_is_reasonable(getattr(block, 'bbox', (0, 0, 0, 0)), w, h)
         ]
+        if analysis_mask is not None:
+            try:
+                _am = np.asarray(analysis_mask)
+                if _am.ndim == 3:
+                    _am = cv2.cvtColor(_am, cv2.COLOR_BGR2GRAY)
+                if _am.shape[:2] != (h, w):
+                    _am = cv2.resize(_am, (w, h), interpolation=cv2.INTER_NEAREST)
+                _am = np.where(_am > 0, 255, 0).astype(np.uint8)
+                _filtered = []
+                for block in safe_blocks:
+                    box = self._clamp_detector_box(getattr(block, 'bbox', (0, 0, 0, 0)), w, h)
+                    if not box:
+                        continue
+                    x1, y1, x2, y2 = box
+                    if cv2.countNonZero(_am[y1:max(y1 + 1, y2 + 1), x1:max(x1 + 1, x2 + 1)]) > 0:
+                        _filtered.append(block)
+                safe_blocks = _filtered
+                analysis_mask = _am
+            except Exception:
+                analysis_mask = None
         raw_payload = result.raw if isinstance(result.raw, dict) else {}
         source_mask = raw_payload.get("mask_refined")
         if source_mask is None:
@@ -2041,6 +2248,8 @@ class MangaProcessEngine:
         base_mask, base_stats = self._create_detector_candidate_mask(
             safe_blocks, w, h, source_mask=source_mask
         )
+        if analysis_mask is not None and base_mask is not None:
+            base_mask = cv2.bitwise_and(base_mask, analysis_mask)
 
         mask_merge = self._expand_detector_analysis_mask(
             base_mask, safe_blocks, w, h,
@@ -2052,6 +2261,11 @@ class MangaProcessEngine:
             ratio=getattr(Config, 'INPAINT_RATIO', 0.1),
             min_px=getattr(Config, 'MIN_STROKE_PX', 1),
         )
+        if analysis_mask is not None:
+            if mask_merge is not None:
+                mask_merge = cv2.bitwise_and(mask_merge, analysis_mask)
+            if mask_inpaint is not None:
+                mask_inpaint = cv2.bitwise_and(mask_inpaint, analysis_mask)
 
         # 분석도 박스도 실제 텍스트 마스크의 연결 상태를 반영한다.
         # 가까운 텍스트 마스크가 확장 후 서로 붙으면 기존 API OCR 그룹화처럼 하나의 박스로 합친다.
@@ -2088,7 +2302,7 @@ class MangaProcessEngine:
 
             provider = str(getattr(Config, "OCR_PROVIDER", "clova") or "clova").lower()
 
-            if provider == "local_paddle_ocr":
+            if provider in ("local_paddle_ocr", "local_manga_ocr"):
                 # Local OCR 경로는 전체 분석/마스크 기준 재분석에서 별도 처리한다.
                 # 타일 OCR API 경로로 떨어지지 않도록 빈 OCR 결과를 반환한다.
                 return []
@@ -2233,6 +2447,98 @@ class MangaProcessEngine:
 
         return deduped
  
+    def quick_ocr_image_region(self, image_path, rect_norm, provider=None, language=None):
+        """드래그한 단일 영역만 OCR해서 문자열로 반환한다.
+
+        rect_norm: [x1, y1, x2, y2] normalized by current page size.
+        """
+        img_array = np.fromfile(image_path, np.uint8)
+        ori_img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+        if ori_img is None:
+            raise ValueError(f"이미지를 읽을 수 없습니다: {image_path}")
+        h, w = ori_img.shape[:2]
+        if not rect_norm or len(rect_norm) < 4:
+            return ""
+        x1, y1, x2, y2 = [float(v) for v in rect_norm[:4]]
+        x1 = max(0, min(w - 1, int(round(x1 * w))))
+        y1 = max(0, min(h - 1, int(round(y1 * h))))
+        x2 = max(0, min(w, int(round(x2 * w))))
+        y2 = max(0, min(h, int(round(y2 * h))))
+        if x2 <= x1 or y2 <= y1:
+            return ""
+        crop = ori_img[y1:y2, x1:x2]
+        if crop.size <= 0:
+            return ""
+
+        provider = str(provider or getattr(Config, "OCR_PROVIDER", "clova") or "clova").strip().lower()
+        language = self._normalize_ocr_language(language or "") if language else ""
+
+        old_provider = getattr(Config, "OCR_PROVIDER", "clova")
+        old_clova_lang = getattr(Config, "CLOVA_OCR_LANGUAGE", "ja")
+        old_google_lang = getattr(Config, "GOOGLE_VISION_OCR_LANGUAGE", "en")
+        old_local_lang = getattr(Config, "LOCAL_PADDLE_OCR_LANGUAGE", "ja")
+        old_manga_lang = getattr(Config, "LOCAL_MANGA_OCR_LANGUAGE", "ja")
+        try:
+            Config.OCR_PROVIDER = provider
+            if language:
+                if provider == "google_vision":
+                    Config.GOOGLE_VISION_OCR_LANGUAGE = language
+                elif provider == "local_paddle_ocr":
+                    Config.LOCAL_PADDLE_OCR_LANGUAGE = language
+                elif provider == "local_manga_ocr":
+                    Config.LOCAL_MANGA_OCR_LANGUAGE = "ja"
+                else:
+                    Config.CLOVA_OCR_LANGUAGE = language
+
+            if provider == "local_paddle_ocr":
+                try:
+                    from ysb.engines.ocr.base import OcrRequest
+                    from ysb.engines.ocr.paddle_ocr import PaddleOcrEngine
+                    lang = language or self._current_ocr_language()
+                    device = str(getattr(Config, "LOCAL_PADDLE_OCR_DEVICE", getattr(Config, "LOCAL_PADDLE_MASK_DEVICE", "auto")) or "auto")
+                    res = PaddleOcrEngine(language=lang, device=device).run(OcrRequest(
+                        image_path='',
+                        language=lang,
+                        options={
+                            'image_bgr': crop,
+                            'device': device,
+                            'scale': 1.5,
+                        },
+                    ))
+                    if not res.ok:
+                        raise ValueError(res.error or "PaddleOCR quick OCR failed")
+                    raw_items = self._paddle_ocr_lines_to_raw_items(res.lines, x1, y1, locale=lang)
+                except Exception:
+                    raise
+            elif provider == "local_manga_ocr":
+                from ysb.engines.ocr.base import OcrRequest
+                from ysb.engines.ocr.manga_ocr import MangaOcrEngine
+                res = MangaOcrEngine(language="ja").run(OcrRequest(
+                    image_path='',
+                    language="ja",
+                    options={
+                        'image_bgr': crop,
+                        'scale': 2.0,
+                    },
+                ))
+                if not res.ok:
+                    raise ValueError(res.error or "Manga OCR quick OCR failed")
+                raw_items = self._manga_ocr_lines_to_raw_items(res.lines, x1, y1, locale="ja")
+            else:
+                raw_items = self._ocr_image_region_tiled(crop, offset_x=x1, offset_y=y1)
+
+            raw_items = self._dedupe_ocr_items(raw_items)
+            if not raw_items:
+                return ""
+            main_text_items, _ruby = self._split_main_and_ruby_items(raw_items)
+            return self._manga_sort(main_text_items or raw_items).strip()
+        finally:
+            Config.OCR_PROVIDER = old_provider
+            Config.CLOVA_OCR_LANGUAGE = old_clova_lang
+            Config.GOOGLE_VISION_OCR_LANGUAGE = old_google_lang
+            Config.LOCAL_PADDLE_OCR_LANGUAGE = old_local_lang
+            Config.LOCAL_MANGA_OCR_LANGUAGE = old_manga_lang
+
     # ---------------------------------------------------------
     # [LOGIC] 그룹화 (스마트 정렬 적용)
     # ---------------------------------------------------------
@@ -2832,7 +3138,7 @@ class MangaProcessEngine:
         _, user_mask_bin = cv2.threshold(gray_mask, 127, 255, cv2.THRESH_BINARY)
 
         provider = str(getattr(Config, "OCR_PROVIDER", "clova") or "clova").strip().lower()
-        if provider == "local_paddle_ocr":
+        if provider in ("local_paddle_ocr", "local_manga_ocr"):
             # Local detector는 마스크/영역 기준 재분석을 사용한다.
             # 기존 API OCR 재분석 경로로 보내면 빈 OCR 결과 때문에 분석도가 날아갈 수 있다.
             return self._reanalyze_local_detector_from_manual_mask(
@@ -3010,6 +3316,131 @@ class MangaProcessEngine:
 
         return final_results
 
+
+
+    def _translate_text_chunk_google(self, texts):
+        """Google Cloud Translation Basic v2 API."""
+        key = str(getattr(Config, "GOOGLE_TRANSLATE_API_KEY", "") or "").strip()
+        if not key:
+            raise ValueError("Google Translate API 키가 비어있습니다.")
+
+        url = "https://translation.googleapis.com/language/translate/v2"
+        payload = {
+            "q": [str(t or "") for t in texts],
+            "source": "ja",
+            "target": "ko",
+            "format": "text",
+        }
+        r = requests.post(url, params={"key": key}, json=payload, timeout=60)
+        if r.status_code != 200:
+            raise ValueError(f"Google Translate Error: {r.status_code} / {r.text[:300]}")
+
+        data = r.json()
+        translations = data.get("data", {}).get("translations", [])
+        results = []
+        for i, original in enumerate(texts):
+            if i < len(translations):
+                translated = str(translations[i].get("translatedText", "") or "")
+                results.append(html.unescape(translated))
+            else:
+                results.append(str(original or ""))
+        return results
+
+    def _translate_text_chunk_gemini(self, texts, base_id=0):
+        """Google AI Studio Gemini API 번역."""
+        key = str(getattr(Config, "GEMINI_API_KEY", "") or "").strip()
+        if not key:
+            raise ValueError("Gemini API 키가 비어있습니다.")
+
+        model = str(getattr(Config, "GEMINI_TRANSLATION_MODEL", "gemini-2.5-flash-lite") or "gemini-2.5-flash-lite").strip()
+        prompt = self._build_translation_system_prompt()
+
+        input_items = []
+        for i, text in enumerate(texts):
+            input_items.append({"id": base_id + i, "text": text})
+
+        user_text = prompt.strip() + "\n\nINPUT JSON:\n" + json.dumps(input_items, ensure_ascii=False)
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        payload = {
+            "contents": [
+                {"role": "user", "parts": [{"text": user_text}]}
+            ],
+            "generationConfig": {
+                "temperature": 0.2,
+                "responseMimeType": "application/json"
+            }
+        }
+
+        r = requests.post(url, params={"key": key}, json=payload, timeout=90)
+        if r.status_code != 200:
+            err_text = r.text[:800]
+            try:
+                err = r.json().get("error", {})
+                msg = str(err.get("message", "") or err_text)
+                code = int(err.get("code", r.status_code) or r.status_code)
+            except Exception:
+                msg = err_text
+                code = r.status_code
+
+            if code == 429:
+                raise ValueError(
+                    "Gemini Translate Error: 429 / Gemini API 할당량 또는 속도 제한을 초과했습니다. "
+                    "AI Studio의 Rate limits와 결제 설정을 확인해 주세요. 무료 등급에서 limit: 0으로 표시되면 "
+                    "해당 프로젝트에 사용 가능한 무료 할당량이 없거나 결제 설정이 필요한 상태일 수 있습니다. "
+                    f"원문: {msg[:400]}"
+                )
+            if code == 404:
+                raise ValueError(
+                    f"Gemini Translate Error: 404 / Gemini 모델명을 찾을 수 없습니다. 현재 모델명 '{model}'을 확인해 주세요. "
+                    "예: gemini-2.5-flash-lite"
+                )
+            raise ValueError(f"Gemini Translate Error: {code} / {msg[:500]}")
+
+        data = r.json()
+        candidates = data.get("candidates", [])
+        if not candidates:
+            raise ValueError("Gemini 번역 응답이 비어있습니다.")
+
+        parts = candidates[0].get("content", {}).get("parts", [])
+        content = "".join(str(part.get("text", "")) for part in parts).strip()
+        if not content:
+            raise ValueError("Gemini 번역 텍스트가 비어있습니다.")
+
+        if content.startswith("```json"):
+            content = content[7:]
+        if content.startswith("```"):
+            content = content[3:]
+        if content.endswith("```"):
+            content = content[:-3]
+
+        parsed = json.loads(content.strip())
+        if isinstance(parsed, dict):
+            items = parsed.get("items", [])
+        elif isinstance(parsed, list):
+            items = parsed
+        else:
+            raise ValueError("Gemini 번역 응답 JSON 형식이 올바르지 않습니다.")
+
+        by_id = {}
+        for item in items:
+            if isinstance(item, dict):
+                try:
+                    by_id[int(item.get("id"))] = str(item.get("translation", ""))
+                except Exception:
+                    pass
+
+        results = []
+        missing_ids = []
+        for i in range(len(texts)):
+            item_id = base_id + i
+            if item_id in by_id:
+                results.append(by_id[item_id])
+            else:
+                missing_ids.append(item_id)
+
+        if missing_ids:
+            raise ValueError(f"Gemini 번역 누락 ID 발생: {missing_ids}")
+        return results
 
     def _build_translation_system_prompt(self):
         """

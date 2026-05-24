@@ -24,26 +24,46 @@ class MainWindowInteractionMixin:
 
         # 개별 작업
         make_action("work_tab_cycle", "작업탭 변경", self.cycle_work_tab)
+        make_action("work_source_compare", "원본 비교창 열기", self.open_source_compare_view)
         make_action("work_page_prev", "이전 페이지", self.prev)
         make_action("work_page_next", "다음 페이지", self.next)
         make_action("work_page_list", "페이지 목록", self.show_page_tab_menu)
         make_action("work_page_full_name", "현재 페이지 이름 보기", self.show_current_page_full_name)
         make_action("work_page_rename_source", "페이지 탭 파일명 변경", self.rename_current_page_source_file)
-        make_action("work_page_delete_current", "현재 이미지탭 삭제", self.delete_current_page_shortcut)
-        make_action("work_page_delete_all", "전체 이미지탭 삭제", self.delete_all_pages_shortcut)
+        make_action("work_page_delete_current", "현재 페이지 탭 삭제", self.delete_current_page_shortcut)
+        make_action("work_page_delete_all", "전체 페이지 탭 삭제", self.delete_all_pages_shortcut)
         make_action("work_open_current_project_folder", "현재 프로젝트의 작업 폴더로 이동하기", self.open_current_project_work_folder)
-        make_action("work_analyze", "개별 분석", self.anal)
+        make_action("work_analyze", "분석", self.anal)
+        make_action("work_quick_ocr", "빠른 OCR 설정", self.open_quick_ocr_dialog)
+        make_action("quick_ocr_execute", "빠른 OCR 실행", self.start_quick_ocr_selection)
+        # 빠른 OCR 설정은 프로그램 바탕/포커스 외부에 툴팁이 뜨면 거슬리므로
+        # 단축키만 유지하고 일반 툴팁은 비워 둔다.
+        try:
+            self.actions["work_quick_ocr"].setToolTip("")
+            self.actions["work_quick_ocr"].setStatusTip("")
+            self.actions["work_quick_ocr"].setWhatsThis("")
+            for prop in (
+                "delayed_tooltip_title",
+                "delayed_tooltip_shortcut",
+                "delayed_tooltip_description",
+                "delayed_tooltip_force_white_in_light",
+                "delayed_tooltip_force_outline",
+                "delayed_tooltip_html",
+            ):
+                self.setProperty(prop, None)
+        except Exception:
+            pass
         make_action("work_text_number_width", "텍스트 넘버 크기 변경", self.open_text_number_width_dialog)
-        make_action("work_translate", "개별 번역", self.trans)
-        make_action("work_inpaint", "개별 인페인팅", self.run_inpainting)
+        make_action("work_translate", "번역", self.trans)
+        make_action("work_inpaint", "인페인팅", self.run_inpainting)
         make_action("work_inpaint_source", "인페인팅을 원본으로", self.use_inpainted_as_source)
         make_action("work_restore_original_source", "원본으로 돌아가기", self.restore_original_source)
-        make_action("work_extract_text", "개별 지문 추출", self.extract_text_current)
-        make_action("work_import_translation", "개별 번역문 불러오기", self.import_translation_current)
+        make_action("work_extract_text", "지문 추출", self.extract_text_current)
+        make_action("work_import_translation", "번역문 불러오기", self.import_translation_current)
         make_action("work_clear_translation", "번역문 내용 지우기", self.clear_translation_current)
-        make_action("work_clean_text", "개별 텍스트 정리", self.clean_text_current)
-        make_action("work_reset_text_rects", "현재 텍스트 기준 영역 재설정", self.reset_text_rects_current)
-        make_action("work_export", "개별 출력", self.export_result)
+        make_action("work_clean_text", "텍스트 정리", self.clean_text_current)
+        make_action("work_reset_text_rects", "현재 텍스트 기준으로 영역 재설정", self.reset_text_rects_current)
+        make_action("work_export", "출력", self.export_result)
 
         # 자동화 작업
         make_action("auto_text_size_current", "자동 텍스트 크기 조정", self.auto_text_size_current)
@@ -59,7 +79,7 @@ class MainWindowInteractionMixin:
         make_action("batch_import_translation", "일괄 번역문 불러오기", self.import_translation_batch)
         make_action("batch_clear_translation", "일괄 번역문 내용 지우기", self.clear_translation_batch)
         make_action("batch_clean_text", "일괄 텍스트 정리", self.clean_text_batch)
-        make_action("batch_reset_text_rects", "일괄 텍스트 기준 영역 재설정", self.reset_text_rects_batch)
+        make_action("batch_reset_text_rects", "일괄 현재 텍스트 기준으로 영역 재설정", self.reset_text_rects_batch)
         make_action("batch_export", "일괄 출력", lambda: self.run_batch('export'))
 
         # 설정 / 옵션
@@ -76,6 +96,7 @@ class MainWindowInteractionMixin:
         make_action("option_translation_prompt", "번역 프롬프트 입력", self.open_translation_prompt_dialog)
         make_action("option_glossary", "단어장", self.open_glossary_dialog)
         make_action("option_analysis_mask_settings", "분석 마스크 확장 비율", self.open_analysis_mask_settings_dialog)
+        make_action("option_ocr_analysis_regions", "OCR 분석 범위 지정", self.open_ocr_analysis_region_dialog)
         make_action("option_cleanup_outputs", "출력물 삭제", self.open_output_cleanup_dialog)
         make_action("option_workspace_location", "작업 폴더 위치 변경", self.change_workspace_location)
         make_action("option_workspace_reset_default", "작업 폴더 위치 기본값으로 변경", self.reset_workspace_location_to_default)
@@ -101,17 +122,19 @@ class MainWindowInteractionMixin:
         make_action("cloud_delete_backups", "클라우드 백업 삭제", self.cloud_delete_cache_backups)
 
         # 토글/보조 작업
+        make_action("paint_undo", "작업 취소", self.handle_global_undo_shortcut)
         make_action("paint_redo", "작업 재실행", self.handle_general_redo)
         make_action("paint_magic_fill", "마스킹 칠하기", self.fill_magic_wand_mask)
+        make_action("paint_area_fill", "영역 페인팅", lambda *args: self.set_tool("area_paint"))
         make_action("paint_mask_cut", "마스크 커팅", lambda *args: self.set_tool("mask_cut"))
         make_action("paint_mask_toggle", "마스크 ON/OFF", self.toggle_mask_toggle)
         make_action("view_text_toggle", "텍스트 표시 ON/OFF", self.toggle_show_final_text)
         make_action("final_paint_color", "최종 페인팅 색상", lambda *args: self.pick_color("final_paint"))
-        make_action("final_paint_to_background", "최종 페인팅을 배경으로 반영", self.apply_final_paint_to_background)
+        make_action("final_paint_to_background", "최종 페인팅을 배경에 반영", self.apply_final_paint_to_background)
         make_action("final_text_tool", "최종 텍스트 도구", lambda *args: self.set_tool("final_text"))
         make_action("final_paint_above_toggle", "텍스트 위 페인팅 ON/OFF", self.toggle_final_paint_above_text)
-        make_action("final_paint_opacity_inc", "최종 브러시 불투명도 증가", lambda *args: self.adjust_final_paint_opacity(+5))
-        make_action("final_paint_opacity_dec", "최종 브러시 불투명도 감소", lambda *args: self.adjust_final_paint_opacity(-5))
+        make_action("final_paint_opacity_inc", "브러시 불투명도 증가", lambda *args: self.adjust_final_paint_opacity(+5))
+        make_action("final_paint_opacity_dec", "브러시 불투명도 감소", lambda *args: self.adjust_final_paint_opacity(-5))
 
     def open_external_url(self, url):
         """도움말 메뉴에서 외부 웹페이지를 기본 브라우저로 연다."""
@@ -270,8 +293,8 @@ class MainWindowInteractionMixin:
         drawing_tabs = mask_tabs or final_tab
         paint_only = mode == 3
 
-        # 브러시/지우개/되돌리기는 마스크 탭 + 최종화면에서 사용.
-        for attr in ("act_brush", "act_erase", "act_undo"):
+        # 브러시/지우개는 마스크 탭 + 최종화면에서 사용.
+        for attr in ("act_brush", "act_erase"):
             if hasattr(self, attr):
                 getattr(self, attr).setVisible(drawing_tabs)
 
@@ -294,7 +317,7 @@ class MainWindowInteractionMixin:
             self.mask_toggle_wrap.setVisible(paint_only)
 
         # 최종화면 전용 도구.
-        for attr in ("act_final_paint_color", "act_final_text_tool", "act_final_paint_to_bg", "act_final_paint_above_text"):
+        for attr in ("act_final_paint_color", "act_final_area_paint", "act_final_text_tool", "act_final_paint_to_bg", "act_final_paint_above_text"):
             if hasattr(self, attr):
                 getattr(self, attr).setVisible(final_tab)
 
@@ -834,6 +857,23 @@ class MainWindowInteractionMixin:
         if widget is None:
             return
 
+        # 메인 윈도우 전체에 지연 툴팁이 붙으면 창 전체가 하나의 툴팁 영역처럼 동작한다.
+        # 빠른 OCR 설정 툴팁이 바탕 어디서나 뜨던 원인이 이 케이스였으므로 방어한다.
+        if widget is self:
+            try:
+                for prop in (
+                    "delayed_tooltip_title",
+                    "delayed_tooltip_shortcut",
+                    "delayed_tooltip_description",
+                    "delayed_tooltip_force_white_in_light",
+                    "delayed_tooltip_force_outline",
+                    "delayed_tooltip_html",
+                ):
+                    self.setProperty(prop, None)
+            except Exception:
+                pass
+            return
+
         # QWidget 툴팁과 QAction 툴팁이 동시에 살아 있으면
         # 작은 기본 툴팁 + 지연 툴팁 + 상태 설명이 중복 표시될 수 있다.
         # 그래서 실제 표시는 이 지연 툴팁 하나로 통일한다.
@@ -870,6 +910,145 @@ class MainWindowInteractionMixin:
         widget.setProperty("delayed_tooltip_html", self._tooltip_rich_text(title, shortcut_text, description, force_white_in_light=force_white_in_light, force_outline=force_outline))
         widget.installEventFilter(self)
 
+    def _hide_delayed_tooltip_popup(self):
+        try:
+            QToolTip.hideText()
+        except Exception:
+            pass
+        try:
+            popup = getattr(self, "_tooltip_popup", None)
+            if popup is not None:
+                popup.hide()
+                popup.deleteLater()
+        except Exception:
+            pass
+        self._tooltip_popup = None
+        try:
+            self._tooltip_visible_target = None
+        except Exception:
+            pass
+
+    def _cursor_inside_tooltip_target(self, widget, margin=3):
+        try:
+            if widget is None or not widget.isVisible():
+                return False
+            pos = QCursor.pos()
+            top_left = widget.mapToGlobal(QPoint(0, 0))
+            rect = QRect(top_left, widget.size()).adjusted(-margin, -margin, margin, margin)
+            return rect.contains(pos)
+        except Exception:
+            return False
+
+    def _validate_delayed_tooltip_hover(self):
+        widget = getattr(self, "_tooltip_visible_target", None) or getattr(self, "_tooltip_target", None)
+        popup = getattr(self, "_tooltip_popup", None)
+        try:
+            has_native = bool(QToolTip.isVisible())
+        except Exception:
+            has_native = False
+        visible = bool((popup is not None and popup.isVisible()) or has_native)
+        if not visible:
+            return
+        if not self._cursor_inside_tooltip_target(widget, margin=6):
+            try:
+                self._tooltip_timer.stop()
+            except Exception:
+                pass
+            self._tooltip_target = None
+            self._tooltip_html = ""
+            self._hide_delayed_tooltip_popup()
+            return
+        try:
+            QTimer.singleShot(250, self._validate_delayed_tooltip_hover)
+        except Exception:
+            pass
+
+    def _tooltip_popup_position(self, widget, popup):
+        """위젯 위치에 맞춰 툴팁을 버튼과 겹치지 않게 배치한다."""
+        gap = 10
+        try:
+            top_left = widget.mapToGlobal(QPoint(0, 0))
+            rect = QRect(top_left, widget.size())
+        except Exception:
+            return QCursor.pos() + QPoint(12, 12)
+
+        try:
+            main_tl = self.mapToGlobal(QPoint(0, 0))
+            main_rect = QRect(main_tl, self.size())
+        except Exception:
+            main_rect = QRect()
+
+        try:
+            hint = str(widget.property("delayed_tooltip_position") or "")
+        except Exception:
+            hint = ""
+
+        try:
+            ox = int(widget.property("delayed_tooltip_offset_x") or 0)
+            oy = int(widget.property("delayed_tooltip_offset_y") or 0)
+        except Exception:
+            ox, oy = 0, 0
+
+        pw = max(1, popup.width())
+        ph = max(1, popup.height())
+
+        def pos_above():
+            return QPoint(rect.center().x() - pw // 2, rect.top() - ph - gap)
+
+        def pos_below(extra_y=0):
+            return QPoint(rect.center().x() - pw // 2, rect.bottom() + gap + extra_y)
+
+        def pos_right():
+            return QPoint(rect.right() + gap, rect.center().y() - ph // 2)
+
+        def pos_left():
+            return QPoint(rect.left() - pw - gap, rect.center().y() - ph // 2)
+
+        if hint == "right":
+            pos = pos_right()
+        elif hint == "left":
+            pos = pos_left()
+        elif hint == "above":
+            pos = pos_above()
+        elif hint == "below":
+            pos = pos_below()
+        elif hint == "below_low":
+            pos = pos_below(12)
+        else:
+            # 기본 자동 배치:
+            # - 왼쪽 도구바 버튼은 오른쪽
+            # - 하단 버튼은 위
+            # - 오른쪽 인터페이스 버튼은 조금 아래
+            # - 나머지는 아래
+            try:
+                if main_rect.isValid():
+                    if rect.center().x() <= main_rect.left() + 90:
+                        pos = pos_right()
+                    elif rect.center().y() >= main_rect.bottom() - 130:
+                        pos = pos_above()
+                    elif rect.center().x() >= main_rect.right() - 210:
+                        pos = pos_below(12)
+                    else:
+                        pos = pos_below()
+                else:
+                    pos = pos_below()
+            except Exception:
+                pos = pos_below()
+
+        pos += QPoint(ox, oy)
+
+        # 화면 밖으로 너무 튀어나가지 않게 최소 보정한다.
+        try:
+            screen = QApplication.screenAt(pos) or QApplication.primaryScreen()
+            if screen is not None:
+                avail = screen.availableGeometry()
+                x = max(avail.left() + 4, min(pos.x(), avail.right() - pw - 4))
+                y = max(avail.top() + 4, min(pos.y(), avail.bottom() - ph - 4))
+                pos = QPoint(x, y)
+        except Exception:
+            pass
+        return pos
+
     def _show_delayed_tooltip(self):
         widget = self._tooltip_target
         html = self._tooltip_html
@@ -889,111 +1068,135 @@ class MainWindowInteractionMixin:
         except Exception:
             pass
         try:
-            pos = widget.mapToGlobal(QPoint(widget.width() // 2, widget.height()))
+            self._tooltip_visible_target = widget
         except Exception:
-            pos = QCursor.pos()
-        QToolTip.showText(pos, html, widget)
+            pass
+
+        try:
+            # 같은 대상의 팝업이 이미 떠 있으면 지우고 다시 띄우지 않는다.
+            # 반복 Enter/Leave 때문에 깜빡이는 것을 막기 위한 처리다.
+            popup = getattr(self, "_tooltip_popup", None)
+            if popup is not None and popup.isVisible() and getattr(self, "_tooltip_visible_target", None) is widget:
+                return
+
+            self._hide_delayed_tooltip_popup()
+            popup = QLabel()
+            popup.setWindowFlags(Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+            popup.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            popup.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+            popup.setTextFormat(Qt.TextFormat.RichText)
+            popup.setText(html)
+            if self.is_light_theme():
+                popup.setStyleSheet("QLabel { background:#ffffff; color:#111827; border:1px solid #cfd7e5; border-radius:0px; padding:5px; }")
+            else:
+                popup.setStyleSheet("QLabel { background:#1f2430; color:#ffffff; border:1px solid #4b5563; border-radius:0px; padding:5px; }")
+            popup.adjustSize()
+            popup.move(self._tooltip_popup_position(widget, popup))
+            popup.show()
+            self._tooltip_popup = popup
+            self._tooltip_visible_target = widget
+            try:
+                QTimer.singleShot(250, self._validate_delayed_tooltip_hover)
+            except Exception:
+                pass
+        except Exception:
+            try:
+                QToolTip.showText(self._tooltip_popup_position(widget, QLabel()), html, widget)
+                self._tooltip_visible_target = widget
+                QTimer.singleShot(250, self._validate_delayed_tooltip_hover)
+            except Exception:
+                QToolTip.showText(QCursor.pos() + QPoint(12, 12), html, widget)
+                self._tooltip_visible_target = widget
+                QTimer.singleShot(250, self._validate_delayed_tooltip_hover)
+
 
     def eventFilter(self, obj, event):
+        """Delayed tooltip + source compare sync event filter."""
         et = event.type()
-        if et in (QEvent.Type.DragEnter, QEvent.Type.DragMove, QEvent.Type.Drop) and self._is_own_window_object(obj):
-            try:
-                images, ysb = self._dragged_supported_files(event)
-                if images or ysb:
-                    event.acceptProposedAction()
-                    if et == QEvent.Type.Drop:
-                        self.handle_supported_file_drop(event)
-                    return True
-            except Exception:
-                pass
-        if et == QEvent.Type.Show and isinstance(obj, QDialog):
-            try:
-                p = obj.parent()
-                while p is not None:
-                    if p is self:
-                        self.schedule_native_title_bar_theme(obj, dark=not self.is_light_theme())
-                        break
-                    p = p.parent()
-            except Exception:
-                pass
-        if et in (QEvent.Type.KeyPress, QEvent.Type.ShortcutOverride) and self._is_own_window_object(obj):
-            try:
-                key = event.key()
-                mods = event.modifiers()
-                ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
 
-                if key == Qt.Key.Key_Escape and self.escape_single_line_input_focus_first(obj):
-                    event.accept()
-                    return True
-
-                if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and not (
-                    mods & (
-                        Qt.KeyboardModifier.ControlModifier
-                        | Qt.KeyboardModifier.ShiftModifier
-                        | Qt.KeyboardModifier.AltModifier
-                    )
+        # Source compare clone: keep the left clone synced whenever the real
+        # work view is resized, scrolled, zoomed, dragged, or otherwise repainted.
+        try:
+            view = getattr(self, "view", None)
+            if view is not None and (obj is view or obj is view.viewport()):
+                if et in (
+                    QEvent.Type.Resize,
+                    QEvent.Type.Wheel,
+                    QEvent.Type.MouseMove,
+                    QEvent.Type.MouseButtonPress,
+                    QEvent.Type.MouseButtonRelease,
+                    QEvent.Type.Paint,
+                    QEvent.Type.UpdateRequest,
+                    QEvent.Type.Show,
                 ):
-                    # 사용자는 입력을 끝낼 때 습관적으로 Enter를 누른다.
-                    # QLineEdit/스핀박스/편집 가능한 콤보박스에서는 Enter가 옆 버튼을 누르거나
-                    # 다음 위젯을 건드리지 않고, 편집을 확정한 뒤 포커스만 빠지게 한다.
-                    if self.finish_single_line_input_by_enter(obj):
-                        event.accept()
-                        return True
+                    if hasattr(self, "schedule_source_compare_sync"):
+                        self.schedule_source_compare_sync(16)
+        except Exception:
+            pass
 
-                if et == QEvent.Type.ShortcutOverride:
-                    return False
+        # Quick OCR must also work on the left source-compare clone.
+        # The clone is a plain QGraphicsView, so the normal MuleImageViewer
+        # quick-OCR mouse handlers do not receive its drag events. Route its
+        # viewport events through the main window while quick OCR mode is active.
+        try:
+            sc_view = getattr(self, "source_compare_view", None)
+            if sc_view is not None and obj is sc_view.viewport():
+                if hasattr(self, "handle_source_compare_quick_ocr_event") and self.handle_source_compare_quick_ocr_event(event):
+                    return True
+        except Exception:
+            pass
 
-                if self._event_matches_shortcut(event, "paint_undo") or (ctrl and key == Qt.Key.Key_Z):
-                    self.handle_global_undo_shortcut()
-                    event.accept()
-                    return True
-                if self._event_matches_shortcut(event, "paint_redo") or (ctrl and key == Qt.Key.Key_Y):
-                    self.handle_general_redo()
-                    event.accept()
-                    return True
-                if key == Qt.Key.Key_Delete:
-                    # 텍스트 셀 편집 중 Delete는 글자 삭제로만 동작해야 한다.
-                    # 여기서 행 삭제로 처리하면 사용자가 번역문을 수정하다가 라인이 통째로 삭제된다.
-                    if self.is_editing_table_text_cell():
+        try:
+            html = obj.property("delayed_tooltip_html") if obj is not None and hasattr(obj, "property") else None
+        except Exception:
+            html = None
+
+        if html:
+            try:
+                if et == QEvent.Type.Enter:
+                    # New target: always clear any previous popup first.
+                    if getattr(self, "_tooltip_visible_target", None) is not obj:
+                        self._hide_delayed_tooltip_popup()
+                    self._tooltip_target = obj
+                    self._tooltip_html = str(html)
+                    popup = getattr(self, "_tooltip_popup", None)
+                    try:
+                        self._tooltip_timer.stop()
+                    except Exception:
+                        pass
+                    if popup is not None and popup.isVisible() and getattr(self, "_tooltip_visible_target", None) is obj:
                         return False
-                    fw = QApplication.focusWidget()
-                    in_table = getattr(self, "tab", None) is not None and (fw is self.tab or self.tab.isAncestorOf(fw))
-                    if in_table and self.selected_table_text_ids():
-                        self.delete_text_data_items(ask=True)
-                        event.accept()
-                        return True
+                    self._tooltip_timer.start(420)
+
+                elif et == QEvent.Type.MouseMove:
+                    if getattr(self, "_tooltip_target", None) is obj:
+                        self._tooltip_html = str(html)
+
+                elif et in (
+                    QEvent.Type.Leave,
+                    QEvent.Type.Hide,
+                    QEvent.Type.Close,
+                    QEvent.Type.Destroy,
+                    QEvent.Type.FocusOut,
+                    QEvent.Type.WindowDeactivate,
+                    QEvent.Type.MouseButtonPress,
+                    QEvent.Type.MouseButtonRelease,
+                    QEvent.Type.Wheel,
+                    QEvent.Type.KeyPress,
+                ):
+                    if getattr(self, "_tooltip_target", None) is obj or getattr(self, "_tooltip_visible_target", None) is obj:
+                        try:
+                            self._tooltip_timer.stop()
+                        except Exception:
+                            pass
+                        self._tooltip_target = None
+                        self._tooltip_html = ""
+                        self._hide_delayed_tooltip_popup()
             except Exception:
                 pass
-        if hasattr(obj, "property") and (obj.property("delayed_tooltip_title") or obj.property("delayed_tooltip_html")):
-            # QAction/QToolButton 기본 툴팁은 action text를 작게 띄우는 경우가 있다.
-            # 예: W, ☐ 같은 "아이콘 확대"처럼 보이는 검은 툴팁.
-            # 지연 툴팁 하나만 쓰기 위해 기본 ToolTip 이벤트는 완전히 막는다.
-            if et == QEvent.Type.ToolTip:
-                return True
 
-            if et == QEvent.Type.Enter:
-                self._tooltip_target = obj
-                try:
-                    raw_title = obj.property("delayed_tooltip_title")
-                    if raw_title:
-                        self._tooltip_html = self._tooltip_rich_text(
-                            raw_title,
-                            obj.property("delayed_tooltip_shortcut") or "",
-                            obj.property("delayed_tooltip_description") or "",
-                            force_white_in_light=bool(obj.property("delayed_tooltip_force_white_in_light")),
-                        )
-                    else:
-                        self._tooltip_html = obj.property("delayed_tooltip_html") or ""
-                except Exception:
-                    self._tooltip_html = obj.property("delayed_tooltip_html") or ""
-                self._tooltip_timer.start(500)
-            elif et in (QEvent.Type.Leave, QEvent.Type.MouseButtonPress, QEvent.Type.Hide, QEvent.Type.FocusOut):
-                if self._tooltip_target is obj:
-                    self._tooltip_timer.stop()
-                    self._tooltip_target = None
-                    self._tooltip_html = ""
-                    QToolTip.hideText()
         return super().eventFilter(obj, event)
+
 
     def configure_ui_tooltips(self):
         def seq_text(key):
@@ -1004,19 +1207,31 @@ class MainWindowInteractionMixin:
             except Exception:
                 return ""
 
+        def tooltip_pos(widget, pos="", x=0, y=0):
+            try:
+                if widget is not None:
+                    if pos:
+                        widget.setProperty("delayed_tooltip_position", pos)
+                    if x:
+                        widget.setProperty("delayed_tooltip_offset_x", int(x))
+                    if y:
+                        widget.setProperty("delayed_tooltip_offset_y", int(y))
+            except Exception:
+                pass
+
         # 좌측 그림판/마스크 도구
         if hasattr(self, "tb") and self.tb is not None:
             action_info = []
             if hasattr(self, "act_brush"): action_info.append((self.act_brush, "브러시", seq_text("paint_brush")))
             if hasattr(self, "act_erase"): action_info.append((self.act_erase, "지우개", seq_text("paint_erase")))
             if hasattr(self, "act_reanal"): action_info.append((self.act_reanal, "재분석", seq_text("paint_reanalyze")))
-            if hasattr(self, "act_undo"): action_info.append((self.act_undo, "작업 취소", seq_text("paint_undo")))
             if hasattr(self, "act_redo"): action_info.append((self.act_redo, "작업 재실행", seq_text("paint_redo")))
             if hasattr(self, "act_magic"): action_info.append((self.act_magic, "요술봉 선택", seq_text("paint_magic_select")))
             if hasattr(self, "act_mask_wrap"): action_info.append((self.act_mask_wrap, "마스크 랩핑", seq_text("paint_mask_wrap"), "영역 안의 떨어진 마스크들을 하나의 채움 영역으로 감싸줍니다."))
             if hasattr(self, "act_mask_cut"): action_info.append((self.act_mask_cut, "마스크 커팅", seq_text("paint_mask_cut"), "선택 영역 밖 경계를 지정 픽셀만큼 잘라 붙어 있는 마스크를 분리합니다."))
+            if hasattr(self, "act_final_area_paint"): action_info.append((self.act_final_area_paint, "영역 페인팅", seq_text("paint_area_fill"), "드래그한 사각형/자유형 영역을 현재 최종 페인팅 색상으로 채웁니다."))
             if hasattr(self, "act_final_text_tool"): action_info.append((self.act_final_text_tool, "최종 텍스트 도구", seq_text("final_text_tool"), "최종화면을 클릭하면 텍스트 영역을 만듭니다. 내용 작성 후 Ctrl+Return을 누르거나 다른 곳을 클릭하면 작성이 완료됩니다."))
-            if hasattr(self, "act_final_paint_to_bg"): action_info.append((self.act_final_paint_to_bg, "최종 페인팅을 배경으로 반영", seq_text("final_paint_to_background")))
+            if hasattr(self, "act_final_paint_to_bg"): action_info.append((self.act_final_paint_to_bg, "최종 페인팅을 배경에 반영", seq_text("final_paint_to_background")))
             if hasattr(self, "act_final_paint_above_text"): action_info.append((self.act_final_paint_above_text, "텍스트 위에 페인팅", seq_text("final_paint_above_toggle"), "ON이면 이후 새로 칠하는 브러시가 텍스트보다 위 레이어에 그려집니다."))
             for info in action_info:
                 try:
@@ -1025,7 +1240,11 @@ class MainWindowInteractionMixin:
                     else:
                         act, title, sk = info
                         desc = ""
-                    self.register_delayed_tooltip(self.tb.widgetForAction(act), title, sk, desc)
+                    _w = self.tb.widgetForAction(act)
+                    if _w is not None:
+                        _w.setToolTip("")
+                        tooltip_pos(_w, "right")
+                    self.register_delayed_tooltip(_w, title, sk, desc)
                 except Exception:
                     pass
 
@@ -1035,10 +1254,12 @@ class MainWindowInteractionMixin:
                 if w is not None:
                     w.setProperty("force_outlined_tooltip_text", True)
                     w.setProperty("force_color_tooltip_text", True)
+                    tooltip_pos(w, "right")
                 self.register_delayed_tooltip(w, "최종 페인팅 색상", seq_text("final_paint_color"), "스포이드: Alt+마우스 좌클릭")
             except Exception:
                 self.register_delayed_tooltip(self.tb.widgetForAction(self.act_final_paint_color), "최종 페인팅 색상", seq_text("final_paint_color"), "스포이드: Alt+마우스 좌클릭")
         if hasattr(self, "mask_toggle_wrap"):
+            tooltip_pos(self.mask_toggle_wrap, "right")
             self.register_delayed_tooltip(
                 self.mask_toggle_wrap,
                 "페인팅 마스크 ON/OFF",
@@ -1052,6 +1273,9 @@ class MainWindowInteractionMixin:
             self.register_delayed_tooltip(self.btn_magic_fill, "마스킹 칠하기", seq_text("paint_magic_fill"))
             self.register_delayed_tooltip(self.sb_magic_tolerance, "RGB 허용범위", f"{seq_text('paint_magic_tolerance_inc')} / {seq_text('paint_magic_tolerance_dec')}")
             self.register_delayed_tooltip(self.sb_magic_expand, "영역 확장 범위", f"{seq_text('paint_magic_expand_inc')} / {seq_text('paint_magic_expand_dec')}")
+        if hasattr(self, "area_paint_bar"):
+            self.register_delayed_tooltip(self.btn_area_paint_rect, "사각형으로 영역 그리기", seq_text("paint_mask_wrap_rect"), "사각형 범위를 잡고 현재 최종 페인팅 색상으로 채웁니다.")
+            self.register_delayed_tooltip(self.btn_area_paint_free, "자유형으로 영역 그리기", seq_text("paint_mask_wrap_free"), "드래그한 자유형 영역을 현재 최종 페인팅 색상으로 채웁니다.")
         if hasattr(self, "mask_wrap_bar"):
             self.register_delayed_tooltip(self.btn_mask_wrap_rect, "사각형으로 영역 그리기", seq_text("paint_mask_wrap_rect"), "윈도우 캡처처럼 사각형 범위를 잡고 그 안의 마스크들을 하나로 감싸 채웁니다.")
             self.register_delayed_tooltip(self.btn_mask_wrap_free, "자유형으로 영역 그리기", seq_text("paint_mask_wrap_free"), "드래그한 자유형 범위 안에서만 마스크들을 하나로 감싸 채웁니다.")
@@ -1059,6 +1283,10 @@ class MainWindowInteractionMixin:
             self.register_delayed_tooltip(self.btn_mask_cut_rect, "사각형으로 영역 그리기", seq_text("paint_mask_wrap_rect"), "사각형 보존 영역의 바깥 경계를 지정 픽셀만큼 잘라냅니다.")
             self.register_delayed_tooltip(self.btn_mask_cut_free, "자유형으로 영역 그리기", seq_text("paint_mask_wrap_free"), "자유형 보존 영역의 바깥 경계를 지정 픽셀만큼 잘라냅니다.")
             self.register_delayed_tooltip(self.sb_mask_cut_px, "커팅 폭", "", "선택 영역 밖으로 잘라낼 마스크 폭입니다.")
+        if hasattr(self, "ocr_region_bar"):
+            self.register_delayed_tooltip(self.btn_ocr_region_rect, "사각형 OCR 분석 영역", seq_text("paint_mask_wrap_rect"), "사각형으로 OCR이 읽을 영역을 지정합니다.")
+            self.register_delayed_tooltip(self.btn_ocr_region_free, "자유형 OCR 분석 영역", seq_text("paint_mask_wrap_free"), "자유형으로 OCR이 읽을 영역을 지정합니다.")
+            self.register_delayed_tooltip(self.btn_ocr_region_finish, "OCR 분석 영역 지정 종료", "", "지정한 영역을 저장하거나 폐기하고 영역 지정 모드를 종료합니다.")
 
         # 툴팁 글자색은 테마 기본값을 따른다.
         # 색상 버튼처럼 특수한 경우만 개별 QToolTip 스타일에서 처리한다.
@@ -1069,14 +1297,23 @@ class MainWindowInteractionMixin:
         if hasattr(self, "btn_text_mask_reanalyze"):
             self.register_delayed_tooltip(self.btn_text_mask_reanalyze, "텍스트 마스크 재분석", seq_text("paint_reanalyze"), "텍스트 마스크 영역을 기준으로 OCR을 다시 실행합니다.")
         if hasattr(self, "btn_analyze"):
+            tooltip_pos(self.btn_analyze, "above")
             self.register_delayed_tooltip(self.btn_analyze, "분석", seq_text("work_analyze"), "현재 페이지를 분석합니다.")
+            # 빠른 OCR 설정은 버튼이 아니라 단축키/메뉴로 여는 기능이다.
+            # 메인 윈도우(self)에 지연 툴팁을 등록하면 창 전체가 툴팁 영역이 되어
+            # 포커스가 없어도 마우스 진입 시 계속 툴팁이 뜬다.
+            # 따라서 여기서는 별도 지연 툴팁을 등록하지 않는다.
         if hasattr(self, "btn_translate"):
+            tooltip_pos(self.btn_translate, "above")
             self.register_delayed_tooltip(self.btn_translate, "번역", seq_text("work_translate"))
         if hasattr(self, "btn_inpaint"):
+            tooltip_pos(self.btn_inpaint, "above")
             self.register_delayed_tooltip(self.btn_inpaint, "인페인팅", seq_text("work_inpaint"))
         if hasattr(self, "btn_text_cleanup"):
+            tooltip_pos(self.btn_text_cleanup, "above")
             self.register_delayed_tooltip(self.btn_text_cleanup, "텍스트 정리", seq_text("work_clean_text"))
         if hasattr(self, "cb_show_final_text"):
+            tooltip_pos(self.cb_show_final_text, "left", x=-6)
             self.register_delayed_tooltip(self.cb_show_final_text, "텍스트 표시 ON/OFF", seq_text("view_text_toggle"))
         if hasattr(self, "cb_font"):
             self.register_delayed_tooltip(self.cb_font, "글꼴", seq_text("item_font_select"), "현재 선택한 텍스트의 글꼴을 바꿉니다.")
@@ -1097,26 +1334,37 @@ class MainWindowInteractionMixin:
             self.register_delayed_tooltip(self.btn_italic, "기울이기", seq_text("text_italic_toggle"))
             self.register_delayed_tooltip(self.btn_strike, "취소선", seq_text("text_strike_toggle"))
         if hasattr(self, "btn_prev_page"):
+            tooltip_pos(self.btn_prev_page, "above")
             self.register_delayed_tooltip(self.btn_prev_page, "이전 페이지", seq_text("work_page_prev"))
         if hasattr(self, "btn_next_page"):
+            tooltip_pos(self.btn_next_page, "above")
             self.register_delayed_tooltip(self.btn_next_page, "다음 페이지", seq_text("work_page_next"))
         if hasattr(self, "btn_page_tab_menu"):
+            tooltip_pos(self.btn_page_tab_menu, "above")
             self.register_delayed_tooltip(self.btn_page_tab_menu, "페이지 목록", seq_text("work_page_list"))
         if hasattr(self, "btn_page_scroll_left"):
+            tooltip_pos(self.btn_page_scroll_left, "above")
             self.register_delayed_tooltip(self.btn_page_scroll_left, "페이지 탭 왼쪽 이동", "")
         if hasattr(self, "btn_page_scroll_right"):
+            tooltip_pos(self.btn_page_scroll_right, "above")
             self.register_delayed_tooltip(self.btn_page_scroll_right, "페이지 탭 오른쪽 이동", "")
         if hasattr(self, "btn_page_add"):
+            tooltip_pos(self.btn_page_add, "above")
             self.register_delayed_tooltip(self.btn_page_add, "이미지 불러오기", seq_text("project_import_images"), "현재 프로젝트에서는 현재 페이지 뒤에 이미지를 추가합니다.")
         if hasattr(self, "btn_project_exit"):
+            tooltip_pos(self.btn_project_exit, "above")
             self.register_delayed_tooltip(self.btn_project_exit, "프로젝트 나가기", seq_text("project_exit"))
         if hasattr(self, "btn_page"):
+            tooltip_pos(self.btn_page, "above")
             self.register_delayed_tooltip(self.btn_page, "페이지 이동", "", "현재 페이지 번호를 눌러 원하는 페이지로 바로 이동합니다.")
         if hasattr(self, "cb_mode"):
+            tooltip_pos(self.cb_mode, "above")
             self.register_delayed_tooltip(self.cb_mode, "작업 탭", seq_text("work_tab_cycle"), "원본, 분석도, 마스크, 최종결과 탭을 전환합니다.")
         if hasattr(self, "btn_quick_undo"):
+            tooltip_pos(self.btn_quick_undo, "above")
             self.register_delayed_tooltip(self.btn_quick_undo, "뒤로가기", seq_text("paint_undo"), "최근 작업을 되돌립니다.")
         if hasattr(self, "btn_quick_redo"):
+            tooltip_pos(self.btn_quick_redo, "above")
             self.register_delayed_tooltip(self.btn_quick_redo, "앞으로 가기", seq_text("paint_redo"), "되돌린 작업을 다시 실행합니다.")
         if hasattr(self, "cb_text_preset"):
             self.register_delayed_tooltip(self.cb_text_preset, "페이지 프리셋", "", "현재 페이지/전체 페이지에 적용할 글꼴 프리셋을 선택합니다.")
@@ -1323,6 +1571,7 @@ class MainWindowInteractionMixin:
         self.magic_wand_seeds = []
         self.magic_wand_history = []
         self.text_clipboard = []
+        self.text_clipboard_is_plain = False
         self.text_paste_pending = False
 
         try:

@@ -1,0 +1,8 @@
+# External PaddleOCR worker portable Python runtime dependencies.
+# Installed into local_runtime/paddle/python/Lib/site-packages by the Local build.
+
+numpy==1.26.4
+paddlepaddle==3.2.2
+paddleocr==3.5.0
+pandas
+setuptools==81.0.0

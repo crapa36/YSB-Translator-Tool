@@ -3399,6 +3399,7 @@ class MainWindowProjectPagesMixin:
             'working_source': None,
             'final_paint': None,
             'final_paint_above': None,
+            'ocr_analysis_regions': [],
             'original_name': original_name or os.path.basename(image_path),
         }
 

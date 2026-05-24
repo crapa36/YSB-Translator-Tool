@@ -190,6 +190,32 @@ class MainWindowOperationsMixin:
             else:
                 self.log(self.tr_ui("🔪 마스크 커팅 모드: 자유형"))
 
+    def set_area_paint_shape(self, shape, silent=False):
+        shape = "free" if str(shape) == "free" else "rect"
+        try:
+            self.view.area_paint_shape = shape
+            self.view.clear_area_paint_preview()
+        except Exception:
+            pass
+        for btn, active in ((getattr(self, "btn_area_paint_rect", None), shape == "rect"), (getattr(self, "btn_area_paint_free", None), shape == "free")):
+            if btn is None:
+                continue
+            try:
+                btn.blockSignals(True)
+                btn.setChecked(active)
+                btn.blockSignals(False)
+                if active:
+                    btn.setStyleSheet("font-weight:bold; background:#7c3aed; color:white;")
+                else:
+                    btn.setStyleSheet("opacity:0.7;")
+            except Exception:
+                pass
+        if not silent:
+            if shape == "rect":
+                self.log(self.tr_ui("▦ 영역 페인팅 모드: 사각형"))
+            else:
+                self.log(self.tr_ui("▦ 영역 페인팅 모드: 자유형"))
+
     def apply_mask_wrapping(self, region_mask):
         """선택한 영역 안의 분리된 마스크 덩어리들을 하나의 채움 영역으로 감싸준다."""
         try:
@@ -461,6 +487,283 @@ class MainWindowOperationsMixin:
             return
         self.sb_magic_expand.setValue(max(0, min(200, self.sb_magic_expand.value() + int(delta))))
 
+    def _detach_source_compare_controls(self):
+        try:
+            controls = getattr(self, "source_compare_controls", None)
+            if controls is None:
+                return
+            parent = controls.parentWidget()
+            if parent is not None and parent.layout() is not None:
+                try:
+                    parent.layout().removeWidget(controls)
+                except Exception:
+                    pass
+            controls.setParent(None)
+        except Exception:
+            pass
+
+    def _add_source_compare_controls_to_layout(self, layout):
+        if layout is None or not hasattr(self, "source_compare_controls"):
+            return False
+        try:
+            self._detach_source_compare_controls()
+            # stretch 뒤에 붙여 같은 줄의 오른쪽 끝에 놓는다.
+            layout.addWidget(self.source_compare_controls)
+            self.source_compare_controls.show()
+            return True
+        except Exception:
+            return False
+
+    def place_source_compare_controls(self):
+        """원본 비교 컨트롤을 현재 작업 도구줄의 오른쪽 끝에 붙인다."""
+        if not hasattr(self, "source_compare_controls"):
+            return
+        visible = self.source_compare_is_visible() if hasattr(self, "source_compare_is_visible") else False
+        if not visible:
+            try:
+                self.source_compare_controls.hide()
+                if hasattr(self, "source_compare_bar"):
+                    self.source_compare_bar.hide()
+            except Exception:
+                pass
+            return
+
+        target_layout = None
+        # 영역 페인팅/마스크 랩핑/원본 비교창은 같은 상단 작업 공간을 공유한다.
+        # 현재 표시 중인 도구줄이 있으면 그 줄의 오른쪽 끝에 원본 비교 컨트롤만 붙인다.
+        for bar_name in (
+            "area_paint_bar",
+            "magic_wand_bar",
+            "mask_wrap_bar",
+            "mask_cut_bar",
+            "ocr_region_bar",
+            "final_paint_option_bar",
+            "final_edit_bar",
+        ):
+            bar = getattr(self, bar_name, None)
+            try:
+                if bar is not None and bar.isVisible() and bar.layout() is not None:
+                    target_layout = bar.layout()
+                    break
+            except Exception:
+                pass
+
+        try:
+            if hasattr(self, "source_compare_bar"):
+                self.source_compare_bar.hide()
+
+            if target_layout is not None and self._add_source_compare_controls_to_layout(target_layout):
+                return
+
+            # 별도 작업 도구줄이 없을 때만 얇은 보조줄을 사용한다.
+            if hasattr(self, "source_compare_bar") and self.source_compare_bar.layout() is not None:
+                if self._add_source_compare_controls_to_layout(self.source_compare_bar.layout()):
+                    self.source_compare_bar.show()
+                    return
+        except Exception:
+            pass
+
+
+    def open_source_compare_view(self):
+        """왼쪽에 현재 페이지의 원본 탭 이미지를 복제해 비교 보기로 띄운다."""
+        if not getattr(self, "paths", None):
+            try:
+                self.log(self.tr_ui("⚠️ 원본 비교창을 열 프로젝트가 없습니다."))
+            except Exception:
+                pass
+            return
+        try:
+            if hasattr(self, "source_compare_view"):
+                self.source_compare_view.show()
+            if hasattr(self, "source_compare_controls"):
+                self.source_compare_controls.show()
+            if hasattr(self, "source_compare_splitter"):
+                sizes = self.source_compare_splitter.sizes()
+                total = sum(sizes) if sizes else 0
+                if total <= 0:
+                    total = max(900, self.source_compare_splitter.width())
+                left = max(40, int(total * 0.35))
+                right = max(240, total - left)
+                self.source_compare_splitter.setSizes([left, right])
+            self.refresh_source_compare_view(fit=True)
+            if hasattr(self, "sync_source_compare_from_main"):
+                self.place_source_compare_controls()
+                self.schedule_source_compare_sync(0)
+                self.start_source_compare_sync_timer()
+                QTimer.singleShot(60, lambda: self.schedule_source_compare_sync(0))
+                QTimer.singleShot(160, lambda: self.schedule_source_compare_sync(0))
+                QTimer.singleShot(300, lambda: self.schedule_source_compare_sync(0))
+            self.log(self.tr_ui("🖼️ 원본 비교창을 열었습니다."))
+        except Exception as e:
+            try:
+                self.log(self.tr_ui(f"⚠️ 원본 비교창 열기 실패: {e}"))
+            except Exception:
+                pass
+
+    def close_source_compare_view(self):
+        try:
+            # Closing the clone view must not change the user's current work view.
+            try:
+                keep_transform = self.view.transform()
+                keep_center = self.view.mapToScene(self.view.viewport().rect().center())
+            except Exception:
+                keep_transform = None
+                keep_center = None
+
+            self.stop_source_compare_sync_timer()
+            if hasattr(self, "source_compare_view"):
+                self.source_compare_view.hide()
+            if hasattr(self, "source_compare_controls"):
+                self.source_compare_controls.hide()
+            if hasattr(self, "source_compare_bar"):
+                self.source_compare_bar.hide()
+            if hasattr(self, "source_compare_splitter"):
+                self.source_compare_splitter.setSizes([0, max(400, self.source_compare_splitter.width())])
+
+            def restore_main_view():
+                try:
+                    if keep_transform is not None:
+                        self.view.setTransform(keep_transform)
+                    if keep_center is not None:
+                        self.view.centerOn(keep_center)
+                except Exception:
+                    pass
+                try:
+                    self.place_source_compare_controls()
+                except Exception:
+                    pass
+
+            QTimer.singleShot(0, restore_main_view)
+            QTimer.singleShot(80, restore_main_view)
+            self.log(self.tr_ui("🖼️ 원본 비교창을 닫았습니다."))
+        except Exception:
+            pass
+
+    def on_source_compare_sync_toggled(self, checked):
+        if checked:
+            self.schedule_source_compare_sync(0)
+            self.start_source_compare_sync_timer()
+        else:
+            self.stop_source_compare_sync_timer()
+            try:
+                self._source_compare_sync_pending = False
+            except Exception:
+                pass
+
+    def source_compare_is_visible(self):
+        try:
+            return bool(hasattr(self, "source_compare_view") and self.source_compare_view.isVisible())
+        except Exception:
+            return False
+
+    def ensure_source_compare_sync_timer(self):
+        """Create a lightweight polling timer for clone sync."""
+        try:
+            timer = getattr(self, "_source_compare_sync_timer", None)
+            if timer is None:
+                timer = QTimer(self)
+                timer.setInterval(50)
+                timer.timeout.connect(lambda: self.sync_source_compare_from_main())
+                self._source_compare_sync_timer = timer
+            return timer
+        except Exception:
+            return None
+
+    def start_source_compare_sync_timer(self):
+        try:
+            if not self.source_compare_is_visible():
+                return
+            if hasattr(self, "cb_source_compare_sync") and not self.cb_source_compare_sync.isChecked():
+                return
+            timer = self.ensure_source_compare_sync_timer()
+            if timer is not None and not timer.isActive():
+                timer.start()
+        except Exception:
+            pass
+
+    def stop_source_compare_sync_timer(self):
+        try:
+            timer = getattr(self, "_source_compare_sync_timer", None)
+            if timer is not None and timer.isActive():
+                timer.stop()
+        except Exception:
+            pass
+
+    def schedule_source_compare_sync(self, delay=16):
+        """Coalesce source-compare clone sync requests.
+
+        The clone must follow the real work view after zoom, pan, resize,
+        scrollbar changes, page switches and splitter moves. Calling sync
+        immediately from every event can happen before Qt finishes updating
+        scrollbars, so this schedules one sync on the next event loop tick.
+        """
+        try:
+            if not self.source_compare_is_visible():
+                return
+            if hasattr(self, "cb_source_compare_sync") and not self.cb_source_compare_sync.isChecked():
+                return
+            if getattr(self, "_source_compare_sync_pending", False):
+                return
+            self._source_compare_sync_pending = True
+            def _run():
+                try:
+                    self._source_compare_sync_pending = False
+                    self.sync_source_compare_from_main()
+                except Exception:
+                    self._source_compare_sync_pending = False
+            QTimer.singleShot(max(0, int(delay)), _run)
+        except Exception:
+            try:
+                self._source_compare_sync_pending = False
+            except Exception:
+                pass
+
+    def refresh_source_compare_view(self, fit=False):
+        if not self.source_compare_is_visible():
+            return
+        try:
+            img = self.get_source_display_image(self.idx)
+            scene = self.source_compare_scene
+            scene.clear()
+            pix = self.qt_pixmap_from_image_source(img)
+            if pix is None or pix.isNull():
+                return
+            scene.addPixmap(pix)
+            scene.setSceneRect(QRectF(pix.rect()))
+            if fit and not (hasattr(self, "cb_source_compare_sync") and self.cb_source_compare_sync.isChecked()):
+                self.source_compare_view.fitInView(scene.itemsBoundingRect(), Qt.AspectRatioMode.KeepAspectRatio)
+            if hasattr(self, "cb_source_compare_sync") and self.cb_source_compare_sync.isChecked():
+                self.schedule_source_compare_sync(0)
+        except Exception as e:
+            try:
+                self.log(self.tr_ui(f"⚠️ 원본 비교창 갱신 실패: {e}"))
+            except Exception:
+                pass
+
+    def sync_source_compare_from_main(self):
+        if getattr(self, "_source_compare_syncing", False):
+            return
+        if not self.source_compare_is_visible():
+            return
+        if hasattr(self, "cb_source_compare_sync") and not self.cb_source_compare_sync.isChecked():
+            return
+        self._source_compare_syncing = True
+        try:
+            # Clone mode A: copy the real work view transform and center scene point.
+            # Do not try to compensate for different viewport sizes; the user will
+            # match the panel sizes when exact clone comparison is needed.
+            center = self.view.mapToScene(self.view.viewport().rect().center())
+            self.source_compare_view.setTransform(self.view.transform())
+            self.source_compare_view.centerOn(center)
+            try:
+                self.source_compare_view.viewport().update()
+            except Exception:
+                pass
+        except Exception:
+            pass
+        finally:
+            self._source_compare_syncing = False
+
     def set_tool(self, m):
         mode = self.cb_mode.currentIndex() if hasattr(self, "cb_mode") else 0
 
@@ -476,8 +779,14 @@ class MainWindowOperationsMixin:
         if m == 'final_text' and mode != 4:
             self.log("⚠️ 텍스트 도구는 최종화면에서만 사용할 수 있습니다.")
             return
+        if m == 'area_paint' and mode != 4:
+            self.log("⚠️ 영역 페인팅은 최종화면에서만 사용할 수 있습니다.")
+            return
         if m == 'paste_text' and mode != 4:
             self.log("⚠️ 텍스트 붙여넣기는 최종화면에서만 사용할 수 있습니다.")
+            return
+        if m == 'ocr_region_select' and mode in [0, 4]:
+            self.log("⚠️ OCR 분석 영역 지정은 분석도/마스크 탭에서 사용하세요.")
             return
         if m in ('draw', 'erase') and mode not in [2, 3, 4]:
             self.log("⚠️ 브러시/지우개는 마스크 탭 또는 최종화면에서만 사용할 수 있습니다.")
@@ -498,19 +807,37 @@ class MainWindowOperationsMixin:
             self.mask_wrap_bar.setVisible(m == 'mask_wrap' and mode in [2, 3])
         if hasattr(self, "mask_cut_bar"):
             self.mask_cut_bar.setVisible(m == 'mask_cut' and mode in [2, 3])
+        if hasattr(self, "ocr_region_bar"):
+            self.ocr_region_bar.setVisible(m == 'ocr_region_select' and mode in [1, 2, 3])
+        if hasattr(self, "area_paint_bar"):
+            self.area_paint_bar.setVisible(m == 'area_paint' and mode == 4)
         if m != 'magic_wand':
             self.clear_magic_wand_selection()
         if m != 'mask_wrap' and hasattr(self.view, "clear_mask_wrap_preview"):
             self.view.clear_mask_wrap_preview()
         if m != 'mask_cut' and hasattr(self.view, "clear_mask_cut_preview"):
             self.view.clear_mask_cut_preview()
+        if m != 'ocr_region_select' and hasattr(self.view, "clear_ocr_region_preview"):
+            self.view.clear_ocr_region_preview()
+        if m != 'quick_ocr' and hasattr(self.view, "clear_quick_ocr_preview"):
+            self.view.clear_quick_ocr_preview()
+        if m != 'area_paint' and hasattr(self.view, "clear_area_paint_preview"):
+            self.view.clear_area_paint_preview()
+        if m != 'area_paint' and hasattr(self.view, "area_paint_points"):
+            self.view.area_paint_points = []
 
         self.update_final_paint_option_bar_visibility()
+        try:
+            self.place_source_compare_controls()
+        except Exception:
+            pass
 
         if m == 'final_text':
             self.log("🔤 도구: 텍스트")
         elif m == 'paste_text':
             self.log("📋 도구: 텍스트 붙여넣기 위치 지정")
+        elif m == 'area_paint':
+            self.log("▦ 도구: 영역 페인팅")
         elif m == 'draw':
             self.log("🖌️ 도구: 브러시")
         elif m == 'erase':
@@ -519,8 +846,1070 @@ class MainWindowOperationsMixin:
             self.log("🩹 도구: 마스크 랩핑")
         elif m == 'mask_cut':
             self.log(self.tr_ui("🔪 도구: 마스크 커팅"))
+        elif m == 'ocr_region_select':
+            self.log("🔎 도구: OCR 분석 영역 지정")
+        elif m == 'quick_ocr':
+            self.log("🔎 도구: 빠른 OCR 영역 선택")
         elif m is None:
             self.log("✋ 도구: 이동")
+
+    def _ocr_region_indices_label(self, indices):
+        if not indices:
+            return self.tr_ui("선택 페이지 없음")
+        if len(indices) == len(getattr(self, "paths", []) or []):
+            return self.tr_ui("전체 페이지")
+        return ", ".join(str(i + 1) for i in indices[:12]) + ("..." if len(indices) > 12 else "")
+
+    def ocr_analysis_regions_hidden(self):
+        return bool((getattr(self, "app_options", {}) or {}).get("ocr_analysis_regions_hidden", False))
+
+    def set_ocr_analysis_regions_hidden(self, hidden):
+        self.app_options["ocr_analysis_regions_hidden"] = bool(hidden)
+        self.save_app_options_cache()
+        self.refresh_ocr_region_overlay()
+
+    def current_ocr_regions_for_view(self):
+        if self.ocr_analysis_regions_hidden():
+            return []
+        temp = getattr(self, "ocr_region_temp_by_page", None)
+        if isinstance(temp, dict) and self.idx in temp:
+            return copy.deepcopy(temp.get(self.idx) or [])
+        curr = self.data.get(self.idx) if hasattr(self, "data") else None
+        if not curr:
+            return []
+        return copy.deepcopy(curr.get('ocr_analysis_regions', []) or [])
+
+    def refresh_ocr_region_overlay(self):
+        try:
+            if not hasattr(self, "view"):
+                return
+            if self.ocr_analysis_regions_hidden():
+                self.view.clear_ocr_region_overlay()
+                return
+            mode = self.cb_mode.currentIndex() if hasattr(self, "cb_mode") else 0
+            if mode in (0, 1, 2, 3):
+                self.view.draw_ocr_analysis_regions(self.current_ocr_regions_for_view())
+            else:
+                self.view.clear_ocr_region_overlay()
+        except Exception:
+            pass
+
+    def set_ocr_region_shape(self, shape, silent=False):
+        shape = "free" if str(shape) == "free" else "rect"
+        try:
+            self.view.ocr_region_shape = shape
+            self.view.clear_ocr_region_preview()
+        except Exception:
+            pass
+        for btn, active in ((getattr(self, "btn_ocr_region_rect", None), shape == "rect"), (getattr(self, "btn_ocr_region_free", None), shape == "free")):
+            if btn is None:
+                continue
+            try:
+                btn.blockSignals(True)
+                btn.setChecked(active)
+                btn.blockSignals(False)
+                if active:
+                    btn.setStyleSheet("font-weight:bold; background:#2f80ed; color:white;")
+                else:
+                    btn.setStyleSheet("opacity:0.7;")
+            except Exception:
+                pass
+        if not silent:
+            self.log("🔎 OCR 분석 영역: 사각형" if shape == "rect" else "🔎 OCR 분석 영역: 자유형")
+
+    def open_ocr_analysis_region_dialog(self):
+        if not getattr(self, "paths", None):
+            QMessageBox.information(self, self.tr_ui("이미지 없음"), self.tr_ui("먼저 프로젝트에 이미지를 불러와 주세요."))
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle(self.tr_ui("OCR 분석 범위 지정"))
+        dlg.setModal(True)
+        dlg.resize(720, 430)
+        try:
+            dlg.setStyleSheet(self.settings_dialog_style())
+        except Exception:
+            pass
+
+        root = QVBoxLayout(dlg)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(12)
+
+        title = QLabel(self.tr_ui("OCR 분석 범위 지정"), dlg)
+        title.setObjectName("SettingsTitle")
+        root.addWidget(title)
+
+        desc = QLabel(self.tr_ui("OCR이 읽을 영역을 페이지별로 제한합니다. 지정된 영역이 없으면 전체 화면을 분석합니다."), dlg)
+        desc.setObjectName("SettingsDescription")
+        desc.setWordWrap(True)
+        root.addWidget(desc)
+
+        form_box = QFrame(dlg)
+        form_box.setObjectName("SettingsItem")
+        form_layout = QVBoxLayout(form_box)
+        form_layout.setContentsMargins(12, 12, 12, 12)
+        form_layout.setSpacing(12)
+
+        def add_setting_row(title_text, description_text, button_text, handler):
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(12)
+
+            text_box = QVBoxLayout()
+            text_box.setContentsMargins(0, 0, 0, 0)
+            text_box.setSpacing(4)
+
+            item_title = QLabel(self.tr_ui(title_text), dlg)
+            item_title.setObjectName("SettingsItemTitle")
+            item_desc = QLabel(self.tr_ui(description_text), dlg)
+            item_desc.setObjectName("SettingsDescription")
+            item_desc.setWordWrap(True)
+
+            text_box.addWidget(item_title)
+            text_box.addWidget(item_desc)
+            row.addLayout(text_box, 1)
+
+            btn = QPushButton(self.tr_ui(button_text), dlg)
+            btn.setMinimumWidth(112)
+            btn.clicked.connect(lambda checked=False, _h=handler: (dlg.accept(), _h()))
+            row.addWidget(btn, 0)
+            form_layout.addLayout(row)
+
+        add_setting_row(
+            "현재 페이지의 OCR 분석 범위 지정",
+            "현재 보고 있는 페이지만 OCR 분석 영역을 지정합니다.",
+            "지정하기",
+            lambda: self.start_ocr_analysis_region_selection([self.idx], "현재 페이지"),
+        )
+        add_setting_row(
+            "전체 페이지의 OCR 분석 범위 지정",
+            "모든 페이지에 같은 OCR 분석 영역을 지정합니다.",
+            "지정하기",
+            lambda: self.start_ocr_analysis_region_selection(list(range(len(self.paths))), "전체 페이지"),
+        )
+
+        def selected_pages_handler():
+            indices, label = self.choose_batch_page_indices(self.tr_ui("OCR 분석 범위 지정"), "analyze")
+            if indices is None:
+                self.log("↩️ OCR 분석 범위 지정 취소")
+                return
+            self.start_ocr_analysis_region_selection(indices, label)
+
+        add_setting_row(
+            "선택 페이지의 OCR 분석 범위 지정",
+            "1-3, 1~3, 1,2,3 형식으로 지정한 페이지에 같은 영역을 적용합니다.",
+            "지정하기",
+            selected_pages_handler,
+        )
+
+        line = QFrame(dlg)
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setFrameShadow(QFrame.Shadow.Sunken)
+        form_layout.addWidget(line)
+
+        add_setting_row(
+            "범위지정 해제",
+            "저장된 OCR 분석 영역을 모두 지우고, 다시 전체 화면 분석 상태로 되돌립니다.",
+            "해제하기",
+            self.clear_all_ocr_analysis_regions,
+        )
+
+        hide_box = QFrame(dlg)
+        hide_box.setObjectName("SettingsItem")
+        hide_layout = QVBoxLayout(hide_box)
+        hide_layout.setContentsMargins(12, 12, 12, 12)
+        hide_layout.setSpacing(6)
+        cb_hide_regions = QCheckBox(self.tr_ui("OCR 분석 영역 숨기기"), dlg)
+        cb_hide_regions.setChecked(self.ocr_analysis_regions_hidden())
+        cb_hide_desc = QLabel(self.tr_ui("체크하면 저장된 OCR 분석 영역은 유지하되, 모든 탭에서 영역 표시만 숨깁니다."), dlg)
+        cb_hide_desc.setObjectName("SettingsDescription")
+        cb_hide_desc.setWordWrap(True)
+        hide_layout.addWidget(cb_hide_regions)
+        hide_layout.addWidget(cb_hide_desc)
+        cb_hide_regions.toggled.connect(lambda checked: self.set_ocr_analysis_regions_hidden(bool(checked)))
+
+        root.addWidget(form_box)
+        root.addWidget(hide_box)
+        root.addStretch(1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, dlg)
+        buttons.button(QDialogButtonBox.StandardButton.Close).setText(self.tr_ui("닫기"))
+        buttons.rejected.connect(dlg.reject)
+        root.addWidget(buttons)
+        dlg.exec()
+
+    def start_ocr_analysis_region_selection(self, indices, label=""):
+        if not indices:
+            self.log("⚠️ OCR 분석 영역을 지정할 페이지가 없습니다.")
+            return
+        clean = []
+        seen = set()
+        for raw in indices:
+            try:
+                i = int(raw)
+            except Exception:
+                continue
+            if 0 <= i < len(self.paths) and i not in seen:
+                clean.append(i); seen.add(i)
+        if not clean:
+            self.log("⚠️ OCR 분석 영역을 지정할 페이지가 없습니다.")
+            return
+        self.ocr_region_target_indices = clean
+        self.ocr_region_target_label = str(label or self._ocr_region_indices_label(clean))
+        self.ocr_region_temp_history = []
+        self.ocr_region_temp_by_page = {i: copy.deepcopy(self.data.get(i, {}).get('ocr_analysis_regions', []) or []) for i in clean}
+        if self.idx not in self.ocr_region_temp_by_page:
+            self.ocr_region_temp_by_page[self.idx] = copy.deepcopy(self.data.get(self.idx, {}).get('ocr_analysis_regions', []) or [])
+        if hasattr(self, "cb_mode") and self.cb_mode.currentIndex() in (0, 4):
+            self.cb_mode.setCurrentIndex(1)
+        self.set_ocr_region_shape("rect", silent=True)
+        self.set_tool('ocr_region_select')
+        self.refresh_ocr_region_overlay()
+        self.log(f"🔎 OCR 분석 영역 지정 시작: {self.ocr_region_target_label}")
+
+    def add_ocr_analysis_region_payload(self, payload):
+        if not isinstance(payload, dict):
+            return
+        temp = getattr(self, "ocr_region_temp_by_page", None)
+        targets = list(getattr(self, "ocr_region_target_indices", []) or [])
+        if not isinstance(temp, dict) or not targets:
+            targets = [self.idx]
+            self.ocr_region_target_indices = targets
+            self.ocr_region_target_label = self.tr_ui("현재 페이지")
+            self.ocr_region_temp_by_page = {self.idx: copy.deepcopy(self.data.get(self.idx, {}).get('ocr_analysis_regions', []) or [])}
+            temp = self.ocr_region_temp_by_page
+        affected = []
+        for i in targets:
+            temp.setdefault(i, copy.deepcopy(self.data.get(i, {}).get('ocr_analysis_regions', []) or []))
+            temp[i].append(copy.deepcopy(payload))
+            affected.append(i)
+        if self.idx not in temp:
+            temp[self.idx] = copy.deepcopy(self.data.get(self.idx, {}).get('ocr_analysis_regions', []) or [])
+            temp[self.idx].append(copy.deepcopy(payload))
+            affected.append(self.idx)
+        hist = getattr(self, "ocr_region_temp_history", None)
+        if not isinstance(hist, list):
+            self.ocr_region_temp_history = []
+            hist = self.ocr_region_temp_history
+        hist.append(affected)
+        self.refresh_ocr_region_overlay()
+        self.update_undo_redo_buttons()
+        self.log(f"➕ OCR 분석 영역 추가: {self._ocr_region_indices_label(targets)}")
+
+    def finish_ocr_analysis_region_selection(self):
+        targets = list(getattr(self, "ocr_region_target_indices", []) or [])
+        temp = getattr(self, "ocr_region_temp_by_page", None)
+        if not isinstance(temp, dict):
+            self.set_tool(None)
+            return
+
+        box = QMessageBox(self)
+        box.setWindowTitle(self.tr_ui("OCR 분석 영역 지정 종료"))
+        box.setText(self.tr_ui("OCR 분석 영역 지정을 종료할까요?"))
+        box.setInformativeText(self.tr_ui("아직 저장하지 않은 변경사항이 있을 수 있습니다. 종료하면 저장 여부를 한 번 더 선택할 수 있습니다."))
+        exit_btn = box.addButton(self.tr_ui("종료하기"), QMessageBox.ButtonRole.AcceptRole)
+        keep_btn = box.addButton(self.tr_ui("계속 지정하기"), QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(keep_btn)
+        box.exec()
+        if box.clickedButton() is not exit_btn:
+            return
+
+        save_box = QMessageBox(self)
+        save_box.setWindowTitle(self.tr_ui("OCR 분석 영역 저장"))
+        save_box.setText(self.tr_ui("변경한 OCR 분석 영역을 저장할까요?"))
+        save_box.setInformativeText(self.tr_ui("저장하지 않고 종료하면 이번에 지정한 OCR 분석 영역은 적용되지 않습니다."))
+        save_btn = save_box.addButton(self.tr_ui("저장하고 종료"), QMessageBox.ButtonRole.AcceptRole)
+        discard_btn = save_box.addButton(self.tr_ui("저장하지 않고 종료"), QMessageBox.ButtonRole.DestructiveRole)
+        save_box.setDefaultButton(save_btn)
+        save_box.exec()
+
+        if save_box.clickedButton() is save_btn:
+            try:
+                self.commit_current_page_ui_to_data(include_mask=False)
+                self.push_project_undo("OCR 분석 범위 지정")
+            except Exception:
+                pass
+            for i in targets:
+                if i in self.data:
+                    self.data[i]['ocr_analysis_regions'] = copy.deepcopy(temp.get(i, []) or [])
+            self.auto_save_project()
+            self.log(f"💾 OCR 분석 영역 저장: {self._ocr_region_indices_label(targets)}")
+        else:
+            self.log("↩️ OCR 분석 영역 변경사항 폐기")
+
+        self.ocr_region_temp_by_page = None
+        self.ocr_region_temp_history = []
+        self.ocr_region_target_indices = []
+        self.ocr_region_target_label = ""
+        self.set_tool(None)
+        self.refresh_ocr_region_overlay()
+
+    def clear_all_ocr_analysis_regions(self):
+        if not getattr(self, "paths", None):
+            return
+        msg = self.tr_ui("모든 페이지의 OCR 분석 영역을 지울까요?\n\n지우면 OCR은 다시 전체 화면을 분석합니다.")
+        if QMessageBox.question(self, self.tr_ui("OCR 분석 범위 해제"), msg) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.commit_current_page_ui_to_data(include_mask=False)
+            self.push_project_undo("OCR 분석 범위 해제")
+        except Exception:
+            pass
+        for curr in self.data.values():
+            if isinstance(curr, dict):
+                curr['ocr_analysis_regions'] = []
+        temp = getattr(self, "ocr_region_temp_by_page", None)
+        if isinstance(temp, dict):
+            for key in list(temp.keys()):
+                temp[key] = []
+            self.ocr_region_temp_history = []
+        self.auto_save_project()
+        try:
+            self.view.clear_ocr_region_overlay()
+        except Exception:
+            pass
+        self.refresh_ocr_region_overlay()
+        try:
+            QApplication.processEvents()
+        except Exception:
+            pass
+        self.log("🧹 OCR 분석 범위를 해제했습니다. 이제 전체 화면을 분석합니다.")
+
+    def undo_last_ocr_analysis_region_temp(self):
+        temp = getattr(self, "ocr_region_temp_by_page", None)
+        hist = getattr(self, "ocr_region_temp_history", None)
+        if not isinstance(temp, dict) or not hist:
+            return False
+        affected = hist.pop()
+        changed = False
+        for i in affected or []:
+            try:
+                if i in temp and temp[i]:
+                    temp[i].pop()
+                    changed = True
+            except Exception:
+                pass
+        if changed:
+            self.refresh_ocr_region_overlay()
+            self.update_undo_redo_buttons()
+            self.log("↩️ OCR 분석 영역 1개 취소")
+        return changed
+
+    def _indices_have_ocr_analysis_regions(self, indices):
+        for i in indices or []:
+            try:
+                curr = self.data.get(int(i), {}) if hasattr(self, "data") else {}
+                if isinstance(curr, dict) and curr.get('ocr_analysis_regions'):
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def confirm_ocr_analysis_regions_before_run(self, indices):
+        if not self._indices_have_ocr_analysis_regions(indices):
+            return True
+        msg = self.tr_ui("지정된 OCR 분석 영역이 있습니다. 지정된 영역만 분석할까요?")
+        detail = self.tr_ui("아니오를 누르면 분석을 취소합니다. 전체 화면을 분석하려면 먼저 OCR 분석 범위 지정을 해제해 주세요.")
+        box = QMessageBox(self)
+        box.setWindowTitle(self.tr_ui("OCR 분석 영역 확인"))
+        box.setText(msg)
+        box.setInformativeText(detail)
+        yes_btn = box.addButton(self.tr_ui("실행하기"), QMessageBox.ButtonRole.AcceptRole)
+        no_btn = box.addButton(self.tr_ui("취소"), QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(yes_btn)
+        box.exec()
+        return box.clickedButton() is yes_btn
+
+    def _rect_edges_from_item(self, item):
+        try:
+            x, y, w, h = [float(v) for v in (item.get('rect') or [0, 0, 0, 0])[:4]]
+            return x, y, x + max(0.0, w), y + max(0.0, h)
+        except Exception:
+            return 0.0, 0.0, 0.0, 0.0
+
+    def _rect_overlap_area_for_items(self, a, b):
+        ax1, ay1, ax2, ay2 = self._rect_edges_from_item(a)
+        bx1, by1, bx2, by2 = self._rect_edges_from_item(b)
+        ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+        ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+        if ix2 <= ix1 or iy2 <= iy1:
+            return 0.0
+        return (ix2 - ix1) * (iy2 - iy1)
+
+    def _rect_center_inside_mask(self, item, mask):
+        if mask is None:
+            return False
+        try:
+            h, w = mask.shape[:2]
+            x1, y1, x2, y2 = self._rect_edges_from_item(item)
+            cx = max(0, min(w - 1, int(round((x1 + x2) / 2))))
+            cy = max(0, min(h - 1, int(round((y1 + y2) / 2))))
+            if mask[cy, cx] > 0:
+                return True
+            rx1 = max(0, min(w - 1, int(round(x1))))
+            ry1 = max(0, min(h - 1, int(round(y1))))
+            rx2 = max(0, min(w, int(round(x2))))
+            ry2 = max(0, min(h, int(round(y2))))
+            if rx2 <= rx1 or ry2 <= ry1:
+                return False
+            crop = mask[ry1:ry2, rx1:rx2]
+            return bool(crop.size and cv2.countNonZero(crop) > 0)
+        except Exception:
+            return False
+
+    def _merge_mask_by_ocr_regions(self, old_mask, new_mask, region_mask):
+        if region_mask is None:
+            return new_mask
+        if isinstance(new_mask, np.ndarray):
+            base_shape = new_mask.shape[:2]
+        elif isinstance(old_mask, np.ndarray):
+            base_shape = old_mask.shape[:2]
+        else:
+            return new_mask
+        if not isinstance(old_mask, np.ndarray):
+            old = np.zeros_like(new_mask) if isinstance(new_mask, np.ndarray) else np.zeros(base_shape, dtype=np.uint8)
+        else:
+            old = old_mask.copy()
+        if old.shape[:2] != base_shape:
+            old = cv2.resize(old, (base_shape[1], base_shape[0]), interpolation=cv2.INTER_NEAREST)
+        if not isinstance(new_mask, np.ndarray):
+            new = np.zeros_like(old)
+        else:
+            new = new_mask.copy()
+            if new.shape[:2] != base_shape:
+                new = cv2.resize(new, (base_shape[1], base_shape[0]), interpolation=cv2.INTER_NEAREST)
+        rm = region_mask
+        if rm.shape[:2] != base_shape:
+            rm = cv2.resize(rm, (base_shape[1], base_shape[0]), interpolation=cv2.INTER_NEAREST)
+        out = old.copy()
+        sel = rm > 0
+        out[sel] = new[sel]
+        return out
+
+    def merge_ocr_analysis_region_results(self, page_idx, new_data, new_mask_merge, new_mask_inpaint, ori_img=None):
+        curr = self.data.get(page_idx, {}) if hasattr(self, "data") else {}
+        regions = copy.deepcopy(curr.get('ocr_analysis_regions', []) or []) if isinstance(curr, dict) else []
+        old_data = copy.deepcopy(curr.get('data', []) or []) if isinstance(curr, dict) else []
+        if not regions or not old_data:
+            return new_data, new_mask_merge, new_mask_inpaint
+        try:
+            if isinstance(ori_img, np.ndarray):
+                h, w = ori_img.shape[:2]
+            elif isinstance(new_mask_merge, np.ndarray):
+                h, w = new_mask_merge.shape[:2]
+            elif isinstance(curr.get('ori'), np.ndarray):
+                h, w = curr.get('ori').shape[:2]
+            else:
+                return new_data, new_mask_merge, new_mask_inpaint
+            region_mask = self.engine._ocr_regions_to_mask(regions, w, h)
+        except Exception:
+            region_mask = None
+        if region_mask is None:
+            return new_data, new_mask_merge, new_mask_inpaint
+
+        new_items = copy.deepcopy(new_data or [])
+        old_in_region = [idx for idx, item in enumerate(old_data) if self._rect_center_inside_mask(item, region_mask)]
+        new_in_region = [idx for idx, item in enumerate(new_items) if self._rect_center_inside_mask(item, region_mask)]
+        if not old_in_region:
+            # 기존 번호가 없는 새 영역이면 새 OCR 결과를 뒤에 붙인다.
+            merged = copy.deepcopy(old_data)
+            max_id = 0
+            for item in merged:
+                try:
+                    max_id = max(max_id, int(item.get('id') or 0))
+                except Exception:
+                    pass
+            for ni in new_in_region:
+                max_id += 1
+                item = copy.deepcopy(new_items[ni])
+                item['id'] = max_id
+                merged.append(item)
+            mm = self._merge_mask_by_ocr_regions(curr.get('mask_merge'), new_mask_merge, region_mask)
+            mi = self._merge_mask_by_ocr_regions(curr.get('mask_inpaint'), new_mask_inpaint, region_mask)
+            return merged, mm, mi
+
+        used_new = set()
+        merged = []
+        for idx, old_item in enumerate(old_data):
+            if idx not in old_in_region:
+                merged.append(copy.deepcopy(old_item))
+                continue
+            best_idx = None
+            best_score = 0.0
+            for ni in new_in_region:
+                if ni in used_new:
+                    continue
+                ni_item = new_items[ni]
+                ov = self._rect_overlap_area_for_items(old_item, ni_item)
+                ax1, ay1, ax2, ay2 = self._rect_edges_from_item(old_item)
+                bx1, by1, bx2, by2 = self._rect_edges_from_item(ni_item)
+                old_area = max(1.0, (ax2 - ax1) * (ay2 - ay1))
+                new_area = max(1.0, (bx2 - bx1) * (by2 - by1))
+                score = ov / max(1.0, min(old_area, new_area))
+                if score > best_score:
+                    best_score = score
+                    best_idx = ni
+            if best_idx is not None and best_score >= 0.08:
+                used_new.add(best_idx)
+                updated = copy.deepcopy(old_item)
+                old_id = old_item.get('id')
+                old_trans = old_item.get('translated_text')
+                for k, v in copy.deepcopy(new_items[best_idx]).items():
+                    if k in ('id', 'translated_text'):
+                        continue
+                    updated[k] = v
+                updated['id'] = old_id
+                if old_trans is not None:
+                    updated['translated_text'] = old_trans
+                merged.append(updated)
+            else:
+                # 재OCR 결과가 없더라도 기존 번호/라인은 삭제하지 않는다.
+                merged.append(copy.deepcopy(old_item))
+
+        max_id = 0
+        for item in merged:
+            try:
+                max_id = max(max_id, int(item.get('id') or 0))
+            except Exception:
+                pass
+        for ni in new_in_region:
+            if ni in used_new:
+                continue
+            max_id += 1
+            item = copy.deepcopy(new_items[ni])
+            item['id'] = max_id
+            merged.append(item)
+
+        mm = self._merge_mask_by_ocr_regions(curr.get('mask_merge'), new_mask_merge, region_mask)
+        mi = self._merge_mask_by_ocr_regions(curr.get('mask_inpaint'), new_mask_inpaint, region_mask)
+        self.log("🔁 지정 영역 OCR 결과를 기존 분석 데이터에 병합했습니다.")
+        return merged, mm, mi
+
+    def _ocr_provider_options(self):
+        """Return the same OCR providers that are available in API Settings.
+
+        Lite and Local share this dialog, so Local-only OCR providers must not
+        appear in Lite Quick OCR.
+        """
+        options = [
+            ("CLOVA OCR", "clova"),
+            ("Google Vision OCR", "google_vision"),
+        ]
+        try:
+            from ysb.editions.current import is_local_edition
+            if is_local_edition():
+                options.extend([
+                    ("LOCAL Paddle OCR", "local_paddle_ocr"),
+                    ("LOCAL Manga OCR", "local_manga_ocr"),
+                ])
+        except Exception:
+            pass
+        return options
+
+    def _quick_ocr_provider_values(self):
+        return [value for _label, value in self._ocr_provider_options()]
+
+    def _ocr_language_options_for_quick(self, provider):
+        provider = str(provider or "clova")
+        if provider == "google_vision":
+            return [("영어", "en"), ("일본어", "ja"), ("중국어", "zh"), ("한국어", "ko")]
+        if provider == "local_paddle_ocr":
+            return [("일본어", "ja"), ("영어", "en"), ("한국어", "ko"), ("중국어", "zh")]
+        if provider == "local_manga_ocr":
+            return [("일본어", "ja")]
+        return [("일본어", "ja"), ("중국어", "zh"), ("한국어", "ko")]
+
+    def _quick_ocr_provider_from_options(self):
+        candidates = [
+            str((getattr(self, "app_options", {}) or {}).get("quick_ocr_provider") or ""),
+            str(getattr(self.api_settings, "selected_ocr_provider", "clova") or "clova"),
+            "clova",
+        ]
+        allowed = set(self._quick_ocr_provider_values())
+        for provider in candidates:
+            if provider in allowed:
+                return provider
+        values = self._quick_ocr_provider_values()
+        return values[0] if values else "clova"
+
+    def _quick_ocr_language_from_options(self):
+        return str((getattr(self, "app_options", {}) or {}).get("quick_ocr_language") or (self._current_ocr_language_value() if hasattr(self, "_current_ocr_language_value") else "ja") or "ja")
+
+    def _quick_ocr_shortcut_conflict_label(self, seq_text):
+        seq_text = str(seq_text or "").strip()
+        if not seq_text:
+            return ""
+        try:
+            target_seq = QKeySequence(seq_text)
+        except Exception:
+            return ""
+        for key, value in list(getattr(self.shortcut_settings, "shortcuts", {}).items()):
+            if key == "quick_ocr_execute":
+                continue
+            if not getattr(self.shortcut_settings, "enabled", {}).get(key, True):
+                continue
+            try:
+                other_seq = QKeySequence(str(value or ""))
+                if other_seq and not other_seq.isEmpty() and other_seq.matches(target_seq) == QKeySequence.SequenceMatch.ExactMatch:
+                    return self.standard_shortcut_label(key) if hasattr(self, "standard_shortcut_label") else str(key)
+            except Exception:
+                continue
+        for macro in getattr(self.shortcut_settings, "macros", []) or []:
+            if not macro.get("enabled", True):
+                continue
+            try:
+                other_seq = QKeySequence(str(macro.get("shortcut", "") or ""))
+                if other_seq and not other_seq.isEmpty() and other_seq.matches(target_seq) == QKeySequence.SequenceMatch.ExactMatch:
+                    return str(macro.get("name") or "매크로")
+            except Exception:
+                continue
+        return ""
+
+    def open_quick_ocr_dialog(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle(self.tr_ui("빠른 OCR"))
+        dlg.resize(660, 430)
+        try:
+            dlg.setStyleSheet(self.settings_dialog_style())
+        except Exception:
+            pass
+
+        root = QVBoxLayout(dlg)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(12)
+
+        title = QLabel(self.tr_ui("빠른 OCR"), dlg)
+        title.setObjectName("SettingsTitle")
+        root.addWidget(title)
+
+        desc = QLabel(self.tr_ui("빠른 OCR은 지정된 단축키를 사용할 때만 동작합니다. Ctrl+J는 이 설정창을 여는 단축키입니다."), dlg)
+        desc.setObjectName("SettingsDescription")
+        desc.setWordWrap(True)
+        root.addWidget(desc)
+
+        form_box = QFrame(dlg)
+        form_box.setObjectName("SettingsItem")
+        form_layout = QVBoxLayout(form_box)
+        form_layout.setContentsMargins(12, 12, 12, 12)
+        form_layout.setSpacing(12)
+
+        def add_setting_row(title_text, description_text, editor):
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(12)
+            text_box = QVBoxLayout()
+            text_box.setContentsMargins(0, 0, 0, 0)
+            text_box.setSpacing(4)
+            item_title = QLabel(self.tr_ui(title_text), dlg)
+            item_title.setObjectName("SettingsItemTitle")
+            item_desc = QLabel(self.tr_ui(description_text), dlg)
+            item_desc.setObjectName("SettingsDescription")
+            item_desc.setWordWrap(True)
+            text_box.addWidget(item_title)
+            text_box.addWidget(item_desc)
+            row.addLayout(text_box, 1)
+            row.addWidget(editor, 0)
+            form_layout.addLayout(row)
+
+        cb_provider = QComboBox(dlg)
+        for label, value in self._ocr_provider_options():
+            cb_provider.addItem(self.tr_ui(label), value)
+        self.set_combo_current_data(cb_provider, self._quick_ocr_provider_from_options())
+
+        cb_lang = QComboBox(dlg)
+
+        def reload_langs():
+            provider = cb_provider.currentData() or "clova"
+            old = cb_lang.currentData()
+            cb_lang.blockSignals(True)
+            cb_lang.clear()
+            for label, value in self._ocr_language_options_for_quick(provider):
+                cb_lang.addItem(self.tr_ui(label), value)
+            self.set_combo_current_data(cb_lang, old or self._quick_ocr_language_from_options())
+            cb_lang.blockSignals(False)
+
+        cb_provider.currentIndexChanged.connect(lambda *_: reload_langs())
+        reload_langs()
+
+        add_setting_row(
+            "OCR 모델",
+            "빠른 OCR 실행에 사용할 OCR 모델을 선택합니다.",
+            cb_provider,
+        )
+        add_setting_row(
+            "언어",
+            "빠른 OCR 실행에 사용할 인식 언어를 선택합니다.",
+            cb_lang,
+        )
+
+        seq_widget = QWidget(dlg)
+        seq_row = QHBoxLayout(seq_widget)
+        seq_row.setContentsMargins(0, 0, 0, 0)
+        seq_row.setSpacing(8)
+        seq_edit = QKeySequenceEdit(dlg)
+        seq_edit.setMinimumWidth(170)
+        try:
+            seq_edit.setKeySequence(self.shortcut_settings.seq("quick_ocr_execute"))
+        except Exception:
+            seq_edit.setKeySequence(QKeySequence(""))
+        btn_clear = QPushButton(self.tr_ui("비우기"), dlg)
+        btn_clear.clicked.connect(seq_edit.clear)
+        seq_row.addWidget(seq_edit, 1)
+        seq_row.addWidget(btn_clear, 0)
+        add_setting_row(
+            "빠른 OCR 실행 단축키",
+            "이 단축키를 누르면 바로 드래그 선택 모드로 들어갑니다. 빠른 OCR은 이 단축키로만 실제 실행됩니다.",
+            seq_widget,
+        )
+
+        shortcut_row = QHBoxLayout()
+        opener_seq = self.shortcut_settings.seq("work_quick_ocr").toString(QKeySequence.SequenceFormat.NativeText)
+        shortcut_row.addWidget(QLabel(f"{self.tr_ui('설정창 단축키')}: {opener_seq or '-'}", dlg))
+        shortcut_row.addStretch(1)
+        shortcut_btn = QPushButton(self.tr_ui("단축키 관리 열기"), dlg)
+        shortcut_btn.clicked.connect(lambda checked=False: self.open_shortcut_settings_dialog())
+        shortcut_row.addWidget(shortcut_btn)
+        form_layout.addLayout(shortcut_row)
+
+        root.addWidget(form_box)
+        root.addStretch(1)
+
+        def apply_quick_ocr_settings():
+            seq_text = seq_edit.keySequence().toString(QKeySequence.SequenceFormat.PortableText).strip()
+            conflict = self._quick_ocr_shortcut_conflict_label(seq_text)
+            if conflict:
+                QMessageBox.warning(
+                    dlg,
+                    self.tr_ui("단축키 충돌"),
+                    self.tr_ui("이미 사용 중인 단축키입니다.") + f"\n\n{conflict}: {seq_text}",
+                )
+                return False
+
+            self.app_options["quick_ocr_provider"] = cb_provider.currentData() or "clova"
+            self.app_options["quick_ocr_language"] = cb_lang.currentData() or "ja"
+            self.save_app_options_cache()
+
+            try:
+                self.shortcut_settings.enabled["quick_ocr_execute"] = bool(seq_text)
+                self.shortcut_settings.shortcuts["quick_ocr_execute"] = seq_text
+                ShortcutSettingsStore.save(self.shortcut_settings)
+                self.shortcut_label_map = shortcut_label_map()
+                self.apply_shortcuts()
+            except Exception as e:
+                QMessageBox.warning(dlg, self.tr_ui("단축키 저장 오류"), str(e))
+                return False
+
+            self.log(f"🔎 빠른 OCR 설정 저장: {cb_provider.currentText()} / {cb_lang.currentText()} / {seq_text or '단축키 없음'}")
+            return True
+
+        def on_ok():
+            if apply_quick_ocr_settings():
+                dlg.accept()
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dlg)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText(self.tr_ui("확인"))
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText(self.tr_ui("닫기"))
+        buttons.accepted.connect(on_ok)
+        buttons.rejected.connect(dlg.reject)
+        root.addWidget(buttons)
+
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self.show_ok_notice("빠른 OCR 설정 저장 완료", "빠른 OCR 설정이 저장되었습니다.")
+
+    def _quick_ocr_popup_style(self):
+        if str(getattr(self, "ui_theme", "dark") or "dark").lower() == "light":
+            return (
+                "QLabel { background:#ffffff; color:#111827; "
+                "border:1px solid #cfd7e5; border-radius:0px; "
+                "padding:6px 8px; font-size:12px; }"
+            )
+        return (
+            "QLabel { background:#1f2430; color:#ffffff; "
+            "border:1px solid #4b5563; border-radius:0px; "
+            "padding:6px 8px; font-size:12px; }"
+        )
+
+    def show_quick_ocr_result_popup(self, text):
+        text = str(text or "").strip()
+        if not text:
+            return
+        try:
+            popup = getattr(self, "quick_ocr_result_popup", None)
+            if popup is None:
+                flags = (
+                    Qt.WindowType.FramelessWindowHint
+                    | Qt.WindowType.Tool
+                    | Qt.WindowType.WindowStaysOnTopHint
+                )
+                popup = QLabel(None, flags=flags)
+                popup.setObjectName("quickOcrResultPopup")
+                popup.setWordWrap(True)
+                popup.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+                popup.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+                self.quick_ocr_result_popup = popup
+            popup.setStyleSheet(self._quick_ocr_popup_style())
+            popup.setText(text)
+            popup.setMaximumWidth(520)
+            popup.adjustSize()
+            pos = QCursor.pos() + QPoint(16, 18)
+            popup.move(pos)
+            popup.show()
+            popup.raise_()
+        except Exception:
+            # 빠른 OCR 결과 표시는 보조 UI라서 실패해도 OCR 자체는 막지 않는다.
+            pass
+
+    def hide_quick_ocr_result_popup(self):
+        try:
+            popup = getattr(self, "quick_ocr_result_popup", None)
+            if popup is not None:
+                popup.hide()
+        except Exception:
+            pass
+
+    def start_quick_ocr_selection(self):
+        if not getattr(self, "paths", None):
+            QMessageBox.information(self, self.tr_ui("이미지 없음"), self.tr_ui("먼저 프로젝트에 이미지를 불러와 주세요."))
+            return
+        if not self.ensure_engine_ready():
+            return
+        self.quick_ocr_provider = self._quick_ocr_provider_from_options()
+        self.quick_ocr_language = self._quick_ocr_language_from_options()
+        self.quick_ocr_latest_text = ""
+        self.quick_ocr_drag_active = False
+        self.set_tool('quick_ocr')
+        self.log("🔎 빠른 OCR: 마우스를 누른 채 영역을 고정하면 OCR을 실행합니다.")
+
+    def begin_quick_ocr_drag(self):
+        self.quick_ocr_drag_active = True
+        self.quick_ocr_latest_text = ""
+        self.quick_ocr_worker_busy = False
+        self.quick_ocr_active_request_id = None
+        self.hide_quick_ocr_result_popup()
+
+    def run_quick_ocr_region_live(self, rect_norm, request_id=None, image_path=None, source="main"):
+        if not rect_norm or not getattr(self, "quick_ocr_drag_active", False):
+            return
+        if getattr(self, "quick_ocr_worker_busy", False):
+            return
+        target_idx = self.idx
+        provider = getattr(self, "quick_ocr_provider", None) or self._quick_ocr_provider_from_options()
+        language = getattr(self, "quick_ocr_language", None) or self._quick_ocr_language_from_options()
+        self.quick_ocr_worker_busy = True
+        self.quick_ocr_active_request_id = request_id
+        self.quick_ocr_active_source = source or "main"
+        self.log("🔎 빠른 OCR 실행 중...")
+        input_path = image_path or self.get_inpainting_input_path(target_idx)
+        self.quick_ocr_worker = QuickOCRWorker(
+            self.engine,
+            input_path,
+            copy.deepcopy(rect_norm),
+            provider=provider,
+            language=language,
+        )
+        self.quick_ocr_worker.log.connect(self.log)
+        self.quick_ocr_worker.finished.connect(lambda text, error=None, rid=request_id, src=source: self.on_quick_ocr_finished(text, error, rid, src))
+        self.quick_ocr_worker.start()
+
+    def run_quick_ocr_region(self, rect_norm):
+        # 구버전 호출 호환용. 빠른 OCR은 이제 마우스를 누른 상태에서만 실행된다.
+        self.run_quick_ocr_region_live(rect_norm, request_id=None)
+
+    def on_quick_ocr_finished(self, text, error=None, request_id=None, source="main"):
+        self.quick_ocr_worker_busy = False
+        if error:
+            if getattr(self, "quick_ocr_drag_active", False):
+                QMessageBox.warning(self, self.tr_ui("빠른 OCR 오류"), str(error))
+            return
+        # 사용자가 아직 마우스를 누르고 있고, OCR 요청 이후 영역이 바뀌지 않은 경우에만 표시한다.
+        try:
+            if not getattr(self, "quick_ocr_drag_active", False):
+                return
+            if str(source or "main") == "source_compare":
+                current_revision = getattr(self, "source_compare_quick_ocr_revision", None)
+                current_rect = copy.deepcopy(getattr(self, "source_compare_quick_ocr_current_rect_norm", None))
+            else:
+                current_revision = getattr(self.view, "quick_ocr_revision", None)
+                current_rect = copy.deepcopy(getattr(self.view, "quick_ocr_current_rect_norm", None))
+            if request_id is not None and current_revision != request_id:
+                # OCR 중에 사용자가 영역을 다시 움직였으면 오래된 결과는 버리고,
+                # 현재 유지 중인 영역으로 한 번 더 실행을 시도한다.
+                if current_rect:
+                    QTimer.singleShot(0, lambda rn=current_rect, rid=current_revision, src=source: self.run_quick_ocr_region_live(rn, request_id=rid, source=src))
+                return
+        except Exception:
+            return
+        text = str(text or "").strip()
+        self.quick_ocr_latest_text = text
+        if text:
+            # QToolTip은 시간이 지나면 자동으로 사라지므로 사용하지 않는다.
+            # 빠른 OCR 결과는 마우스를 떼기 전까지 유지되는 전용 팝업으로 표시한다.
+            self.show_quick_ocr_result_popup(text)
+            self.log(f"🔎 빠른 OCR 결과: {text}")
+        else:
+            self.show_quick_ocr_result_popup(self.tr_ui("인식된 텍스트가 없습니다."))
+            self.log("⚠️ 빠른 OCR에서 인식된 텍스트가 없습니다.")
+
+    def finish_quick_ocr_drag(self):
+        text = str(getattr(self, "quick_ocr_latest_text", "") or "").strip()
+        self.quick_ocr_drag_active = False
+        self.quick_ocr_active_request_id = None
+        if text:
+            QApplication.clipboard().setText(text)
+            self.log(f"📋 빠른 OCR 결과를 클립보드에 복사했습니다: {text}")
+        self.hide_quick_ocr_result_popup()
+        try:
+            QToolTip.hideText()
+        except Exception:
+            pass
+        self.set_tool(None)
+
+    def clear_source_compare_quick_ocr_preview(self):
+        try:
+            item = getattr(self, "source_compare_quick_ocr_preview_item", None)
+            if item is not None and hasattr(self, "source_compare_scene"):
+                self.source_compare_scene.removeItem(item)
+        except Exception:
+            pass
+        self.source_compare_quick_ocr_preview_item = None
+
+    def _source_compare_norm_rect_from_scene(self, rect):
+        try:
+            scene_rect = self.source_compare_scene.sceneRect()
+            w = float(scene_rect.width())
+            h = float(scene_rect.height())
+            if w <= 0 or h <= 0:
+                return None
+            left = float(scene_rect.left())
+            top = float(scene_rect.top())
+            x1 = max(left, min(left + w, float(rect.left())))
+            y1 = max(top, min(top + h, float(rect.top())))
+            x2 = max(left, min(left + w, float(rect.right())))
+            y2 = max(top, min(top + h, float(rect.bottom())))
+            if x2 <= x1 or y2 <= y1:
+                return None
+            return [(x1 - left) / w, (y1 - top) / h, (x2 - left) / w, (y2 - top) / h]
+        except Exception:
+            return None
+
+    def source_compare_quick_ocr_rect_payload(self, end_pos):
+        if getattr(self, "source_compare_quick_ocr_start", None) is None:
+            return None
+        try:
+            rect = QRectF(self.source_compare_quick_ocr_start, end_pos).normalized()
+            return self._source_compare_norm_rect_from_scene(rect)
+        except Exception:
+            return None
+
+    def draw_source_compare_quick_ocr_preview(self, end_pos):
+        self.clear_source_compare_quick_ocr_preview()
+        try:
+            start = getattr(self, "source_compare_quick_ocr_start", None)
+            if start is None or not hasattr(self, "source_compare_scene"):
+                return
+            rect = QRectF(start, end_pos).normalized()
+            if rect.width() < 2 or rect.height() < 2:
+                return
+            pen = QPen(QColor(70, 135, 220, 220), 2)
+            brush = QBrush(QColor(80, 160, 255, 70))
+            item = self.source_compare_scene.addRect(rect, pen, brush)
+            item.setZValue(87)
+            item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            self.source_compare_quick_ocr_preview_item = item
+        except Exception:
+            pass
+
+    def _schedule_source_compare_quick_ocr_hold_check(self, end_pos):
+        rect_norm = self.source_compare_quick_ocr_rect_payload(end_pos)
+        old_rect = copy.deepcopy(getattr(self, "source_compare_quick_ocr_current_rect_norm", None))
+        if not rect_norm:
+            if old_rect is not None:
+                self.source_compare_quick_ocr_current_rect_norm = None
+                self.source_compare_quick_ocr_revision = int(getattr(self, "source_compare_quick_ocr_revision", 0) or 0) + 1
+            return
+        changed = True
+        try:
+            changed = self.view._quick_ocr_rect_changed_significantly(old_rect, rect_norm)
+        except Exception:
+            changed = old_rect != rect_norm
+        if old_rect is not None and not changed:
+            return
+        self.source_compare_quick_ocr_current_rect_norm = copy.deepcopy(rect_norm)
+        self.source_compare_quick_ocr_revision = int(getattr(self, "source_compare_quick_ocr_revision", 0) or 0) + 1
+        try:
+            latest = str(getattr(self, "quick_ocr_latest_text", "") or "").strip()
+            if latest:
+                self.show_quick_ocr_result_popup(latest)
+        except Exception:
+            pass
+        try:
+            timer = getattr(self, "source_compare_quick_ocr_hold_timer", None)
+            if timer is None:
+                timer = QTimer(self)
+                timer.setSingleShot(True)
+                timer.timeout.connect(self._trigger_source_compare_quick_ocr_if_still_holding)
+                self.source_compare_quick_ocr_hold_timer = timer
+            timer.start(200)
+        except Exception:
+            pass
+
+    def _trigger_source_compare_quick_ocr_if_still_holding(self):
+        if getattr(getattr(self, "view", None), "draw_mode", None) != "quick_ocr":
+            return
+        if not getattr(self, "source_compare_quick_ocr_drawing", False):
+            return
+        rect_norm = copy.deepcopy(getattr(self, "source_compare_quick_ocr_current_rect_norm", None))
+        if not rect_norm:
+            return
+        revision = int(getattr(self, "source_compare_quick_ocr_revision", 0) or 0)
+        if revision == int(getattr(self, "source_compare_quick_ocr_last_requested_revision", -1) or -1):
+            return
+        self.source_compare_quick_ocr_last_requested_revision = revision
+        self.run_quick_ocr_region_live(rect_norm, request_id=revision, source="source_compare")
+
+    def handle_source_compare_quick_ocr_event(self, event):
+        try:
+            if getattr(getattr(self, "view", None), "draw_mode", None) != "quick_ocr":
+                return False
+            if not self.source_compare_is_visible():
+                return False
+            et = event.type()
+            if et == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                self.source_compare_quick_ocr_drawing = True
+                self.source_compare_quick_ocr_start = self.source_compare_view.mapToScene(event.pos())
+                self.source_compare_quick_ocr_current_rect_norm = None
+                self.source_compare_quick_ocr_revision = int(getattr(self, "source_compare_quick_ocr_revision", 0) or 0) + 1
+                self.source_compare_quick_ocr_last_requested_revision = -1
+                try:
+                    timer = getattr(self, "source_compare_quick_ocr_hold_timer", None)
+                    if timer is not None:
+                        timer.stop()
+                except Exception:
+                    pass
+                self.quick_ocr_active_source = "source_compare"
+                self.begin_quick_ocr_drag()
+                self.draw_source_compare_quick_ocr_preview(self.source_compare_quick_ocr_start)
+                return True
+            if et == QEvent.Type.MouseMove and getattr(self, "source_compare_quick_ocr_drawing", False):
+                now = self.source_compare_view.mapToScene(event.pos())
+                self.draw_source_compare_quick_ocr_preview(now)
+                self._schedule_source_compare_quick_ocr_hold_check(now)
+                return True
+            if et == QEvent.Type.MouseButtonRelease and getattr(self, "source_compare_quick_ocr_drawing", False):
+                self.source_compare_quick_ocr_drawing = False
+                self.source_compare_quick_ocr_start = None
+                self.source_compare_quick_ocr_current_rect_norm = None
+                try:
+                    timer = getattr(self, "source_compare_quick_ocr_hold_timer", None)
+                    if timer is not None:
+                        timer.stop()
+                except Exception:
+                    pass
+                self.clear_source_compare_quick_ocr_preview()
+                self.finish_quick_ocr_drag()
+                return True
+        except Exception:
+            return False
+        return False
 
     def reset_mode_to_original(self):
         """
@@ -591,6 +1980,7 @@ class MainWindowOperationsMixin:
                 'working_source': None,
                 'final_paint': None,
                 'final_paint_above': None,
+                'ocr_analysis_regions': [],
             }
         elif self.data[self.idx].get('ori') is None:
             self.data[self.idx]['ori'] = cv2.imdecode(np.fromfile(p, np.uint8), 1)
@@ -889,6 +2279,9 @@ class MainWindowOperationsMixin:
             return
         if not self.check_ocr_api_or_alert():
             return
+        if not self.confirm_ocr_analysis_regions_before_run([self.idx]):
+            self.log("↩️ OCR 분석 취소")
+            return
 
         self.commit_current_page_ui_to_data(include_mask=False)
 
@@ -897,7 +2290,11 @@ class MainWindowOperationsMixin:
         self._long_task_cancel_requested = False
         self.prepare_task_progress_overlay("분석", "OCR/API 분석을 진행 중입니다.", total=0, cancellable=True)
         self.begin_busy_state("분석")
-        self.w = AnalysisWorker(self.engine, self.get_inpainting_input_path(target_idx))
+        self.w = AnalysisWorker(
+            self.engine,
+            self.get_inpainting_input_path(target_idx),
+            analysis_regions=copy.deepcopy(self.data.get(target_idx, {}).get('ocr_analysis_regions', []) or []),
+        )
         self._active_task_worker = self.w
         self.w.log.connect(lambda msg: self.handle_long_task_message(msg))
         self.w.finished.connect(
@@ -1005,6 +2402,7 @@ class MainWindowOperationsMixin:
                 'working_source': None,
                 'final_paint': None,
                 'final_paint_above': None,
+                'ocr_analysis_regions': [],
             }
 
         old_inpaint_off = self.data[page_idx].get('mask_inpaint_off')
@@ -1032,6 +2430,10 @@ class MainWindowOperationsMixin:
             ))
         else:
             # 일반 분석은 새 OCR 결과를 기준으로 텍스트 마스크를 다시 만드는 작업이다.
+            # 단, OCR 분석 영역이 지정되어 있고 기존 분석 데이터가 있다면 전체 결과를 버리지 않고
+            # 지정 영역 안의 기존 번호/라인만 새 OCR 결과로 업데이트한다.
+            if self.data[page_idx].get('ocr_analysis_regions') and self.data[page_idx].get('data'):
+                d, mm, mi = self.merge_ocr_analysis_region_results(page_idx, d, mm, mi, ori_img=o)
             # 이전 mask_merge/mask_inpaint가 남으면 분석을 반복해도 이전 상태가 섞여 보일 수 있으므로
             # 텍스트 마스크 계열은 명시적으로 새 결과로 교체한다.
             self.data[page_idx].update({
@@ -1123,20 +2525,10 @@ class MainWindowOperationsMixin:
         settings = getattr(self, "api_settings", None) or ApiSettingsStore.load()
         provider = str(getattr(settings, "selected_ocr_provider", "clova") or "clova").lower()
 
-        if provider.startswith("local_") and provider != "local_paddle_ocr":
-            # Older test caches are normalized to the only supported Local OCR path.
-            provider = "local_paddle_ocr"
-            try:
-                settings.selected_ocr_provider = provider
-                ApiSettingsStore.save(settings)
-                self.api_settings = settings
-            except Exception:
-                pass
-
-        if provider == "local_paddle_ocr":
+        if provider in ("local_paddle_ocr", "local_manga_ocr"):
             try:
                 from ysb.editions.current import is_local_edition
-                local_name = "LOCAL Paddle OCR"
+                local_name = "LOCAL Manga OCR" if provider == "local_manga_ocr" else "LOCAL Paddle OCR"
                 if not is_local_edition():
                     QMessageBox.critical(
                         self,
@@ -1158,19 +2550,32 @@ class MainWindowOperationsMixin:
                     self.log(f"❌ {local_name} 준비 실패: {reason}")
                     return False
                 try:
-                    from ysb.editions.local.local_dependency_check import paddleocr_available
-                    if not paddleocr_available():
-                        QMessageBox.critical(
-                            self,
-                            "PaddleOCR 설치 필요",
-                            "LOCAL Paddle OCR 문자 인식에 필요한 paddleocr 패키지를 찾을 수 없습니다.\n\n"
-                            "setup_local_core_venv_v2_1_0.bat을 다시 실행하거나 requirements/local.txt 설치 상태를 확인해 주세요."
-                        )
-                        self.log("❌ paddleocr 패키지를 찾을 수 없습니다.")
-                        return False
+                    from ysb.editions.local.local_dependency_check import paddleocr_available, manga_ocr_ready
+                    if provider == "local_manga_ocr":
+                        ok, detail = manga_ocr_ready()
+                        if not ok:
+                            QMessageBox.critical(
+                                self,
+                                "Manga OCR 설치 필요",
+                                "LOCAL Manga OCR 문자 인식에 필요한 런타임 또는 모델을 찾을 수 없습니다.\n\n"
+                                "배포판은 local_runtime/manga_ocr, 개발 환경은 setup_manga_ocr_v2_2_0.bat 실행 상태를 확인해 주세요.\n\n"
+                                f"상세: {detail}"
+                            )
+                            self.log(f"❌ Manga OCR 준비 실패: {detail}")
+                            return False
+                    else:
+                        if not paddleocr_available():
+                            QMessageBox.critical(
+                                self,
+                                "PaddleOCR 설치 필요",
+                                "LOCAL Paddle OCR 문자 인식에 필요한 paddleocr 패키지를 찾을 수 없습니다.\n\n"
+                                "setup_local_core_venv_v2_1_0.bat을 다시 실행하거나 requirements/local.txt 설치 상태를 확인해 주세요."
+                            )
+                            self.log("❌ paddleocr 패키지를 찾을 수 없습니다.")
+                            return False
                 except Exception as e:
-                    QMessageBox.critical(self, "PaddleOCR 확인 오류", f"paddleocr 설치 확인 중 오류가 발생했습니다.\n\n{e}")
-                    self.log(f"❌ paddleocr 설치 확인 오류: {e}")
+                    QMessageBox.critical(self, "Local OCR 확인 오류", f"Local OCR 설치 확인 중 오류가 발생했습니다.\n\n{e}")
+                    self.log(f"❌ Local OCR 설치 확인 오류: {e}")
                     return False
                 return True
             except Exception as e:
@@ -1647,6 +3052,7 @@ class MainWindowOperationsMixin:
             if item.zValue() >= 20:
                 self.view.scene.removeItem(item)
         self.view.draw_static_boxes(curr.get('data', []))
+        self.refresh_ocr_region_overlay()
 
     def refresh_after_text_line_change(self, autosave=True):
         """텍스트 라인/ID/체크 상태가 바뀐 뒤 현재 탭 표시를 즉시 갱신한다.
@@ -1879,35 +3285,63 @@ class MainWindowOperationsMixin:
                 self.magic_wand_bar.hide()
             if hasattr(self, "mask_wrap_bar"):
                 self.mask_wrap_bar.hide()
+            if hasattr(self, "mask_cut_bar"):
+                self.mask_cut_bar.hide()
+            if hasattr(self, "ocr_region_bar"):
+                self.ocr_region_bar.hide()
+            if hasattr(self, "area_paint_bar"):
+                self.area_paint_bar.hide()
             if hasattr(self, "final_edit_bar"):
                 self.final_edit_bar.hide()
+            try:
+                self.place_source_compare_controls()
+            except Exception:
+                pass
             return
 
         if i != 4 and getattr(self.view, "draw_mode", None) == 'paste_text':
             self.set_tool(None)
 
-        if i not in [2, 3] and getattr(self.view, "draw_mode", None) in ('magic_wand', 'mask_wrap'):
+        if i not in [2, 3] and getattr(self.view, "draw_mode", None) in ('magic_wand', 'mask_wrap', 'mask_cut'):
+            self.set_tool(None)
+        if i not in [1, 2, 3] and getattr(self.view, "draw_mode", None) == 'ocr_region_select':
+            self.set_tool(None)
+        if i != 4 and getattr(self.view, "draw_mode", None) == 'area_paint':
             self.set_tool(None)
         elif hasattr(self, "magic_wand_bar"):
             self.magic_wand_bar.setVisible(getattr(self.view, "draw_mode", None) == 'magic_wand' and i in [2, 3])
         if hasattr(self, "mask_wrap_bar"):
             self.mask_wrap_bar.setVisible(getattr(self.view, "draw_mode", None) == 'mask_wrap' and i in [2, 3])
+        if hasattr(self, "mask_cut_bar"):
+            self.mask_cut_bar.setVisible(getattr(self.view, "draw_mode", None) == 'mask_cut' and i in [2, 3])
+        if hasattr(self, "ocr_region_bar"):
+            self.ocr_region_bar.setVisible(getattr(self.view, "draw_mode", None) == 'ocr_region_select' and i in [1, 2, 3])
+        if hasattr(self, "area_paint_bar"):
+            self.area_paint_bar.setVisible(getattr(self.view, "draw_mode", None) == 'area_paint' and i == 4)
         self.final_edit_bar.hide()
         self.update_final_paint_option_bar_visibility()
+        try:
+            self.place_source_compare_controls()
+        except Exception:
+            pass
 
         source_img = self.get_source_display_image(self.idx)
 
         if i == 0:
             self.view.set_image(source_img, fit=not preserve_view_state)
+            self.refresh_ocr_region_overlay()
         elif i == 1:
             self.view.set_image(source_img, fit=not preserve_view_state)
             self.view.draw_static_boxes(curr['data'])
+            self.refresh_ocr_region_overlay()
         elif i == 2:
             self.view.set_overlay(source_img, self.get_active_mask(curr, 2), QColor(255, 0, 0, 100), fit=not preserve_view_state)
             self.view.draw_static_boxes(curr['data'])
+            self.refresh_ocr_region_overlay()
         elif i == 3:
             self.view.set_overlay(source_img, self.get_active_mask(curr, 3), QColor(0, 0, 255, 100), fit=not preserve_view_state)
             self.view.draw_static_boxes(curr['data'])
+            self.refresh_ocr_region_overlay()
         elif i == 4:
             self.ensure_item_style_defaults_for_page(self.idx)
             final_base = self.final_base_image_for_page(self.idx)
@@ -1926,6 +3360,11 @@ class MainWindowOperationsMixin:
             )
 
         restore_view_state_later()
+        try:
+            self.refresh_source_compare_view(fit=False)
+            QTimer.singleShot(30, lambda: self.schedule_source_compare_sync(0))
+        except Exception:
+            pass
 
         if track_mode_change:
             try:
@@ -2609,6 +4048,9 @@ class MainWindowOperationsMixin:
             if selected_page_indices is None:
                 self.log(f"↩️ {title} 취소")
                 return
+            if mode == "analyze" and not self.confirm_ocr_analysis_regions_before_run(selected_page_indices):
+                self.log(f"↩️ {title} 취소")
+                return
         else:
             if getattr(self, "ui_language", LANG_KO) == LANG_EN:
                 batch_message = f"Run {self.tr_ui(title)} on total {len(self.paths)} page(s)?"
@@ -2709,10 +4151,19 @@ class MainWindowOperationsMixin:
                 'working_source': None,
                 'final_paint': None,
                 'final_paint_above': None,
+                'ocr_analysis_regions': [],
             }
 
         if payload:
             curr = self.data[i]
+            if getattr(self, "current_batch_mode", None) == "analyze" and curr.get('ocr_analysis_regions') and curr.get('data'):
+                try:
+                    md, mm, mi = self.merge_ocr_analysis_region_results(i, payload.get('data', []), payload.get('mask_merge'), payload.get('mask_inpaint'), ori_img=payload.get('ori'))
+                    payload['data'] = md
+                    payload['mask_merge'] = mm
+                    payload['mask_inpaint'] = mi
+                except Exception as e:
+                    self.log(f"⚠️ 지정 영역 OCR 병합 실패: {e}")
             for key, value in payload.items():
                 if isinstance(value, np.ndarray):
                     curr[key] = value.copy()
@@ -2914,9 +4365,9 @@ class MainWindowOperationsMixin:
                 return
 
         if ctrl and key == Qt.Key.Key_V:
-            if self.cb_mode.currentIndex() == 4 and self.text_clipboard:
-                self.enter_text_paste_mode()
-                return
+            if self.cb_mode.currentIndex() == 4:
+                if self.enter_text_paste_mode():
+                    return
 
         if self.cb_mode.currentIndex() == 4:
             if self._event_matches_shortcut(event, "text_font_size"):
@@ -2966,10 +4417,10 @@ class MainWindowOperationsMixin:
             "paint_magic_select", "paint_magic_expand",
             "paint_magic_tolerance_inc", "paint_magic_tolerance_dec",
             "paint_magic_expand_inc", "paint_magic_expand_dec",
-            "paint_mask_cut",
+            "paint_mask_cut", "paint_area_fill",
             "paint_brush", "paint_erase", "paint_move",
             "paint_zoom_out", "paint_zoom_in", "paint_reanalyze", "paint_undo", "paint_redo",
-            "final_paint_color", "final_paint_to_background", "final_text_tool",
+            "final_paint_color", "paint_area_fill", "final_paint_to_background", "final_text_tool",
             "final_paint_above_toggle", "final_paint_opacity_inc", "final_paint_opacity_dec",
         ]
         if self.cb_mode.currentIndex() not in (2, 3, 4):
@@ -3002,16 +4453,33 @@ class MainWindowOperationsMixin:
         if self._event_matches_shortcut(event, "paint_mask_cut"):
             self.set_tool('mask_cut')
             return
-        if getattr(self.view, "draw_mode", None) in ('mask_wrap', 'mask_cut'):
+        if self._event_matches_shortcut(event, "work_quick_ocr"):
+            self.open_quick_ocr_dialog()
+            return
+        if self._event_matches_shortcut(event, "quick_ocr_execute"):
+            self.start_quick_ocr_selection()
+            return
+        if getattr(self.view, "draw_mode", None) == 'ocr_region_select':
+            if self._event_matches_shortcut(event, "paint_mask_wrap_rect"):
+                self.set_ocr_region_shape('rect')
+                return
+            if self._event_matches_shortcut(event, "paint_mask_wrap_free"):
+                self.set_ocr_region_shape('free')
+                return
+        if getattr(self.view, "draw_mode", None) in ('mask_wrap', 'mask_cut', 'area_paint'):
             if self._event_matches_shortcut(event, "paint_mask_wrap_rect"):
                 if getattr(self.view, "draw_mode", None) == 'mask_cut':
                     self.set_mask_cut_shape('rect')
+                elif getattr(self.view, "draw_mode", None) == 'area_paint':
+                    self.set_area_paint_shape('rect')
                 else:
                     self.set_mask_wrap_shape('rect')
                 return
             if self._event_matches_shortcut(event, "paint_mask_wrap_free"):
                 if getattr(self.view, "draw_mode", None) == 'mask_cut':
                     self.set_mask_cut_shape('free')
+                elif getattr(self.view, "draw_mode", None) == 'area_paint':
+                    self.set_area_paint_shape('free')
                 else:
                     self.set_mask_wrap_shape('free')
                 return
@@ -3034,6 +4502,9 @@ class MainWindowOperationsMixin:
 
         # 최종 화면에서 텍스트를 선택한 상태일 때만 작동하는 개별 텍스트 단축키
         if self.cb_mode.currentIndex() == 4 and self.selected_text_items():
+            if self._event_matches_shortcut(event, "text_transform_toggle"):
+                self.toggle_text_transform_mode(self.selected_text_items()[0].data)
+                return
             if self._event_matches_shortcut(event, "item_font_select"):
                 self.open_font_select_dialog()
                 return
@@ -3082,8 +4553,16 @@ class MainWindowOperationsMixin:
                 return
 
         if self.cb_mode.currentIndex() == 4:
+            if self._event_matches_shortcut(event, "text_transform_toggle"):
+                active = self.current_transform_data_item() if hasattr(self, "current_transform_data_item") else None
+                if active is not None:
+                    self.toggle_text_transform_mode(active)
+                    return
             if self._event_matches_shortcut(event, "final_paint_color"):
                 self.pick_color("final_paint")
+                return
+            if self._event_matches_shortcut(event, "paint_area_fill"):
+                self.set_tool("area_paint")
                 return
             if self._event_matches_shortcut(event, "final_paint_to_background"):
                 self.apply_final_paint_to_background()

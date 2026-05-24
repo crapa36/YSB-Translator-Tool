@@ -23,12 +23,12 @@ YSBTranslator/
 - run_lite_v2.1.0.bat
 - run_local_v2.1.0.bat
 - build_tools/
-  - build_exe_v2.1.0.bat
-  - build_pyinstaller_v2.1.0.py
+  - build_exe.bat
+  - build_pyinstaller.py
   - build_probe.py
   - version_main_lite.txt
   - version_main_local.txt
-  - version_launcher_v2.1.0.txt
+  - version_launcher.txt
 ```
 
 ## Development run
@@ -63,10 +63,22 @@ requirements/build.txt     # build dependencies
 Run directly from the project root or from `build_tools/`:
 
 ```bat
-build_tools\build_exe_v2.1.0.bat
+build_tools\build_exe.bat
 ```
 
 The build script treats the parent folder of `build_tools/` as the project root. It reuses the root `.venv`; if `.venv` does not exist, it creates it.
+
+## Build outputs
+
+```text
+dist/
+- 역식붕이 툴 Lite v2.1.0.exe
+- 역식붕이 툴 Local v2.1.0/
+- YSB_Launcher.exe
+- packages/
+  - YSB_Tool_Lite_v2.1.0.zip
+  - YSB_Tool_Local_v2.1.0.zip
+```
 
 ## Notes
 

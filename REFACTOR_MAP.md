@@ -35,12 +35,12 @@ If a Windows file association still points to an old opener executable, unregist
 Build helper files are grouped under `build_tools/`.
 
 ```text
-build_tools/build_exe_v2.1.0.bat
-build_tools/build_pyinstaller_v2.1.0.py
+build_tools/build_exe.bat
+build_tools/build_pyinstaller.py
 build_tools/build_probe.py
 build_tools/version_main_lite.txt
 build_tools/version_main_local.txt
-build_tools/version_launcher_v2.1.0.txt
+build_tools/version_launcher.txt
 ```
 
 The build script treats the parent directory of `build_tools/` as the project root and uses the root `.venv`.

@@ -1,8 +1,8 @@
 # UTF-8
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(2, 1, 1, 0),
-    prodvers=(2, 1, 1, 0),
+    filevers=(2, 2, 0, 0),
+    prodvers=(2, 2, 0, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -17,11 +17,11 @@ VSVersionInfo(
         [
           StringStruct('CompanyName', 'Zerostress8'),
           StringStruct('FileDescription', 'YSB Translator Tool Local Main'),
-          StringStruct('FileVersion', '2.1.1.0'),
+          StringStruct('FileVersion', '2.2.0.0'),
           StringStruct('InternalName', 'YSB_MAIN'),
           StringStruct('OriginalFilename', 'YSB_Tool_Local.exe'),
           StringStruct('ProductName', 'YSB Translator Tool'),
-          StringStruct('ProductVersion', '2.1.1.0'),
+          StringStruct('ProductVersion', '2.2.0.0'),
           StringStruct('YSBAppFamilyId', 'ZEROSTRESS8_YSB_TRANSLATOR_TOOL'),
           StringStruct('YSBAppRole', 'YSB_MAIN'),
           StringStruct('YSBEdition', 'local')
