@@ -1,5 +1,6 @@
 import sys
 import os
+import math
 import shutil
 import uuid
 from pathlib import Path
@@ -36,7 +37,7 @@ from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from ysb.engine.manga_engine import MangaProcessEngine, Config
 from ysb.core.project_store import ProjectStore, PROJECT_FILENAME, YSB_EXTENSION, package_project, extract_ysb_package, read_ysb_manifest, safe_project_name, clean_workspace_name, unique_dir, unique_dir_with_code_suffix
 from ysb.settings.api_settings import ApiSettingsStore, ApiSettingsDialog, apply_settings_to_config
-from ysb.settings.shortcut_settings import ShortcutSettingsStore, ShortcutSettingsDialog, MacroSettingsDialog, TEXT_SYMBOLS, shortcut_label_map
+from ysb.settings.shortcut_settings import ShortcutSettingsStore, ShortcutSettingsDialog, MacroSettingsDialog, TEXT_SYMBOLS, shortcut_label_map, ConfirmingKeySequenceEdit, sequence_without_confirm_keys, key_sequence_from_text, key_sequence_to_portable
 from ysb.ui.viewer import MuleImageViewer
 from ysb.engine.graphics_items import TypesettingItem, build_typesetting_text_path
 from ysb.ui.delegates import MultilineDelegate
@@ -2166,6 +2167,127 @@ class TextTableWidget(QTableWidget):
     def dropEvent(self, event):
         super().dropEvent(event)
         self.rowsReordered.emit()
+
+
+
+class TextAdvancedEffectDialog(QDialog):
+    """텍스트 그라데이션/기울임 설정 창."""
+
+    def __init__(self, data_item=None, parent=None):
+        super().__init__(parent)
+        self.data_item = data_item or {}
+        self._ui_language = getattr(parent, "ui_language", LANG_KO) if parent is not None else LANG_KO
+        self.setWindowTitle(translate_ui_text("텍스트 고급 효과", self._ui_language))
+        self.resize(520, 520)
+        try:
+            if parent is not None and hasattr(parent, "settings_dialog_style"):
+                self.setStyleSheet(parent.settings_dialog_style())
+        except Exception:
+            pass
+
+        self._color_buttons = {}
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+
+        info = QLabel(translate_ui_text("선택한 텍스트 라인에 문자/획 그라데이션을 적용합니다. 평행사변형 변형/사다리꼴 변형/부채꼴 변형은 우클릭 메뉴에서 직접 조정합니다.", self._ui_language))
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        layout.addWidget(self._make_gradient_group(
+            key="text",
+            title=translate_ui_text("문자 그라데이션", self._ui_language),
+            default1=str(self.data_item.get("text_gradient_color1") or self.data_item.get("text_color") or "#000000"),
+            default2=str(self.data_item.get("text_gradient_color2") or "#FFFFFF"),
+            enabled=bool(self.data_item.get("text_gradient_enabled", False)),
+            angle=int(self.data_item.get("text_gradient_angle", 0) or 0),
+            ratio=int(self.data_item.get("text_gradient_ratio", 50) or 50),
+        ))
+        layout.addWidget(self._make_gradient_group(
+            key="stroke",
+            title=translate_ui_text("획 그라데이션", self._ui_language),
+            default1=str(self.data_item.get("stroke_gradient_color1") or self.data_item.get("stroke_color") or "#FFFFFF"),
+            default2=str(self.data_item.get("stroke_gradient_color2") or "#000000"),
+            enabled=bool(self.data_item.get("stroke_gradient_enabled", False)),
+            angle=int(self.data_item.get("stroke_gradient_angle", 0) or 0),
+            ratio=int(self.data_item.get("stroke_gradient_ratio", 50) or 50),
+        ))
+
+        buttons = QDialogButtonBox()
+        buttons.addButton(translate_ui_text("적용", self._ui_language), QDialogButtonBox.ButtonRole.AcceptRole)
+        buttons.addButton(translate_ui_text("닫기", self._ui_language), QDialogButtonBox.ButtonRole.RejectRole)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _make_color_button(self, key, color):
+        btn = QPushButton(str(color or "#000000"))
+        btn.setMinimumWidth(92)
+        self._set_color_button(btn, color)
+        btn.clicked.connect(lambda _=False, b=btn: self._pick_color(b))
+        self._color_buttons[key] = btn
+        return btn
+
+    def _set_color_button(self, btn, color):
+        c = QColor(str(color or "#000000"))
+        if not c.isValid():
+            c = QColor("#000000")
+        text = c.name(QColor.NameFormat.HexRgb).upper()
+        btn.setText(text)
+        btn.setProperty("color_value", text)
+        btn.setStyleSheet(f"QPushButton {{ background:{text}; color:{'#000000' if c.lightness() > 150 else '#ffffff'}; border:1px solid #777; padding:4px 8px; }}")
+
+    def _pick_color(self, btn):
+        cur = QColor(str(btn.property("color_value") or "#000000"))
+        color = QColorDialog.getColor(cur, self, translate_ui_text("색상 선택", self._ui_language))
+        if not color.isValid():
+            return
+        self._set_color_button(btn, color.name(QColor.NameFormat.HexRgb).upper())
+
+    def _make_gradient_group(self, key, title, default1, default2, enabled=False, angle=0, ratio=50):
+        group = QGroupBox(title)
+        form = QFormLayout(group)
+        chk = QCheckBox(translate_ui_text("사용", self._ui_language))
+        chk.setChecked(bool(enabled))
+        setattr(self, f"{key}_gradient_enabled", chk)
+
+        color_line = QHBoxLayout()
+        color1 = self._make_color_button(f"{key}_gradient_color1", default1)
+        color2 = self._make_color_button(f"{key}_gradient_color2", default2)
+        color_line.addWidget(QLabel(translate_ui_text("색 1", self._ui_language)))
+        color_line.addWidget(color1)
+        color_line.addSpacing(8)
+        color_line.addWidget(QLabel(translate_ui_text("색 2", self._ui_language)))
+        color_line.addWidget(color2)
+        color_line.addStretch()
+
+        angle_spin = QSpinBox()
+        angle_spin.setRange(-360, 360)
+        angle_spin.setSuffix("°")
+        angle_spin.setValue(int(angle or 0))
+        setattr(self, f"{key}_gradient_angle", angle_spin)
+
+        ratio_spin = QSpinBox()
+        ratio_spin.setRange(1, 99)
+        ratio_spin.setSuffix(" %")
+        ratio_spin.setValue(max(1, min(99, int(ratio or 50))))
+        setattr(self, f"{key}_gradient_ratio", ratio_spin)
+
+        form.addRow(chk)
+        form.addRow(translate_ui_text("색상", self._ui_language), color_line)
+        form.addRow(translate_ui_text("각도", self._ui_language), angle_spin)
+        form.addRow(translate_ui_text("비율", self._ui_language), ratio_spin)
+        return group
+
+    def values(self):
+        out = {}
+        for key in ("text", "stroke"):
+            out[f"{key}_gradient_enabled"] = bool(getattr(self, f"{key}_gradient_enabled").isChecked())
+            out[f"{key}_gradient_color1"] = str(self._color_buttons[f"{key}_gradient_color1"].property("color_value") or "#000000")
+            out[f"{key}_gradient_color2"] = str(self._color_buttons[f"{key}_gradient_color2"].property("color_value") or "#FFFFFF")
+            out[f"{key}_gradient_angle"] = int(getattr(self, f"{key}_gradient_angle").value())
+            out[f"{key}_gradient_ratio"] = int(getattr(self, f"{key}_gradient_ratio").value())
+        return out
 
 
 class TranslationPromptDialog(QDialog):

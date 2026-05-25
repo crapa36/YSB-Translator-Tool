@@ -5,10 +5,10 @@ Manga OCR is a recognition-only OCR model for Japanese manga text.  It does
 not return detection boxes, so YSB uses the Local text detector for
 regions/masks and applies Manga OCR only to cropped text regions.
 
-In packaged Local builds, Manga OCR runs through local_runtime/manga_ocr_worker.py
-so transformers/tokenizers do not need to be frozen into the main EXE.  In
-source/dev mode, it can also fall back to importing manga_ocr directly from the
-current Python environment.
+In source/dev mode, Manga OCR is loaded directly from the current .venv and uses
+local_models/manga_ocr as the model cache.  In packaged Local builds, Manga OCR
+runs through local_runtime/manga_ocr_worker.py so transformers/tokenizers do not
+need to be frozen into the main EXE.
 """
 
 from __future__ import annotations
@@ -75,25 +75,72 @@ def manga_ocr_legacy_model_root() -> Path:
     return _app_root() / "local_models" / "manga_ocr"
 
 
+def _manga_ocr_cache_ready(root: Path) -> bool:
+    """True when a Manga OCR HF cache exists under *root*.
+
+    The expected cache root is one of:
+        local_runtime/manga_ocr/model_cache
+        local_models/manga_ocr
+
+    Both contain:
+        huggingface/hub/models--kha-white--manga-ocr-base/...
+    """
+    try:
+        model_dir = root / "huggingface" / "hub" / "models--kha-white--manga-ocr-base"
+        if not model_dir.exists():
+            return False
+        snapshots = model_dir / "snapshots"
+        if snapshots.exists() and any(snapshots.iterdir()):
+            return True
+        return any(model_dir.rglob("*.safetensors")) or any(model_dir.rglob("*.bin"))
+    except Exception:
+        return False
+
+
+def _manga_ocr_candidate_model_roots() -> list[Path]:
+    roots: list[Path] = []
+    env_root = os.environ.get("YSB_MANGA_OCR_MODEL_ROOT")
+    if env_root:
+        roots.append(Path(env_root).expanduser())
+    roots.append(manga_ocr_runtime_model_root())
+    roots.append(manga_ocr_legacy_model_root())
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        try:
+            key = str(root.resolve())
+        except Exception:
+            key = str(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(root)
+    return unique
+
+
 def manga_ocr_model_root() -> Path:
     """Return the active Manga OCR model root.
 
-    Packaged Local builds keep the model inside the Manga OCR runtime:
-        local_runtime/manga_ocr/model_cache
+    Priority:
+    1. Explicit YSB_MANGA_OCR_MODEL_ROOT.
+    2. Runtime-bundled cache when it actually contains the model.
+    3. Shared local_models/manga_ocr cache when it actually contains the model.
+    4. A writable default for first download/cache creation.
 
-    Source/dev mode may still use:
-        local_models/manga_ocr
+    This is intentionally more forgiving than the old layout.  If a user deletes
+    local_runtime/manga_ocr/model_cache but keeps local_models/manga_ocr, Manga
+    OCR should still work instead of trying to use the empty runtime cache.
     """
-    runtime_root = manga_ocr_runtime_model_root()
+    candidates = _manga_ocr_candidate_model_roots()
+    for root in candidates:
+        if _manga_ocr_cache_ready(root):
+            return root
+
     legacy_root = manga_ocr_legacy_model_root()
-    runtime_model_dir = runtime_root / "huggingface" / "hub" / "models--kha-white--manga-ocr-base"
-    legacy_model_dir = legacy_root / "huggingface" / "hub" / "models--kha-white--manga-ocr-base"
-    if runtime_model_dir.exists():
-        return runtime_root
-    if legacy_model_dir.exists():
-        return legacy_root
-    if (_runtime_manga_ocr_root() / "python" / "python.exe").exists():
-        return runtime_root
+    # Prefer local_models for a new cache because it is easy for users to find,
+    # replace, or delete without touching the worker runtime.  Runtime cache is
+    # still used above when it actually contains a ready model.
     return legacy_root
 
 
@@ -110,15 +157,8 @@ def manga_ocr_transformers_cache() -> Path:
 
 
 def manga_ocr_model_exists() -> bool:
-    """True when the Manga OCR Hugging Face model is already under local_models."""
-    hub = manga_ocr_hub_cache()
-    model_dir = hub / "models--kha-white--manga-ocr-base"
-    if not model_dir.exists():
-        return False
-    snapshots = model_dir / "snapshots"
-    if snapshots.exists() and any(snapshots.iterdir()):
-        return True
-    return any(model_dir.rglob("*.safetensors")) or any(model_dir.rglob("*.bin"))
+    """True when the selected Manga OCR Hugging Face cache is ready."""
+    return _manga_ocr_cache_ready(manga_ocr_model_root())
 
 
 def ensure_manga_ocr_local_cache_env() -> Path:
@@ -178,8 +218,23 @@ def _external_worker_python() -> Path | None:
 
 
 def _should_use_external_worker() -> bool:
+    """Use the external worker only where it actually makes sense.
+
+    Source/test runs already execute inside the project's .venv, so Manga OCR can
+    be loaded directly from that Python environment and can read
+    local_models/manga_ocr.  The local_runtime worker is primarily for frozen /
+    packaged Local builds where the main EXE cannot directly import the heavy ML
+    stack.
+
+    Set YSB_MANGA_OCR_USE_WORKER=1 to force the worker in source mode, or
+    YSB_MANGA_OCR_INTERNAL=1 to force direct mode.
+    """
     if os.environ.get("YSB_MANGA_OCR_INTERNAL", "").strip().lower() in ("1", "true", "yes"):
         return False
+    if not getattr(sys, "frozen", False):
+        forced = os.environ.get("YSB_MANGA_OCR_USE_WORKER", "").strip().lower()
+        if forced not in ("1", "true", "yes"):
+            return False
     return _external_worker_file().exists() and _external_worker_python() is not None
 
 
@@ -218,21 +273,23 @@ class _ExternalMangaOcrWorkerClient:
         if not worker.exists():
             raise RuntimeError(f"External Manga OCR worker not found: {worker}")
         if python is None:
-            raise RuntimeError("External Manga OCR Python runtime not found. local_runtime/manga_ocr/python/python.exe를 확인해 주세요.")
+            raise RuntimeError("External Manga OCR Python runtime not found. 배포판은 local_runtime/manga_ocr/python/python.exe, 소스 테스트는 .venv/현재 Python을 확인해 주세요.")
 
         env = os.environ.copy()
         env.setdefault("PYTHONUTF8", "1")
         env.setdefault("PYTHONIOENCODING", "utf-8")
         ensure_manga_ocr_local_cache_env()
-        env["HF_HOME"] = str(manga_ocr_hf_home())
-        env["HF_HUB_CACHE"] = str(manga_ocr_hub_cache())
-        env["TRANSFORMERS_CACHE"] = str(manga_ocr_transformers_cache())
+        model_root = manga_ocr_model_root()
+        env["YSB_MANGA_OCR_MODEL_ROOT"] = str(model_root)
+        env["HF_HOME"] = str(model_root / "huggingface")
+        env["HF_HUB_CACHE"] = str(model_root / "huggingface" / "hub")
+        env["TRANSFORMERS_CACHE"] = str(model_root / "huggingface" / "transformers")
 
         try:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             self.log_handle = open(self.log_path, "a", encoding="utf-8", errors="replace")
             self.log_handle.write("\n=== YSB External Manga OCR worker start ===\n")
-            self.log_handle.write(f"python={python}\nworker={worker}\napp_root={_app_root()}\n")
+            self.log_handle.write(f"python={python}\nworker={worker}\napp_root={_app_root()}\nmodel_root={manga_ocr_model_root()}\n")
             self.log_handle.flush()
         except Exception:
             self.log_handle = subprocess.DEVNULL  # type: ignore[assignment]
@@ -319,8 +376,9 @@ def _post_process_manga_ocr_text(text: str) -> str:
 class _DirectMangaOcr:
     """Direct Manga OCR loader for source/dev fallback.
 
-    The packaged Local edition normally uses local_runtime/manga_ocr_worker.py.
-    This fallback avoids older manga-ocr package loaders that call
+    Source/test mode normally uses this direct loader.  Packaged Local builds use
+    local_runtime/manga_ocr_worker.py instead.  This loader avoids older
+    manga-ocr package code that calls
     AutoFeatureExtractor and fail with current manga-ocr-base metadata.
     """
 

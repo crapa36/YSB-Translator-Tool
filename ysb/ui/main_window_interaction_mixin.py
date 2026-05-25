@@ -24,7 +24,7 @@ class MainWindowInteractionMixin:
 
         # 개별 작업
         make_action("work_tab_cycle", "작업탭 변경", self.cycle_work_tab)
-        make_action("work_source_compare", "원본 비교창 열기", self.open_source_compare_view)
+        make_action("work_source_compare", "원본 비교창 열기/끄기", self.open_source_compare_view)
         make_action("work_page_prev", "이전 페이지", self.prev)
         make_action("work_page_next", "다음 페이지", self.next)
         make_action("work_page_list", "페이지 목록", self.show_page_tab_menu)
@@ -221,6 +221,12 @@ class MainWindowInteractionMixin:
 
     def apply_shortcuts(self):
         for key, action in self.actions.items():
+            # Alt+V 현재 페이지 이름은 keyPress/keyRelease에서 직접 처리한다.
+            # QAction 단축키와 동시에 살아 있으면 팝업이 두 번 떠서 깜빡인다.
+            if key == "work_page_full_name":
+                action.setShortcut(QKeySequence())
+                action.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
+                continue
             seq = self.shortcut_settings.seq(key)
             action.setShortcut(seq)
             action.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
@@ -802,6 +808,13 @@ class MainWindowInteractionMixin:
         if widget is None:
             return
         try:
+            if isinstance(widget, QAbstractSpinBox):
+                # 숫자 입력 중 매 키마다 valueChanged가 발생하면 화면/우측 UI가 갱신되며
+                # 포커스가 OCR 언어 콤보박스 등으로 튈 수 있다. 입력 확정 시점에만 반영한다.
+                widget.setKeyboardTracking(False)
+        except Exception:
+            pass
+        try:
             widget.installEventFilter(self)
         except Exception:
             pass
@@ -834,6 +847,22 @@ class MainWindowInteractionMixin:
         except Exception:
             pass
 
+    def configure_stable_numeric_inputs(self):
+        """메인 UI의 숫자 입력칸은 입력 중 포커스를 잃지 않도록 안정화한다."""
+        try:
+            widgets = list(self.findChildren(QAbstractSpinBox))
+        except Exception:
+            widgets = []
+        for spin in widgets:
+            try:
+                spin.setKeyboardTracking(False)
+            except Exception:
+                pass
+            try:
+                self.install_enter_escape_for_input(spin)
+            except Exception:
+                pass
+
     def install_main_input_enter_escape_filters(self):
         """메인 상단 조작부 입력칸에서 Enter가 포커스 탈출로 동작하게 한다."""
         for widget in (
@@ -844,14 +873,23 @@ class MainWindowInteractionMixin:
             getattr(self, "sb_letter_spacing", None),
             getattr(self, "sb_char_width", None),
             getattr(self, "sb_char_height", None),
+            getattr(self, "final_item_size", None),
+            getattr(self, "final_item_stroke", None),
+            getattr(self, "sb_text_opacity", None),
             getattr(self, "cb_item_text_preset", None),
             getattr(self, "cb_trans_provider", None),
+            getattr(self, "cb_ocr_language", None),
             getattr(self, "sb_trans_chunk", None),
             getattr(self, "sb_final_paint_opacity", None),
             getattr(self, "sb_magic_tolerance", None),
             getattr(self, "sb_magic_expand", None),
+            getattr(self, "sb_mask_cut_px", None),
         ):
             self.install_enter_escape_for_input(widget)
+        try:
+            self.configure_stable_numeric_inputs()
+        except Exception:
+            pass
 
     def register_delayed_tooltip(self, widget, title, shortcut_text="", description=""):
         if widget is None:
@@ -1013,7 +1051,7 @@ class MainWindowInteractionMixin:
         elif hint == "below":
             pos = pos_below()
         elif hint == "below_low":
-            pos = pos_below(12)
+            pos = pos_below(34)
         else:
             # 기본 자동 배치:
             # - 왼쪽 도구바 버튼은 오른쪽
@@ -1114,35 +1152,136 @@ class MainWindowInteractionMixin:
         """Delayed tooltip + source compare sync event filter."""
         et = event.type()
 
-        # Source compare clone: keep the left clone synced whenever the real
-        # work view is resized, scrolled, zoomed, dragged, or otherwise repainted.
+        # Enter/Esc from right-side numeric/single-line inputs must commit/cancel the
+        # edit and return focus to the image workspace.  Do this before global
+        # shortcut handling or Qt focus traversal can move focus to the OCR language
+        # combo box.
+        try:
+            if et in (QEvent.Type.ShortcutOverride, QEvent.Type.KeyPress):
+                key = event.key()
+                if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Escape):
+                    target = self.current_single_line_input_widget(obj)
+                    if target is not None:
+                        # Do not steal Enter from multiline text editors.
+                        if not isinstance(target, (QTextEdit, QPlainTextEdit)):
+                            if key == Qt.Key.Key_Escape:
+                                if self.escape_single_line_input_focus_first(target):
+                                    event.accept()
+                                    return True
+                            else:
+                                if not (event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.AltModifier)):
+                                    if self.finish_single_line_input_by_enter(target):
+                                        event.accept()
+                                        return True
+        except Exception:
+            pass
+
+        # Source compare clone sync must be driven only by real view movement.
+        # Resize/Paint/MouseMove are layout/UI events and can drag the image toward
+        # the top-left when the compare splitter is moved, so they are intentionally ignored.
         try:
             view = getattr(self, "view", None)
-            if view is not None and (obj is view or obj is view.viewport()):
-                if et in (
-                    QEvent.Type.Resize,
-                    QEvent.Type.Wheel,
-                    QEvent.Type.MouseMove,
-                    QEvent.Type.MouseButtonPress,
-                    QEvent.Type.MouseButtonRelease,
-                    QEvent.Type.Paint,
-                    QEvent.Type.UpdateRequest,
-                    QEvent.Type.Show,
-                ):
+            if view is not None and obj is view.viewport():
+                if et in (QEvent.Type.Wheel, QEvent.Type.MouseButtonRelease):
                     if hasattr(self, "schedule_source_compare_sync"):
                         self.schedule_source_compare_sync(16)
         except Exception:
             pass
 
-        # Quick OCR must also work on the left source-compare clone.
-        # The clone is a plain QGraphicsView, so the normal MuleImageViewer
-        # quick-OCR mouse handlers do not receive its drag events. Route its
-        # viewport events through the main window while quick OCR mode is active.
+        # Source compare clone can now be controlled directly.
+        # If scroll sync is ON, wheel/drag operations on the clone drive the main work view too.
         try:
             sc_view = getattr(self, "source_compare_view", None)
             if sc_view is not None and obj is sc_view.viewport():
+                if et == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+                    try:
+                        if hasattr(self, '_hide_eyedropper_color_feedback'):
+                            self._hide_eyedropper_color_feedback()
+                    except Exception:
+                        pass
+
+                if (
+                    et == QEvent.Type.MouseButtonPress
+                    and event.button() == Qt.MouseButton.LeftButton
+                    and (event.modifiers() & Qt.KeyboardModifier.AltModifier)
+                    and getattr(self, "cb_mode", None) is not None
+                    and self.cb_mode.currentIndex() == 4
+                ):
+                    try:
+                        pt = sc_view.mapToScene(event.pos())
+                        if hasattr(self, "pick_final_paint_color_from_source_scene"):
+                            self.pick_final_paint_color_from_source_scene(int(pt.x()), int(pt.y()))
+                            return True
+                    except Exception:
+                        pass
+
+                if et == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                    try:
+                        self._source_compare_user_driving = True
+                    except Exception:
+                        pass
+                elif et == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+                    try:
+                        self._source_compare_user_driving = False
+                    except Exception:
+                        pass
+                    if hasattr(self, "schedule_main_sync_from_source_compare"):
+                        self.schedule_main_sync_from_source_compare(0)
+                elif et == QEvent.Type.Wheel:
+                    try:
+                        self._source_compare_user_driving = True
+                    except Exception:
+                        pass
+                    if hasattr(self, "schedule_main_sync_from_source_compare"):
+                        self.schedule_main_sync_from_source_compare(0)
+                    try:
+                        QTimer.singleShot(120, lambda: setattr(self, '_source_compare_user_driving', False))
+                    except Exception:
+                        pass
+
                 if hasattr(self, "handle_source_compare_quick_ocr_event") and self.handle_source_compare_quick_ocr_event(event):
                     return True
+        except Exception:
+            pass
+
+        try:
+            view = getattr(self, "view", None)
+            if view is not None and obj is view.viewport() and et == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+                if hasattr(self, '_hide_eyedropper_color_feedback'):
+                    self._hide_eyedropper_color_feedback()
+        except Exception:
+            pass
+
+
+        try:
+            if obj is getattr(self, '_source_compare_splitter_handle', None):
+                if et == QEvent.Type.MouseButtonPress:
+                    self._source_compare_splitter_adjusting = True
+                    if hasattr(self, '_block_source_compare_sync_temporarily'):
+                        self._block_source_compare_sync_temporarily(320)
+                    if hasattr(self, '_capture_source_compare_splitter_states'):
+                        self._source_compare_splitter_view_states = self._capture_source_compare_splitter_states()
+                elif et == QEvent.Type.MouseMove:
+                    # splitter 이동은 레이아웃 변경만 해야 한다. 이미지 좌표/확대/스크롤은 저장값으로 유지한다.
+                    if hasattr(self, '_block_source_compare_sync_temporarily'):
+                        self._block_source_compare_sync_temporarily(220)
+                    if hasattr(self, '_restore_source_compare_splitter_states'):
+                        self._restore_source_compare_splitter_states()
+                elif et == QEvent.Type.MouseButtonRelease:
+                    states = getattr(self, '_source_compare_splitter_view_states', None)
+                    if hasattr(self, '_block_source_compare_sync_temporarily'):
+                        self._block_source_compare_sync_temporarily(320)
+                    if hasattr(self, '_restore_source_compare_splitter_states'):
+                        self._restore_source_compare_splitter_states(states)
+                        QTimer.singleShot(0, lambda s=states: self._restore_source_compare_splitter_states(s))
+                        QTimer.singleShot(80, lambda s=states: self._restore_source_compare_splitter_states(s))
+                    self._source_compare_splitter_view_states = None
+                    QTimer.singleShot(180, lambda: setattr(self, '_source_compare_splitter_adjusting', False))
+                elif et == QEvent.Type.MouseButtonDblClick:
+                    if hasattr(self, 'reset_source_compare_splitter_half'):
+                        self.reset_source_compare_splitter_half()
+                        event.accept()
+                        return True
         except Exception:
             pass
 
@@ -1352,8 +1491,8 @@ class MainWindowInteractionMixin:
             tooltip_pos(self.btn_page_add, "above")
             self.register_delayed_tooltip(self.btn_page_add, "이미지 불러오기", seq_text("project_import_images"), "현재 프로젝트에서는 현재 페이지 뒤에 이미지를 추가합니다.")
         if hasattr(self, "btn_project_exit"):
-            tooltip_pos(self.btn_project_exit, "above")
-            self.register_delayed_tooltip(self.btn_project_exit, "프로젝트 나가기", seq_text("project_exit"))
+            tooltip_pos(self.btn_project_exit, "below_low", y=10)
+            self.register_delayed_tooltip(self.btn_project_exit, "프로젝트 나가기", seq_text("project_exit"), "현재 프로젝트를 닫고 시작 화면으로 돌아갑니다.")
         if hasattr(self, "btn_page"):
             tooltip_pos(self.btn_page, "above")
             self.register_delayed_tooltip(self.btn_page, "페이지 이동", "", "현재 페이지 번호를 눌러 원하는 페이지로 바로 이동합니다.")
@@ -1406,6 +1545,18 @@ class MainWindowInteractionMixin:
             except Exception:
                 pass
             self.register_delayed_tooltip(self.btn_item_stroke_color, "획 색상", seq_text("item_stroke_color"))
+        if hasattr(self, "sb_text_opacity"):
+            self.register_delayed_tooltip(self.sb_text_opacity, "텍스트 불투명도", "", "선택한 텍스트의 불투명도를 조절합니다.")
+        if hasattr(self, "btn_text_effect_gradient"):
+            self.register_delayed_tooltip(self.btn_text_effect_gradient, "문자/획 그라데이션", seq_text("text_effect_gradient"), "선택한 텍스트에 문자/획 그라데이션 설정 창을 엽니다.")
+        if hasattr(self, "btn_text_effect_transform"):
+            self.register_delayed_tooltip(self.btn_text_effect_transform, "텍스트 변형", seq_text("text_transform_toggle"), "선택한 텍스트의 기준 변형 모드를 켜거나 끕니다.")
+        if hasattr(self, "btn_text_effect_skew"):
+            self.register_delayed_tooltip(self.btn_text_effect_skew, "평행사변형 변형", seq_text("text_skew_toggle"), "선택한 텍스트를 평행사변형 형태로 기울입니다.")
+        if hasattr(self, "btn_text_effect_trapezoid"):
+            self.register_delayed_tooltip(self.btn_text_effect_trapezoid, "사다리꼴 변형", seq_text("text_trapezoid_toggle"), "선택한 텍스트에 좌우/상하 원근감을 적용합니다.")
+        if hasattr(self, "btn_text_effect_arc"):
+            self.register_delayed_tooltip(self.btn_text_effect_arc, "부채꼴 변형", seq_text("text_arc_toggle"), "선택한 텍스트를 부채꼴로 휘게 변형합니다.")
         if hasattr(self, "btn_align_left"):
             self.register_delayed_tooltip(self.btn_align_left, "왼쪽 정렬", seq_text("item_align_left"))
             self.register_delayed_tooltip(self.btn_align_center, "가운데 정렬", seq_text("item_align_center"))

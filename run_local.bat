@@ -100,6 +100,8 @@ if errorlevel 1 goto PADDLE_IMPORT_FAIL
 python -c "import paddleocr; print('paddleocr OK')"
 if errorlevel 1 goto PADDLEOCR_IMPORT_FAIL
 
+python -c "import importlib.util as u; mods=['transformers','fugashi','unidic_lite']; missing=[m for m in mods if u.find_spec(m) is None]; print('Manga OCR optional deps OK' if not missing else '[INFO] Manga OCR optional deps missing: ' + ', '.join(missing) + ' / run setup_manga_ocr_v2_2_1.bat if you use LOCAL Manga OCR')"
+
 echo.
 echo Starting YSB Tool Local...
 echo If the app crashes, this window will stay open with the error.

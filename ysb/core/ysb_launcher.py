@@ -943,6 +943,301 @@ def messagebox_yes_no_topmost(title: str, message: str, default_yes: bool = True
         return False
 
 
+def _launcher_workspace_setup_reason():
+    """PyQt6 없이 런처 단계에서 작업 폴더 설정 필요 여부를 확인한다."""
+    try:
+        from ysb.core.workspace_manager import load_workspace_config, configured_workspace_root_raw, _is_unsafe_workspace_root
+        cfg = load_workspace_config()
+        if not cfg.get("workspace_root"):
+            return True, "처음 실행입니다.\n작업 폴더 위치를 확인해 주세요.", "info"
+        root = configured_workspace_root_raw()
+        if root is None:
+            return True, "저장된 작업 폴더 경로를 읽을 수 없습니다.\n작업 폴더 위치를 다시 지정해 주세요.", "warning"
+        try:
+            if _is_unsafe_workspace_root(root):
+                return True, "저장된 작업 폴더 경로가 안전하지 않습니다.\n작업 폴더 위치를 다시 지정해 주세요.", "warning"
+        except Exception:
+            pass
+        if not root.exists() or not root.is_dir():
+            return True, "저장된 작업 폴더를 찾을 수 없습니다.\n작업 폴더 위치를 다시 지정해 주세요.", "warning"
+        return False, "", "info"
+    except Exception as e:
+        opener_log(f"workspace setup lightweight check failed: {e}")
+        return True, f"저장된 작업 폴더를 확인하지 못했습니다.\n작업 폴더 위치를 다시 지정해 주세요.\n\n{e}", "warning"
+
+
+def _launcher_read_workspace_language(default="ko") -> str:
+    try:
+        from ysb.core.workspace_manager import configured_workspace_root_raw, default_workspace_root
+        root = configured_workspace_root_raw() or default_workspace_root()
+        p = Path(root) / "cache" / "app_options.json"
+        if p.exists():
+            data = json.loads(p.read_text(encoding="utf-8"))
+            value = str(data.get("ui_language") or default).lower()
+            if value in ("en", "english", "en-us", "en_us"):
+                return "en"
+    except Exception:
+        pass
+    return "ko"
+
+
+def _launcher_save_workspace_language(root: Path, lang: str):
+    try:
+        value = "en" if str(lang).lower().startswith("en") else "ko"
+        cache = Path(root) / "cache"
+        cache.mkdir(parents=True, exist_ok=True)
+        p = cache / "app_options.json"
+        data = {}
+        if p.exists():
+            try:
+                loaded = json.loads(p.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    data = loaded
+            except Exception:
+                data = {}
+        data["ui_language"] = value
+        p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        opener_log(f"launcher save language failed: {e}")
+
+
+def _launcher_show_workspace_setup_dialog(reason: str = "", reason_kind: str = "info") -> bool:
+    """런처 전용 경량 작업 폴더 설정창. PyQt6를 import하지 않는다."""
+    if tk is None:
+        show_error("작업 폴더 설정창을 열 수 없습니다.\n런처 실행 환경에서 tkinter를 사용할 수 없습니다.")
+        return False
+    try:
+        from tkinter import filedialog
+        from ysb.core.workspace_manager import default_workspace_root, ensure_workspace_writable, set_workspace_root
+    except Exception as e:
+        show_error(f"작업 폴더 설정에 필요한 모듈을 불러오지 못했습니다.\n프로그램을 시작할 수 없습니다.\n\n{e}")
+        return False
+
+    state = {"ok": False}
+    initial_lang = _launcher_read_workspace_language()
+    TEXT = {
+        "ko": {
+            "window": "작업 폴더 설정",
+            "title": "역식붕이 툴 작업 폴더 설정",
+            "reason_missing": "저장된 작업 폴더를 찾을 수 없습니다.\n작업 폴더 위치를 다시 지정해 주세요.",
+            "folder": "작업 폴더 위치",
+            "browse": "찾아보기",
+            "default": "기본값으로\n변경",
+            "language": "Language",
+            "assoc": ".ysbt 확장자 연결 등록",
+            "assoc_decline_title": ".ysbt 확장자 연결 확인",
+            "assoc_decline_message": ".ysbt 확장자 연결을 등록하지 않으면 .ysbt 파일을 더블클릭해서 바로 열 수 없습니다.\n\n정말 등록하지 않고 계속 진행할까요?",
+            "ok": "확인",
+            "close": "닫기",
+            "select": "작업 폴더 위치 선택",
+            "save_fail": "작업 폴더 설정을 저장하지 못했습니다.",
+            "desc": (
+                "작업 폴더는 캐시, 임시 작업, 실제 프로젝트 작업 폴더를 저장하는 기준 위치입니다.\n"
+                "기본값은 Windows의 실제 문서 폴더 아래 YSB_Translator 폴더입니다. 선택한 폴더가 YSB_Translator가 아니면 그 안에\n"
+                "YSB_Translator 폴더를 만들어 사용합니다. [기본값으로 변경]을 누르면 이 실제 문서 위치로 되돌립니다.\n\n"
+                ".ysbt 확장자 연결을 등록하면 .ysbt 프로젝트 파일을 더블클릭했을 때 역식붕이 툴로 바로 열 수 있습니다. 이 설정은 현재\n"
+                "Windows 사용자 계정에만 적용되며, 옵션에서 해제할 수 있습니다.\n"
+                "작업 폴더 위치 설정은 Windows 사용자 설정 폴더의 workspace_config.json에 저장됩니다."
+            ),
+        },
+        "en": {
+            "window": "Workspace Folder Settings",
+            "title": "YSB Tool Workspace Folder Settings",
+            "reason_missing": "The saved workspace folder could not be found.\nPlease choose the workspace folder again.",
+            "folder": "Workspace Folder",
+            "browse": "Browse",
+            "default": "Reset to\nDefault",
+            "language": "Language",
+            "assoc": "Register .ysbt file association",
+            "assoc_decline_title": "Confirm .ysbt File Association",
+            "assoc_decline_message": "If you do not register the .ysbt file association, double-clicking .ysbt project files will not open them directly.\n\nContinue without registering the file association?",
+            "ok": "OK",
+            "close": "Close",
+            "select": "Select Workspace Folder",
+            "save_fail": "Failed to save workspace folder settings.",
+            "desc": (
+                "The workspace folder stores caches, temporary work, and actual project work folders.\n"
+                "The default is the YSB_Translator folder under the real Windows Documents folder. If the selected folder is not YSB_Translator,\n"
+                "a YSB_Translator folder will be created inside it. [Reset to Default] returns to the real Documents location.\n\n"
+                "Registering the .ysbt file association lets you open .ysbt projects by double-clicking them. This setting applies only to the current\n"
+                "Windows user account and can be disabled later in Options.\n"
+                "The workspace folder setting is saved in workspace_config.json under the Windows user settings folder."
+            ),
+        },
+    }
+
+    def normalize_lang(value):
+        return "en" if str(value).lower().startswith("en") else "ko"
+
+    def t(key):
+        return TEXT[normalize_lang(lang_var.get())].get(key, key)
+
+    def normalize_user_root(value: str) -> Path:
+        raw = str(value or "").strip().strip('"')
+        if not raw:
+            raise ValueError("empty")
+        pth = Path(raw).expanduser()
+        if pth.name.lower() not in ("ysb_translator", "ysbtranslator"):
+            pth = pth / "YSB_Translator"
+        return pth
+
+    root = tk.Tk()
+    root.withdraw()
+    root.title(TEXT[initial_lang]["window"])
+    root.configure(bg="#1f2126")
+    root.resizable(False, False)
+    try:
+        root.attributes("-topmost", True)
+    except Exception:
+        pass
+
+    lang_var = tk.StringVar(value=initial_lang)
+    path_var = tk.StringVar(value=str(default_workspace_root()))
+    assoc_var = tk.BooleanVar(value=True)
+    reason_text = str(reason or TEXT[initial_lang]["reason_missing"])
+
+    frame = tk.Frame(root, bg="#1f2126", padx=12, pady=12)
+    frame.pack(fill="both", expand=True)
+    title_label = tk.Label(frame, bg="#1f2126", fg="#ffffff", font=("Malgun Gothic", 12, "bold"), anchor="w")
+    title_label.grid(row=0, column=0, columnspan=5, sticky="ew", pady=(0, 8))
+    reason_label = tk.Label(frame, bg="#1f2126", fg="#ffd966", font=("Malgun Gothic", 9, "bold"), justify="left", anchor="w")
+    reason_label.grid(row=1, column=0, columnspan=5, sticky="ew", pady=(0, 10))
+    folder_label = tk.Label(frame, bg="#1f2126", fg="#ffffff", font=("Malgun Gothic", 9), anchor="w")
+    folder_label.grid(row=2, column=0, sticky="w", pady=(0, 8))
+    path_entry = tk.Entry(frame, textvariable=path_var, width=56, bg="#2a2e36", fg="#ffffff", insertbackground="#ffffff", relief="solid", bd=1)
+    path_entry.grid(row=2, column=1, columnspan=2, sticky="ew", padx=(6, 6), pady=(0, 8))
+    browse_btn = tk.Button(frame, bg="#384050", fg="#ffffff", activebackground="#46536a", activeforeground="#ffffff", relief="solid", bd=1, padx=12)
+    browse_btn.grid(row=2, column=3, sticky="ew", padx=(0, 6), pady=(0, 8))
+    default_btn = tk.Button(frame, bg="#4a5366", fg="#ffffff", activebackground="#58657c", activeforeground="#ffffff", relief="solid", bd=1, padx=8)
+    default_btn.grid(row=2, column=4, sticky="ew", pady=(0, 8))
+    language_label = tk.Label(frame, bg="#1f2126", fg="#ffffff", font=("Malgun Gothic", 9), anchor="w")
+    language_label.grid(row=3, column=0, sticky="w", pady=(0, 8))
+    lang_menu = tk.OptionMenu(frame, lang_var, "ko", "en")
+    lang_menu.configure(bg="#2a2e36", fg="#ffffff", activebackground="#384050", activeforeground="#ffffff", relief="solid", bd=1, width=8, highlightthickness=0)
+    try:
+        lang_menu["menu"].configure(bg="#2a2e36", fg="#ffffff", activebackground="#46536a", activeforeground="#ffffff")
+        lang_menu["menu"].entryconfig(0, label="한국어")
+        lang_menu["menu"].entryconfig(1, label="English")
+    except Exception:
+        pass
+    lang_menu.grid(row=3, column=1, sticky="w", padx=(6, 0), pady=(0, 8))
+    assoc_check = tk.Checkbutton(frame, variable=assoc_var, bg="#1f2126", fg="#ffffff", selectcolor="#2a2e36", activebackground="#1f2126", activeforeground="#ffffff", font=("Malgun Gothic", 9))
+    assoc_check.grid(row=3, column=2, columnspan=3, sticky="w", pady=(0, 8))
+    desc_label = tk.Label(frame, bg="#1f2126", fg="#f2f4f8", font=("Malgun Gothic", 8), justify="left", anchor="w", wraplength=660)
+    desc_label.grid(row=4, column=0, columnspan=5, sticky="ew", pady=(0, 12))
+    btn_frame = tk.Frame(frame, bg="#1f2126")
+    btn_frame.grid(row=5, column=0, columnspan=5, sticky="e")
+    ok_btn = tk.Button(btn_frame, bg="#46536a", fg="#ffffff", activebackground="#566684", activeforeground="#ffffff", relief="solid", bd=1, padx=14)
+    ok_btn.pack(side="left", padx=(0, 8))
+    close_btn = tk.Button(btn_frame, bg="#384050", fg="#ffffff", activebackground="#46536a", activeforeground="#ffffff", relief="solid", bd=1, padx=14)
+    close_btn.pack(side="left")
+    frame.grid_columnconfigure(2, weight=1)
+
+    def refresh_texts(*_args):
+        root.title(t("window"))
+        title_label.configure(text=t("title"))
+        shown_reason = reason_text
+        if reason_text == TEXT[initial_lang]["reason_missing"]:
+            shown_reason = t("reason_missing")
+        reason_label.configure(text=shown_reason)
+        folder_label.configure(text=t("folder"))
+        browse_btn.configure(text=t("browse"))
+        default_btn.configure(text=t("default"))
+        language_label.configure(text=t("language"))
+        assoc_check.configure(text=t("assoc"))
+        desc_label.configure(text=t("desc"))
+        ok_btn.configure(text=t("ok"))
+        close_btn.configure(text=t("close"))
+
+    def browse():
+        current = str(path_var.get() or default_workspace_root())
+        selected = filedialog.askdirectory(title=t("select"), initialdir=current if Path(current).exists() else str(Path.home()))
+        if selected:
+            path_var.set(str(normalize_user_root(selected)))
+
+    def on_ok():
+        try:
+            if not bool(assoc_var.get()):
+                try:
+                    import tkinter.messagebox as messagebox
+                    proceed = messagebox.askyesno(t("assoc_decline_title"), t("assoc_decline_message"), parent=root, icon="warning")
+                except Exception:
+                    proceed = messagebox_yes_no_topmost(t("assoc_decline_title"), t("assoc_decline_message"), default_yes=False)
+                if not proceed:
+                    try:
+                        assoc_var.set(True)
+                    except Exception:
+                        pass
+                    return
+
+            target = normalize_user_root(path_var.get())
+            target = ensure_workspace_writable(target)
+            set_workspace_root(target)
+            _launcher_save_workspace_language(target, lang_var.get())
+            if bool(assoc_var.get()):
+                register_ysbt_association_to_opener()
+            state["ok"] = True
+            root.destroy()
+        except Exception as e:
+            try:
+                import tkinter.messagebox as messagebox
+                messagebox.showerror(t("window"), f"{t('save_fail')}\n\n{e}", parent=root)
+            except Exception:
+                show_error(f"{t('save_fail')}\n\n{e}")
+
+    browse_btn.configure(command=browse)
+    default_btn.configure(command=lambda: path_var.set(str(default_workspace_root())))
+    ok_btn.configure(command=on_ok)
+    close_btn.configure(command=lambda: (state.update(ok=False), root.destroy()))
+    root.protocol("WM_DELETE_WINDOW", lambda: (state.update(ok=False), root.destroy()))
+    root.bind("<Escape>", lambda _e: (state.update(ok=False), root.destroy()))
+    root.bind("<Return>", lambda _e: on_ok())
+    lang_var.trace_add("write", refresh_texts)
+    refresh_texts()
+    root.update_idletasks()
+    try:
+        w = max(720, root.winfo_reqwidth())
+        h = max(330, root.winfo_reqheight())
+        sw = root.winfo_screenwidth()
+        sh = root.winfo_screenheight()
+        x = int((sw - w) / 2)
+        y = int((sh - h) / 2)
+        root.geometry(f"{w}x{h}+{x}+{y}")
+    except Exception:
+        pass
+    root.deiconify()
+    root.lift()
+    try:
+        root.focus_force()
+        path_entry.focus_set()
+        path_entry.selection_range(0, tk.END)
+    except Exception:
+        pass
+    root.mainloop()
+    return bool(state.get("ok"))
+
+
+def run_workspace_setup_preflight_before_loading() -> bool:
+    """런처 단계에서도 첫 실행/복구 작업 폴더 설정창을 먼저 처리한다.
+
+    런처는 PyQt6를 포함하지 않을 수 있으므로 본 프로그램의 PyQt6 설정창을
+    import하지 않는다. 대신 tkinter 기반의 런처 전용 경량 설정창을 사용한다.
+    """
+    try:
+        needs_setup, reason, reason_kind = _launcher_workspace_setup_reason()
+        if not needs_setup:
+            return True
+        opener_log(f"workspace setup preflight required: kind={reason_kind}, reason={reason!r}")
+        ok = bool(_launcher_show_workspace_setup_dialog(reason, reason_kind))
+        if not ok:
+            opener_log("workspace setup preflight canceled by user")
+        return ok
+    except Exception as e:
+        opener_log(f"workspace setup preflight failed: {e}")
+        show_error(f"작업 폴더 설정창을 열지 못했습니다.\n프로그램을 시작할 수 없습니다.\n\n{e}")
+        return False
+
+
 def run_association_preflight_before_loading():
     """런처 단계에서 확장자 갱신 알림을 먼저 처리한다.
 
@@ -1220,6 +1515,12 @@ def main() -> int:
 
     launcher_session_id = uuid.uuid4().hex
     cleanup_launch_handshake_files(launcher_session_id)
+
+    # 작업 폴더 설정은 런처 스플래시/메인 실행보다 먼저 처리한다.
+    # workspace_config.json이 없거나 저장된 작업 폴더가 사라진 상태라면
+    # 메인 앱을 띄우기 전에 같은 작업 폴더 설정창을 먼저 띄운다.
+    if not run_workspace_setup_preflight_before_loading():
+        return 0
 
     # 확장자 갱신 알림은 런처 스플래시/메인 실행보다 먼저 처리한다.
     # 이 알림이 떠 있는 동안에는 뒤에서 로딩이 진행되지 않는다.

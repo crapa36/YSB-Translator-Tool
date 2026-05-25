@@ -515,57 +515,281 @@ class MainWindowOperationsMixin:
             return False
 
     def place_source_compare_controls(self):
-        """원본 비교 컨트롤을 현재 작업 도구줄의 오른쪽 끝에 붙인다."""
-        if not hasattr(self, "source_compare_controls"):
-            return
-        visible = self.source_compare_is_visible() if hasattr(self, "source_compare_is_visible") else False
-        if not visible:
+        """원본 비교 컨트롤은 공유 옵션바의 우측 고정 영역에만 배치한다."""
+        try:
+            right_layout = getattr(self, "shared_option_right_layout", None)
+            controls = getattr(self, "source_compare_controls", None)
+            if right_layout is None or controls is None:
+                return
+            # 우측 고정 영역은 원본 비교 컨트롤 전용이다. 도구 옵션은 왼쪽 영역만 사용한다.
+            while right_layout.count():
+                item = right_layout.takeAt(0)
+                widget = item.widget() if item is not None else None
+                if widget is not None:
+                    widget.setParent(None)
+            visible = self.source_compare_is_visible() if hasattr(self, "source_compare_is_visible") else False
+            if visible:
+                right_layout.addWidget(controls)
+                controls.show()
+            else:
+                controls.hide()
+            if hasattr(self, "source_compare_bar"):
+                self.source_compare_bar.hide()
+            if hasattr(self, "shared_option_bar"):
+                self.shared_option_bar.show()
+        except Exception:
+            pass
+
+    def _hide_legacy_option_bars(self):
+        for bar_name in (
+            "area_paint_bar", "magic_wand_bar", "mask_wrap_bar", "mask_cut_bar",
+            "ocr_region_bar", "final_paint_option_bar", "final_edit_bar",
+            "source_compare_bar",
+        ):
             try:
-                self.source_compare_controls.hide()
-                if hasattr(self, "source_compare_bar"):
-                    self.source_compare_bar.hide()
+                bar = getattr(self, bar_name, None)
+                if bar is not None:
+                    bar.hide()
             except Exception:
                 pass
-            return
 
-        target_layout = None
-        # 영역 페인팅/마스크 랩핑/원본 비교창은 같은 상단 작업 공간을 공유한다.
-        # 현재 표시 중인 도구줄이 있으면 그 줄의 오른쪽 끝에 원본 비교 컨트롤만 붙인다.
-        for bar_name in (
-            "area_paint_bar",
-            "magic_wand_bar",
-            "mask_wrap_bar",
-            "mask_cut_bar",
-            "ocr_region_bar",
-            "final_paint_option_bar",
-            "final_edit_bar",
-        ):
-            bar = getattr(self, bar_name, None)
+    def _clear_shared_option_left(self):
+        layout = getattr(self, "shared_option_left_layout", None)
+        if layout is None:
+            return
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget() if item is not None else None
+            if widget is not None:
+                widget.setParent(None)
+
+    def _shared_add_label(self, text):
+        try:
+            label = QLabel(str(text))
+            self.shared_option_left_layout.addWidget(label)
+            return label
+        except Exception:
+            return None
+
+    def refresh_shared_option_bar(self):
+        """항상 보이는 한 줄 공유 옵션바의 왼쪽 도구 영역을 현재 상태에 맞게 재구성한다."""
+        if not hasattr(self, "shared_option_bar") or not hasattr(self, "shared_option_left_layout"):
+            return
+        self._hide_legacy_option_bars()
+        self._clear_shared_option_left()
+        try:
+            self.shared_option_bar.show()
+        except Exception:
+            pass
+
+        mode = self.cb_mode.currentIndex() if hasattr(self, "cb_mode") else 0
+        draw_mode = getattr(getattr(self, "view", None), "draw_mode", None)
+
+        def add_widget(widget):
             try:
-                if bar is not None and bar.isVisible() and bar.layout() is not None:
-                    target_layout = bar.layout()
-                    break
+                if widget is not None:
+                    self.shared_option_left_layout.addWidget(widget)
+                    widget.show()
             except Exception:
                 pass
 
         try:
-            if hasattr(self, "source_compare_bar"):
-                self.source_compare_bar.hide()
+            selected_text = self.selected_text_items() if hasattr(self, "selected_text_items") else []
+        except Exception:
+            selected_text = []
 
-            if target_layout is not None and self._add_source_compare_controls_to_layout(target_layout):
-                return
+        populated = False
+        try:
+            if mode == 4 and draw_mode is None and selected_text:
+                self._shared_add_label("불투명도")
+                add_widget(getattr(self, "sb_text_opacity", None))
+                add_widget(getattr(self, "btn_text_effect_gradient", None))
+                add_widget(getattr(self, "btn_text_effect_transform", None))
+                add_widget(getattr(self, "btn_text_effect_skew", None))
+                add_widget(getattr(self, "btn_text_effect_trapezoid", None))
+                add_widget(getattr(self, "btn_text_effect_arc", None))
+                populated = True
+            elif mode == 4 and draw_mode in ("draw", "erase"):
+                self._shared_add_label("브러시")
+                self._shared_add_label("불투명도")
+                add_widget(getattr(self, "sb_final_paint_opacity", None))
+                populated = True
+            elif mode == 4 and draw_mode == "area_paint":
+                self._shared_add_label(self.tr_ui("영역 페인팅"))
+                add_widget(getattr(self, "btn_area_paint_rect", None))
+                add_widget(getattr(self, "btn_area_paint_free", None))
+                self._shared_add_label(self.tr_ui("선택한 영역을 현재 최종 페인팅 색상으로 채웁니다."))
+                populated = True
+            elif mode in (2, 3) and draw_mode == "magic_wand":
+                self._shared_add_label("요술봉")
+                self._shared_add_label("RGB 허용범위")
+                add_widget(getattr(self, "sb_magic_tolerance", None))
+                add_widget(getattr(self, "btn_magic_expand", None))
+                self._shared_add_label("확장 범위")
+                add_widget(getattr(self, "sb_magic_expand", None))
+                add_widget(getattr(self, "btn_magic_fill", None))
+                populated = True
+            elif mode in (2, 3) and draw_mode == "mask_wrap":
+                self._shared_add_label(self.tr_ui("마스크 랩핑"))
+                add_widget(getattr(self, "btn_mask_wrap_rect", None))
+                add_widget(getattr(self, "btn_mask_wrap_free", None))
+                self._shared_add_label(self.tr_ui("선택한 영역 안의 떨어진 마스크들을 하나의 채움 영역으로 감싸줍니다."))
+                populated = True
+            elif mode in (2, 3) and draw_mode == "mask_cut":
+                self._shared_add_label(self.tr_ui("마스크 커팅"))
+                add_widget(getattr(self, "btn_mask_cut_rect", None))
+                add_widget(getattr(self, "btn_mask_cut_free", None))
+                self._shared_add_label(self.tr_ui("커팅 폭"))
+                add_widget(getattr(self, "sb_mask_cut_px", None))
+                populated = True
+            elif mode in (1, 2, 3) and draw_mode == "ocr_region_select":
+                self._shared_add_label(self.tr_ui("OCR 분석 영역"))
+                add_widget(getattr(self, "btn_ocr_region_rect", None))
+                add_widget(getattr(self, "btn_ocr_region_free", None))
+                self._shared_add_label(self.tr_ui("OCR이 읽을 범위를 드래그로 지정합니다."))
+                add_widget(getattr(self, "btn_ocr_region_finish", None))
+                populated = True
+        except Exception:
+            pass
 
-            # 별도 작업 도구줄이 없을 때만 얇은 보조줄을 사용한다.
-            if hasattr(self, "source_compare_bar") and self.source_compare_bar.layout() is not None:
-                if self._add_source_compare_controls_to_layout(self.source_compare_bar.layout()):
-                    self.source_compare_bar.show()
-                    return
+        # 빈 상태여도 바 높이는 유지한다.
+        try:
+            self.shared_option_left_layout.addStretch(1)
+        except Exception:
+            pass
+        try:
+            self.place_source_compare_controls()
         except Exception:
             pass
 
 
+    def _source_compare_sync_blocked(self):
+        try:
+            if getattr(self, "_source_compare_splitter_adjusting", False):
+                return True
+            until = float(getattr(self, "_source_compare_sync_block_until", 0.0) or 0.0)
+            if until and time.monotonic() < until:
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _block_source_compare_sync_temporarily(self, ms=180):
+        try:
+            self._source_compare_sync_block_until = max(
+                float(getattr(self, "_source_compare_sync_block_until", 0.0) or 0.0),
+                time.monotonic() + max(0, int(ms)) / 1000.0,
+            )
+            self._source_compare_sync_pending = False
+            self._source_compare_reverse_sync_pending = False
+        except Exception:
+            pass
+
+    def _capture_compare_view_state(self, view):
+        try:
+            if view is None:
+                return None
+            return {
+                "transform": view.transform(),
+                "h": view.horizontalScrollBar().value(),
+                "v": view.verticalScrollBar().value(),
+            }
+        except Exception:
+            return None
+
+    def _restore_compare_view_state(self, view, state):
+        try:
+            if view is None or not state:
+                return
+            if state.get("transform") is not None:
+                view.setTransform(state.get("transform"))
+            if state.get("h") is not None:
+                view.horizontalScrollBar().setValue(int(state.get("h")))
+            if state.get("v") is not None:
+                view.verticalScrollBar().setValue(int(state.get("v")))
+            try:
+                view.viewport().update()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _capture_source_compare_splitter_states(self):
+        return {
+            "main": self._capture_compare_view_state(getattr(self, "view", None)),
+            "clone": self._capture_compare_view_state(getattr(self, "source_compare_view", None)),
+        }
+
+    def _restore_source_compare_splitter_states(self, states=None):
+        try:
+            if states is None:
+                states = getattr(self, "_source_compare_splitter_view_states", None)
+            if not states:
+                return
+            old_sync = getattr(self, "_source_compare_syncing", False)
+            self._source_compare_syncing = True
+            try:
+                self._restore_compare_view_state(getattr(self, "view", None), states.get("main"))
+                self._restore_compare_view_state(getattr(self, "source_compare_view", None), states.get("clone"))
+            finally:
+                self._source_compare_syncing = old_sync
+        except Exception:
+            pass
+
+    def _capture_main_view_state_for_compare_splitter(self):
+        try:
+            states = self._capture_source_compare_splitter_states()
+            return states.get("main")
+        except Exception:
+            return None
+
+    def _restore_main_view_state_for_compare_splitter(self, state=None):
+        try:
+            if state is None:
+                state = getattr(self, "_source_compare_splitter_main_view_state", None)
+            old_sync = getattr(self, "_source_compare_syncing", False)
+            self._source_compare_syncing = True
+            try:
+                self._restore_compare_view_state(getattr(self, "view", None), state)
+            finally:
+                self._source_compare_syncing = old_sync
+        except Exception:
+            pass
+
+    def reset_source_compare_splitter_half(self):
+        """원본 비교창과 작업창을 현재 사용 가능 너비 기준 정확히 반반으로 맞춘다."""
+        try:
+            keep_states = self._capture_source_compare_splitter_states()
+            split = getattr(self, 'source_compare_splitter', None)
+            if split is None or split.count() < 2:
+                return
+            total = max(0, int(split.width()) - max(0, (split.count() - 1) * int(split.handleWidth())))
+            if total <= 0:
+                total = sum(max(0, int(v)) for v in split.sizes())
+            if total <= 0:
+                return
+            left = total // 2
+            right = total - left
+            self._source_compare_splitter_adjusting = True
+            self._block_source_compare_sync_temporarily(260)
+            try:
+                split.setSizes([left, right])
+                self._restore_source_compare_splitter_states(keep_states)
+                QTimer.singleShot(0, lambda s=keep_states: self._restore_source_compare_splitter_states(s))
+                QTimer.singleShot(80, lambda s=keep_states: self._restore_source_compare_splitter_states(s))
+            finally:
+                QTimer.singleShot(180, lambda: setattr(self, '_source_compare_splitter_adjusting', False))
+            self.log('🖼️ 원본 비교창/작업창 너비를 1:1로 정렬했습니다.')
+        except Exception as e:
+            try:
+                self.log(f'⚠️ 원본 비교창 정렬 실패: {e}')
+            except Exception:
+                pass
+
     def open_source_compare_view(self):
-        """왼쪽에 현재 페이지의 원본 탭 이미지를 복제해 비교 보기로 띄운다."""
+        """왼쪽에 현재 페이지의 원본 탭 이미지를 복제해 비교 보기로 띄운다.
+        이미 열려 있으면 같은 버튼/단축키로 닫는다.
+        """
         if not getattr(self, "paths", None):
             try:
                 self.log(self.tr_ui("⚠️ 원본 비교창을 열 프로젝트가 없습니다."))
@@ -573,6 +797,9 @@ class MainWindowOperationsMixin:
                 pass
             return
         try:
+            if self.source_compare_is_visible():
+                self.close_source_compare_view()
+                return
             if hasattr(self, "source_compare_view"):
                 self.source_compare_view.show()
             if hasattr(self, "source_compare_controls"):
@@ -671,6 +898,8 @@ class MainWindowOperationsMixin:
 
     def start_source_compare_sync_timer(self):
         try:
+            if self._source_compare_sync_blocked():
+                return
             if not self.source_compare_is_visible():
                 return
             if hasattr(self, "cb_source_compare_sync") and not self.cb_source_compare_sync.isChecked():
@@ -692,12 +921,12 @@ class MainWindowOperationsMixin:
     def schedule_source_compare_sync(self, delay=16):
         """Coalesce source-compare clone sync requests.
 
-        The clone must follow the real work view after zoom, pan, resize,
-        scrollbar changes, page switches and splitter moves. Calling sync
-        immediately from every event can happen before Qt finishes updating
-        scrollbars, so this schedules one sync on the next event loop tick.
+        The clone follows real work-view interactions, but splitter resizing is layout-only
+        and must not move image coordinates.
         """
         try:
+            if self._source_compare_sync_blocked() or getattr(self, "_source_compare_syncing", False) or getattr(self, "_source_compare_user_driving", False):
+                return
             if not self.source_compare_is_visible():
                 return
             if hasattr(self, "cb_source_compare_sync") and not self.cb_source_compare_sync.isChecked():
@@ -708,6 +937,8 @@ class MainWindowOperationsMixin:
             def _run():
                 try:
                     self._source_compare_sync_pending = False
+                    if self._source_compare_sync_blocked() or getattr(self, "_source_compare_user_driving", False):
+                        return
                     self.sync_source_compare_from_main()
                 except Exception:
                     self._source_compare_sync_pending = False
@@ -741,7 +972,9 @@ class MainWindowOperationsMixin:
                 pass
 
     def sync_source_compare_from_main(self):
-        if getattr(self, "_source_compare_syncing", False):
+        if self._source_compare_sync_blocked():
+            return
+        if getattr(self, "_source_compare_syncing", False) or getattr(self, "_source_compare_user_driving", False):
             return
         if not self.source_compare_is_visible():
             return
@@ -749,9 +982,6 @@ class MainWindowOperationsMixin:
             return
         self._source_compare_syncing = True
         try:
-            # Clone mode A: copy the real work view transform and center scene point.
-            # Do not try to compensate for different viewport sizes; the user will
-            # match the panel sizes when exact clone comparison is needed.
             center = self.view.mapToScene(self.view.viewport().rect().center())
             self.source_compare_view.setTransform(self.view.transform())
             self.source_compare_view.centerOn(center)
@@ -763,6 +993,81 @@ class MainWindowOperationsMixin:
             pass
         finally:
             self._source_compare_syncing = False
+
+    def schedule_main_sync_from_source_compare(self, delay=0):
+        try:
+            if self._source_compare_sync_blocked() or getattr(self, "_source_compare_syncing", False):
+                return
+            if not self.source_compare_is_visible():
+                return
+            if hasattr(self, "cb_source_compare_sync") and not self.cb_source_compare_sync.isChecked():
+                return
+            if getattr(self, "_source_compare_reverse_sync_pending", False):
+                return
+            self._source_compare_reverse_sync_pending = True
+            def _run():
+                try:
+                    self._source_compare_reverse_sync_pending = False
+                    if self._source_compare_sync_blocked():
+                        return
+                    self.sync_main_from_source_compare()
+                except Exception:
+                    self._source_compare_reverse_sync_pending = False
+            QTimer.singleShot(max(0, int(delay)), _run)
+        except Exception:
+            try:
+                self._source_compare_reverse_sync_pending = False
+            except Exception:
+                pass
+
+    def sync_main_from_source_compare(self):
+        if self._source_compare_sync_blocked():
+            return
+        if getattr(self, "_source_compare_syncing", False):
+            return
+        if not self.source_compare_is_visible():
+            return
+        if hasattr(self, "cb_source_compare_sync") and not self.cb_source_compare_sync.isChecked():
+            return
+        self._source_compare_syncing = True
+        try:
+            center = self.source_compare_view.mapToScene(self.source_compare_view.viewport().rect().center())
+            self.view.setTransform(self.source_compare_view.transform())
+            self.view.centerOn(center)
+            try:
+                self.view.viewport().update()
+            except Exception:
+                pass
+        except Exception:
+            pass
+        finally:
+            self._source_compare_syncing = False
+
+    def _on_main_view_scroll_changed_for_source_compare(self, *_args):
+        try:
+            if self._source_compare_sync_blocked() or getattr(self, "_source_compare_syncing", False):
+                return
+            self.schedule_source_compare_sync(0)
+        except Exception:
+            pass
+
+    def _on_source_compare_scroll_changed_for_main(self, *_args):
+        try:
+            if self._source_compare_sync_blocked() or getattr(self, "_source_compare_syncing", False):
+                return
+            sc_view = getattr(self, "source_compare_view", None)
+            # Resize/layout changes also move scrollbars. Treat reverse sync as user intent
+            # only when the clone view itself is being interacted with.
+            user_driving = bool(getattr(self, "_source_compare_user_driving", False))
+            try:
+                user_driving = user_driving or bool(sc_view is not None and (sc_view.underMouse() or sc_view.viewport().underMouse()))
+            except Exception:
+                pass
+            if not user_driving:
+                return
+            self.schedule_main_sync_from_source_compare(0)
+        except Exception:
+            pass
 
     def set_tool(self, m):
         mode = self.cb_mode.currentIndex() if hasattr(self, "cb_mode") else 0
@@ -785,6 +1090,9 @@ class MainWindowOperationsMixin:
         if m == 'paste_text' and mode != 4:
             self.log("⚠️ 텍스트 붙여넣기는 최종화면에서만 사용할 수 있습니다.")
             return
+        if m == 'raster_erase' and mode != 4:
+            self.log("⚠️ " + self.tr_ui("객체 일부 지우기는 최종화면에서만 사용할 수 있습니다."))
+            return
         if m == 'ocr_region_select' and mode in [0, 4]:
             self.log("⚠️ OCR 분석 영역 지정은 분석도/마스크 탭에서 사용하세요.")
             return
@@ -801,16 +1109,7 @@ class MainWindowOperationsMixin:
 
         self.view.draw_mode = m
         self.view.setDragMode(QGraphicsView.DragMode.NoDrag if m else QGraphicsView.DragMode.ScrollHandDrag)
-        if hasattr(self, "magic_wand_bar"):
-            self.magic_wand_bar.setVisible(m == 'magic_wand' and mode in [2, 3])
-        if hasattr(self, "mask_wrap_bar"):
-            self.mask_wrap_bar.setVisible(m == 'mask_wrap' and mode in [2, 3])
-        if hasattr(self, "mask_cut_bar"):
-            self.mask_cut_bar.setVisible(m == 'mask_cut' and mode in [2, 3])
-        if hasattr(self, "ocr_region_bar"):
-            self.ocr_region_bar.setVisible(m == 'ocr_region_select' and mode in [1, 2, 3])
-        if hasattr(self, "area_paint_bar"):
-            self.area_paint_bar.setVisible(m == 'area_paint' and mode == 4)
+        self._hide_legacy_option_bars()
         if m != 'magic_wand':
             self.clear_magic_wand_selection()
         if m != 'mask_wrap' and hasattr(self.view, "clear_mask_wrap_preview"):
@@ -825,10 +1124,12 @@ class MainWindowOperationsMixin:
             self.view.clear_area_paint_preview()
         if m != 'area_paint' and hasattr(self.view, "area_paint_points"):
             self.view.area_paint_points = []
+        if m != 'raster_erase' and hasattr(self.view, "clear_raster_erase_preview"):
+            self.view.clear_raster_erase_preview()
 
         self.update_final_paint_option_bar_visibility()
         try:
-            self.place_source_compare_controls()
+            self.refresh_shared_option_bar()
         except Exception:
             pass
 
@@ -838,6 +1139,8 @@ class MainWindowOperationsMixin:
             self.log("📋 도구: 텍스트 붙여넣기 위치 지정")
         elif m == 'area_paint':
             self.log("▦ 도구: 영역 페인팅")
+        elif m == 'raster_erase':
+            self.log("🧽 " + self.tr_ui("도구: 텍스트 객체 일부 지우기"))
         elif m == 'draw':
             self.log("🖌️ 도구: 브러시")
         elif m == 'erase':
@@ -1007,9 +1310,16 @@ class MainWindowOperationsMixin:
         form_layout.addWidget(line)
 
         add_setting_row(
-            "범위지정 해제",
-            "저장된 OCR 분석 영역을 모두 지우고, 다시 전체 화면 분석 상태로 되돌립니다.",
-            "해제하기",
+            "현재 페이지 범위지정 해제",
+            "현재 보고 있는 페이지만 OCR 분석 영역을 지우고, 다른 페이지의 영역은 유지합니다.",
+            "현재 페이지만 해제",
+            self.clear_current_ocr_analysis_regions,
+        )
+
+        add_setting_row(
+            "전체 범위지정 해제",
+            "저장된 OCR 분석 영역을 모든 페이지에서 지우고, 다시 전체 화면 분석 상태로 되돌립니다.",
+            "전체 해제",
             self.clear_all_ocr_analysis_regions,
         )
 
@@ -1142,6 +1452,32 @@ class MainWindowOperationsMixin:
         self.ocr_region_target_label = ""
         self.set_tool(None)
         self.refresh_ocr_region_overlay()
+
+    def clear_current_ocr_analysis_regions(self):
+        if not getattr(self, "paths", None):
+            return
+        msg = self.tr_ui("현재 페이지의 OCR 분석 영역만 지울까요?\n\n다른 페이지의 OCR 분석 영역은 유지됩니다.")
+        if QMessageBox.question(self, self.tr_ui("현재 페이지 OCR 분석 범위 해제"), msg) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.commit_current_page_ui_to_data(include_mask=False)
+            self.push_project_undo("현재 페이지 OCR 분석 범위 해제")
+        except Exception:
+            pass
+        curr = self.data.get(self.idx)
+        if isinstance(curr, dict):
+            curr['ocr_analysis_regions'] = []
+        temp = getattr(self, "ocr_region_temp_by_page", None)
+        if isinstance(temp, dict):
+            temp[self.idx] = []
+            self.ocr_region_temp_history = []
+        self.auto_save_project()
+        self.refresh_ocr_region_overlay()
+        try:
+            QApplication.processEvents()
+        except Exception:
+            pass
+        self.log("🧹 현재 페이지 OCR 분석 범위를 해제했습니다. 다른 페이지의 영역은 유지됩니다.")
 
     def clear_all_ocr_analysis_regions(self):
         if not getattr(self, "paths", None):
@@ -1439,7 +1775,7 @@ class MainWindowOperationsMixin:
         if not seq_text:
             return ""
         try:
-            target_seq = QKeySequence(seq_text)
+            target_seq = key_sequence_from_text(seq_text)
         except Exception:
             return ""
         for key, value in list(getattr(self.shortcut_settings, "shortcuts", {}).items()):
@@ -1448,7 +1784,7 @@ class MainWindowOperationsMixin:
             if not getattr(self.shortcut_settings, "enabled", {}).get(key, True):
                 continue
             try:
-                other_seq = QKeySequence(str(value or ""))
+                other_seq = key_sequence_from_text(str(value or ""))
                 if other_seq and not other_seq.isEmpty() and other_seq.matches(target_seq) == QKeySequence.SequenceMatch.ExactMatch:
                     return self.standard_shortcut_label(key) if hasattr(self, "standard_shortcut_label") else str(key)
             except Exception:
@@ -1457,7 +1793,7 @@ class MainWindowOperationsMixin:
             if not macro.get("enabled", True):
                 continue
             try:
-                other_seq = QKeySequence(str(macro.get("shortcut", "") or ""))
+                other_seq = key_sequence_from_text(str(macro.get("shortcut", "") or ""))
                 if other_seq and not other_seq.isEmpty() and other_seq.matches(target_seq) == QKeySequence.SequenceMatch.ExactMatch:
                     return str(macro.get("name") or "매크로")
             except Exception:
@@ -1545,7 +1881,7 @@ class MainWindowOperationsMixin:
         seq_row = QHBoxLayout(seq_widget)
         seq_row.setContentsMargins(0, 0, 0, 0)
         seq_row.setSpacing(8)
-        seq_edit = QKeySequenceEdit(dlg)
+        seq_edit = ConfirmingKeySequenceEdit(dlg)
         seq_edit.setMinimumWidth(170)
         try:
             seq_edit.setKeySequence(self.shortcut_settings.seq("quick_ocr_execute"))
@@ -1574,7 +1910,19 @@ class MainWindowOperationsMixin:
         root.addStretch(1)
 
         def apply_quick_ocr_settings():
-            seq_text = seq_edit.keySequence().toString(QKeySequence.SequenceFormat.PortableText).strip()
+            try:
+                clean_seq = sequence_without_confirm_keys(seq_edit.keySequence())
+                clean_text = key_sequence_to_portable(clean_seq).strip()
+                current_text = key_sequence_to_portable(seq_edit.keySequence()).strip()
+                if clean_text != current_text:
+                    seq_edit.blockSignals(True)
+                    try:
+                        seq_edit.setKeySequence(clean_seq)
+                    finally:
+                        seq_edit.blockSignals(False)
+                seq_text = clean_text
+            except Exception:
+                seq_text = key_sequence_to_portable(seq_edit.keySequence()).strip()
             conflict = self._quick_ocr_shortcut_conflict_label(seq_text)
             if conflict:
                 QMessageBox.warning(
@@ -2257,9 +2605,17 @@ class MainWindowOperationsMixin:
                 self.tab.setItem(row, 1, check_item)
                 self.tab.setCellWidget(row, 1, self.make_center_check_widget(row, is_checked))
 
-                text_item = QTableWidgetItem(x.get('text', ''))
+                if x.get('rasterized_text'):
+                    display_text = str(x.get('text', '') or '')
+                    display_trans = str(x.get('translated_text', '') or x.get('object_source_text', '') or '')
+                    text_item = QTableWidgetItem(display_text)
+                    trans_item = QTableWidgetItem("[객체] " + display_trans)
+                    text_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                    trans_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                else:
+                    text_item = QTableWidgetItem(x.get('text', ''))
+                    trans_item = QTableWidgetItem(x.get('translated_text', ''))
                 text_item.setData(Qt.ItemDataRole.UserRole, str(x.get('text', '') or ''))
-                trans_item = QTableWidgetItem(x.get('translated_text', ''))
                 trans_item.setData(Qt.ItemDataRole.UserRole, str(x.get('translated_text', '') or ''))
                 self.tab.setItem(row, 2, text_item)
                 self.tab.setItem(row, 3, trans_item)
@@ -3281,20 +3637,9 @@ class MainWindowOperationsMixin:
         curr = self.data.get(self.idx)
         if not curr:
             self.update_text_style_control_state([])
-            if hasattr(self, "magic_wand_bar"):
-                self.magic_wand_bar.hide()
-            if hasattr(self, "mask_wrap_bar"):
-                self.mask_wrap_bar.hide()
-            if hasattr(self, "mask_cut_bar"):
-                self.mask_cut_bar.hide()
-            if hasattr(self, "ocr_region_bar"):
-                self.ocr_region_bar.hide()
-            if hasattr(self, "area_paint_bar"):
-                self.area_paint_bar.hide()
-            if hasattr(self, "final_edit_bar"):
-                self.final_edit_bar.hide()
+            self._hide_legacy_option_bars()
             try:
-                self.place_source_compare_controls()
+                self.refresh_shared_option_bar()
             except Exception:
                 pass
             return
@@ -3308,20 +3653,10 @@ class MainWindowOperationsMixin:
             self.set_tool(None)
         if i != 4 and getattr(self.view, "draw_mode", None) == 'area_paint':
             self.set_tool(None)
-        elif hasattr(self, "magic_wand_bar"):
-            self.magic_wand_bar.setVisible(getattr(self.view, "draw_mode", None) == 'magic_wand' and i in [2, 3])
-        if hasattr(self, "mask_wrap_bar"):
-            self.mask_wrap_bar.setVisible(getattr(self.view, "draw_mode", None) == 'mask_wrap' and i in [2, 3])
-        if hasattr(self, "mask_cut_bar"):
-            self.mask_cut_bar.setVisible(getattr(self.view, "draw_mode", None) == 'mask_cut' and i in [2, 3])
-        if hasattr(self, "ocr_region_bar"):
-            self.ocr_region_bar.setVisible(getattr(self.view, "draw_mode", None) == 'ocr_region_select' and i in [1, 2, 3])
-        if hasattr(self, "area_paint_bar"):
-            self.area_paint_bar.setVisible(getattr(self.view, "draw_mode", None) == 'area_paint' and i == 4)
-        self.final_edit_bar.hide()
+        self._hide_legacy_option_bars()
         self.update_final_paint_option_bar_visibility()
         try:
-            self.place_source_compare_controls()
+            self.refresh_shared_option_bar()
         except Exception:
             pass
 
@@ -4285,6 +4620,20 @@ class MainWindowOperationsMixin:
         pressed = QKeySequence(mods_value | key)
         return pressed.matches(seq) == QKeySequence.SequenceMatch.ExactMatch
 
+    def keyReleaseEvent(self, event):
+        try:
+            if getattr(self, "_page_full_name_popup_hold_by_shortcut", False) and not event.isAutoRepeat():
+                self.hide_current_page_full_name()
+                event.accept()
+                return
+            if getattr(self, "_page_list_popup_hold_by_shortcut", False) and not event.isAutoRepeat():
+                self.hide_page_tab_menu()
+                event.accept()
+                return
+        except Exception:
+            pass
+        super().keyReleaseEvent(event)
+
     def keyPressEvent(self, event):
         if self.is_text_transform_active() and (
             event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
@@ -4315,19 +4664,38 @@ class MainWindowOperationsMixin:
                 event.accept()
                 return
 
-        # 텍스트 편집 중에도 Ctrl+Z는 YSB 전역 Undo로 처리한다.
-        # 일반 글자 입력/복사/붙여넣기 등은 기존 편집기 동작을 우선한다.
+        # 텍스트/숫자 입력 중에는 Backspace/숫자/방향키 등이 전역 단축키로 새지 않게 한다.
+        # 특히 QSpinBox가 포커스를 가진 상태에서 valueChanged/UI 갱신이 얽히면
+        # OCR 언어 콤보박스로 포커스가 튀는 문제가 생길 수 있다.
         fw = QApplication.focusWidget()
-        if isinstance(fw, (QTextEdit, QLineEdit)):
+        input_target = None
+        try:
+            input_target = self.current_single_line_input_widget(fw)
+        except Exception:
+            input_target = None
+        if isinstance(fw, (QTextEdit, QLineEdit, QPlainTextEdit)) or isinstance(input_target, (QAbstractSpinBox, QComboBox, QFontComboBox, QKeySequenceEdit)):
             mods_for_edit = event.modifiers()
-            if (mods_for_edit & Qt.KeyboardModifier.ControlModifier) and key == Qt.Key.Key_Z:
-                self.handle_global_undo_shortcut()
-                event.accept()
-                return
-            if (mods_for_edit & Qt.KeyboardModifier.ControlModifier) and key == Qt.Key.Key_Y:
-                self.handle_general_redo()
-                event.accept()
-                return
+            # 단일 수치/콤보/라인 입력칸에서는 Enter/Esc가 포커스 탈출로 동작해야 한다.
+            # 그냥 super()로 넘기면 Qt의 focus traversal 때문에 OCR 언어 콤보박스로 포커스가 이동할 수 있다.
+            if input_target is not None and key in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Escape):
+                if key == Qt.Key.Key_Escape:
+                    if self.escape_single_line_input_focus_first(input_target):
+                        event.accept()
+                        return
+                elif not (mods_for_edit & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.AltModifier)):
+                    if self.finish_single_line_input_by_enter(input_target):
+                        event.accept()
+                        return
+            # 멀티라인/일반 텍스트 편집 중 Ctrl+Z/Y만 기존 YSB 전역 Undo/Redo로 유지한다.
+            if isinstance(fw, (QTextEdit, QPlainTextEdit, QLineEdit)):
+                if (mods_for_edit & Qt.KeyboardModifier.ControlModifier) and key == Qt.Key.Key_Z:
+                    self.handle_global_undo_shortcut()
+                    event.accept()
+                    return
+                if (mods_for_edit & Qt.KeyboardModifier.ControlModifier) and key == Qt.Key.Key_Y:
+                    self.handle_general_redo()
+                    event.accept()
+                    return
             super().keyPressEvent(event)
             return
 
@@ -4335,6 +4703,28 @@ class MainWindowOperationsMixin:
         ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
         shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
         alt = bool(mods & Qt.KeyboardModifier.AltModifier)
+
+        # 페이지 목록 단축키는 누르고 있는 동안만 표시하고, 키를 떼면 즉시 닫는다.
+        if self._event_matches_shortcut(event, "work_page_list"):
+            if not event.isAutoRepeat():
+                try:
+                    self._page_list_popup_hold_by_shortcut = True
+                    self.show_page_tab_menu(hold_by_shortcut=True)
+                except TypeError:
+                    self.show_page_tab_menu()
+            event.accept()
+            return
+
+        # 현재 페이지 이름 팝업도 누르고 있는 동안만 표시한다.
+        if self._event_matches_shortcut(event, "work_page_full_name"):
+            if not event.isAutoRepeat():
+                try:
+                    self._page_full_name_popup_hold_by_shortcut = True
+                    self.show_current_page_full_name()
+                except Exception:
+                    pass
+            event.accept()
+            return
 
         # Alt+숫자: 작업탭 직접 이동
         if alt and key in (
@@ -4503,7 +4893,22 @@ class MainWindowOperationsMixin:
         # 최종 화면에서 텍스트를 선택한 상태일 때만 작동하는 개별 텍스트 단축키
         if self.cb_mode.currentIndex() == 4 and self.selected_text_items():
             if self._event_matches_shortcut(event, "text_transform_toggle"):
-                self.toggle_text_transform_mode(self.selected_text_items()[0].data)
+                self.toggle_selected_text_transform_quick()
+                return
+            if self._event_matches_shortcut(event, "text_effect_gradient"):
+                self.open_selected_text_gradient_dialog()
+                return
+            if self._event_matches_shortcut(event, "text_skew_toggle"):
+                self.toggle_selected_text_skew_quick()
+                return
+            if self._event_matches_shortcut(event, "text_trapezoid_toggle"):
+                self.toggle_selected_text_trapezoid_quick()
+                return
+            if self._event_matches_shortcut(event, "text_arc_toggle"):
+                self.toggle_selected_text_arc_quick()
+                return
+            if self._event_matches_shortcut(event, "text_rasterize"):
+                self.rasterize_selected_text_quick()
                 return
             if self._event_matches_shortcut(event, "item_font_select"):
                 self.open_font_select_dialog()

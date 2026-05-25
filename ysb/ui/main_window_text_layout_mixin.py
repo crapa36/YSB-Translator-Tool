@@ -174,25 +174,25 @@ class MainWindowTextLayoutMixin:
         self._style_signal_lock = True
         try:
             self.cb_font.setCurrentFont(QFont(style["font_family"]))
-            self.sb_font_size.setValue(int(style["font_size"]))
-            self.sb_strk.setValue(int(style["stroke_width"]))
+            self._set_widget_value_blocked(self.sb_font_size, int(style["font_size"]))
+            self._set_widget_value_blocked(self.sb_strk, int(style["stroke_width"]))
             self.default_text_color = style["text_color"]
             self.default_stroke_color = style["stroke_color"]
             self.default_align = style["align"]
             if hasattr(self, "sb_line_spacing"):
-                self.sb_line_spacing.setValue(100 if int(style["line_spacing"] or 0) == 0 else int(style["line_spacing"]))
+                self._set_widget_value_blocked(self.sb_line_spacing, 100 if int(style["line_spacing"] or 0) == 0 else int(style["line_spacing"]))
             if hasattr(self, "sb_letter_spacing"):
-                self.sb_letter_spacing.setValue(int(style["letter_spacing"]))
+                self._set_widget_value_blocked(self.sb_letter_spacing, int(style["letter_spacing"]))
             if hasattr(self, "sb_char_width"):
-                self.sb_char_width.setValue(int(style["char_width"]))
+                self._set_widget_value_blocked(self.sb_char_width, int(style["char_width"]))
             if hasattr(self, "sb_char_height"):
-                self.sb_char_height.setValue(int(style["char_height"]))
+                self._set_widget_value_blocked(self.sb_char_height, int(style["char_height"]))
             if hasattr(self, "btn_bold"):
-                self.btn_bold.setChecked(bool(style["bold"]))
+                self._set_widget_checked_blocked(self.btn_bold, bool(style["bold"]))
             if hasattr(self, "btn_italic"):
-                self.btn_italic.setChecked(bool(style["italic"]))
+                self._set_widget_checked_blocked(self.btn_italic, bool(style["italic"]))
             if hasattr(self, "btn_strike"):
-                self.btn_strike.setChecked(bool(style["strike"]))
+                self._set_widget_checked_blocked(self.btn_strike, bool(style["strike"]))
             self.update_color_button_styles()
         finally:
             self._style_signal_lock = False
@@ -323,7 +323,7 @@ class MainWindowTextLayoutMixin:
             if isinstance(shortcut, QKeySequence):
                 seq = shortcut
             else:
-                seq = QKeySequence(str(shortcut or ""))
+                seq = key_sequence_from_text(str(shortcut or ""))
             return seq.toString(QKeySequence.SequenceFormat.PortableText)
         except Exception:
             return str(shortcut or "").strip()
@@ -1496,7 +1496,7 @@ class MainWindowTextLayoutMixin:
                 btn_select = QPushButton("선택")
                 name_edit = QLineEdit(name)
                 summary = QLabel(self.style_summary_text(preset.get("style"), preset.get("include"))); summary.setWordWrap(True)
-                key_edit = QKeySequenceEdit(QKeySequence(str(preset.get("shortcut", "") or ""))); key_edit.setMaximumWidth(160)
+                key_edit = ConfirmingKeySequenceEdit(); key_edit.setKeySequence(key_sequence_from_text(str(preset.get("shortcut", "") or ""))); key_edit.setMaximumWidth(160)
                 btn_update = QPushButton("수정 저장")
                 btn_delete = QPushButton("삭제")
 
@@ -1575,14 +1575,26 @@ class MainWindowTextLayoutMixin:
                     refresh_rows(selected_name["value"])
 
                 def on_shortcut_finished(edit=key_edit, n=name, old_seq=str(preset.get("shortcut", "") or "")):
-                    seq_text = edit.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
+                    try:
+                        clean_seq = sequence_without_confirm_keys(edit.keySequence())
+                        clean_text = key_sequence_to_portable(clean_seq)
+                        current_text = key_sequence_to_portable(edit.keySequence())
+                        if clean_text != current_text:
+                            edit.blockSignals(True)
+                            try:
+                                edit.setKeySequence(clean_seq)
+                            finally:
+                                edit.blockSignals(False)
+                        seq_text = clean_text
+                    except Exception:
+                        seq_text = key_sequence_to_portable(edit.keySequence())
                     if self.normalize_shortcut_text(seq_text) == self.normalize_shortcut_text(old_seq):
                         return
                     if not self.set_item_text_preset_shortcut_checked(n, seq_text, parent=dialog):
                         edit.blockSignals(True)
                         try:
                             if old_seq:
-                                edit.setKeySequence(QKeySequence(old_seq))
+                                edit.setKeySequence(key_sequence_from_text(old_seq))
                             else:
                                 edit.clear()
                         finally:
@@ -2066,6 +2078,8 @@ class MainWindowTextLayoutMixin:
         - 그룹 전체 글자수 기반 전역 cap은 사용하지 않는다.
         """
         pieces = self._collect_item_ocr_pieces(item)
+        # Manga OCR은 detector 영역 crop을 읽는 인식 OCR이라, 이 좌표를 글자 크기 추정에 쓰지 않는다.
+        pieces = [p for p in pieces if str(p.get('source_provider', '') or '').lower() != 'local_manga_ocr']
         if not pieces:
             return None
 
@@ -2323,6 +2337,178 @@ class MainWindowTextLayoutMixin:
         source = str(item.get('text', '') or '')
         return 'text', source
 
+    def is_manga_ocr_layout_item(self, item):
+        """Manga OCR 결과인지 판정한다.
+
+        Manga OCR은 글자/단어 좌표를 주는 OCR이 아니라, detector 영역 crop을 읽어
+        문자열만 돌려주는 인식 전용 OCR에 가깝다. 따라서 일반 일본어 OCR 좌표 기반
+        자동 크기 추정으로 보내면 detector 영역 폭/높이를 글자 크기로 오해할 수 있다.
+        """
+        if not isinstance(item, dict):
+            return False
+        if str(item.get('ocr_engine', '') or '').lower() == 'manga_ocr':
+            return True
+        provider_keys = (
+            'source_provider', 'provider', 'ocr_provider', 'source', 'engine',
+        )
+        for key in provider_keys:
+            if str(item.get(key, '') or '').lower() == 'local_manga_ocr':
+                return True
+        for list_key in ('ocr_items', 'ocr_items_all', 'raw_items', 'source_items', 'children', 'segments', 'parts', 'items'):
+            val = item.get(list_key)
+            if not isinstance(val, list):
+                continue
+            for piece in val:
+                if not isinstance(piece, dict):
+                    continue
+                provider = str(piece.get('source_provider', '') or piece.get('source', '') or piece.get('provider', '') or '').lower()
+                if provider == 'local_manga_ocr':
+                    return True
+        return False
+
+    def _wrap_manga_translation_lines(self, text, fm, max_w, letter_spacing=0):
+        """Manga OCR 전용 번역문 줄내림.
+
+        - 공백 기준으로 재조립한다.
+        - 5글자를 넘는 긴 토큰은 억지로 글자 단위 분해하지 않는다.
+        - 짧은 조사/단어들은 가능한 만큼 같은 줄에 붙이고, 넘치면 다음 줄로 내린다.
+        - Manga OCR 영역은 세로로 긴 경우가 많으므로 폭보다 하단 초과 방지를 우선한다.
+        """
+        text = re.sub(r'\s+', ' ', str(text or '').replace('\r\n', '\n').replace('\r', '\n').replace('\n', ' ')).strip()
+        if not text:
+            return ['']
+        max_w = max(1, int(max_w))
+        tokens = [t for t in text.split(' ') if t]
+        if not tokens:
+            return [text]
+
+        def compact_len(s):
+            return len(''.join(ch for ch in str(s or '') if not ch.isspace()))
+
+        def width(s):
+            return self._text_advance_with_letter_spacing(s, fm, letter_spacing)
+
+        lines = []
+        current = ''
+        for token in tokens:
+            if not current:
+                current = token
+                continue
+
+            trial = current + ' ' + token
+            # 짧은 묶음은 폭이 조금 넘어도 한 줄로 둔다. 너무 잦은 줄내림 방지.
+            if compact_len(trial) <= 5:
+                current = trial
+                continue
+
+            if width(trial) <= max_w:
+                current = trial
+                continue
+
+            lines.append(current.rstrip())
+            current = token
+
+        if current:
+            lines.append(current.rstrip())
+        return lines or [text]
+
+    def _fit_manga_ocr_text_for_item(self, item, page_idx=None):
+        """Manga OCR 전용 자동 줄내림 + 자동 크기 조정.
+
+        Manga OCR은 일본어 전용 인식 OCR이지만 좌표는 detector 영역 단위에 가깝다.
+        따라서 원문 좌표 기반 글자 크기 추정 대신, 실제 출력될 번역문을 기준으로
+        위에서 아래로 배치하고 OCR 영역의 하단을 넘지 않을 때까지 font_size를 줄인다.
+        """
+        rect = item.get('rect')
+        if not rect or len(rect) < 4:
+            return False
+
+        # 번역문 기준이 원칙. 번역문이 아직 없으면 안전하게 원문을 fallback으로 사용한다.
+        text_key = 'translated_text' if str(item.get('translated_text', '') or '').strip() else 'text'
+        original = str(item.get(text_key, '') or '')
+        if not original.strip():
+            return False
+
+        source_text = self.normalize_auto_wrap_source_text_for_lang(original, lang='ko')
+        if not source_text.strip():
+            return False
+
+        self.ensure_item_style_for_auto(item)
+
+        try:
+            box_w = max(1, int(rect[2]))
+            box_h = max(1, int(rect[3]))
+        except Exception:
+            return False
+
+        try:
+            family = item.get('font_family') or self.cb_font.currentFont().family()
+        except Exception:
+            family = item.get('font_family') or 'Arial'
+        try:
+            start_size = int(item.get('font_size', self.sb_font_size.value()) or self.sb_font_size.value())
+        except Exception:
+            start_size = 24
+        try:
+            stroke = int(item.get('stroke_width', 0) or 0)
+        except Exception:
+            stroke = 0
+
+        min_size = 5
+        # 처음엔 넉넉하게 잡고 아래로 넘치지 않을 때까지 줄인다.
+        max_size_by_box = int(max(box_w * 0.95, box_h * 0.28, start_size * 1.70))
+        max_size = max(min_size, min(260, max(start_size, max_size_by_box)))
+        # 폭은 조금 튀어나와도 허용하되, 줄내림 기준 자체는 너무 넓게 잡지 않는다.
+        wrap_target_w = max(1, int(box_w * 1.12) - stroke * 2)
+        # 핵심 기준: 하단 초과 방지. 약간의 하단 여백만 둔다.
+        max_h = max(1, int(box_h * 0.98) - stroke * 2)
+
+        chosen_size = None
+        chosen_lines = None
+        chosen_height = None
+
+        for size in range(max_size, min_size - 1, -1):
+            _font, fm, line_spacing_pct, char_width_pct, char_height_pct, letter_spacing = self._auto_layout_item_style_metrics(item, family, size)
+            sx = max(0.1, char_width_pct / 100.0)
+            wrap_w = max(1, int(wrap_target_w / sx))
+            lines = self._wrap_manga_translation_lines(source_text, fm, wrap_w, letter_spacing=letter_spacing)
+            _measured_w, measured_h = self._measure_wrapped_lines_for_auto_fit(item, lines, family, size, stroke=stroke)
+            chosen_size = size
+            chosen_lines = lines
+            chosen_height = measured_h
+            if measured_h <= max_h:
+                break
+
+        if chosen_lines is None or chosen_size is None:
+            return False
+
+        wrapped = '\n'.join([line.rstrip() for line in chosen_lines]).strip()
+        changed = False
+
+        if wrapped and wrapped != str(original or ''):
+            item[text_key] = wrapped
+            changed = True
+
+        old_size = int(item.get('font_size', start_size) or start_size)
+        if old_size != int(chosen_size):
+            item['font_size'] = int(chosen_size)
+            changed = True
+
+        if item.get('ocr_engine') != 'manga_ocr':
+            item['ocr_engine'] = 'manga_ocr'
+            changed = True
+        if item.get('ocr_lang') != 'ja':
+            item['ocr_lang'] = 'ja'
+            changed = True
+        item['auto_layout_mode'] = 'manga_ocr_translation_fit'
+
+        if chosen_height is not None and chosen_height > max_h:
+            item['auto_wrap_height_overflow'] = True
+        else:
+            item.pop('auto_wrap_height_overflow', None)
+
+        return changed
+
     def normalize_auto_wrap_source_text_for_lang(self, text, lang=None):
         """언어별 자동 줄내림용 원문 정리. 기존 줄바꿈은 다시 감기 위해 해제한다."""
         lang = self._normalize_ocr_lang_for_layout(lang) or 'ja'
@@ -2541,6 +2727,12 @@ class MainWindowTextLayoutMixin:
         - 영어/한국어: 번역문 기준으로 자동 줄내림 + 최대 크기 맞춤을 함께 수행한다.
         - 일본어/중국어: 기존 원문 OCR/마스크 기반 크기 추정 로직을 유지한다.
         """
+        if self.is_manga_ocr_layout_item(item):
+            return self._fit_manga_ocr_text_for_item(item, page_idx=page_idx)
+
+        if self.is_manga_ocr_layout_item(item):
+            return self._fit_manga_ocr_text_for_item(item)
+
         lang = self.item_ocr_language_for_layout(item)
         if lang in ('en', 'ko'):
             return self._fit_space_language_text_for_item(item, lang=lang)
@@ -2939,6 +3131,82 @@ class MainWindowTextLayoutMixin:
                     pass
         return max_id + 1
 
+    def text_clipboard_visible_anchor(self, data_items=None):
+        """붙여넣기 기준점을 실제 보이는 텍스트의 좌상단에 가깝게 잡는다."""
+        src_items = [copy.deepcopy(d) for d in (data_items or self.text_clipboard or []) if isinstance(d, dict)]
+        if not src_items:
+            return 0.0, 0.0
+        first = src_items[0]
+        if first.get('rasterized_text'):
+            rect = list(first.get('rect') or [0, 0, 1, 1])
+            while len(rect) < 4:
+                rect.append(1)
+            try:
+                return float(rect[0]) + float(first.get('x_off', 0) or 0), float(rect[1]) + float(first.get('y_off', 0) or 0)
+            except Exception:
+                return 0.0, 0.0
+        try:
+            item = TypesettingItem(
+                first,
+                self.cb_font.currentFont().family() if hasattr(self, 'cb_font') else 'Arial',
+                self.sb_font_size.value() if hasattr(self, 'sb_font_size') else int(first.get('font_size', 24) or 24),
+                self.sb_strk.value() if hasattr(self, 'sb_strk') else int(first.get('stroke_width', 0) or 0),
+                None,
+                text_color=getattr(self, "default_text_color", "#000000"),
+                stroke_color=getattr(self, "default_stroke_color", "#FFFFFF"),
+                align=getattr(self, "default_align", "center"),
+            )
+            r = item.text_content_scene_rect()
+            if not r.isNull() and r.width() > 0 and r.height() > 0:
+                return float(r.left()), float(r.top())
+        except Exception:
+            pass
+        rect = list(first.get('rect') or [0, 0, 1, 1])
+        while len(rect) < 4:
+            rect.append(1)
+        try:
+            return float(rect[0]) + float(first.get('x_off', 0) or 0), float(rect[1]) + float(first.get('y_off', 0) or 0)
+        except Exception:
+            return 0.0, 0.0
+
+    def text_clipboard_visible_bounds(self, data_items=None):
+        """붙여넣기 미리보기/확정 배치용 대략 bounds를 구한다."""
+        src_items = [copy.deepcopy(d) for d in (data_items or self.text_clipboard or []) if isinstance(d, dict)]
+        if not src_items:
+            return 0.0, 0.0, 1.0, 1.0
+        xs = []
+        ys = []
+        for d in src_items:
+            rect = list(d.get('rect') or [0, 0, 1, 1])
+            while len(rect) < 4:
+                rect.append(1)
+            try:
+                x = float(rect[0]) + float(d.get('x_off', 0) or 0)
+                y = float(rect[1]) + float(d.get('y_off', 0) or 0)
+                w = max(1.0, float(rect[2]))
+                h = max(1.0, float(rect[3]))
+            except Exception:
+                x, y, w, h = 0.0, 0.0, 1.0, 1.0
+            xs.extend([x, x + w])
+            ys.extend([y, y + h])
+        return min(xs), min(ys), max(xs), max(ys)
+
+    def text_clipboard_paste_origin_from_cursor(self, data_items, scene_pos):
+        """커서의 끝이 텍스트 묶음의 상단 중앙에 오도록 배치한다."""
+        try:
+            cx, cy = float(scene_pos.x()), float(scene_pos.y())
+        except Exception:
+            cx, cy = 0.0, 0.0
+        base_x, base_y = self.text_clipboard_visible_anchor(data_items)
+        try:
+            _l, _t, right, bottom = self.text_clipboard_visible_bounds(data_items)
+            group_w = max(1.0, float(right) - float(base_x))
+            group_h = max(1.0, float(bottom) - float(base_y))
+        except Exception:
+            group_w, group_h = 260.0, 80.0
+        gap = 3.0
+        return cx - (group_w / 2.0), cy - group_h - gap
+
     def paste_text_clipboard_at(self, scene_pos=None):
         curr = self.data.get(self.idx)
         if not curr:
@@ -2955,12 +3223,9 @@ class MainWindowTextLayoutMixin:
             px, py = 0.0, 0.0
 
         src_items = [copy.deepcopy(d) for d in self.text_clipboard]
-        first = src_items[0].get('rect') or [0, 0, 1, 1]
-        try:
-            base_x = float(first[0]) + float(src_items[0].get('x_off', 0) or 0)
-            base_y = float(first[1]) + float(src_items[0].get('y_off', 0) or 0)
-        except Exception:
-            base_x, base_y = 0.0, 0.0
+        base_x, base_y = self.text_clipboard_visible_anchor(src_items)
+        # 커서가 텍스트를 가리지 않도록 커서의 위쪽 끝단을 텍스트 묶음의 우측 하단에 맞춘다.
+        px, py = self.text_clipboard_paste_origin_from_cursor(src_items, scene_pos)
 
         self.push_page_text_undo('텍스트 붙여넣기')
 
@@ -3081,32 +3346,298 @@ class MainWindowTextLayoutMixin:
         self.set_tool(None)
         return ok
 
+    def _selected_or_context_text_data_items(self, context_data_item=None):
+        items = self.selected_text_data_items() if hasattr(self, "selected_text_data_items") else []
+        if context_data_item is not None and not items:
+            items = [context_data_item]
+        if context_data_item is not None and str(context_data_item.get('id')) not in {str(d.get('id')) for d in items}:
+            # 캔버스 우클릭은 해당 항목 하나만 다루는 것이 안전하다.
+            items = [context_data_item]
+        return [d for d in items if isinstance(d, dict)]
+
+    def open_text_advanced_effect_dialog(self, data_items=None):
+        data_items = [d for d in (data_items or self.selected_text_data_items()) if isinstance(d, dict)]
+        data_items = [d for d in data_items if not d.get('rasterized_text')]
+        if not data_items:
+            self.log("⚠️ " + self.tr_ui("효과를 적용할 편집 가능한 텍스트가 없습니다."))
+            return False
+        dlg = TextAdvancedEffectDialog(data_items[0], self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return False
+        values = dlg.values()
+        selected_ids = [d.get('id') for d in data_items]
+        self.push_page_text_undo('텍스트 고급 효과 변경')
+        for d in data_items:
+            for k, v in values.items():
+                d[k] = v
+            try:
+                if bool(d.get('manual_text_rect')) or str(d.get('text_anchor_mode') or '').lower() == 'text':
+                    self.shrink_text_rect_to_content(d)
+            except Exception:
+                pass
+        self.auto_save_project()
+        if self.cb_mode.currentIndex() == 4:
+            self.mode_chg(4)
+            self.reselect_text_items(selected_ids)
+        self.log(f"🎨 텍스트 고급 효과 적용: {len(data_items)}개")
+        return True
+
+    def _qimage_to_png_base64(self, image):
+        if image is None or image.isNull():
+            return ""
+        ba = QByteArray()
+        buf = QBuffer(ba)
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        image.save(buf, "PNG")
+        buf.close()
+        return bytes(ba.toBase64()).decode("ascii")
+
+    def _qimage_from_png_base64(self, value):
+        if not value:
+            return QImage()
+        try:
+            raw = base64.b64decode(str(value).encode("ascii"), validate=False)
+            img = QImage()
+            img.loadFromData(raw, "PNG")
+            return img.convertToFormat(QImage.Format.Format_ARGB32)
+        except Exception:
+            return QImage()
+
+    def render_text_data_item_to_raster_png(self, data_item):
+        if not data_item or data_item.get('rasterized_text'):
+            return None
+        temp_data = copy.deepcopy(data_item)
+        temp_data.pop('_transform_mode', None)
+        temp_data.pop('_skew_mode', None)
+        scene = QGraphicsScene()
+        item = TypesettingItem(
+            temp_data,
+            self.cb_font.currentFont().family(),
+            self.sb_font_size.value(),
+            self.sb_strk.value(),
+            None,
+            text_color=self.default_text_color,
+            stroke_color=self.default_stroke_color,
+            align=self.default_align,
+        )
+        item.suppress_guides = True
+        item.setSelected(False)
+        scene.addItem(item)
+        scene_rect = item.sceneBoundingRect().adjusted(-4, -4, 4, 4)
+        if scene_rect.isNull() or scene_rect.width() <= 0 or scene_rect.height() <= 0:
+            return None
+        w = max(1, int(math.ceil(scene_rect.width())))
+        h = max(1, int(math.ceil(scene_rect.height())))
+        if w > 12000 or h > 12000:
+            self.log("⚠️ 객체화할 텍스트가 너무 큽니다.")
+            return None
+        scene.setSceneRect(scene_rect)
+        image = QImage(w, h, QImage.Format.Format_ARGB32)
+        image.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(image)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            scene.render(painter, QRectF(0, 0, w, h), scene_rect)
+        finally:
+            painter.end()
+            scene.clear()
+        return {
+            "png": self._qimage_to_png_base64(image),
+            "rect": [int(round(scene_rect.left())), int(round(scene_rect.top())), w, h],
+            "width": w,
+            "height": h,
+        }
+
+    def convert_text_data_items_to_raster_objects(self, data_items=None):
+        try:
+            self.sync_final_text_scene_to_data()
+        except Exception:
+            pass
+        data_items = [d for d in (data_items or self.selected_text_data_items()) if isinstance(d, dict)]
+        data_items = [d for d in data_items if not d.get('rasterized_text')]
+        if not data_items:
+            self.log("⚠️ " + self.tr_ui("객체로 변환할 일반 텍스트가 없습니다."))
+            return False
+        if QMessageBox.question(
+            self,
+            "텍스트를 객체로 변환",
+            "선택한 텍스트를 이미지 객체로 변환합니다.\n변환 후에는 텍스트 내용을 직접 수정할 수 없습니다.\n계속할까요?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
+            return False
+        selected_ids = [d.get('id') for d in data_items]
+        self.push_page_text_undo('텍스트 객체 변환')
+        converted = 0
+        for d in data_items:
+            payload = self.render_text_data_item_to_raster_png(d)
+            if not payload or not payload.get('png'):
+                continue
+            d['rasterized_text'] = True
+            d['raster_png'] = payload['png']
+            d['raster_w'] = payload['width']
+            d['raster_h'] = payload['height']
+            d['rect'] = payload['rect']
+            d['x_off'] = 0
+            d['y_off'] = 0
+            d['rotation'] = 0
+            d['manual_text_rect'] = True
+            d['text_anchor_mode'] = 'raster'
+            d.pop('_transform_mode', None)
+            d.pop('_skew_mode', None)
+            d.pop('_trapezoid_mode', None)
+            d.pop('_arc_mode', None)
+            d['object_source_text'] = str(d.get('translated_text') or '')
+            converted += 1
+        if not converted:
+            self.log("⚠️ 객체 변환에 실패했습니다.")
+            return False
+        self.ref_tab()
+        self.auto_save_project()
+        if self.cb_mode.currentIndex() == 4:
+            self.mode_chg(4)
+            self.reselect_text_items(selected_ids)
+        self.log(f"🧱 텍스트 객체 변환 완료: {converted}개")
+        return True
+
+    def begin_raster_text_erase_mode(self, data_items=None):
+        data_items = [d for d in (data_items or self.selected_text_data_items()) if isinstance(d, dict) and d.get('rasterized_text')]
+        if not data_items:
+            self.log("⚠️ " + self.tr_ui("일부 지우기는 객체로 변환된 텍스트에서만 사용할 수 있습니다."))
+            return False
+        self.raster_erase_target_ids = [d.get('id') for d in data_items]
+        self.set_tool('raster_erase')
+        self.log(f"🧽 객체 일부 지우기: 지울 영역을 사각형으로 드래그하세요. 대상 {len(data_items)}개")
+        return True
+
+    def apply_raster_text_erase_rect(self, scene_rect):
+        scene_rect = QRectF(scene_rect).normalized()
+        if scene_rect.width() < 1 or scene_rect.height() < 1:
+            self.log("↩️ 객체 지우기 취소: 영역이 너무 작습니다.")
+            return False
+        target_ids = {str(x) for x in getattr(self, 'raster_erase_target_ids', []) or []}
+        curr = self.data.get(self.idx)
+        if not curr:
+            return False
+        targets = []
+        for d in curr.get('data', []) or []:
+            if not d.get('rasterized_text'):
+                continue
+            if target_ids and str(d.get('id')) not in target_ids:
+                continue
+            targets.append(d)
+        if not targets:
+            self.log("⚠️ 지울 수 있는 텍스트 객체가 없습니다.")
+            return False
+
+        self.push_page_text_undo('텍스트 객체 일부 지우기')
+        changed_ids = []
+        for d in targets:
+            img = self._qimage_from_png_base64(d.get('raster_png'))
+            if img.isNull():
+                continue
+            rect = list(d.get('rect') or [0, 0, img.width(), img.height()])
+            while len(rect) < 4:
+                rect.append(1)
+            obj_rect = QRectF(
+                float(rect[0]) + float(d.get('x_off', 0) or 0),
+                float(rect[1]) + float(d.get('y_off', 0) or 0),
+                max(1.0, float(rect[2])),
+                max(1.0, float(rect[3])),
+            )
+            inter = scene_rect.intersected(obj_rect)
+            if inter.isNull() or inter.width() <= 0 or inter.height() <= 0:
+                continue
+            local = QRectF(inter.left() - obj_rect.left(), inter.top() - obj_rect.top(), inter.width(), inter.height())
+            p = QPainter(img)
+            try:
+                p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+                p.fillRect(local, Qt.GlobalColor.transparent)
+            finally:
+                p.end()
+            d['raster_png'] = self._qimage_to_png_base64(img)
+            d['raster_w'] = img.width()
+            d['raster_h'] = img.height()
+            changed_ids.append(d.get('id'))
+        if not changed_ids:
+            self.log("↩️ 객체 지우기 취소: 선택한 영역이 객체와 겹치지 않습니다.")
+            return False
+        self.auto_save_project()
+        if self.cb_mode.currentIndex() == 4:
+            self.mode_chg(4)
+            self.reselect_text_items(changed_ids)
+        self.log(f"🧽 텍스트 객체 일부 지우기 완료: {len(changed_ids)}개")
+        return True
+
     def show_final_text_context_menu(self, text_item, global_pos, scene_pos=None):
         if self.cb_mode.currentIndex() != 4 or text_item is None:
             return
         self.last_canvas_context_pos = scene_pos
-        self.select_text_item_and_row(text_item)
+        # 이미 여러 텍스트가 선택된 상태에서 그중 하나를 우클릭하면
+        # 다중 선택을 유지한다. 선택 밖 항목을 우클릭할 때만 해당 항목 하나로 전환한다.
+        try:
+            selected_scene_items = [x for x in self._safe_graphics_scene().selectedItems() if isinstance(x, TypesettingItem)]
+        except Exception:
+            selected_scene_items = []
+        if text_item not in selected_scene_items:
+            self.select_text_item_and_row(text_item)
+        else:
+            self.on_scene_selection_changed()
+
+        data_items = self._selected_or_context_text_data_items(text_item.data)
+        raster_items = [d for d in data_items if d.get('rasterized_text')]
+        editable_text_items = [d for d in data_items if not d.get('rasterized_text')]
 
         menu = QMenu(self)
         act_copy = menu.addAction("텍스트 복사")
         act_paste = menu.addAction("텍스트 붙여넣기")
         act_paste.setEnabled(bool(self.text_clipboard))
         menu.addSeparator()
+        act_effect = menu.addAction(self.tr_ui("문자/획 그라데이션..."))
+        act_effect.setEnabled(bool(editable_text_items))
+        act_skew = menu.addAction(self.tr_ui("평행사변형 변형"))
+        act_skew.setCheckable(True)
+        act_skew.setChecked(bool(text_item.data.get('_skew_mode', False)))
+        act_skew.setEnabled(len(editable_text_items) == 1 and not bool(text_item.data.get('rasterized_text')))
+        act_trapezoid = menu.addAction(self.tr_ui("사다리꼴 변형"))
+        act_trapezoid.setCheckable(True)
+        act_trapezoid.setChecked(bool(text_item.data.get('_trapezoid_mode', False)))
+        act_trapezoid.setEnabled(len(editable_text_items) == 1 and not bool(text_item.data.get('rasterized_text')))
+        act_arc = menu.addAction(self.tr_ui("부채꼴 변형"))
+        act_arc.setCheckable(True)
+        act_arc.setChecked(bool(text_item.data.get('_arc_mode', False)))
+        act_arc.setEnabled(len(editable_text_items) == 1 and not bool(text_item.data.get('rasterized_text')))
         act_transform = menu.addAction("텍스트 변형")
         act_transform.setCheckable(True)
         act_transform.setChecked(bool(text_item.data.get('_transform_mode', False)))
+        act_transform.setEnabled(not bool(text_item.data.get('rasterized_text')))
+        menu.addSeparator()
+        act_rasterize = menu.addAction(self.tr_ui("텍스트를 객체로 변환"))
+        act_rasterize.setEnabled(bool(editable_text_items))
         menu.addSeparator()
         act_delete = menu.addAction(self.tr_ui("텍스트 삭제"))
 
         chosen = menu.exec(global_pos)
         if chosen == act_copy:
-            self.copy_text_data_items([text_item.data])
+            self.copy_text_data_items(data_items or [text_item.data])
         elif chosen == act_paste:
             self.paste_text_clipboard_at(scene_pos)
+        elif chosen == act_effect:
+            self.open_text_advanced_effect_dialog(editable_text_items)
+        elif chosen == act_skew:
+            self.toggle_text_skew_mode(text_item.data)
+        elif chosen == act_trapezoid:
+            self.toggle_text_trapezoid_mode(text_item.data)
+        elif chosen == act_arc:
+            self.toggle_text_arc_mode(text_item.data)
         elif chosen == act_transform:
             self.toggle_text_transform_mode(text_item.data)
+        elif chosen == act_rasterize:
+            self.convert_text_data_items_to_raster_objects(editable_text_items)
         elif chosen == act_delete:
-            self.delete_text_data_items([text_item.data], ask=True)
+            self.delete_text_data_items(data_items or [text_item.data], ask=True)
 
     def clear_text_transform_modes(self, except_data=None):
         curr = self.data.get(self.idx)
@@ -3116,6 +3647,9 @@ class MainWindowTextLayoutMixin:
             if except_data is not None and d is except_data:
                 continue
             d.pop('_transform_mode', None)
+            d.pop('_skew_mode', None)
+            d.pop('_trapezoid_mode', None)
+            d.pop('_arc_mode', None)
 
     def toggle_text_transform_mode(self, data_item):
         """최종화면 텍스트 변형 모드 토글."""
@@ -3136,12 +3670,126 @@ class MainWindowTextLayoutMixin:
                 reason="텍스트 변형 영역 자동 재생성",
             )
             data_item['_transform_mode'] = True
+            data_item.pop('_skew_mode', None)
+            data_item.pop('_trapezoid_mode', None)
+            data_item.pop('_arc_mode', None)
             if rect_changed:
                 self.log("🔷 텍스트 변형 영역 자동 재생성: OCR 영역 대신 현재 텍스트 bounds를 사용합니다.")
             self.log("🔷 텍스트 변형 모드 ON: 파란 테두리/핸들을 조작하세요. Alt+드래그로 이동, Ctrl+Enter 또는 배경 클릭으로 종료")
         else:
             data_item.pop('_transform_mode', None)
             self.log("🔷 텍스트 변형 모드 OFF")
+
+        if self.cb_mode.currentIndex() == 4:
+            old_suppress = getattr(self, "_suppress_mode_undo", False)
+            self._suppress_mode_undo = True
+            try:
+                self.mode_chg(4)
+            finally:
+                self._suppress_mode_undo = old_suppress
+            if selected_id is not None:
+                self.reselect_text_items([selected_id])
+        self.auto_save_project()
+
+    def toggle_text_skew_mode(self, data_item):
+        """최종화면 텍스트 기울이기 직접 조정 모드 토글."""
+        if self.cb_mode.currentIndex() != 4 or not data_item or data_item.get('rasterized_text'):
+            return
+
+        enabled = not bool(data_item.get('_skew_mode', False))
+        self.clear_text_transform_modes(except_data=data_item)
+        selected_id = data_item.get('id')
+
+        if enabled:
+            rect_changed = self.ensure_text_anchor_rect(
+                data_item,
+                record_undo=True,
+                reason="텍스트 기울이기 영역 자동 재생성",
+            )
+            data_item['_skew_mode'] = True
+            data_item.pop('_transform_mode', None)
+            data_item.pop('_trapezoid_mode', None)
+            data_item.pop('_arc_mode', None)
+            if rect_changed:
+                self.log("🔷 텍스트 기울이기 영역 자동 재생성: 현재 텍스트 bounds를 사용합니다.")
+            self.log("🔷 평행사변형 변형 ON: 파란 테두리의 상/하 핸들은 가로 기울임, 좌/우 핸들은 세로 기울임입니다. 핸들 더블클릭으로 각도 입력.")
+        else:
+            data_item.pop('_skew_mode', None)
+            self.log("🔷 평행사변형 변형 OFF")
+
+        if self.cb_mode.currentIndex() == 4:
+            old_suppress = getattr(self, "_suppress_mode_undo", False)
+            self._suppress_mode_undo = True
+            try:
+                self.mode_chg(4)
+            finally:
+                self._suppress_mode_undo = old_suppress
+            if selected_id is not None:
+                self.reselect_text_items([selected_id])
+        self.auto_save_project()
+
+    def toggle_text_trapezoid_mode(self, data_item):
+        """최종화면 텍스트 사다리꼴 변형 직접 조정 모드 토글."""
+        if self.cb_mode.currentIndex() != 4 or not data_item or data_item.get('rasterized_text'):
+            return
+
+        enabled = not bool(data_item.get('_trapezoid_mode', False))
+        self.clear_text_transform_modes(except_data=data_item)
+        selected_id = data_item.get('id')
+
+        if enabled:
+            rect_changed = self.ensure_text_anchor_rect(
+                data_item,
+                record_undo=True,
+                reason="사다리꼴 변형 영역 자동 재생성",
+            )
+            data_item['_trapezoid_mode'] = True
+            data_item.pop('_transform_mode', None)
+            data_item.pop('_skew_mode', None)
+            data_item.pop('_arc_mode', None)
+            if rect_changed:
+                self.log("🔷 사다리꼴 변형 영역 자동 재생성: 현재 텍스트 bounds를 사용합니다.")
+            self.log("🔷 사다리꼴 변형 ON: 네 꼭짓점과 상/하/좌/우 핸들을 드래그하세요. 좌우 핸들은 세로 원근, 상하 핸들은 가로 원근을 조정합니다. 핸들 더블클릭으로 수치 입력.")
+        else:
+            data_item.pop('_trapezoid_mode', None)
+            self.log("🔷 사다리꼴 변형 OFF")
+
+        if self.cb_mode.currentIndex() == 4:
+            old_suppress = getattr(self, "_suppress_mode_undo", False)
+            self._suppress_mode_undo = True
+            try:
+                self.mode_chg(4)
+            finally:
+                self._suppress_mode_undo = old_suppress
+            if selected_id is not None:
+                self.reselect_text_items([selected_id])
+        self.auto_save_project()
+
+    def toggle_text_arc_mode(self, data_item):
+        """최종화면 텍스트 부채꼴 변형 직접 조정 모드 토글."""
+        if self.cb_mode.currentIndex() != 4 or not data_item or data_item.get('rasterized_text'):
+            return
+
+        enabled = not bool(data_item.get('_arc_mode', False))
+        self.clear_text_transform_modes(except_data=data_item)
+        selected_id = data_item.get('id')
+
+        if enabled:
+            rect_changed = self.ensure_text_anchor_rect(
+                data_item,
+                record_undo=True,
+                reason="부채꼴 변형 영역 자동 재생성",
+            )
+            data_item['_arc_mode'] = True
+            data_item.pop('_transform_mode', None)
+            data_item.pop('_skew_mode', None)
+            data_item.pop('_trapezoid_mode', None)
+            if rect_changed:
+                self.log("🔷 부채꼴 변형 영역 자동 재생성: 현재 텍스트 bounds를 사용합니다.")
+            self.log("🔷 부채꼴 변형 ON: 상/하/좌/우 중앙 핸들을 드래그해 휘어짐을 조정하세요. 핸들 더블클릭으로 각 면의 휘어짐 수치를 직접 입력합니다.")
+        else:
+            data_item.pop('_arc_mode', None)
+            self.log("🔷 부채꼴 변형 OFF")
 
         if self.cb_mode.currentIndex() == 4:
             old_suppress = getattr(self, "_suppress_mode_undo", False)
@@ -3170,7 +3818,7 @@ class MainWindowTextLayoutMixin:
         elif chosen == act_add:
             self.set_tool("final_text")
             try:
-                self.create_final_text_at(int(scene_pos.x()), int(scene_pos.y()))
+                self.create_final_text_at(int(scene_pos.x()), int(scene_pos.y()), centered=False)
             except Exception:
                 pass
 
@@ -3186,11 +3834,86 @@ class MainWindowTextLayoutMixin:
         if data_item is None:
             return
 
+        data_items = self.selected_text_data_items() or [data_item]
+        raster_items = [d for d in data_items if isinstance(d, dict) and d.get('rasterized_text')]
+        editable_text_items = [d for d in data_items if isinstance(d, dict) and not d.get('rasterized_text')]
+
         menu = QMenu(self)
+        act_effect = menu.addAction(self.tr_ui("문자/획 그라데이션..."))
+        act_effect.setEnabled(bool(editable_text_items))
+        act_skew = menu.addAction(self.tr_ui("평행사변형 변형"))
+        act_skew.setEnabled(len(editable_text_items) == 1)
+        act_trapezoid = menu.addAction(self.tr_ui("사다리꼴 변형"))
+        act_trapezoid.setEnabled(len(editable_text_items) == 1)
+        act_arc = menu.addAction(self.tr_ui("부채꼴 변형"))
+        act_arc.setEnabled(len(editable_text_items) == 1)
+        act_rasterize = menu.addAction(self.tr_ui("텍스트를 객체로 변환"))
+        act_rasterize.setEnabled(bool(editable_text_items))
+        menu.addSeparator()
         act_delete = menu.addAction("텍스트행 삭제")
         chosen = menu.exec(self.tab.viewport().mapToGlobal(pos))
-        if chosen == act_delete:
-            self.delete_text_data_items([data_item], ask=True)
+        if chosen == act_effect:
+            self.open_text_advanced_effect_dialog(editable_text_items)
+        elif chosen == act_skew:
+            self.toggle_text_skew_mode(editable_text_items[0] if editable_text_items else None)
+        elif chosen == act_trapezoid:
+            self.toggle_text_trapezoid_mode(editable_text_items[0] if editable_text_items else None)
+        elif chosen == act_arc:
+            self.toggle_text_arc_mode(editable_text_items[0] if editable_text_items else None)
+        elif chosen == act_rasterize:
+            self.convert_text_data_items_to_raster_objects(editable_text_items)
+        elif chosen == act_delete:
+            self.delete_text_data_items(data_items, ask=True)
+
+    def erase_raster_text_brush_line(self, scene_start, scene_end, brush_size=25):
+        if self.cb_mode.currentIndex() != 4:
+            return False
+        scene = self._safe_graphics_scene() if hasattr(self, '_safe_graphics_scene') else getattr(getattr(self, 'view', None), 'scene', None)
+        if scene is None:
+            return False
+        changed_ids = []
+        try:
+            line_rect = QRectF(QPointF(scene_start), QPointF(scene_end)).normalized().adjusted(-brush_size, -brush_size, brush_size, brush_size)
+        except Exception:
+            line_rect = QRectF()
+        for item in list(scene.items()):
+            if not isinstance(item, TypesettingItem):
+                continue
+            if not item.data.get('rasterized_text'):
+                continue
+            try:
+                if not line_rect.isNull() and not item.sceneBoundingRect().adjusted(-brush_size, -brush_size, brush_size, brush_size).intersects(line_rect):
+                    continue
+                # 첫 실제 후보를 만난 순간에만 텍스트 Undo를 연다.
+                # 지우개가 객체 바깥에서 시작해도 스트로크가 객체를 통과하면 여기서 정상 기록된다.
+                if not getattr(self, '_raster_text_erase_undo_started', False):
+                    try:
+                        self.push_page_text_undo('텍스트 객체 지우개')
+                    except Exception:
+                        pass
+                    self._raster_text_erase_undo_started = True
+                if item.erase_raster_line_scene(scene_start, scene_end, brush_size):
+                    changed_ids.append(item.data.get('id'))
+            except Exception:
+                continue
+        if changed_ids:
+            self._raster_text_erase_changed_ids = list(set((getattr(self, '_raster_text_erase_changed_ids', []) or []) + changed_ids))
+            return True
+        return False
+
+    def finish_raster_text_brush_erase(self):
+        changed_ids = getattr(self, '_raster_text_erase_changed_ids', []) or []
+        self._raster_text_erase_changed_ids = []
+        self._raster_text_erase_undo_started = False
+        if not changed_ids:
+            return False
+        self.auto_save_project()
+        try:
+            self.reselect_text_items(changed_ids)
+        except Exception:
+            pass
+        self.log(f"🧽 텍스트 객체 지우개 적용: {len(changed_ids)}개")
+        return True
 
     def renumber_text_items_for_current_page(self, curr=None):
         """우측 텍스트 행의 라인넘버(ID)를 현재 순서 기준 1부터 다시 정렬한다."""

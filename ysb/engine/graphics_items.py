@@ -1,7 +1,9 @@
 import math
+import base64
+import copy
 from PyQt6.QtWidgets import QGraphicsPathItem, QGraphicsRectItem, QInputDialog
-from PyQt6.QtGui import QFont, QFontMetrics, QPainterPath, QPen, QBrush, QColor, QTransform
-from PyQt6.QtCore import Qt, QRectF, QPointF
+from PyQt6.QtGui import QFont, QFontMetrics, QPainterPath, QPen, QBrush, QColor, QTransform, QImage, QPixmap, QLinearGradient, QPainter, QPolygonF
+from PyQt6.QtCore import Qt, QRectF, QPointF, QBuffer, QByteArray, QIODevice
 
 
 # Photoshop의 Faux Italic 느낌에 맞춘 합성 기울임 강도.
@@ -15,6 +17,324 @@ def _qcolor(value, fallback):
         c = QColor(fallback)
     return c
 
+
+
+
+def _bool_value(value, default=False):
+    if value is None:
+        return bool(default)
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on", "y")
+    return bool(value)
+
+
+def _int_value(value, default=0, lo=None, hi=None):
+    try:
+        out = int(round(float(value)))
+    except Exception:
+        out = int(default)
+    if lo is not None:
+        out = max(int(lo), out)
+    if hi is not None:
+        out = min(int(hi), out)
+    return out
+
+
+def _image_from_base64_png(value):
+    if not value:
+        return QImage()
+    try:
+        raw = base64.b64decode(str(value).encode("ascii"), validate=False)
+        img = QImage()
+        img.loadFromData(raw, "PNG")
+        return img
+    except Exception:
+        return QImage()
+
+
+def _image_to_base64_png(image):
+    if image is None or image.isNull():
+        return ""
+    ba = QByteArray()
+    buf = QBuffer(ba)
+    if not buf.open(QIODevice.OpenModeFlag.WriteOnly):
+        return ""
+    try:
+        image.save(buf, "PNG")
+    finally:
+        buf.close()
+    return bytes(ba.toBase64()).decode("ascii")
+
+
+def _gradient_brush(rect, color1, color2, angle=0, ratio=50):
+    rect = QRectF(rect)
+    if rect.isNull() or rect.width() <= 0 or rect.height() <= 0:
+        rect = QRectF(0, 0, 1, 1)
+
+    c1 = _qcolor(color1, "#000000")
+    c2 = _qcolor(color2, "#FFFFFF")
+
+    try:
+        rad = math.radians(float(angle or 0))
+    except Exception:
+        rad = 0.0
+    # Rect diagonal length keeps the gradient long enough for any angle.
+    length = max(1.0, math.hypot(rect.width(), rect.height()))
+    dx = math.cos(rad) * length / 2.0
+    dy = math.sin(rad) * length / 2.0
+    center = rect.center()
+    grad = QLinearGradient(QPointF(center.x() - dx, center.y() - dy), QPointF(center.x() + dx, center.y() + dy))
+
+    # ratio is interpreted as the point where color 2 becomes dominant.
+    # 50 = normal two-color gradient.  Lower values make color 2 appear earlier;
+    # higher values keep color 1 longer.
+    t = max(1, min(99, _int_value(ratio, 50, 1, 99))) / 100.0
+    grad.setColorAt(0.0, c1)
+    grad.setColorAt(t, c2)
+    grad.setColorAt(1.0, c2)
+    return QBrush(grad)
+
+def _projective_transform_for_quads(src_points, dst_points):
+    try:
+        src_poly = QPolygonF([QPointF(p) for p in src_points])
+        dst_poly = QPolygonF([QPointF(p) for p in dst_points])
+    except Exception:
+        return None
+
+    # PyQt/PySide 버전에 따라 quadToQuad 반환 형식이 조금 다르다.
+    try:
+        trans = QTransform()
+        ok = QTransform.quadToQuad(src_poly, dst_poly, trans)
+        if ok:
+            return trans
+    except TypeError:
+        pass
+    except Exception:
+        pass
+
+    try:
+        result = QTransform.quadToQuad(src_poly, dst_poly)
+        if isinstance(result, tuple):
+            if len(result) == 2 and isinstance(result[1], QTransform):
+                ok, trans = result
+                if ok:
+                    return trans
+            elif len(result) >= 3 and isinstance(result[-1], QTransform):
+                ok = bool(result[0])
+                trans = result[-1]
+                if ok:
+                    return trans
+        elif isinstance(result, QTransform):
+            return result
+    except Exception:
+        pass
+    return None
+
+
+def _trapezoid_quad_from_rect(rect, left_pct=0, right_pct=0, top_pct=0, bottom_pct=0):
+    rect = QRectF(rect)
+    if rect.isNull() or rect.width() <= 0 or rect.height() <= 0:
+        rect = QRectF(0, 0, 1, 1)
+    lp = max(-95, min(95, int(round(float(left_pct or 0)))))
+    rp = max(-95, min(95, int(round(float(right_pct or 0)))))
+    tp = max(-95, min(95, int(round(float(top_pct or 0)))))
+    bp = max(-95, min(95, int(round(float(bottom_pct or 0)))))
+    half_h = rect.height() / 2.0
+    half_w = rect.width() / 2.0
+    left_inset = half_h * (lp / 100.0)
+    right_inset = half_h * (rp / 100.0)
+    top_inset = half_w * (tp / 100.0)
+    bottom_inset = half_w * (bp / 100.0)
+    return [
+        QPointF(rect.left() + top_inset, rect.top() + left_inset),
+        QPointF(rect.right() - top_inset, rect.top() + right_inset),
+        QPointF(rect.right() - bottom_inset, rect.bottom() - right_inset),
+        QPointF(rect.left() + bottom_inset, rect.bottom() - left_inset),
+    ]
+
+
+def _apply_trapezoid_transform_to_path(path, left_pct=0, right_pct=0, top_pct=0, bottom_pct=0):
+    if path is None:
+        return path
+    rect = path.boundingRect()
+    if rect.isNull() or rect.width() <= 0 or rect.height() <= 0:
+        return path
+    src = [rect.topLeft(), rect.topRight(), rect.bottomRight(), rect.bottomLeft()]
+    dst = _trapezoid_quad_from_rect(rect, left_pct, right_pct, top_pct, bottom_pct)
+    trans = _projective_transform_for_quads(src, dst)
+    if trans is None:
+        return path
+    try:
+        return trans.map(path)
+    except Exception:
+        return path
+
+
+def _warp_path_by_arc_sides(path, top_pct=0, bottom_pct=0, left_pct=0, right_pct=0, top_pos=50, bottom_pos=50, left_pos=50, right_pos=50):
+    if path is None:
+        return path
+    rect = path.boundingRect()
+    if rect.isNull() or rect.width() <= 0 or rect.height() <= 0:
+        return path
+
+    w = max(1.0, float(rect.width()))
+    h = max(1.0, float(rect.height()))
+    left = float(rect.left())
+    top = float(rect.top())
+    top_pct = float(top_pct or 0)
+    bottom_pct = float(bottom_pct or 0)
+    left_pct = float(left_pct or 0)
+    right_pct = float(right_pct or 0)
+    top_c = max(0.0, min(1.0, float(top_pos or 50) / 100.0))
+    bottom_c = max(0.0, min(1.0, float(bottom_pos or 50) / 100.0))
+    left_c = max(0.0, min(1.0, float(left_pos or 50) / 100.0))
+    right_c = max(0.0, min(1.0, float(right_pos or 50) / 100.0))
+
+    def bell_center(t, c):
+        t = max(0.0, min(1.0, float(t)))
+        c = max(0.0, min(1.0, float(c)))
+        # 클릭한 위치를 가장 강하게 하고 주변으로 부드럽게 사라지는 1점 제어 곡선.
+        radius = 0.55
+        d = abs(t - c) / radius
+        if d >= 1.0:
+            return 0.0
+        return (1.0 - d * d) ** 2
+
+    def map_point(pt):
+        u = (pt.x() - left) / w
+        v = (pt.y() - top) / h
+        dx = (bell_center(v, left_c) * left_pct * (1.0 - u) + bell_center(v, right_c) * right_pct * u) * (w * 0.35 / 100.0)
+        dy = (bell_center(u, top_c) * top_pct * (1.0 - v) + bell_center(u, bottom_c) * bottom_pct * v) * (h * 0.35 / 100.0)
+        return QPointF(pt.x() + dx, pt.y() + dy)
+
+    polys = path.toSubpathPolygons()
+    if not polys:
+        return path
+    out = QPainterPath()
+    out.setFillRule(path.fillRule())
+    for poly in polys:
+        if not poly:
+            continue
+        pts = [map_point(pt) for pt in poly]
+        if not pts:
+            continue
+        out.moveTo(pts[0])
+        for pt in pts[1:]:
+            out.lineTo(pt)
+        out.closeSubpath()
+    return out
+
+
+
+
+def _arc_handles_from_data(data):
+    out = []
+    raw = []
+    try:
+        raw = data.get('arc_handles') or []
+    except Exception:
+        raw = []
+    if isinstance(raw, list):
+        for h in raw:
+            if not isinstance(h, dict):
+                continue
+            side = str(h.get('side') or '')
+            if side not in ('top', 'bottom', 'left', 'right'):
+                continue
+            try:
+                t = max(0, min(100, int(round(float(h.get('t', 50))))))
+                value = max(-100, min(100, int(round(float(h.get('value', 0))))))
+            except Exception:
+                continue
+            out.append({'side': side, 't': t, 'value': value})
+    if out:
+        return out
+
+    # 구버전/단일 부채꼴 값 호환. 저장 구조가 바뀌어도 기존 프로젝트는 유지한다.
+    legacy = []
+    for side in ('top', 'bottom', 'left', 'right'):
+        try:
+            value = int(round(float(data.get(f'arc_{side}', 0) or 0)))
+        except Exception:
+            value = 0
+        if value:
+            try:
+                t = int(round(float(data.get(f'arc_{side}_pos', 50) or 50)))
+            except Exception:
+                t = 50
+            legacy.append({'side': side, 't': max(0, min(100, t)), 'value': max(-100, min(100, value))})
+    return legacy
+
+
+def _warp_path_by_arc_handles(path, handles):
+    handles = [h for h in (handles or []) if isinstance(h, dict) and h.get('side') in ('top', 'bottom', 'left', 'right')]
+    if not handles:
+        return path
+    if path is None:
+        return path
+    rect = path.boundingRect()
+    if rect.isNull() or rect.width() <= 0 or rect.height() <= 0:
+        return path
+
+    w = max(1.0, float(rect.width()))
+    h = max(1.0, float(rect.height()))
+    left = float(rect.left())
+    top = float(rect.top())
+
+    def bell_center(t, c):
+        t = max(0.0, min(1.0, float(t)))
+        c = max(0.0, min(1.0, float(c)))
+        radius = 0.45
+        d = abs(t - c) / radius
+        if d >= 1.0:
+            return 0.0
+        return (1.0 - d * d) ** 2
+
+    normalized = []
+    for raw in handles:
+        side = str(raw.get('side') or '')
+        try:
+            t = max(0.0, min(1.0, float(raw.get('t', 50) or 50) / 100.0))
+            value = max(-100.0, min(100.0, float(raw.get('value', 0) or 0)))
+        except Exception:
+            continue
+        if value:
+            normalized.append((side, t, value))
+    if not normalized:
+        return path
+
+    def map_point(pt):
+        u = (pt.x() - left) / w
+        v = (pt.y() - top) / h
+        dx = 0.0
+        dy = 0.0
+        for side, t, value in normalized:
+            if side == 'top':
+                dy += bell_center(u, t) * value * (1.0 - v) * (h * 0.35 / 100.0)
+            elif side == 'bottom':
+                dy += bell_center(u, t) * value * v * (h * 0.35 / 100.0)
+            elif side == 'left':
+                dx += bell_center(v, t) * value * (1.0 - u) * (w * 0.35 / 100.0)
+            elif side == 'right':
+                dx += bell_center(v, t) * value * u * (w * 0.35 / 100.0)
+        return QPointF(pt.x() + dx, pt.y() + dy)
+
+    polys = path.toSubpathPolygons()
+    if not polys:
+        return path
+    out = QPainterPath()
+    out.setFillRule(path.fillRule())
+    for poly in polys:
+        if not poly:
+            continue
+        pts = [map_point(pt) for pt in poly]
+        if not pts:
+            continue
+        out.moveTo(pts[0])
+        for pt in pts[1:]:
+            out.lineTo(pt)
+        out.closeSubpath()
+    return out
 
 
 def build_typesetting_text_path(lines, font, align="center", line_height=None, letter_spacing=0):
@@ -126,6 +446,10 @@ class TypesettingItem(QGraphicsPathItem):
         self.data = data
         self.update_cb = update_cb
 
+        if _bool_value(data.get('rasterized_text'), False):
+            self._init_rasterized_text_item()
+            return
+
         # 번역문이 비어 있으면 최종 화면에는 아무 글자도 만들지 않는다.
         text = str(data.get('translated_text', '') or '')
         lines = text.split('\n') if text.strip() else ([''] if data.get('force_show') else [])
@@ -181,6 +505,24 @@ class TypesettingItem(QGraphicsPathItem):
             tr.scale(sx, sy)
             path = tr.map(path)
 
+        skew_x = _int_value(data.get('skew_x', 0), 0, -100, 100) / 100.0
+        skew_y = _int_value(data.get('skew_y', 0), 0, -100, 100) / 100.0
+        if skew_x or skew_y:
+            tr = QTransform()
+            tr.shear(skew_x, skew_y)
+            path = tr.map(path)
+
+        trap_left = _int_value(data.get('trap_left', 0), 0, -95, 95)
+        trap_right = _int_value(data.get('trap_right', 0), 0, -95, 95)
+        trap_top = _int_value(data.get('trap_top', 0), 0, -95, 95)
+        trap_bottom = _int_value(data.get('trap_bottom', 0), 0, -95, 95)
+        if trap_left or trap_right or trap_top or trap_bottom:
+            path = _apply_trapezoid_transform_to_path(path, trap_left, trap_right, trap_top, trap_bottom)
+
+        arc_handles = _arc_handles_from_data(data)
+        if arc_handles:
+            path = _warp_path_by_arc_handles(path, arc_handles)
+
         self.setPath(path)
 
         self.pen_stroke = QPen(
@@ -190,7 +532,18 @@ class TypesettingItem(QGraphicsPathItem):
             Qt.PenCapStyle.RoundCap,
             Qt.PenJoinStyle.RoundJoin,
         )
-        self.brush_fill = QBrush(_qcolor(item_text_color, "#000000"))
+        if _bool_value(data.get('text_gradient_enabled'), False):
+            self.brush_fill = _gradient_brush(
+                path.boundingRect(),
+                data.get('text_gradient_color1') or item_text_color,
+                data.get('text_gradient_color2') or "#FFFFFF",
+                data.get('text_gradient_angle', 0),
+                data.get('text_gradient_ratio', 50),
+            )
+            self._fill_fallback_color = _qcolor(data.get('text_gradient_color1') or item_text_color, "#000000")
+        else:
+            self.brush_fill = QBrush(_qcolor(item_text_color, "#000000"))
+            self._fill_fallback_color = self.brush_fill.color()
 
         rect = data['rect']
         final_x = float(rect[0]) + float(data.get('x_off', 0) or 0)
@@ -250,16 +603,107 @@ class TypesettingItem(QGraphicsPathItem):
         self._transform_press_scene_pos = QPointF()
         self._transform_press_item_pos = QPointF()
         self._transform_press_rect_data = None
+        self._skew_action = None
+        self._skew_press_pos = QPointF()
+        self._skew_press_scene_pos = QPointF()
+        self._skew_press_x = int(data.get('skew_x', 0) or 0)
+        self._skew_press_y = int(data.get('skew_y', 0) or 0)
+        self._trapezoid_action = None
+        self._trapezoid_press_pos = QPointF()
+        self._trapezoid_press_scene_pos = QPointF()
+        self._trapezoid_press_left = int(data.get('trap_left', 0) or 0)
+        self._trapezoid_press_right = int(data.get('trap_right', 0) or 0)
+        self._trapezoid_press_top = int(data.get('trap_top', 0) or 0)
+        self._trapezoid_press_bottom = int(data.get('trap_bottom', 0) or 0)
+        self._arc_action = None
+        self._arc_press_pos = QPointF()
+        self._arc_press_scene_pos = QPointF()
+        self._arc_press_top = int(data.get('arc_top', 0) or 0)
+        self._arc_press_bottom = int(data.get('arc_bottom', 0) or 0)
+        self._arc_press_left = int(data.get('arc_left', 0) or 0)
+        self._arc_press_right = int(data.get('arc_right', 0) or 0)
 
+        self._apply_common_text_item_flags()
+
+    def _apply_common_text_item_flags(self):
         self.setZValue(30)
         self.setAcceptHoverEvents(True)
         self.setAcceptedMouseButtons(Qt.MouseButton.LeftButton | Qt.MouseButton.RightButton)
-
         self.setFlags(
             self.GraphicsItemFlag.ItemIsMovable
             | self.GraphicsItemFlag.ItemIsSelectable
             | self.GraphicsItemFlag.ItemSendsGeometryChanges
         )
+
+    def _init_rasterized_text_item(self):
+        self._is_rasterized_text = True
+        img = _image_from_base64_png(self.data.get('raster_png'))
+        if img.isNull():
+            img = QImage(1, 1, QImage.Format.Format_ARGB32)
+            img.fill(Qt.GlobalColor.transparent)
+        self._raster_image = img.convertToFormat(QImage.Format.Format_ARGB32)
+        self._raster_rect = QRectF(0, 0, max(1, self._raster_image.width()), max(1, self._raster_image.height()))
+
+        path = QPainterPath()
+        path.addRect(self._raster_rect)
+        self.setPath(path)
+        self.pen_stroke = QPen(Qt.PenStyle.NoPen)
+        self.brush_fill = QBrush(Qt.BrushStyle.NoBrush)
+        self._fill_fallback_color = QColor("#000000")
+        self._strike_lines = []
+        self._synthetic_bold_width = 0.0
+        self._text_path_rect = QRectF(self._raster_rect)
+        self._local_text_area_rect = QRectF(self._raster_rect)
+
+        rect = list(self.data.get('rect') or [0, 0, self._raster_image.width(), self._raster_image.height()])
+        while len(rect) < 4:
+            rect.append(1)
+        try:
+            x = float(rect[0]) + float(self.data.get('x_off', 0) or 0)
+            y = float(rect[1]) + float(self.data.get('y_off', 0) or 0)
+        except Exception:
+            x, y = 0.0, 0.0
+        self.setPos(x, y)
+
+        try:
+            self.setTransformOriginPoint(self.transform_rect().center())
+            self.setRotation(float(self.data.get('rotation', 0) or 0))
+        except Exception:
+            pass
+
+        self._transform_action = None
+        self._transform_press_pos = None
+        self._transform_press_angle = 0.0
+        self._transform_press_rotation = 0.0
+        self._transform_press_char_width = int(self.data.get('char_width', 100) or 100)
+        self._transform_press_char_height = int(self.data.get('char_height', 100) or 100)
+        self._transform_press_rect = QRectF()
+        self._transform_live_rect = None
+        self._transform_press_scene_pos = QPointF()
+        self._transform_press_item_pos = QPointF()
+        self._transform_press_rect_data = None
+        self._skew_action = None
+        self._skew_press_pos = QPointF()
+        self._skew_press_scene_pos = QPointF()
+        self._skew_press_x = int(self.data.get('skew_x', 0) or 0)
+        self._skew_press_y = int(self.data.get('skew_y', 0) or 0)
+        self._trapezoid_action = None
+        self._trapezoid_press_pos = QPointF()
+        self._trapezoid_press_scene_pos = QPointF()
+        self._trapezoid_press_left = int(self.data.get('trap_left', 0) or 0)
+        self._trapezoid_press_right = int(self.data.get('trap_right', 0) or 0)
+        self._trapezoid_press_top = int(self.data.get('trap_top', 0) or 0)
+        self._trapezoid_press_bottom = int(self.data.get('trap_bottom', 0) or 0)
+        self._arc_action = None
+        self._arc_press_pos = QPointF()
+        self._arc_press_scene_pos = QPointF()
+        self._arc_press_top = int(self.data.get('arc_top', 0) or 0)
+        self._arc_press_bottom = int(self.data.get('arc_bottom', 0) or 0)
+        self._arc_press_left = int(self.data.get('arc_left', 0) or 0)
+        self._arc_press_right = int(self.data.get('arc_right', 0) or 0)
+        self._raster_drag_scene_press = None
+        self._raster_drag_item_press = None
+        self._apply_common_text_item_flags()
 
     def transform_rect(self):
         """텍스트 변형 모드에서 조작할 기준 박스.
@@ -300,6 +744,432 @@ class TypesettingItem(QGraphicsPathItem):
             'bottom_right': rect.bottomRight(),
         }
         return {name: box(pt) for name, pt in pts.items()}
+
+    def skew_handle_rects(self):
+        rect = self.transform_rect()
+        s = 16.0
+        half = s / 2.0
+
+        def box(pt):
+            return QRectF(pt.x() - half, pt.y() - half, s, s)
+
+        pts = {
+            'left': QPointF(rect.left(), rect.center().y()),
+            'right': QPointF(rect.right(), rect.center().y()),
+            'top': QPointF(rect.center().x(), rect.top()),
+            'bottom': QPointF(rect.center().x(), rect.bottom()),
+        }
+        return {name: box(pt) for name, pt in pts.items()}
+
+    def skew_action_at(self, pos):
+        if not self.data.get('_skew_mode', False):
+            return None
+        rects = self.skew_handle_rects()
+        for name in ('left', 'right', 'top', 'bottom'):
+            r = rects.get(name)
+            if r and r.adjusted(-6, -6, 6, 6).contains(pos):
+                return name
+        return None
+
+    def set_text_skew_values(self, skew_x=None, skew_y=None):
+        if skew_x is not None:
+            self.data['skew_x'] = max(-100, min(100, int(round(float(skew_x)))))
+        if skew_y is not None:
+            self.data['skew_y'] = max(-100, min(100, int(round(float(skew_y)))))
+        self.update()
+
+    def set_text_skew_angle(self, action, angle):
+        try:
+            value = math.tan(math.radians(float(angle))) * 100.0
+        except Exception:
+            value = 0.0
+        value = max(-100, min(100, int(round(value))))
+        if action in ('top', 'bottom'):
+            self.set_text_skew_values(skew_x=value)
+        elif action in ('left', 'right'):
+            self.set_text_skew_values(skew_y=value)
+
+    def begin_skew_action(self, action, local_pos, scene_pos):
+        if not self.data.get('_skew_mode', False) or not action:
+            return False
+        main = getattr(self, "main_window", None)
+        if main is not None and hasattr(main, 'push_page_text_undo'):
+            try:
+                main.push_page_text_undo('텍스트 기울이기 조정')
+            except Exception:
+                pass
+        self._skew_action = action
+        self._skew_press_pos = QPointF(local_pos)
+        self._skew_press_scene_pos = QPointF(scene_pos)
+        self._skew_press_x = int(self.data.get('skew_x', 0) or 0)
+        self._skew_press_y = int(self.data.get('skew_y', 0) or 0)
+        self.setSelected(True)
+        self.update()
+        return True
+
+    def update_skew_action(self, local_pos, scene_pos):
+        if not self._skew_action:
+            return False
+        rect = self.transform_rect()
+        w = max(1.0, float(rect.width()))
+        h = max(1.0, float(rect.height()))
+        dx = float(local_pos.x() - self._skew_press_pos.x())
+        dy = float(local_pos.y() - self._skew_press_pos.y())
+        if self._skew_action in ('top', 'bottom'):
+            sign = -1.0 if self._skew_action == 'top' else 1.0
+            value = self._skew_press_x + sign * (dx / h) * 100.0
+            self.set_text_skew_values(skew_x=value)
+        elif self._skew_action in ('left', 'right'):
+            sign = -1.0 if self._skew_action == 'left' else 1.0
+            value = self._skew_press_y + sign * (dy / w) * 100.0
+            self.set_text_skew_values(skew_y=value)
+        return True
+
+    def finish_skew_action(self):
+        if not self._skew_action:
+            return False
+        self._skew_action = None
+        main = getattr(self, "main_window", None)
+        selected_id = self.data.get('id')
+        if main is not None:
+            try:
+                main.auto_save_project()
+                if main.cb_mode.currentIndex() == 4:
+                    main.mode_chg(4)
+                    if selected_id is not None:
+                        main.reselect_text_items([selected_id])
+            except Exception:
+                pass
+            try:
+                main.log(f"🔷 텍스트 기울이기 적용: 가로 {self.data.get('skew_x', 0)}%, 세로 {self.data.get('skew_y', 0)}%")
+            except Exception:
+                pass
+        return True
+
+    def trapezoid_handle_rects(self):
+        pts = _trapezoid_quad_from_rect(
+            self.transform_rect(),
+            self.data.get('trap_left', 0),
+            self.data.get('trap_right', 0),
+            self.data.get('trap_top', 0),
+            self.data.get('trap_bottom', 0),
+        )
+        names = ('top_left', 'top_right', 'bottom_right', 'bottom_left')
+        s = 16.0
+        half = s / 2.0
+        out = {}
+        for name, pt in zip(names, pts):
+            out[name] = QRectF(pt.x() - half, pt.y() - half, s, s)
+        rect = self.transform_rect()
+        out['top'] = QRectF(rect.center().x() - half, min(pts[0].y(), pts[1].y()) - half, s, s)
+        out['bottom'] = QRectF(rect.center().x() - half, max(pts[2].y(), pts[3].y()) - half, s, s)
+        out['left'] = QRectF(min(pts[0].x(), pts[3].x()) - half, rect.center().y() - half, s, s)
+        out['right'] = QRectF(max(pts[1].x(), pts[2].x()) - half, rect.center().y() - half, s, s)
+        return out
+
+    def trapezoid_action_at(self, pos):
+        if not self.data.get('_trapezoid_mode', False):
+            return None
+        order = ('top_left', 'top_right', 'bottom_right', 'bottom_left', 'top', 'bottom', 'left', 'right')
+        for name in order:
+            r = self.trapezoid_handle_rects().get(name)
+            if r and r.adjusted(-6, -6, 6, 6).contains(pos):
+                return name
+        return None
+
+    def set_text_trapezoid_values(self, left_pct=None, right_pct=None, top_pct=None, bottom_pct=None):
+        if left_pct is not None:
+            self.data['trap_left'] = max(-95, min(95, int(round(float(left_pct)))))
+        if right_pct is not None:
+            self.data['trap_right'] = max(-95, min(95, int(round(float(right_pct)))))
+        if top_pct is not None:
+            self.data['trap_top'] = max(-95, min(95, int(round(float(top_pct)))))
+        if bottom_pct is not None:
+            self.data['trap_bottom'] = max(-95, min(95, int(round(float(bottom_pct)))))
+        self.update()
+
+    def begin_trapezoid_action(self, action, local_pos, scene_pos):
+        if not self.data.get('_trapezoid_mode', False) or not action:
+            return False
+        main = getattr(self, 'main_window', None)
+        if main is not None and hasattr(main, 'push_page_text_undo'):
+            try:
+                main.push_page_text_undo('사다리꼴 변형 조정')
+            except Exception:
+                pass
+        self._trapezoid_action = action
+        self._trapezoid_press_pos = QPointF(local_pos)
+        self._trapezoid_press_scene_pos = QPointF(scene_pos)
+        self._trapezoid_press_left = int(self.data.get('trap_left', 0) or 0)
+        self._trapezoid_press_right = int(self.data.get('trap_right', 0) or 0)
+        self._trapezoid_press_top = int(self.data.get('trap_top', 0) or 0)
+        self._trapezoid_press_bottom = int(self.data.get('trap_bottom', 0) or 0)
+        self.setSelected(True)
+        self.update()
+        return True
+
+    def update_trapezoid_action(self, local_pos, scene_pos):
+        if not self._trapezoid_action:
+            return False
+        rect = self.transform_rect()
+        h = max(1.0, float(rect.height()))
+        w = max(1.0, float(rect.width()))
+        dx = float(local_pos.x() - self._trapezoid_press_pos.x())
+        dy = float(local_pos.y() - self._trapezoid_press_pos.y())
+        scale_y = 200.0 / h
+        scale_x = 200.0 / w
+        action = self._trapezoid_action
+        if action in ('top_left', 'bottom_left', 'left'):
+            sign = 1.0 if action == 'top_left' else (-1.0 if action == 'bottom_left' else 1.0)
+            value = self._trapezoid_press_left + sign * dy * scale_y
+            self.set_text_trapezoid_values(left_pct=value)
+        elif action in ('top_right', 'bottom_right', 'right'):
+            sign = 1.0 if action == 'top_right' else (-1.0 if action == 'bottom_right' else 1.0)
+            value = self._trapezoid_press_right + sign * dy * scale_y
+            self.set_text_trapezoid_values(right_pct=value)
+        elif action == 'top':
+            value = self._trapezoid_press_top + dx * scale_x
+            self.set_text_trapezoid_values(top_pct=value)
+        elif action == 'bottom':
+            value = self._trapezoid_press_bottom - dx * scale_x
+            self.set_text_trapezoid_values(bottom_pct=value)
+        return True
+
+    def finish_trapezoid_action(self):
+        if not self._trapezoid_action:
+            return False
+        self._trapezoid_action = None
+        main = getattr(self, 'main_window', None)
+        selected_id = self.data.get('id')
+        if main is not None:
+            try:
+                main.auto_save_project()
+                if main.cb_mode.currentIndex() == 4:
+                    main.mode_chg(4)
+                    if selected_id is not None:
+                        main.reselect_text_items([selected_id])
+            except Exception:
+                pass
+            try:
+                main.log(f"🔷 사다리꼴 변형 적용: 왼쪽 {self.data.get('trap_left', 0)}%, 오른쪽 {self.data.get('trap_right', 0)}%, 위쪽 {self.data.get('trap_top', 0)}%, 아래쪽 {self.data.get('trap_bottom', 0)}%")
+            except Exception:
+                pass
+        return True
+
+    def _arc_handles(self):
+        handles = _arc_handles_from_data(self.data)
+        # 새 구조를 쓰기 시작하면 명시적으로 저장한다.
+        try:
+            if self.data.get('arc_handles') is None and handles:
+                self.data['arc_handles'] = copy.deepcopy(handles)
+        except Exception:
+            pass
+        return handles
+
+    def _save_arc_handles(self, handles):
+        clean = []
+        for h in handles or []:
+            if not isinstance(h, dict):
+                continue
+            side = str(h.get('side') or '')
+            if side not in ('top', 'bottom', 'left', 'right'):
+                continue
+            try:
+                clean.append({
+                    'side': side,
+                    't': max(0, min(100, int(round(float(h.get('t', 50)))))),
+                    'value': max(-100, min(100, int(round(float(h.get('value', 0)))))),
+                })
+            except Exception:
+                pass
+        self.data['arc_handles'] = clean
+        try:
+            self.data['arc_active_index'] = max(-1, min(int(self.data.get('arc_active_index', -1) or -1), len(clean) - 1))
+        except Exception:
+            self.data['arc_active_index'] = len(clean) - 1 if clean else -1
+
+    def _arc_handle_point_for(self, handle):
+        rect = self.transform_rect()
+        side = str((handle or {}).get('side') or '')
+        try:
+            t = max(0.0, min(1.0, float((handle or {}).get('t', 50) or 50) / 100.0))
+        except Exception:
+            t = 0.5
+        if side == 'top':
+            return QPointF(rect.left() + rect.width() * t, rect.top())
+        if side == 'bottom':
+            return QPointF(rect.left() + rect.width() * t, rect.bottom())
+        if side == 'left':
+            return QPointF(rect.left(), rect.top() + rect.height() * t)
+        if side == 'right':
+            return QPointF(rect.right(), rect.top() + rect.height() * t)
+        return None
+
+    def arc_handle_rects(self):
+        handles = self._arc_handles()
+        s = 16.0
+        half = s / 2.0
+        out = {}
+        for idx, handle in enumerate(handles):
+            pt = self._arc_handle_point_for(handle)
+            if pt is not None:
+                out[f'arc_{idx}'] = QRectF(pt.x() - half, pt.y() - half, s, s)
+        return out
+
+    def _arc_side_and_t_from_pos(self, pos):
+        rect = self.transform_rect()
+        if rect.isNull() or rect.width() <= 0 or rect.height() <= 0:
+            return None, 50.0
+        p = QPointF(pos)
+        margin = 26.0
+        if not rect.adjusted(-margin, -margin, margin, margin).contains(p):
+            return None, 50.0
+        d = {
+            'top': abs(p.y() - rect.top()),
+            'bottom': abs(p.y() - rect.bottom()),
+            'left': abs(p.x() - rect.left()),
+            'right': abs(p.x() - rect.right()),
+        }
+        side = min(d, key=d.get)
+        if side in ('top', 'bottom'):
+            t = ((p.x() - rect.left()) / max(1.0, rect.width())) * 100.0
+        else:
+            t = ((p.y() - rect.top()) / max(1.0, rect.height())) * 100.0
+        return side, max(0.0, min(100.0, t))
+
+    def create_or_replace_arc_handle_at(self, pos):
+        side, t = self._arc_side_and_t_from_pos(pos)
+        if not side:
+            return None
+        handles = self._arc_handles()
+        handles.append({'side': side, 't': int(round(t)), 'value': 0})
+        self._save_arc_handles(handles)
+        idx = len(handles) - 1
+        self.data['arc_active_index'] = idx
+        self.update()
+        return f'arc_{idx}'
+
+    def arc_action_at(self, pos):
+        if not self.data.get('_arc_mode', False):
+            return None
+        for name, r in self.arc_handle_rects().items():
+            if r.adjusted(-6, -6, 6, 6).contains(pos):
+                return name
+        return None
+
+    def _arc_index_from_action(self, action):
+        try:
+            if isinstance(action, str) and action.startswith('arc_'):
+                return int(action.split('_', 1)[1])
+        except Exception:
+            pass
+        # 구버전 액션 문자열 호환
+        if action in ('top', 'bottom', 'left', 'right'):
+            handles = self._arc_handles()
+            for i, h in enumerate(handles):
+                if h.get('side') == action:
+                    return i
+        return -1
+
+    def set_text_arc_values(self, top_pct=None, bottom_pct=None, left_pct=None, right_pct=None):
+        # 구버전 API 호환용. 같은 면의 첫 핸들을 갱신하거나 새 핸들을 만든다.
+        updates = {'top': top_pct, 'bottom': bottom_pct, 'left': left_pct, 'right': right_pct}
+        handles = self._arc_handles()
+        for side, value in updates.items():
+            if value is None:
+                continue
+            found = False
+            for h in handles:
+                if h.get('side') == side:
+                    h['value'] = max(-100, min(100, int(round(float(value)))))
+                    found = True
+                    break
+            if not found:
+                handles.append({'side': side, 't': 50, 'value': max(-100, min(100, int(round(float(value)))))} )
+        self._save_arc_handles(handles)
+        self.update()
+
+    def set_text_arc_handle_value(self, index, value):
+        handles = self._arc_handles()
+        try:
+            idx = int(index)
+        except Exception:
+            return False
+        if idx < 0 or idx >= len(handles):
+            return False
+        handles[idx]['value'] = max(-100, min(100, int(round(float(value)))))
+        self._save_arc_handles(handles)
+        self.data['arc_active_index'] = idx
+        self.update()
+        return True
+
+    def begin_arc_action(self, action, local_pos, scene_pos):
+        if not self.data.get('_arc_mode', False) or not action:
+            return False
+        idx = self._arc_index_from_action(action)
+        handles = self._arc_handles()
+        if idx < 0 or idx >= len(handles):
+            return False
+        main = getattr(self, 'main_window', None)
+        if main is not None and hasattr(main, 'push_page_text_undo'):
+            try:
+                main.push_page_text_undo('부채꼴 변형 조정')
+            except Exception:
+                pass
+        self._arc_action = f'arc_{idx}'
+        self._arc_active_index = idx
+        self._arc_press_pos = QPointF(local_pos)
+        self._arc_press_scene_pos = QPointF(scene_pos)
+        self._arc_press_value = int(handles[idx].get('value', 0) or 0)
+        self.data['arc_active_index'] = idx
+        self.setSelected(True)
+        self.update()
+        return True
+
+    def update_arc_action(self, local_pos, scene_pos):
+        if not self._arc_action:
+            return False
+        idx = self._arc_index_from_action(self._arc_action)
+        handles = self._arc_handles()
+        if idx < 0 or idx >= len(handles):
+            return False
+        rect = self.transform_rect()
+        h = max(1.0, float(rect.height()))
+        w = max(1.0, float(rect.width()))
+        dx = float(local_pos.x() - self._arc_press_pos.x())
+        dy = float(local_pos.y() - self._arc_press_pos.y())
+        side = str(handles[idx].get('side') or '')
+        base = int(getattr(self, '_arc_press_value', handles[idx].get('value', 0)) or 0)
+        if side == 'top':
+            value = base + (-dy / h) * 120.0
+        elif side == 'bottom':
+            value = base + (dy / h) * 120.0
+        elif side == 'left':
+            value = base + (-dx / w) * 120.0
+        else:
+            value = base + (dx / w) * 120.0
+        return self.set_text_arc_handle_value(idx, value)
+
+    def finish_arc_action(self):
+        if not self._arc_action:
+            return False
+        self._arc_action = None
+        main = getattr(self, 'main_window', None)
+        selected_id = self.data.get('id')
+        if main is not None:
+            try:
+                main.auto_save_project()
+                if main.cb_mode.currentIndex() == 4:
+                    main.mode_chg(4)
+                    if selected_id is not None:
+                        main.reselect_text_items([selected_id])
+            except Exception:
+                pass
+            try:
+                main.log(f"🔷 부채꼴 변형 적용: 제어점 {len(self._arc_handles())}개")
+            except Exception:
+                pass
+        return True
 
     def transform_action_at(self, pos):
         if not self.data.get('_transform_mode', False):
@@ -416,7 +1286,7 @@ class TypesettingItem(QGraphicsPathItem):
         # 주의: getattr(..., QGraphicsPathItem.boundingRect(self)) 형태는 default 인자가 매번 평가되어
         # shape()/boundingRect() 호출 중 Qt 쪽 재귀를 만들 수 있다. path().boundingRect()로 가볍게 계산한다.
         text_anchor_mode = str(self.data.get('text_anchor_mode') or '').lower() == 'text'
-        if bool(self.data.get('manual_text_rect')) or text_anchor_mode or bool(self.data.get('_transform_mode', False)):
+        if bool(self.data.get('manual_text_rect')) or text_anchor_mode or bool(self.data.get('_transform_mode', False)) or bool(self.data.get('_skew_mode', False)) or bool(self.data.get('_trapezoid_mode', False)) or bool(self.data.get('_arc_mode', False)):
             rect = getattr(self, '_text_path_rect', None)
             if rect is None:
                 rect = self.path().boundingRect()
@@ -460,6 +1330,18 @@ class TypesettingItem(QGraphicsPathItem):
                 out = out.united(r)
             hp = QPointF(tr.center().x(), tr.top() - 34)
             out = out.united(QRectF(hp.x() - 24, hp.y() - 24, 48, 48))
+        if self.data.get('_skew_mode', False):
+            out = out.united(self.transform_rect())
+            for r in self.skew_handle_rects().values():
+                out = out.united(r)
+        if self.data.get('_trapezoid_mode', False):
+            out = out.united(self.transform_rect())
+            for r in self.trapezoid_handle_rects().values():
+                out = out.united(r)
+        if self.data.get('_arc_mode', False):
+            out = out.united(self.transform_rect())
+            for r in self.arc_handle_rects().values():
+                out = out.united(r)
         return out.adjusted(-12, -12, 12, 12)
 
     def shape(self):
@@ -479,6 +1361,21 @@ class TypesettingItem(QGraphicsPathItem):
                 s.addRect(r.adjusted(-6, -6, 6, 6))
             hp = QPointF(tr.center().x(), tr.top() - 34)
             s.addEllipse(QRectF(hp.x() - 22, hp.y() - 22, 44, 44))
+        if self.data.get('_skew_mode', False):
+            tr = self.transform_rect()
+            s.addRect(tr.adjusted(-10, -10, 10, 10))
+            for r in self.skew_handle_rects().values():
+                s.addRect(r.adjusted(-8, -8, 8, 8))
+        if self.data.get('_trapezoid_mode', False):
+            tr = self.transform_rect()
+            s.addPolygon(QPolygonF(_trapezoid_quad_from_rect(tr, self.data.get('trap_left', 0), self.data.get('trap_right', 0), self.data.get('trap_top', 0), self.data.get('trap_bottom', 0))))
+            for r in self.trapezoid_handle_rects().values():
+                s.addRect(r.adjusted(-8, -8, 8, 8))
+        if self.data.get('_arc_mode', False):
+            tr = self.transform_rect()
+            s.addRect(tr.adjusted(-10, -10, 10, 10))
+            for r in self.arc_handle_rects().values():
+                s.addRect(r.adjusted(-8, -8, 8, 8))
         return s
 
     def paint(self, painter, option, widget=None):
@@ -488,6 +1385,27 @@ class TypesettingItem(QGraphicsPathItem):
         # 단, 파일 출력용 오프스크린 렌더에서는 보조 박스/핸들이 이미지에 찍히면 안 되므로 숨길 수 있게 한다.
         suppress_guides = bool(getattr(self, "suppress_guides", False))
         area_rect = self.text_area_rect()
+        try:
+            _text_opacity = max(0, min(100, int(self.data.get('opacity', 100) or 100))) / 100.0
+        except Exception:
+            _text_opacity = 1.0
+        painter.save()
+        painter.setOpacity(_text_opacity)
+        if getattr(self, '_is_rasterized_text', False):
+            if not suppress_guides:
+                if self.isSelected():
+                    area_pen = QPen(QColor(255, 0, 0), 2, Qt.PenStyle.DashLine)
+                else:
+                    area_pen = QPen(QColor(180, 180, 180, 150), 1, Qt.PenStyle.DotLine)
+                painter.setPen(area_pen)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRect(area_rect)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawImage(QPointF(0, 0), self._raster_image)
+            painter.restore()
+            return
+
         if not suppress_guides:
             if self.data.get('_transform_mode', False):
                 tr = self.transform_rect()
@@ -512,6 +1430,33 @@ class TypesettingItem(QGraphicsPathItem):
                         painter.setBrush(QBrush(QColor(60, 150, 255)))
                     else:
                         painter.drawRect(r)
+            elif self.data.get('_skew_mode', False):
+                tr = self.transform_rect()
+                painter.setPen(QPen(QColor(60, 150, 255), 2, Qt.PenStyle.SolidLine))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRect(tr)
+                painter.setBrush(QBrush(QColor(60, 150, 255)))
+                painter.setPen(QPen(QColor(230, 245, 255), 1))
+                for name, r in self.skew_handle_rects().items():
+                    painter.drawRect(r)
+            elif self.data.get('_trapezoid_mode', False):
+                quad = _trapezoid_quad_from_rect(self.transform_rect(), self.data.get('trap_left', 0), self.data.get('trap_right', 0), self.data.get('trap_top', 0), self.data.get('trap_bottom', 0))
+                painter.setPen(QPen(QColor(60, 150, 255), 2, Qt.PenStyle.SolidLine))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawPolygon(QPolygonF(quad))
+                painter.setBrush(QBrush(QColor(60, 150, 255)))
+                painter.setPen(QPen(QColor(230, 245, 255), 1))
+                for name, r in self.trapezoid_handle_rects().items():
+                    painter.drawRect(r)
+            elif self.data.get('_arc_mode', False):
+                tr = self.transform_rect()
+                painter.setPen(QPen(QColor(60, 150, 255), 2, Qt.PenStyle.SolidLine))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRect(tr)
+                painter.setBrush(QBrush(QColor(60, 150, 255)))
+                painter.setPen(QPen(QColor(230, 245, 255), 1))
+                for name, r in self.arc_handle_rects().items():
+                    painter.drawRect(r)
             else:
                 if self.isSelected():
                     area_pen = QPen(QColor(255, 0, 0), 2, Qt.PenStyle.DashLine)
@@ -522,29 +1467,40 @@ class TypesettingItem(QGraphicsPathItem):
                 painter.drawRect(area_rect)
 
         synthetic_bold_width = float(getattr(self, '_synthetic_bold_width', 0.0) or 0.0)
-
-        if self.pen_stroke.widthF() > 0:
-            stroke_pen = QPen(self.pen_stroke)
-            if synthetic_bold_width > 0:
-                # If we embolden the fill, the outline must grow with it too.
-                stroke_pen.setWidthF(float(stroke_pen.widthF()) + synthetic_bold_width)
-            painter.setPen(stroke_pen)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawPath(self.path())
+        text_path = self.path()
 
         if synthetic_bold_width > 0:
-            # Some fonts have no bold face.  Photoshop fakes this; Qt often does
-            # not.  Stroke the glyph path with the fill color to synthesize bold.
-            bold_pen = QPen(self.brush_fill.color(), synthetic_bold_width)
+            # 합성 볼드는 글자 내부를 두껍게 만드는 용도다. 획보다 나중에 그리면
+            # 문자 그라데이션의 첫 색이 획 바깥으로 번져 보일 수 있으므로 먼저 깔고,
+            # 실제 획을 그 위에 다시 올린 뒤 fill을 마지막에 정리한다.
+            bold_pen = QPen()
+            bold_pen.setBrush(self.brush_fill)
+            bold_pen.setWidthF(synthetic_bold_width)
             bold_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
             bold_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
             painter.setPen(bold_pen)
             painter.setBrush(self.brush_fill)
-            painter.drawPath(self.path())
-        else:
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(self.brush_fill)
-            painter.drawPath(self.path())
+            painter.drawPath(text_path)
+
+        if self.pen_stroke.widthF() > 0:
+            stroke_pen = QPen(self.pen_stroke)
+            if _bool_value(self.data.get('stroke_gradient_enabled'), False):
+                stroke_pen.setBrush(_gradient_brush(
+                    text_path.boundingRect(),
+                    self.data.get('stroke_gradient_color1') or self.pen_stroke.color().name(),
+                    self.data.get('stroke_gradient_color2') or "#000000",
+                    self.data.get('stroke_gradient_angle', 0),
+                    self.data.get('stroke_gradient_ratio', 50),
+                ))
+            if synthetic_bold_width > 0:
+                stroke_pen.setWidthF(float(stroke_pen.widthF()) + synthetic_bold_width)
+            painter.setPen(stroke_pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawPath(text_path)
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(self.brush_fill)
+        painter.drawPath(text_path)
 
         if getattr(self, '_strike_lines', None):
             font_size = int(getattr(self, 'data', {}).get('font_size', 20) or 20)
@@ -557,7 +1513,7 @@ class TypesettingItem(QGraphicsPathItem):
                 painter.setPen(under_pen)
                 for x1, y1, x2, y2 in self._strike_lines:
                     painter.drawLine(QPointF(x1, y1), QPointF(x2, y2))
-            pen = QPen(self.brush_fill.color(), base_width)
+            pen = QPen(getattr(self, '_fill_fallback_color', self.brush_fill.color()), base_width)
             pen.setCapStyle(Qt.PenCapStyle.RoundCap)
             painter.setPen(pen)
             for x1, y1, x2, y2 in self._strike_lines:
@@ -669,6 +1625,30 @@ class TypesettingItem(QGraphicsPathItem):
                 self.setCursor(Qt.CursorShape.ArrowCursor)
             event.accept()
             return
+        if self.data.get('_skew_mode', False):
+            action = self.skew_action_at(event.pos())
+            if action:
+                self.setCursor(self.transform_cursor_for_action(action))
+            else:
+                self.setCursor(Qt.CursorShape.ArrowCursor)
+            event.accept()
+            return
+        if self.data.get('_trapezoid_mode', False):
+            action = self.trapezoid_action_at(event.pos())
+            if action:
+                self.setCursor(self.transform_cursor_for_action(action))
+            else:
+                self.setCursor(Qt.CursorShape.ArrowCursor)
+            event.accept()
+            return
+        if self.data.get('_arc_mode', False):
+            action = self.arc_action_at(event.pos())
+            if action:
+                self.setCursor(self.transform_cursor_for_action(action))
+            else:
+                self.setCursor(Qt.CursorShape.ArrowCursor)
+            event.accept()
+            return
         super().hoverMoveEvent(event)
 
     def hoverLeaveEvent(self, event):
@@ -699,6 +1679,21 @@ class TypesettingItem(QGraphicsPathItem):
             event.accept()
             return
 
+        # 객체화된 텍스트는 더 이상 텍스트 편집 대상은 아니지만,
+        # 기존 텍스트와 같은 레이어의 이동 가능한 객체여야 한다.
+        # QGraphicsItem 기본 이동이 draw/erase 도구와 섞일 때 불안정할 수 있어
+        # rasterized_text만 별도 드래그 이동을 직접 처리한다.
+        if getattr(self, '_is_rasterized_text', False) and event.button() == Qt.MouseButton.LeftButton:
+            if self.scene() is not None:
+                for item in self.scene().selectedItems():
+                    if item is not self:
+                        item.setSelected(False)
+            self.setSelected(True)
+            self._raster_drag_scene_press = QPointF(event.scenePos())
+            self._raster_drag_item_press = QPointF(self.pos())
+            event.accept()
+            return
+
         if self.data.get('_transform_mode', False) and event.button() == Qt.MouseButton.LeftButton:
             if event.modifiers() & Qt.KeyboardModifier.AltModifier:
                 if self.transform_rect().adjusted(-10, -10, 10, 10).contains(event.pos()):
@@ -712,6 +1707,38 @@ class TypesettingItem(QGraphicsPathItem):
                     event.accept()
                     return
 
+            self.setSelected(True)
+            event.accept()
+            return
+
+        if self.data.get('_skew_mode', False) and event.button() == Qt.MouseButton.LeftButton:
+            action = self.skew_action_at(event.pos())
+            if action:
+                if self.begin_skew_action(action, event.pos(), event.scenePos()):
+                    event.accept()
+                    return
+            self.setSelected(True)
+            event.accept()
+            return
+
+        if self.data.get('_trapezoid_mode', False) and event.button() == Qt.MouseButton.LeftButton:
+            action = self.trapezoid_action_at(event.pos())
+            if action:
+                if self.begin_trapezoid_action(action, event.pos(), event.scenePos()):
+                    event.accept()
+                    return
+            self.setSelected(True)
+            event.accept()
+            return
+
+        if self.data.get('_arc_mode', False) and event.button() == Qt.MouseButton.LeftButton:
+            action = self.arc_action_at(event.pos())
+            if not action:
+                action = self.create_or_replace_arc_handle_at(event.pos())
+            if action:
+                if self.begin_arc_action(action, event.pos(), event.scenePos()):
+                    event.accept()
+                    return
             self.setSelected(True)
             event.accept()
             return
@@ -742,6 +1769,113 @@ class TypesettingItem(QGraphicsPathItem):
             main = getattr(self, "main_window", None)
             if main is not None and getattr(getattr(main, "view", None), "draw_mode", None) is not None:
                 event.ignore()
+                return
+
+            if getattr(self, '_is_rasterized_text', False) or self.data.get('rasterized_text'):
+                # 객체화된 텍스트는 일반 이미지 객체로 취급한다.
+                # 더블클릭해도 인라인 텍스트 편집으로 들어가지 않는다.
+                event.accept()
+                return
+
+            if self.data.get('_skew_mode', False):
+                action = self.skew_action_at(event.pos())
+                if action:
+                    current_pct = float(self.data.get('skew_x' if action in ('top', 'bottom') else 'skew_y', 0) or 0)
+                    current_angle = math.degrees(math.atan(current_pct / 100.0))
+                    angle, ok = QInputDialog.getDouble(None, "평행사변형 변형", "기울임 각도(도):", current_angle, -45.0, 45.0, 1)
+                    if ok:
+                        try:
+                            if main is not None and hasattr(main, 'push_page_text_undo'):
+                                main.push_page_text_undo('평행사변형 변형 각도 지정')
+                        except Exception:
+                            pass
+                        self.set_text_skew_angle(action, angle)
+                        try:
+                            if main is not None:
+                                main.auto_save_project()
+                                main.mode_chg(4)
+                                main.reselect_text_items([self.data.get('id')])
+                                main.log(f"🔷 평행사변형 변형 각도 지정: {angle}°")
+                        except Exception:
+                            pass
+                    event.accept()
+                    return
+                event.accept()
+                return
+
+            if self.data.get('_trapezoid_mode', False):
+                action = self.trapezoid_action_at(event.pos())
+                if action:
+                    if action in ('top_left', 'bottom_left', 'left'):
+                        side_key = 'trap_left'
+                        side_name = '왼쪽'
+                    elif action in ('top_right', 'bottom_right', 'right'):
+                        side_key = 'trap_right'
+                        side_name = '오른쪽'
+                    elif action == 'top':
+                        side_key = 'trap_top'
+                        side_name = '위쪽'
+                    else:
+                        side_key = 'trap_bottom'
+                        side_name = '아래쪽'
+                    current_pct = float(self.data.get(side_key, 0) or 0)
+                    value, ok = QInputDialog.getInt(None, '사다리꼴 변형', f'{side_name} 크기(%)', int(round(current_pct)), -95, 95, 1)
+                    if ok:
+                        try:
+                            if main is not None and hasattr(main, 'push_page_text_undo'):
+                                main.push_page_text_undo('사다리꼴 변형 수치 지정')
+                        except Exception:
+                            pass
+                        if side_key == 'trap_left':
+                            self.set_text_trapezoid_values(left_pct=value)
+                        elif side_key == 'trap_right':
+                            self.set_text_trapezoid_values(right_pct=value)
+                        elif side_key == 'trap_top':
+                            self.set_text_trapezoid_values(top_pct=value)
+                        else:
+                            self.set_text_trapezoid_values(bottom_pct=value)
+                        try:
+                            if main is not None:
+                                main.auto_save_project()
+                                main.mode_chg(4)
+                                main.reselect_text_items([self.data.get('id')])
+                                main.log(f"🔷 사다리꼴 변형 수치 지정: {side_name} {value}%")
+                        except Exception:
+                            pass
+                    event.accept()
+                    return
+                event.accept()
+                return
+
+            if self.data.get('_arc_mode', False):
+                action = self.arc_action_at(event.pos())
+                if action:
+                    idx = self._arc_index_from_action(action)
+                    handles = self._arc_handles()
+                    if 0 <= idx < len(handles):
+                        handle = handles[idx]
+                        side = str(handle.get('side') or '')
+                        side_name = {'top':'위쪽','bottom':'아래쪽','left':'왼쪽','right':'오른쪽'}.get(side, side)
+                        current_pct = float(handle.get('value', 0) or 0)
+                        value, ok = QInputDialog.getInt(None, '부채꼴 변형', f'{side_name} 제어점 휘어짐(%)', int(round(current_pct)), -100, 100, 1)
+                        if ok:
+                            try:
+                                if main is not None and hasattr(main, 'push_page_text_undo'):
+                                    main.push_page_text_undo('부채꼴 변형 수치 지정')
+                            except Exception:
+                                pass
+                            self.set_text_arc_handle_value(idx, value)
+                            try:
+                                if main is not None:
+                                    main.auto_save_project()
+                                    main.mode_chg(4)
+                                    main.reselect_text_items([self.data.get('id')])
+                                    main.log(f"🔷 부채꼴 변형 수치 지정: {side_name} 제어점 {value}%")
+                            except Exception:
+                                pass
+                    event.accept()
+                    return
+                event.accept()
                 return
 
             if self.data.get('_transform_mode', False):
@@ -775,8 +1909,34 @@ class TypesettingItem(QGraphicsPathItem):
         super().mouseDoubleClickEvent(event)
 
     def mouseMoveEvent(self, event):
+        if (
+            getattr(self, '_is_rasterized_text', False)
+            and getattr(self, '_raster_drag_scene_press', None) is not None
+            and event.buttons() & Qt.MouseButton.LeftButton
+        ):
+            try:
+                delta = QPointF(event.scenePos()) - QPointF(self._raster_drag_scene_press)
+                self.setPos(QPointF(self._raster_drag_item_press) + delta)
+                self.update()
+                event.accept()
+                return
+            except Exception:
+                pass
+
         if self._transform_action:
             self.update_transform_action(event.pos(), event.scenePos())
+            event.accept()
+            return
+        if self._skew_action:
+            self.update_skew_action(event.pos(), event.scenePos())
+            event.accept()
+            return
+        if self._trapezoid_action:
+            self.update_trapezoid_action(event.pos(), event.scenePos())
+            event.accept()
+            return
+        if self._arc_action:
+            self.update_arc_action(event.pos(), event.scenePos())
             event.accept()
             return
         super().mouseMoveEvent(event)
@@ -786,13 +1946,32 @@ class TypesettingItem(QGraphicsPathItem):
             self.finish_transform_action()
             event.accept()
             return
+        if self._skew_action:
+            self.finish_skew_action()
+            event.accept()
+            return
+        if self._trapezoid_action:
+            self.finish_trapezoid_action()
+            event.accept()
+            return
+        if self._arc_action:
+            self.finish_arc_action()
+            event.accept()
+            return
 
         if getattr(self, '_ctrl_select_press', False):
             self._ctrl_select_press = False
             event.accept()
             return
 
-        super().mouseReleaseEvent(event)
+        raster_drag_active = getattr(self, '_raster_drag_scene_press', None) is not None
+        self._raster_drag_scene_press = None
+        self._raster_drag_item_press = None
+
+        # rasterized_text는 위에서 직접 이동했으므로 base mouseRelease가 없어도 된다.
+        # 일반 텍스트는 기존 흐름을 유지한다.
+        if not raster_drag_active:
+            super().mouseReleaseEvent(event)
         new_pos = self.pos()
         rect = self.data['rect']
         align = (self.data.get('align') or 'center').lower()
@@ -802,13 +1981,20 @@ class TypesettingItem(QGraphicsPathItem):
             rect_y = float(rect[1])
             rect_w = max(1.0, float(rect[2]))
             rect_h = max(1.0, float(rect[3]))
-            if align == 'left':
+            if getattr(self, '_is_rasterized_text', False) or self.data.get('rasterized_text'):
+                # 객체화 텍스트는 rect 자체가 래스터 이미지의 좌상단 기준이다.
+                # align/글자 bounds 보정 없이 위치 차이만 저장해야 이동 후 다시 박혀 보이지 않는다.
+                new_x_off = int(round(float(new_pos.x()) - rect_x))
+                new_y_off = int(round(float(new_pos.y()) - rect_y))
+            elif align == 'left':
                 new_x_off = int(round(float(new_pos.x()) + float(path_rect.left()) - rect_x))
+                new_y_off = int(round(float(new_pos.y()) + float(path_rect.center().y()) - (rect_y + rect_h / 2.0)))
             elif align == 'right':
                 new_x_off = int(round(float(new_pos.x()) + float(path_rect.right()) - (rect_x + rect_w)))
+                new_y_off = int(round(float(new_pos.y()) + float(path_rect.center().y()) - (rect_y + rect_h / 2.0)))
             else:
                 new_x_off = int(round(float(new_pos.x()) + float(path_rect.center().x()) - (rect_x + rect_w / 2.0)))
-            new_y_off = int(round(float(new_pos.y()) + float(path_rect.center().y()) - (rect_y + rect_h / 2.0)))
+                new_y_off = int(round(float(new_pos.y()) + float(path_rect.center().y()) - (rect_y + rect_h / 2.0)))
         except Exception:
             new_x_off = int(round(float(new_pos.x()) - float(rect[0])))
             new_y_off = int(self.data.get('y_off', 0) or 0)
@@ -852,6 +2038,38 @@ class TypesettingItem(QGraphicsPathItem):
                     main.auto_save_project()
             except Exception:
                 pass
+
+
+    def erase_raster_line_scene(self, scene_start, scene_end, brush_size=25):
+        if not getattr(self, '_is_rasterized_text', False):
+            return False
+        if getattr(self, '_raster_image', None) is None or self._raster_image.isNull():
+            return False
+        try:
+            local_start = self.mapFromScene(QPointF(scene_start))
+            local_end = self.mapFromScene(QPointF(scene_end))
+        except Exception:
+            return False
+        width = max(1.0, float(brush_size or 1))
+        hit_rect = QRectF(local_start, local_end).normalized().adjusted(-width, -width, width, width)
+        if not self._raster_rect.intersects(hit_rect):
+            return False
+        p = QPainter(self._raster_image)
+        try:
+            p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            pen = QPen(QColor(0, 0, 0, 0), width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+            p.setPen(pen)
+            p.drawLine(local_start, local_end)
+            if abs(local_start.x() - local_end.x()) < 0.5 and abs(local_start.y() - local_end.y()) < 0.5:
+                p.drawPoint(local_start)
+        finally:
+            p.end()
+        self.data['raster_png'] = _image_to_base64_png(self._raster_image)
+        self.data['raster_w'] = self._raster_image.width()
+        self.data['raster_h'] = self._raster_image.height()
+        self.update()
+        return True
 
 
 class ToggleBoxItem(QGraphicsRectItem):

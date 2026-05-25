@@ -36,30 +36,80 @@ def _package_root() -> Path:
         return Path.cwd()
 
 
-def _configure_local_model_cache() -> Path:
-    package_root = _package_root()
-    here = Path(__file__).resolve()
-
-    # 배포판에서는 Manga OCR 런타임 폴더 안에 모델 캐시를 함께 둔다.
-    #   local_runtime/manga_ocr/model_cache/huggingface
-    # 소스 실행/구버전 구조에서는 기존 local_models/manga_ocr도 허용한다.
-    runtime_root = None
+def _cache_ready(root: Path) -> bool:
     try:
-        if here.parent.name == "manga_ocr" and here.parent.parent.name == "local_runtime":
-            runtime_root = here.parent
+        model_dir = root / "huggingface" / "hub" / "models--kha-white--manga-ocr-base"
+        if not model_dir.exists():
+            return False
+        snapshots = model_dir / "snapshots"
+        if snapshots.exists() and any(snapshots.iterdir()):
+            return True
+        return any(model_dir.rglob("*.safetensors")) or any(model_dir.rglob("*.bin"))
     except Exception:
-        runtime_root = None
+        return False
 
+
+def _runtime_model_cache_root() -> Path | None:
+    try:
+        here = Path(__file__).resolve()
+        if here.parent.name == "manga_ocr" and here.parent.parent.name == "local_runtime":
+            return here.parent / "model_cache"
+    except Exception:
+        pass
+    return None
+
+
+def _candidate_model_roots() -> list[Path]:
+    package_root = _package_root()
+    roots: list[Path] = []
+
+    env_root = os.environ.get("YSB_MANGA_OCR_MODEL_ROOT")
+    if env_root:
+        roots.append(Path(env_root).expanduser())
+
+    runtime_root = _runtime_model_cache_root()
     if runtime_root is not None:
-        root = runtime_root / "model_cache"
-    else:
-        root = package_root / "local_models" / "manga_ocr"
+        roots.append(runtime_root)
 
+    # Shared/user-manageable cache.  This lets Manga OCR keep working even when
+    # local_runtime/manga_ocr/model_cache was deleted but local_models/manga_ocr
+    # still contains the downloaded Hugging Face model.
+    roots.append(package_root / "local_models" / "manga_ocr")
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        try:
+            key = str(root.resolve())
+        except Exception:
+            key = str(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(root)
+    return unique
+
+
+def _select_model_root() -> Path:
+    candidates = _candidate_model_roots()
+    for root in candidates:
+        if _cache_ready(root):
+            return root
+
+    # If no cache is ready yet, use local_models as the download/cache target
+    # instead of forcing users to put models inside the runtime folder. Runtime
+    # cache is still used above when it actually contains a ready model.
+    return _package_root() / "local_models" / "manga_ocr"
+
+
+def _configure_local_model_cache() -> Path:
+    root = _select_model_root()
     hf_home = root / "huggingface"
     hub = hf_home / "hub"
     transformers = hf_home / "transformers"
     for d in (root, hf_home, hub, transformers):
         d.mkdir(parents=True, exist_ok=True)
+    os.environ["YSB_MANGA_OCR_MODEL_ROOT"] = str(root)
     os.environ["HF_HOME"] = str(hf_home)
     os.environ["HF_HUB_CACHE"] = str(hub)
     os.environ["TRANSFORMERS_CACHE"] = str(transformers)
@@ -68,14 +118,7 @@ def _configure_local_model_cache() -> Path:
 
 def _model_cache_ready() -> bool:
     try:
-        root = _configure_local_model_cache()
-        model_dir = root / "huggingface" / "hub" / "models--kha-white--manga-ocr-base"
-        if not model_dir.exists():
-            return False
-        snapshots = model_dir / "snapshots"
-        if snapshots.exists() and any(snapshots.iterdir()):
-            return True
-        return any(model_dir.rglob("*.safetensors")) or any(model_dir.rglob("*.bin"))
+        return _cache_ready(_configure_local_model_cache())
     except Exception:
         return False
 

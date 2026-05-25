@@ -16,6 +16,43 @@ class MainWindowProjectPagesMixin:
         except Exception:
             return []
 
+    def _set_widget_value_blocked(self, widget, value):
+        """프로그램이 UI 값을 채울 때 valueChanged 재발동/포커스 튐을 막는다."""
+        if widget is None:
+            return
+        blocker = None
+        try:
+            blocker = QSignalBlocker(widget)
+        except Exception:
+            blocker = None
+        try:
+            widget.setValue(value)
+        except Exception:
+            pass
+        finally:
+            try:
+                del blocker
+            except Exception:
+                pass
+
+    def _set_widget_checked_blocked(self, widget, checked):
+        if widget is None:
+            return
+        blocker = None
+        try:
+            blocker = QSignalBlocker(widget)
+        except Exception:
+            blocker = None
+        try:
+            widget.setChecked(bool(checked))
+        except Exception:
+            pass
+        finally:
+            try:
+                del blocker
+            except Exception:
+                pass
+
     def calculate_tight_text_scene_rect(self, data_item):
         """data_item의 현재 번역문/스타일이 실제로 차지하는 scene rect를 계산한다.
 
@@ -276,6 +313,9 @@ class MainWindowProjectPagesMixin:
 
         if text_item is None:
             return
+        if bool(getattr(text_item, 'data', {}).get('rasterized_text')):
+            self.log("⚠️ " + self.tr_ui("객체로 변환된 텍스트는 내용을 직접 수정할 수 없습니다."))
+            return
 
         self.inline_text_target = text_item
         text_item.setSelected(True)
@@ -446,11 +486,6 @@ class MainWindowProjectPagesMixin:
         if self._safe_graphics_scene() is None:
             return
 
-        # 개별 텍스트 스타일 작업은 우측 패널의 "선택 텍스트 스타일"에서만 한다.
-        # 예전처럼 이미지 위쪽에 별도 작업바가 뜨지 않게 항상 숨긴다.
-        if hasattr(self, 'final_edit_bar'):
-            self.final_edit_bar.hide()
-
         active_transform = self.current_transform_data_item()
         if active_transform is not None:
             active_id = active_transform.get('id')
@@ -462,7 +497,14 @@ class MainWindowProjectPagesMixin:
             items = self.selected_text_items()
         ids = [item.data.get('id') for item in items]
         self.select_table_rows_by_ids(ids)
+        if hasattr(self, 'final_edit_bar'):
+            self.final_edit_bar.hide()
         self.update_text_style_control_state(items)
+        try:
+            if hasattr(self, "refresh_shared_option_bar"):
+                self.refresh_shared_option_bar()
+        except Exception:
+            pass
 
         if not items or self._style_signal_lock:
             return
@@ -471,25 +513,33 @@ class MainWindowProjectPagesMixin:
         self._style_signal_lock = True
         try:
             self.cb_font.setCurrentFont(QFont(d.get('font_family') or self.cb_font.currentFont().family()))
-            self.sb_font_size.setValue(int(d.get('font_size', self.sb_font_size.value()) or self.sb_font_size.value()))
-            self.sb_strk.setValue(int(d.get('stroke_width', self.sb_strk.value()) or 0))
+            self._set_widget_value_blocked(self.sb_font_size, int(d.get('font_size', self.sb_font_size.value()) or self.sb_font_size.value()))
+            self._set_widget_value_blocked(self.sb_strk, int(d.get('stroke_width', self.sb_strk.value()) or 0))
+            if hasattr(self, 'final_item_font'):
+                self.final_item_font.setCurrentFont(QFont(d.get('font_family') or self.final_item_font.currentFont().family()))
+            if hasattr(self, 'final_item_size'):
+                self._set_widget_value_blocked(self.final_item_size, int(d.get('font_size', self.sb_font_size.value()) or self.sb_font_size.value()))
+            if hasattr(self, 'final_item_stroke'):
+                self._set_widget_value_blocked(self.final_item_stroke, int(d.get('stroke_width', self.sb_strk.value()) or 0))
             self.default_text_color = d.get('text_color') or self.default_text_color
             self.default_stroke_color = d.get('stroke_color') or self.default_stroke_color
             self.default_align = d.get('align') or self.default_align
             if hasattr(self, "sb_line_spacing"):
-                self.sb_line_spacing.setValue(int(d.get('line_spacing', self.default_line_spacing) or self.default_line_spacing))
+                self._set_widget_value_blocked(self.sb_line_spacing, int(d.get('line_spacing', self.default_line_spacing) or self.default_line_spacing))
             if hasattr(self, "sb_letter_spacing"):
-                self.sb_letter_spacing.setValue(int(d.get('letter_spacing', self.default_letter_spacing) or self.default_letter_spacing))
+                self._set_widget_value_blocked(self.sb_letter_spacing, int(d.get('letter_spacing', self.default_letter_spacing) or self.default_letter_spacing))
             if hasattr(self, "sb_char_width"):
-                self.sb_char_width.setValue(int(d.get('char_width', self.default_char_width) or self.default_char_width))
+                self._set_widget_value_blocked(self.sb_char_width, int(d.get('char_width', self.default_char_width) or self.default_char_width))
             if hasattr(self, "sb_char_height"):
-                self.sb_char_height.setValue(int(d.get('char_height', self.default_char_height) or self.default_char_height))
+                self._set_widget_value_blocked(self.sb_char_height, int(d.get('char_height', self.default_char_height) or self.default_char_height))
             if hasattr(self, "btn_bold"):
-                self.btn_bold.setChecked(bool(d.get('bold', False)))
+                self._set_widget_checked_blocked(self.btn_bold, bool(d.get('bold', False)))
             if hasattr(self, "btn_italic"):
-                self.btn_italic.setChecked(bool(d.get('italic', False)))
+                self._set_widget_checked_blocked(self.btn_italic, bool(d.get('italic', False)))
             if hasattr(self, "btn_strike"):
-                self.btn_strike.setChecked(bool(d.get('strike', False)))
+                self._set_widget_checked_blocked(self.btn_strike, bool(d.get('strike', False)))
+            if hasattr(self, "sb_text_opacity"):
+                self._set_widget_value_blocked(self.sb_text_opacity, int(d.get('opacity', 100) or 100))
             self.update_color_button_styles()
             self.update_item_preset_combo_for_selected_texts()
             self.update_text_style_control_state(items)
@@ -595,22 +645,26 @@ class MainWindowProjectPagesMixin:
             if not enabled:
                 for btn in (getattr(self, 'btn_align_left', None), getattr(self, 'btn_align_center', None), getattr(self, 'btn_align_right', None), getattr(self, 'btn_bold', None), getattr(self, 'btn_italic', None), getattr(self, 'btn_strike', None)):
                     if btn is not None:
-                        btn.setChecked(False)
+                        self._set_widget_checked_blocked(btn, False)
+                if hasattr(self, 'sb_text_opacity'):
+                    self._set_widget_value_blocked(self.sb_text_opacity, 100)
                 return
             d = getattr(items[0], 'data', {}) or {}
             align = str(d.get('align') or getattr(self, 'default_align', 'center') or 'center').lower()
             if align not in ('left', 'center', 'right'):
                 align = 'center'
             if hasattr(self, 'btn_align_left'):
-                self.btn_align_left.setChecked(align == 'left')
-                self.btn_align_center.setChecked(align == 'center')
-                self.btn_align_right.setChecked(align == 'right')
+                self._set_widget_checked_blocked(self.btn_align_left, align == 'left')
+                self._set_widget_checked_blocked(self.btn_align_center, align == 'center')
+                self._set_widget_checked_blocked(self.btn_align_right, align == 'right')
             if hasattr(self, 'btn_bold'):
-                self.btn_bold.setChecked(bool(d.get('bold', False)))
+                self._set_widget_checked_blocked(self.btn_bold, bool(d.get('bold', False)))
             if hasattr(self, 'btn_italic'):
-                self.btn_italic.setChecked(bool(d.get('italic', False)))
+                self._set_widget_checked_blocked(self.btn_italic, bool(d.get('italic', False)))
             if hasattr(self, 'btn_strike'):
-                self.btn_strike.setChecked(bool(d.get('strike', False)))
+                self._set_widget_checked_blocked(self.btn_strike, bool(d.get('strike', False)))
+            if hasattr(self, 'sb_text_opacity'):
+                self._set_widget_value_blocked(self.sb_text_opacity, int(d.get('opacity', 100) or 100))
         finally:
             self._style_signal_lock = False
 
@@ -624,6 +678,61 @@ class MainWindowProjectPagesMixin:
             font_size=self.final_item_size.value(),
             stroke_width=self.final_item_stroke.value(),
         )
+
+
+    def on_text_opacity_changed(self, value):
+        if getattr(self, '_style_signal_lock', False):
+            return
+        if not self.selected_text_items() or self.cb_mode.currentIndex() != 4:
+            return
+        self.apply_style_to_selected(opacity=max(0, min(100, int(value))))
+
+    def selected_first_text_data_item(self):
+        try:
+            items = self.selected_text_items()
+            if items:
+                return items[0].data
+        except Exception:
+            pass
+        try:
+            rows = self.selected_text_data_items()
+            if rows:
+                return rows[0]
+        except Exception:
+            pass
+        return None
+
+    def open_selected_text_gradient_dialog(self):
+        try:
+            self.open_text_advanced_effect_dialog(self.selected_text_data_items())
+        except Exception:
+            pass
+
+    def toggle_selected_text_transform_quick(self):
+        d = self.selected_first_text_data_item()
+        if d is not None:
+            self.toggle_text_transform_mode(d)
+
+    def toggle_selected_text_skew_quick(self):
+        d = self.selected_first_text_data_item()
+        if d is not None:
+            self.toggle_text_skew_mode(d)
+
+    def toggle_selected_text_trapezoid_quick(self):
+        d = self.selected_first_text_data_item()
+        if d is not None:
+            self.toggle_text_trapezoid_mode(d)
+
+    def toggle_selected_text_arc_quick(self):
+        d = self.selected_first_text_data_item()
+        if d is not None:
+            self.toggle_text_arc_mode(d)
+
+    def rasterize_selected_text_quick(self):
+        try:
+            self.convert_text_data_items_to_raster_objects(self.selected_text_data_items())
+        except Exception:
+            pass
 
     def apply_style_to_selected(self, keep_selection=True, preset_name=None, record_undo=True, **style):
         if getattr(self, "_app_is_closing", False) or getattr(self, "_closing_confirmed", False):
@@ -2759,7 +2868,7 @@ class MainWindowProjectPagesMixin:
             return False
 
     def show_current_page_full_name(self):
-        """Alt+V: 현재 페이지 탭에 마우스를 올린 것처럼 전체 페이지명을 툴팁으로 보여준다."""
+        """Alt+V: 현재 페이지 탭 전체 이름을 누르고 있는 동안만 보여준다."""
         if not getattr(self, "paths", None):
             self.log("⚠️ 표시할 페이지가 없습니다.")
             return False
@@ -2772,10 +2881,28 @@ class MainWindowProjectPagesMixin:
             bar = getattr(self, "page_tab_bar", None)
             if bar is not None and 0 <= page_idx < bar.count():
                 rect = bar.tabRect(page_idx)
-                pos = bar.mapToGlobal(rect.center())
+                anchor = bar.mapToGlobal(rect.bottomLeft()) + QPoint(0, 8)
             else:
-                pos = QCursor.pos()
-            QToolTip.showText(pos, self.native_tooltip_html("현재 페이지 이름", "Alt+V", text), bar if bar is not None else self)
+                anchor = QCursor.pos() + QPoint(12, 12)
+
+            html = self.native_tooltip_html("현재 페이지 이름", "Alt+V", text)
+            popup = getattr(self, "_page_full_name_popup", None)
+            if popup is None:
+                popup = QLabel()
+                popup.setWindowFlags(Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+                popup.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+                popup.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+                popup.setTextFormat(Qt.TextFormat.RichText)
+                self._page_full_name_popup = popup
+            popup.setText(html)
+            if self.is_light_theme():
+                popup.setStyleSheet("QLabel { background:#ffffff; color:#111827; border:1px solid #cfd7e5; border-radius:0px; padding:5px; }")
+            else:
+                popup.setStyleSheet("QLabel { background:#1f2430; color:#ffffff; border:1px solid #4b5563; border-radius:0px; padding:5px; }")
+            popup.adjustSize()
+            popup.move(anchor)
+            popup.show()
+            self._page_full_name_popup_hold_by_shortcut = True
         except Exception:
             try:
                 QMessageBox.information(self, self.tr_ui("현재 페이지 이름"), text)
@@ -2784,15 +2911,42 @@ class MainWindowProjectPagesMixin:
         self.log(f"📄 현재 페이지 이름: {text}")
         return True
 
-    def show_page_tab_menu(self):
-        """좌측 3선 버튼/단축키에서 현재 프로젝트의 페이지 목록을 포커스 가능한 세로 목록으로 보여준다."""
+    def hide_current_page_full_name(self):
+        try:
+            QToolTip.hideText()
+        except Exception:
+            pass
+        try:
+            popup = getattr(self, "_page_full_name_popup", None)
+            if popup is not None:
+                popup.hide()
+        except Exception:
+            pass
+        self._page_full_name_popup_hold_by_shortcut = False
+
+    def hide_page_tab_menu(self):
         try:
             old_popup = getattr(self, "_page_list_popup", None)
             if old_popup is not None and old_popup.isVisible():
                 old_popup.close()
+        except Exception:
+            pass
+        self._page_list_popup = None
+        self._page_list_popup_hold_by_shortcut = False
+
+    def show_page_tab_menu(self, hold_by_shortcut=False):
+        """좌측 3선 버튼/단축키에서 현재 프로젝트의 페이지 목록을 포커스 가능한 세로 목록으로 보여준다."""
+        try:
+            old_popup = getattr(self, "_page_list_popup", None)
+            if old_popup is not None and old_popup.isVisible():
+                if hold_by_shortcut:
+                    self._page_list_popup_hold_by_shortcut = True
+                    return
+                old_popup.close()
                 return
         except Exception:
             pass
+        self._page_list_popup_hold_by_shortcut = bool(hold_by_shortcut)
 
         btn = getattr(self, "btn_page_tab_menu", None)
         anchor = btn if btn is not None else self
@@ -5420,13 +5574,20 @@ class MainWindowProjectPagesMixin:
                     rect_y = float(rect[1])
                     rect_w = max(1.0, float(rect[2]))
                     rect_h = max(1.0, float(rect[3]))
-                    if align == 'left':
+                    if bool(target.get('rasterized_text')) or bool(getattr(item, '_is_rasterized_text', False)):
+                        # 객체화된 텍스트는 rect가 래스터 이미지의 좌상단 기준이다.
+                        # 일반 텍스트처럼 center/align 보정을 넣으면 이동 후 저장 시 위치가 다시 밀린다.
+                        new_x_off = int(round(float(item_pos.x()) - rect_x))
+                        new_y_off = int(round(float(item_pos.y()) - rect_y))
+                    elif align == 'left':
                         new_x_off = int(round(float(item_pos.x()) + float(path_rect.left()) - rect_x))
+                        new_y_off = int(round(float(item_pos.y()) + float(path_rect.center().y()) - (rect_y + rect_h / 2.0)))
                     elif align == 'right':
                         new_x_off = int(round(float(item_pos.x()) + float(path_rect.right()) - (rect_x + rect_w)))
+                        new_y_off = int(round(float(item_pos.y()) + float(path_rect.center().y()) - (rect_y + rect_h / 2.0)))
                     else:
                         new_x_off = int(round(float(item_pos.x()) + float(path_rect.center().x()) - (rect_x + rect_w / 2.0)))
-                    new_y_off = int(round(float(item_pos.y()) + float(path_rect.center().y()) - (rect_y + rect_h / 2.0)))
+                        new_y_off = int(round(float(item_pos.y()) + float(path_rect.center().y()) - (rect_y + rect_h / 2.0)))
                 except Exception:
                     continue
 
@@ -5454,14 +5615,21 @@ class MainWindowProjectPagesMixin:
             if data_index < 0 or data_index >= len(curr.get('data', [])):
                 continue
 
-            curr['data'][data_index]['use_inpaint'] = self.get_table_check_state(row)
+            data_item = curr['data'][data_index]
+            data_item['use_inpaint'] = self.get_table_check_state(row)
+
+            # 객체화된 텍스트는 우측 표에 [객체] 표시용 문자열을 보여주지만,
+            # 그 문자열이 원본 translated_text에 다시 저장되면 [객체] 접두사가 누적된다.
+            # 래스터 텍스트 객체는 이동/삭제/부분 지우기만 허용하고 내용 편집 값은 유지한다.
+            if data_item.get('rasterized_text'):
+                continue
 
             orig_item = self.tab.item(row, 2)
             if orig_item is not None:
-                curr['data'][data_index]['text'] = orig_item.text()
+                data_item['text'] = orig_item.text()
 
             trans_item = self.tab.item(row, 3)
-            curr['data'][data_index]['translated_text'] = trans_item.text() if trans_item else ""
+            data_item['translated_text'] = trans_item.text() if trans_item else ""
 
         # 화면 마스크 자동 저장은 평상시 현재 페이지에서만 허용.
         # 페이지 로딩/일괄 작업 중에는 이전 화면의 마스크가 다른 페이지에 섞일 수 있으므로 차단한다.

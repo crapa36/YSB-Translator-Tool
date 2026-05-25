@@ -1382,6 +1382,32 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         self.apply_page_tab_style()
         self.refresh_page_tabs()
 
+        # 상단 공유 옵션바: 도구별 옵션은 이 한 줄을 공유한다.
+        # 바 자체는 항상 보이고, 선택/도구 상태에 따라 내부 내용만 교체한다.
+        self.shared_option_bar = QWidget()
+        self.shared_option_bar.setObjectName("SharedOptionBar")
+        self.shared_option_bar_layout = QHBoxLayout(self.shared_option_bar)
+        self.shared_option_bar_layout.setContentsMargins(6, 1, 6, 1)
+        self.shared_option_bar_layout.setSpacing(6)
+        self.shared_option_left = QWidget()
+        self.shared_option_left_layout = QHBoxLayout(self.shared_option_left)
+        self.shared_option_left_layout.setContentsMargins(0, 0, 0, 0)
+        self.shared_option_left_layout.setSpacing(6)
+        self.shared_option_right = QWidget()
+        self.shared_option_right_layout = QHBoxLayout(self.shared_option_right)
+        self.shared_option_right_layout.setContentsMargins(0, 0, 0, 0)
+        self.shared_option_right_layout.setSpacing(6)
+        self.shared_option_bar_layout.addWidget(self.shared_option_left, 0)
+        self.shared_option_bar_layout.addStretch(1)
+        self.shared_option_bar_layout.addWidget(self.shared_option_right, 0)
+        try:
+            self.shared_option_bar.setFixedHeight(30)
+            self.shared_option_bar.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        except Exception:
+            pass
+        self.shared_option_bar.show()
+        vl.addWidget(self.shared_option_bar)
+
         self.final_edit_bar = QWidget()
         final_bar = QHBoxLayout(self.final_edit_bar)
         final_bar.setContentsMargins(6, 1, 6, 1)
@@ -1399,17 +1425,37 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         self.btn_item_align_left = QPushButton("≡◁")
         self.btn_item_align_center = QPushButton("≡◇")
         self.btn_item_align_right = QPushButton("▷≡")
-        final_bar.addWidget(QLabel("선택 텍스트"))
-        final_bar.addWidget(self.final_item_font, 1)
-        final_bar.addWidget(QLabel("크기"))
-        final_bar.addWidget(self.final_item_size)
-        final_bar.addWidget(QLabel("획"))
-        final_bar.addWidget(self.final_item_stroke)
-        final_bar.addWidget(self.btn_item_text_color)
-        final_bar.addWidget(self.btn_item_stroke_color)
-        final_bar.addWidget(self.btn_item_align_left)
-        final_bar.addWidget(self.btn_item_align_center)
-        final_bar.addWidget(self.btn_item_align_right)
+        self.sb_text_opacity = QSpinBox()
+        self.sb_text_opacity.setRange(0, 100)
+        self.sb_text_opacity.setValue(100)
+        self.sb_text_opacity.setSuffix(" %")
+        self.sb_text_opacity.setFixedWidth(76)
+        self.sb_text_opacity.setToolTip("")
+        self.btn_text_effect_gradient = QPushButton("◩")
+        self.btn_text_effect_transform = QPushButton("⤢")
+        self.btn_text_effect_skew = QPushButton("▱")
+        self.btn_text_effect_trapezoid = QPushButton("▰")
+        self.btn_text_effect_arc = QPushButton("⌒")
+        self.btn_text_effect_rasterize = QPushButton("▣")
+        for _btn, _tip in (
+            (self.btn_text_effect_gradient, "문자/획 그라데이션"),
+            (self.btn_text_effect_transform, "텍스트 변형"),
+            (self.btn_text_effect_skew, "평행사변형 변형"),
+            (self.btn_text_effect_trapezoid, "사다리꼴 변형"),
+            (self.btn_text_effect_arc, "부채꼴 변형"),
+            (self.btn_text_effect_rasterize, "텍스트를 객체로 변환"),
+        ):
+            _btn.setFixedSize(30, 26)
+            _btn.setToolTip("")
+        # 공유바에는 선택 텍스트용 빠른 옵션만 최소 구성으로 올린다.
+        final_bar.addWidget(QLabel("불투명도"))
+        final_bar.addWidget(self.sb_text_opacity)
+        final_bar.addWidget(self.btn_text_effect_gradient)
+        final_bar.addWidget(self.btn_text_effect_transform)
+        final_bar.addWidget(self.btn_text_effect_skew)
+        final_bar.addWidget(self.btn_text_effect_trapezoid)
+        final_bar.addWidget(self.btn_text_effect_arc)
+        final_bar.addStretch()
         self.final_edit_bar.hide()
         vl.addWidget(self.final_edit_bar)
         try:
@@ -1598,7 +1644,11 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         self.btn_source_compare_close.clicked.connect(self.close_source_compare_view)
         source_compare_controls_lay.addWidget(self.cb_source_compare_sync)
         source_compare_controls_lay.addWidget(self.btn_source_compare_close)
-        source_compare_bar_lay.addWidget(self.source_compare_controls)
+        try:
+            if hasattr(self, "shared_option_right_layout"):
+                self.shared_option_right_layout.addWidget(self.source_compare_controls)
+        except Exception:
+            pass
         self.source_compare_controls.hide()
         self.source_compare_bar.hide()
         vl.addWidget(self.source_compare_bar)
@@ -1632,11 +1682,18 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         self.source_compare_splitter.setStretchFactor(1, 2)
         self.source_compare_splitter.setSizes([0, 1200])
         vl.addWidget(self.source_compare_splitter)
+        try:
+            self.source_compare_splitter.handle(1).installEventFilter(self)
+            self._source_compare_splitter_handle = self.source_compare_splitter.handle(1)
+        except Exception:
+            pass
 
         try:
-            self.source_compare_splitter.splitterMoved.connect(lambda pos, index: self.schedule_source_compare_sync(0))
-            self.view.horizontalScrollBar().valueChanged.connect(lambda value: self.schedule_source_compare_sync(0))
-            self.view.verticalScrollBar().valueChanged.connect(lambda value: self.schedule_source_compare_sync(0))
+            self.source_compare_splitter.splitterMoved.connect(lambda pos, index: None)
+            self.view.horizontalScrollBar().valueChanged.connect(self._on_main_view_scroll_changed_for_source_compare)
+            self.view.verticalScrollBar().valueChanged.connect(self._on_main_view_scroll_changed_for_source_compare)
+            self.source_compare_view.horizontalScrollBar().valueChanged.connect(self._on_source_compare_scroll_changed_for_main)
+            self.source_compare_view.verticalScrollBar().valueChanged.connect(self._on_source_compare_scroll_changed_for_main)
         except Exception:
             pass
 
@@ -1854,7 +1911,10 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
             self.sb_line_spacing, self.sb_letter_spacing,
             self.sb_char_width, self.sb_char_height,
             self.btn_bold, self.btn_italic, self.btn_strike,
-            self.cb_item_text_preset,
+            self.cb_item_text_preset, getattr(self, 'sb_text_opacity', None),
+            getattr(self, 'btn_text_effect_gradient', None), getattr(self, 'btn_text_effect_transform', None),
+            getattr(self, 'btn_text_effect_skew', None), getattr(self, 'btn_text_effect_trapezoid', None),
+            getattr(self, 'btn_text_effect_arc', None), getattr(self, 'btn_text_effect_rasterize', None),
         ]
 
         # 우측 인터페이스 3줄: 자주 쓰는 작업만 남긴 압축 배치
@@ -2019,6 +2079,13 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         self.btn_item_align_left.clicked.connect(self.make_safe_slot(self.apply_style_to_selected, align="left"))
         self.btn_item_align_center.clicked.connect(self.make_safe_slot(self.apply_style_to_selected, align="center"))
         self.btn_item_align_right.clicked.connect(self.make_safe_slot(self.apply_style_to_selected, align="right"))
+        self.sb_text_opacity.valueChanged.connect(self.on_text_opacity_changed)
+        self.btn_text_effect_gradient.clicked.connect(self.open_selected_text_gradient_dialog)
+        self.btn_text_effect_transform.clicked.connect(self.toggle_selected_text_transform_quick)
+        self.btn_text_effect_skew.clicked.connect(self.toggle_selected_text_skew_quick)
+        self.btn_text_effect_trapezoid.clicked.connect(self.toggle_selected_text_trapezoid_quick)
+        self.btn_text_effect_arc.clicked.connect(self.toggle_selected_text_arc_quick)
+        self.btn_text_effect_rasterize.clicked.connect(self.rasterize_selected_text_quick)
         self.page_required_widgets = [
             getattr(self, 'tb', None), getattr(self, 'view', None), getattr(self, 'btn_prev_page', None), getattr(self, 'btn_next_page', None),
             getattr(self, 'cb_mode', None), getattr(self, 'btn_page', None), getattr(self, 'btn_text_mask_reanalyze', None), getattr(self, 'btn_analyze', None),
@@ -2035,6 +2102,10 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         self.update_text_style_control_state([])
         self.update_page_presence_interlocks()
         self.install_main_input_enter_escape_filters()
+        try:
+            self.configure_stable_numeric_inputs()
+        except Exception:
+            pass
 
     def toggle_log_panel_collapsed(self):
         self.set_log_panel_collapsed(not bool(getattr(self, "log_panel_collapsed", False)), save=True)

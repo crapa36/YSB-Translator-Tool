@@ -1,6 +1,10 @@
-# External Manga OCR worker portable Python runtime dependencies.
-# Installed into local_runtime/manga_ocr/python/Lib/site-packages by the Local build.
-# Keep transformers on v4.x because manga-ocr-base is a VisionEncoderDecoder model.
+# Manga OCR dependencies for YSB Local.
+# Source/test mode: install these into the project .venv with setup_manga_ocr_v2_2_1.bat.
+# Packaged Local mode: install/bundle equivalent dependencies into the Manga OCR portable runtime.
+# torch is installed by the Local core setup; keep it there because the exact CPU/CUDA wheel can differ by user/build.
 
 manga-ocr==0.1.14
 transformers>=4.25,<5
+Pillow>=9
+fugashi>=1.3
+unidic-lite>=1.0

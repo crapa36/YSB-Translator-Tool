@@ -11,12 +11,59 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import subprocess
 import sys
 from pathlib import Path
 
 
 def module_available(module_name: str) -> bool:
     return importlib.util.find_spec(module_name) is not None
+
+
+MANGA_OCR_REQUIRED_MODULES = ["torch", "PIL", "transformers", "fugashi", "unidic_lite"]
+
+
+def _same_path(a: Path, b: Path) -> bool:
+    try:
+        return a.resolve() == b.resolve()
+    except Exception:
+        return str(a) == str(b)
+
+
+def _python_has_modules(python: Path, modules: list[str]) -> tuple[bool, list[str], str]:
+    """Check whether *python* can import the required Manga OCR modules."""
+    missing: list[str] = []
+    if _same_path(python, Path(sys.executable)):
+        for module_name in modules:
+            if not module_available(module_name):
+                missing.append(module_name)
+        return len(missing) == 0, missing, "current"
+
+    code = (
+        "import importlib.util, json, sys; "
+        "mods=" + repr(modules) + "; "
+        "missing=[m for m in mods if importlib.util.find_spec(m) is None]; "
+        "print(json.dumps(missing, ensure_ascii=False)); "
+        "sys.exit(1 if missing else 0)"
+    )
+    try:
+        proc = subprocess.run(
+            [str(python), "-c", code],
+            cwd=str(_app_root()),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=20,
+        )
+        import json
+        try:
+            missing = list(json.loads((proc.stdout or "[]").strip() or "[]"))
+        except Exception:
+            missing = modules if proc.returncode else []
+        return proc.returncode == 0, missing, (proc.stderr or proc.stdout or "").strip()
+    except Exception as e:
+        return False, modules, str(e)
 
 
 def _app_root() -> Path:
@@ -69,38 +116,80 @@ def comic_text_detector_runtime_status() -> tuple[bool, list[str]]:
     return len(missing) == 0, missing
 
 
+def _manga_ocr_python_candidates() -> list[Path]:
+    root = _app_root()
+    env_python = os.environ.get("YSB_MANGA_OCR_PYTHON") or os.environ.get("YSB_PADDLEOCR_PYTHON")
+    python_candidates: list[Path] = []
+    if env_python:
+        python_candidates.append(Path(env_python).expanduser())
+
+    if not getattr(sys, "frozen", False):
+        # Source/test mode: use the active venv/current interpreter first.
+        # local_runtime is only the worker script location here, not a required
+        # Python runtime folder.
+        python_candidates.extend([
+            Path(sys.executable),
+            root / ".venv" / "Scripts" / "python.exe",
+            root / ".venv" / "bin" / "python",
+        ])
+    else:
+        # Packaged Local distribution: the frozen EXE needs a separate Python
+        # runtime for the heavy Manga OCR stack.
+        python_candidates.extend([
+            root / "local_runtime" / "manga_ocr" / "python" / "python.exe",
+            root / "local_runtime" / "python" / "python.exe",
+        ])
+
+    python_candidates.extend([
+        # Optional / backward-compatible explicit runtimes.
+        root / "local_runtime" / "manga_ocr_venv" / "Scripts" / "python.exe",
+        root / "local_runtime" / "manga_ocr_venv" / "bin" / "python",
+        root / "local_runtime" / "ocr_venv" / "Scripts" / "python.exe",
+        root / "local_runtime" / "ocr_venv" / "bin" / "python",
+    ])
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for py in python_candidates:
+        try:
+            key = str(py.resolve())
+        except Exception:
+            key = str(py)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(py)
+    return unique
+
+
 def external_manga_ocr_worker_status() -> tuple[bool, str]:
     root = _app_root()
     worker_candidates = [
-        # Final Local distribution layout.
         root / "local_runtime" / "manga_ocr" / "manga_ocr_worker.py",
-        # Backward-compatible layout from old test builds.
         root / "local_runtime" / "manga_ocr_worker.py",
     ]
-    env_python = os.environ.get("YSB_MANGA_OCR_PYTHON") or os.environ.get("YSB_PADDLEOCR_PYTHON")
-    python_candidates = []
-    if env_python:
-        python_candidates.append(Path(env_python).expanduser())
-    python_candidates.extend([
-        # Final Local distribution uses a separate Manga OCR runtime.
-        root / "local_runtime" / "manga_ocr" / "python" / "python.exe",
-        # Source/dev optional Manga OCR runtime.
-        root / "local_runtime" / "manga_ocr_venv" / "Scripts" / "python.exe",
-        root / "local_runtime" / "manga_ocr_venv" / "bin" / "python",
-        # Backward-compatible fallbacks from old test builds.
-        root / "local_runtime" / "python" / "python.exe",
-        root / "local_runtime" / "ocr_venv" / "Scripts" / "python.exe",
-        root / "local_runtime" / "ocr_venv" / "bin" / "python",
-        root / ".venv" / "Scripts" / "python.exe",
-        root / ".venv" / "bin" / "python",
-    ])
     worker = next((w for w in worker_candidates if w.exists()), None)
-    if worker is None:
+    if worker is None and getattr(sys, "frozen", False):
         return False, "External Manga OCR worker not found: local_runtime/manga_ocr/manga_ocr_worker.py"
-    for py in python_candidates:
-        if py.exists():
-            return True, f"External Manga OCR worker ready: {py}"
-    return False, "External Manga OCR Python runtime not found. local_runtime/manga_ocr/python/python.exe를 확인해 주세요."
+
+    for py in _manga_ocr_python_candidates():
+        if not py.exists():
+            continue
+        deps_ok, missing, detail = _python_has_modules(py, MANGA_OCR_REQUIRED_MODULES)
+        if deps_ok:
+            mode = "source/test current Python" if not getattr(sys, "frozen", False) and _same_path(py, Path(sys.executable)) else "external worker Python"
+            if worker is not None:
+                return True, f"Manga OCR ready via {mode}: {py}"
+            return True, f"Manga OCR direct source/test ready: {py}"
+        return False, (
+            f"Manga OCR Python dependencies missing in {py}: {', '.join(missing)}. "
+            "소스/테스트판은 setup_manga_ocr_v2_2_1.bat을 실행해 .venv에 설치해 주세요. "
+            f"Detail: {detail}"
+        )
+
+    if getattr(sys, "frozen", False):
+        return False, "External Manga OCR Python runtime not found. 배포판에서는 local_runtime/manga_ocr/python/python.exe를 확인해 주세요."
+    return False, "Manga OCR source/test Python not found. .venv 또는 현재 Python 실행 상태를 확인해 주세요."
 
 
 def _manga_model_dir_ready(model_dir: Path) -> bool:
@@ -133,24 +222,21 @@ def manga_ocr_model_status() -> tuple[bool, str]:
         if _manga_model_dir_ready(model_dir):
             return True, f"Manga OCR model found: {model_dir}"
     return False, (
-        "Manga OCR model not found. 배포판에서는 local_runtime/manga_ocr/model_cache 안의 모델을 확인해 주세요. "
-        f"Checked: {candidates[0]}"
+        "Manga OCR model not found. local_models/manga_ocr 또는 배포판의 local_runtime/manga_ocr/model_cache를 확인해 주세요. "
+        f"Checked: {candidates}"
     )
 
 
 def manga_ocr_available() -> bool:
     ok, _ = external_manga_ocr_worker_status()
-    if ok:
-        return True
-    return module_available("manga_ocr")
+    return ok
 
 
 def manga_ocr_ready() -> tuple[bool, str]:
-    worker_ok, worker_msg = external_manga_ocr_worker_status()
-    import_ok = module_available("manga_ocr")
-    if not worker_ok and not import_ok:
-        return False, "manga-ocr 실행 환경을 찾을 수 없습니다. local_runtime/python 또는 .venv 설치 상태를 확인해 주세요."
+    runtime_ok, runtime_msg = external_manga_ocr_worker_status()
+    if not runtime_ok:
+        return False, runtime_msg
     model_ok, msg = manga_ocr_model_status()
     if not model_ok:
         return False, msg
-    return True, worker_msg if worker_ok else msg
+    return True, f"{runtime_msg} / {msg}"

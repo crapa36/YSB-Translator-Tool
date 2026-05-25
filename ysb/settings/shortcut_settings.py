@@ -22,6 +22,162 @@ def cache_file():
     return get_cache_file(CACHE_FILE_NAME)
 
 
+_CONFIRM_KEYS = (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+_ESCAPE_KEYS = (Qt.Key.Key_Escape,)
+_ENTER_KEY_NAMES = {"return", "enter", "numenter", "num+enter", "keypadenter"}
+_COMMA_KEY_NAMES = {",", "comma"}
+
+
+def _enum_int(value):
+    try:
+        return int(value.value)
+    except Exception:
+        try:
+            return int(value)
+        except Exception:
+            return 0
+
+
+def _split_sequence_parts_preserving_comma(text: str):
+    """QKeySequence PortableText의 콤마 구분자를 나누되 Ctrl+, 같은 콤마 키는 보존한다."""
+    s = str(text or "").strip()
+    if not s:
+        return []
+    if s.lower() in _COMMA_KEY_NAMES:
+        return [s]
+
+    parts = []
+    buf = []
+    for i, ch in enumerate(s):
+        if ch == ",":
+            before = "".join(buf).rstrip()
+            after = s[i + 1:].lstrip()
+            prev = before[-1:]
+            # Ctrl+, / Ctrl+Shift+, / bare , 는 실제 콤마 키이므로 분리하지 않는다.
+            if prev == "+" or (not before and not after):
+                buf.append(ch)
+                continue
+            # 일반 QKeySequence의 multi-stroke 구분자.
+            part = before.strip()
+            if part:
+                parts.append(part)
+            buf = []
+            continue
+        buf.append(ch)
+    tail = "".join(buf).strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def key_sequence_from_text(value) -> QKeySequence:
+    """문자열을 QKeySequence로 변환한다. Qt가 헷갈려하는 Ctrl+, 계열은 수동 생성한다."""
+    text = str(value or "").strip()
+    if not text:
+        return QKeySequence("")
+    compact = text.replace(" ", "")
+    tokens = [t for t in compact.split("+") if t != ""]
+    if tokens and tokens[-1].lower() in _COMMA_KEY_NAMES:
+        mods = Qt.KeyboardModifier.NoModifier
+        for token in tokens[:-1]:
+            t = token.lower()
+            if t in ("ctrl", "control"):
+                mods |= Qt.KeyboardModifier.ControlModifier
+            elif t == "alt":
+                mods |= Qt.KeyboardModifier.AltModifier
+            elif t == "shift":
+                mods |= Qt.KeyboardModifier.ShiftModifier
+            elif t in ("meta", "cmd", "command", "win"):
+                mods |= Qt.KeyboardModifier.MetaModifier
+        return QKeySequence(_enum_int(mods) | _enum_int(Qt.Key.Key_Comma))
+    return QKeySequence(text)
+
+
+def key_sequence_to_portable(seq, fallback="") -> str:
+    try:
+        text = seq.toString(QKeySequence.SequenceFormat.PortableText)
+    except Exception:
+        text = ""
+    if text:
+        return text
+    fallback = str(fallback or "").strip()
+    if fallback and (fallback.lower() in _COMMA_KEY_NAMES or fallback.replace(" ", "").endswith("+,")):
+        return fallback.replace(" ", "")
+    return ""
+
+
+def _sequence_part_has_enter(part: str) -> bool:
+    tokens = [t.strip().lower() for t in str(part or "").replace(" ", "").split("+") if t.strip()]
+    return any(t in _ENTER_KEY_NAMES for t in tokens)
+
+
+def sequence_without_confirm_keys(seq) -> QKeySequence:
+    """Return/Enter는 단축키 입력 확정키로만 사용하고 실제 단축키에서는 제거한다."""
+    try:
+        text = seq.toString(QKeySequence.SequenceFormat.PortableText)
+    except Exception:
+        text = str(seq or "")
+    parts = _split_sequence_parts_preserving_comma(text)
+    parts = [p for p in parts if not _sequence_part_has_enter(p)]
+    return key_sequence_from_text(", ".join(parts))
+
+
+class ConfirmingKeySequenceEdit(QKeySequenceEdit):
+    """Enter/Esc를 단축키 일부가 아니라 입력 확정/포커스 해제로 처리하는 단축키 입력칸."""
+
+    def _finish_shortcut_input(self):
+        try:
+            clean = sequence_without_confirm_keys(self.keySequence())
+            if key_sequence_to_portable(clean) != key_sequence_to_portable(self.keySequence()):
+                self.blockSignals(True)
+                try:
+                    self.setKeySequence(clean)
+                finally:
+                    self.blockSignals(False)
+        except Exception:
+            pass
+        try:
+            self.editingFinished.emit()
+        except Exception:
+            pass
+        try:
+            self.clearFocus()
+        except Exception:
+            pass
+        try:
+            parent = self.parentWidget()
+            if parent is not None:
+                parent.setFocus(Qt.FocusReason.OtherFocusReason)
+        except Exception:
+            pass
+
+    def keyPressEvent(self, event):
+        if event.key() in _CONFIRM_KEYS:
+            event.accept()
+            self._finish_shortcut_input()
+            return
+        if event.key() in _ESCAPE_KEYS:
+            event.accept()
+            self._finish_shortcut_input()
+            return
+        if event.key() == Qt.Key.Key_Comma:
+            mods = event.modifiers()
+            parts = []
+            if mods & Qt.KeyboardModifier.ControlModifier:
+                parts.append("Ctrl")
+            if mods & Qt.KeyboardModifier.AltModifier:
+                parts.append("Alt")
+            if mods & Qt.KeyboardModifier.ShiftModifier:
+                parts.append("Shift")
+            if mods & Qt.KeyboardModifier.MetaModifier:
+                parts.append("Meta")
+            seq_text = "+".join(parts + [","]) if parts else ","
+            self.setKeySequence(key_sequence_from_text(seq_text))
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
 THEME_DARK = "dark"
 THEME_LIGHT = "light"
 LANG_KO = "ko"
@@ -302,6 +458,11 @@ DEFAULT_SHORTCUTS = {
     "text_italic_toggle": "Ctrl+Alt+M",
     "text_strike_toggle": "Ctrl+Alt+N",
     "text_transform_toggle": "Ctrl+T",
+    "text_effect_gradient": "Ctrl+1",
+    "text_skew_toggle": "Ctrl+2",
+    "text_trapezoid_toggle": "Ctrl+3",
+    "text_arc_toggle": "Ctrl+4",
+    "text_rasterize": "Ctrl+Alt+K",
 
     # 2. 텍스트 입력 옵션
     # 사용자가 'Shift'라고 적어준 항목은 실제 입력 충돌 방지를 위해 Shift+Enter로 처리
@@ -410,9 +571,9 @@ DEFAULT_SHORTCUTS = {
     "item_font_select": "F1",
     "item_font_inc": "=",
     "item_font_dec": "-",
-    "item_align_left": "F2",
-    "item_align_center": "F3",
-    "item_align_right": "F4",
+    "item_align_left": "Ctrl+5",
+    "item_align_center": "Ctrl+6",
+    "item_align_right": "Ctrl+7",
     "item_stroke_inc": "Ctrl+=",
     "item_stroke_dec": "Ctrl+-",
     "item_text_color": "F6",
@@ -446,20 +607,7 @@ GROUPS = [
         ("final_paint_opacity_inc", "브러시 불투명도 증가"),
         ("final_paint_opacity_dec", "브러시 불투명도 감소"),
     ]),
-    ("텍스트 입력", [
-        ("text_linebreak", "줄내림"),
-        ("text_ellipsis", "말줄임표(…)"),
-        ("text_horizontal_dash", "가로장음(―)"),
-        ("text_vertical_dash", "세로장음(│)"),
-        ("text_single_corner", "홑낫표(「」)"),
-        ("text_double_corner", "겹낫표(『』)"),
-        ("text_white_heart", "하얀하트(♡)"),
-        ("text_black_heart", "검은하트(♥)"),
-        ("text_music_note", "음표(♪)"),
-        ("text_black_circle", "검은 동그라미(●)"),
-        ("text_middle_dot", "가운뎃점(·)"),
-    ]),
-    ("글꼴", [
+    ("텍스트", [
         ("item_font_select", "폰트"),
         ("text_font_size", "문자 크기"),
         ("item_font_inc", "문자 확대"),
@@ -474,12 +622,30 @@ GROUPS = [
         ("text_bold_toggle", "굵게하기"),
         ("text_italic_toggle", "기울이기"),
         ("text_strike_toggle", "취소선"),
-        ("text_transform_toggle", "텍스트 변형"),
         ("item_align_left", "왼쪽 정렬"),
         ("item_align_center", "중앙정렬"),
         ("item_align_right", "오른쪽 정렬"),
         ("item_text_color", "문자 색상 팔레트"),
         ("item_stroke_color", "획 색상 팔레트"),
+        ("text_linebreak", "줄내림"),
+        ("text_ellipsis", "말줄임표(…)"),
+        ("text_horizontal_dash", "가로장음(―)"),
+        ("text_vertical_dash", "세로장음(│)"),
+        ("text_single_corner", "홑낫표(「」)"),
+        ("text_double_corner", "겹낫표(『』)"),
+        ("text_white_heart", "하얀하트(♡)"),
+        ("text_black_heart", "검은하트(♥)"),
+        ("text_music_note", "음표(♪)"),
+        ("text_black_circle", "검은 동그라미(●)"),
+        ("text_middle_dot", "가운뎃점(·)"),
+    ]),
+    ("텍스트 수정", [
+        ("text_transform_toggle", "텍스트 변형"),
+        ("text_effect_gradient", "문자/획 그라데이션"),
+        ("text_skew_toggle", "평행사변형 변형"),
+        ("text_trapezoid_toggle", "사다리꼴 변형"),
+        ("text_arc_toggle", "부채꼴 변형"),
+        ("text_rasterize", "텍스트를 객체로 변환"),
     ]),
     ("프로젝트", [
         ("project_new", "새로 만들기"),
@@ -494,7 +660,7 @@ GROUPS = [
     ]),
     ("작업", [
         ("work_tab_cycle", "작업탭 변경"),
-        ("work_source_compare", "원본 비교창 열기"),
+        ("work_source_compare", "원본 비교창 열기/끄기"),
         ("paint_undo", "작업 취소"),
         ("paint_redo", "작업 재실행"),
         ("work_page_prev", "이전 페이지"),
@@ -651,10 +817,10 @@ class ShortcutSettings:
     def seq(self, key: str) -> QKeySequence:
         if not self.is_enabled(key):
             return QKeySequence("")
-        return QKeySequence(self.shortcuts.get(key, DEFAULT_SHORTCUTS.get(key, "")))
+        return key_sequence_from_text(self.shortcuts.get(key, DEFAULT_SHORTCUTS.get(key, "")))
 
     def set_seq(self, key: str, seq: QKeySequence):
-        self.shortcuts[key] = seq.toString(QKeySequence.SequenceFormat.PortableText)
+        self.shortcuts[key] = key_sequence_to_portable(seq)
 
     def set_enabled(self, key: str, value: bool):
         self.enabled[key] = bool(value)
@@ -849,9 +1015,14 @@ class ShortcutSettingsStore:
                 "text_italic_toggle": "Ctrl+Alt+M",
                 "text_strike_toggle": "Ctrl+Alt+N",
                 "text_transform_toggle": "Ctrl+T",
-                "item_align_left": "F2",
-                "item_align_center": "F3",
-                "item_align_right": "F4",
+    "text_effect_gradient": "Ctrl+1",
+    "text_skew_toggle": "Ctrl+2",
+    "text_trapezoid_toggle": "Ctrl+3",
+    "text_arc_toggle": "Ctrl+4",
+    "text_rasterize": "Ctrl+Alt+K",
+                "item_align_left": "Ctrl+5",
+                "item_align_center": "Ctrl+6",
+                "item_align_right": "Ctrl+7",
                 "item_text_color": "F6",
                 "item_stroke_color": "F7",
             }
@@ -982,7 +1153,7 @@ class MacroFunctionSelectDialog(QDialog):
             if not shortcut:
                 continue
             try:
-                seq = QKeySequence(shortcut)
+                seq = key_sequence_from_text(shortcut)
                 display_shortcut = seq.toString(QKeySequence.SequenceFormat.NativeText) or shortcut
             except Exception:
                 display_shortcut = shortcut
@@ -1008,7 +1179,7 @@ class MacroFunctionSelectDialog(QDialog):
                 if not shortcut:
                     continue
                 try:
-                    seq = QKeySequence(shortcut)
+                    seq = key_sequence_from_text(shortcut)
                     display_shortcut = seq.toString(QKeySequence.SequenceFormat.NativeText) or shortcut
                 except Exception:
                     display_shortcut = shortcut
@@ -1494,7 +1665,7 @@ class MacroSettingsDialog(QDialog):
             if checked:
                 restore = row_data.get("backup_shortcut", "")
                 if restore:
-                    seq_edit.setKeySequence(QKeySequence(restore))
+                    seq_edit.setKeySequence(key_sequence_from_text(restore))
             else:
                 current = seq_edit.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
                 if current:
@@ -1532,12 +1703,12 @@ class MacroSettingsDialog(QDialog):
         function_btn = QPushButton(self.macro_label(actions))
         function_btn.setMinimumWidth(360)
 
-        seq = QKeySequenceEdit()
-        seq.setKeySequence(QKeySequence(str(macro.get("shortcut", ""))))
+        seq = ConfirmingKeySequenceEdit()
+        seq.setKeySequence(key_sequence_from_text(str(macro.get("shortcut", ""))))
 
         delete_btn = QPushButton(tr_text("삭제", self._ui_language))
 
-        initial_shortcut = seq.keySequence().toString(QKeySequence.SequenceFormat.PortableText) if enabled.isChecked() else ""
+        initial_shortcut = key_sequence_to_portable(seq.keySequence()) if enabled.isChecked() else ""
         row_data = {
             "enabled": enabled,
             "name": name,
@@ -1590,7 +1761,19 @@ class MacroSettingsDialog(QDialog):
         if not row_data["enabled"].isChecked():
             return
 
-        seq_text = row_data["seq"].keySequence().toString(QKeySequence.SequenceFormat.PortableText)
+        try:
+            clean_seq = sequence_without_confirm_keys(row_data["seq"].keySequence())
+            clean_text = key_sequence_to_portable(clean_seq)
+            current_text = key_sequence_to_portable(row_data["seq"].keySequence())
+            if clean_text != current_text:
+                row_data["seq"].blockSignals(True)
+                try:
+                    row_data["seq"].setKeySequence(clean_seq)
+                finally:
+                    row_data["seq"].blockSignals(False)
+            seq_text = clean_text
+        except Exception:
+            seq_text = key_sequence_to_portable(row_data["seq"].keySequence())
         old_text = row_data.get("last_shortcut", "")
 
         if not seq_text:
@@ -1606,7 +1789,7 @@ class MacroSettingsDialog(QDialog):
             self._handling = True
             try:
                 if old_text:
-                    row_data["seq"].setKeySequence(QKeySequence(old_text))
+                    row_data["seq"].setKeySequence(key_sequence_from_text(old_text))
                 else:
                     row_data["seq"].clear()
                 row_data["last_shortcut"] = old_text
@@ -1620,7 +1803,7 @@ class MacroSettingsDialog(QDialog):
                     continue
                 if not other["enabled"].isChecked():
                     continue
-                other_seq = other["seq"].keySequence().toString(QKeySequence.SequenceFormat.PortableText)
+                other_seq = key_sequence_to_portable(other["seq"].keySequence())
                 if other_seq == seq_text:
                     ans = QMessageBox.question(
                         self,
@@ -1648,7 +1831,7 @@ class MacroSettingsDialog(QDialog):
             for key, shortcut in list(self.settings.shortcuts.items()):
                 if not self.settings.enabled.get(key, True):
                     continue
-                if shortcut and QKeySequence(shortcut).toString(QKeySequence.SequenceFormat.PortableText) == seq_text:
+                if shortcut and key_sequence_to_portable(key_sequence_from_text(shortcut), shortcut) == seq_text:
                     label = self.label_map.get(key, key)
                     ans = QMessageBox.question(
                         self,
@@ -1674,7 +1857,7 @@ class MacroSettingsDialog(QDialog):
                 if not preset.get("enabled", True):
                     continue
                 item_seq = str(preset.get("shortcut", "") or "")
-                if item_seq and QKeySequence(item_seq).toString(QKeySequence.SequenceFormat.PortableText) == seq_text:
+                if item_seq and key_sequence_to_portable(key_sequence_from_text(item_seq), item_seq) == seq_text:
                     ans = QMessageBox.question(
                         self,
                         tr_text("개별 프리셋 단축키 비활성화 확인", self._ui_language),
@@ -2006,7 +2189,7 @@ class ShortcutSettingsDialog(QDialog):
 
                     item_layout.addWidget(left_wrap, 1)
 
-                    edit = QKeySequenceEdit()
+                    edit = ConfirmingKeySequenceEdit()
                     edit.setKeySequence(self.settings.seq(key))
                     edit.setMinimumWidth(220)
                     item_layout.addWidget(edit, 0, alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -2016,7 +2199,7 @@ class ShortcutSettingsDialog(QDialog):
                     self.desc_labels[key] = desc_w
                     self.item_frames[key] = item
                     self.edits[key] = edit
-                    self.last_sequences[key] = edit.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
+                    self.last_sequences[key] = key_sequence_to_portable(edit.keySequence())
 
                     chk.toggled.connect(lambda checked, k=key: self.on_enabled_toggled(k, checked))
                     edit.editingFinished.connect(lambda k=key: self.on_editing_finished(k))
@@ -2151,7 +2334,7 @@ class ShortcutSettingsDialog(QDialog):
             if not shortcut:
                 continue
             try:
-                seq = QKeySequence(shortcut)
+                seq = key_sequence_from_text(shortcut)
                 display_shortcut = seq.toString(QKeySequence.SequenceFormat.NativeText) or shortcut
             except Exception:
                 display_shortcut = shortcut
@@ -2177,7 +2360,7 @@ class ShortcutSettingsDialog(QDialog):
                 if not shortcut:
                     continue
                 try:
-                    seq = QKeySequence(shortcut)
+                    seq = key_sequence_from_text(shortcut)
                     display_shortcut = seq.toString(QKeySequence.SequenceFormat.NativeText) or shortcut
                 except Exception:
                     display_shortcut = shortcut
@@ -2273,7 +2456,7 @@ class ShortcutSettingsDialog(QDialog):
             return ""
         seq_text = "+".join(parts + [token]) if parts else token
         try:
-            portable = QKeySequence(seq_text).toString(QKeySequence.SequenceFormat.PortableText)
+            portable = key_sequence_to_portable(key_sequence_from_text(seq_text), seq_text)
             if portable:
                 return portable
         except Exception:
@@ -2304,10 +2487,11 @@ class ShortcutSettingsDialog(QDialog):
         if hasattr(self, "extra_shortcut_text_by_key") and key in self.extra_shortcut_text_by_key:
             value = str(self.extra_shortcut_text_by_key.get(key) or "")
             try:
-                seq = QKeySequence(value)
+                seq = key_sequence_from_text(value)
                 if seq and not seq.isEmpty():
                     fmt = QKeySequence.SequenceFormat.PortableText if portable else QKeySequence.SequenceFormat.NativeText
-                    return seq.toString(fmt)
+                    shown = seq.toString(fmt)
+                    return shown or value
             except Exception:
                 pass
             return value
@@ -2318,11 +2502,11 @@ class ShortcutSettingsDialog(QDialog):
             if not seq or seq.isEmpty():
                 return ""
             fmt = QKeySequence.SequenceFormat.PortableText if portable else QKeySequence.SequenceFormat.NativeText
-            return seq.toString(fmt)
+            return seq.toString(fmt) or key_sequence_to_portable(seq)
         value = self.settings.shortcuts.get(key, DEFAULT_SHORTCUTS.get(key, ""))
-        seq = QKeySequence(value)
+        seq = key_sequence_from_text(value)
         fmt = QKeySequence.SequenceFormat.PortableText if portable else QKeySequence.SequenceFormat.NativeText
-        return seq.toString(fmt) if seq and not seq.isEmpty() else ""
+        return (seq.toString(fmt) or str(value or "")) if seq and not seq.isEmpty() else ""
 
     def clear_shortcut_search(self):
         if hasattr(self, "search_edit"):
@@ -2372,7 +2556,7 @@ class ShortcutSettingsDialog(QDialog):
             QMessageBox.information(self, tr_text("단축키 검색", self._ui_language), tr_text("해당 단축키는 없습니다.", self._ui_language))
             return
         # 검색창에는 사용자가 방금 누른 단축키를 표시해 현재 필터 상태를 알 수 있게 한다.
-        self.search_edit.setText(QKeySequence(seq_text).toString(QKeySequence.SequenceFormat.NativeText) or seq_text)
+        self.search_edit.setText(key_sequence_from_text(seq_text).toString(QKeySequence.SequenceFormat.NativeText) or seq_text)
         self.apply_filter(set(matched))
 
     def apply_filter(self, matched_keys):
@@ -2429,7 +2613,19 @@ class ShortcutSettingsDialog(QDialog):
             self._shortcut_conflict_prompt_active = False
 
     def sequence_text(self, edit: QKeySequenceEdit) -> str:
-        return edit.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
+        try:
+            clean = sequence_without_confirm_keys(edit.keySequence())
+            clean_text = key_sequence_to_portable(clean)
+            current_text = key_sequence_to_portable(edit.keySequence())
+            if clean_text != current_text:
+                edit.blockSignals(True)
+                try:
+                    edit.setKeySequence(clean)
+                finally:
+                    edit.blockSignals(False)
+            return clean_text
+        except Exception:
+            return edit.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
 
     def apply_enabled_state(self, key: str, enabled: bool):
         edit = self.edits[key]
@@ -2474,7 +2670,7 @@ class ShortcutSettingsDialog(QDialog):
         try:
             if checked:
                 restore = self.disabled_backup.get(key) or DEFAULT_SHORTCUTS.get(key, "")
-                edit.setKeySequence(QKeySequence(restore))
+                edit.setKeySequence(key_sequence_from_text(restore))
                 # 여기서 last_sequences를 바로 갱신하면 swap_if_conflict가
                 # "변경 없음"으로 판단해서 매크로 단축키 충돌 검사를 건너뛴다.
                 # 따라서 토글 ON 직후 충돌 검사는 swap_if_conflict가 담당하게 둔다.
@@ -2514,7 +2710,7 @@ class ShortcutSettingsDialog(QDialog):
             self._handling_change = True
             try:
                 if old_text:
-                    edit.setKeySequence(QKeySequence(old_text))
+                    edit.setKeySequence(key_sequence_from_text(old_text))
                 else:
                     edit.clear()
                 self.last_sequences[key] = old_text
@@ -2528,7 +2724,7 @@ class ShortcutSettingsDialog(QDialog):
             macro_seq = str(macro.get("shortcut", "") or "")
             if not macro_seq:
                 continue
-            if QKeySequence(macro_seq).toString(QKeySequence.SequenceFormat.PortableText) == new_text:
+            if key_sequence_to_portable(key_sequence_from_text(macro_seq), macro_seq) == new_text:
                 label = self.labels.get(key).text() if self.labels.get(key) else key
                 macro_name = str(macro.get("name", "매크로"))
                 ans = self.ask_shortcut_conflict_question(
@@ -2555,7 +2751,7 @@ class ShortcutSettingsDialog(QDialog):
             if not preset.get("enabled", True):
                 continue
             item_seq = str(preset.get("shortcut", "") or "")
-            if item_seq and QKeySequence(item_seq).toString(QKeySequence.SequenceFormat.PortableText) == new_text:
+            if item_seq and key_sequence_to_portable(key_sequence_from_text(item_seq), item_seq) == new_text:
                 label = self.labels.get(key).text() if self.labels.get(key) else key
                 ans = self.ask_shortcut_conflict_question(
                     self,
@@ -2609,7 +2805,7 @@ class ShortcutSettingsDialog(QDialog):
             if other_key:
                 other_edit = self.edits[other_key]
                 if old_text:
-                    other_edit.setKeySequence(QKeySequence(old_text))
+                    other_edit.setKeySequence(key_sequence_from_text(old_text))
                 else:
                     other_edit.clear()
                 self.last_sequences[other_key] = old_text
@@ -2632,8 +2828,8 @@ class ShortcutSettingsDialog(QDialog):
                 if key in self.checks:
                     self.checks[key].setChecked(True)
                 if key in self.edits:
-                    self.edits[key].setKeySequence(QKeySequence(value))
-                    self.last_sequences[key] = self.edits[key].keySequence().toString(QKeySequence.SequenceFormat.PortableText)
+                    self.edits[key].setKeySequence(key_sequence_from_text(value))
+                    self.last_sequences[key] = key_sequence_to_portable(self.edits[key].keySequence())
                     self.apply_enabled_state(key, True)
         finally:
             self._handling_change = False

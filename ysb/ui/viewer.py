@@ -1,8 +1,9 @@
 import copy
+import math
 import numpy as np
-from PyQt6.QtWidgets import QGraphicsView, QGraphicsScene, QGraphicsTextItem
+from PyQt6.QtWidgets import QGraphicsView, QGraphicsScene, QGraphicsTextItem, QInputDialog
 from PyQt6.QtGui import QPainter, QPen, QBrush, QColor, QImage, QPixmap, QFont, QPainterPath
-from PyQt6.QtCore import Qt, QRectF, QTimer
+from PyQt6.QtCore import Qt, QRectF, QTimer, QPointF
 
 from ysb.engine.graphics_items import ToggleBoxItem, TypesettingItem
 
@@ -71,6 +72,19 @@ class MuleImageViewer(QGraphicsView):
         self.is_area_painting = False
         self._area_paint_undo_key = None
 
+        self.raster_erase_start = None
+        self.raster_erase_preview_item = None
+        self.is_raster_erasing = False
+        self.is_raster_text_brush_erasing = False
+
+        # 객체화 텍스트는 페인팅 레이어/뷰 드래그 모드에 클릭이 막힐 수 있어
+        # QGraphicsItem 이벤트에 맡기지 않고 View 레벨에서 직접 hit-test/드래그한다.
+        self._raster_view_drag_item = None
+        self._raster_view_drag_scene_press = None
+        self._raster_view_drag_item_press = None
+        self._raster_view_drag_old_offsets = None
+        self._raster_view_drag_moved = False
+
     def _active_transform_item_obj(self):
         active = self.main.current_transform_data_item() if hasattr(self.main, 'current_transform_data_item') else None
         if active is None:
@@ -87,7 +101,14 @@ class MuleImageViewer(QGraphicsView):
         if active_item is not None:
             try:
                 local = active_item.mapFromScene(scene_pos)
-                if active_item.transform_action_at(local) or active_item.shape().contains(local):
+                action = active_item.transform_action_at(local) if active_item.data.get('_transform_mode', False) else None
+                if not action and active_item.data.get('_skew_mode', False):
+                    action = active_item.skew_action_at(local)
+                if not action and active_item.data.get('_trapezoid_mode', False):
+                    action = active_item.trapezoid_action_at(local)
+                if not action and active_item.data.get('_arc_mode', False):
+                    action = active_item.arc_action_at(local)
+                if action or active_item.shape().contains(local):
                     return active_item
             except Exception:
                 pass
@@ -95,6 +116,201 @@ class MuleImageViewer(QGraphicsView):
             if isinstance(item, TypesettingItem) and not getattr(item, "is_paste_preview", False):
                 return item
         return None
+
+    def _final_text_hit_debug_enabled(self):
+        try:
+            return bool(getattr(self.main, "debug_text_hit_test", False) or getattr(self, "debug_text_hit_test", False))
+        except Exception:
+            return False
+
+    def _log_final_text_hit_debug(self, message):
+        if not self._final_text_hit_debug_enabled():
+            return
+        try:
+            if hasattr(self.main, "log"):
+                self.main.log(message)
+        except Exception:
+            pass
+
+    def _is_final_move_mode(self):
+        try:
+            return (
+                getattr(self.main, "cb_mode", None) is not None
+                and self.main.cb_mode.currentIndex() == 4
+                and self.draw_mode is None
+            )
+        except Exception:
+            return False
+
+    def _raster_text_alpha_hit(self, item, scene_pos, radius=3):
+        """객체화 텍스트의 실제 보이는 픽셀을 기준으로 hit-test한다.
+
+        itemAt()/scene.items(scene_pos)는 최상단 페인팅 레이어나 아이템 shape 때문에
+        실제 글자 클릭과 다르게 동작할 수 있다. 그래서 객체화 텍스트는 알파 채널을
+        직접 검사한다. 얇은 획/안티앨리어싱을 고려해 작은 반경도 같이 본다.
+        """
+        if item is None or not getattr(item, "data", {}).get('rasterized_text'):
+            return False
+        img = getattr(item, '_raster_image', None)
+        rect = getattr(item, '_raster_rect', QRectF())
+        if img is None or img.isNull() or rect.isNull():
+            return False
+        try:
+            local = item.mapFromScene(QPointF(scene_pos))
+        except Exception:
+            return False
+        if not rect.adjusted(-radius, -radius, radius, radius).contains(local):
+            return False
+        w = img.width()
+        h = img.height()
+        cx = int(round(local.x()))
+        cy = int(round(local.y()))
+        r = max(0, int(radius or 0))
+        for yy in range(max(0, cy - r), min(h - 1, cy + r) + 1):
+            for xx in range(max(0, cx - r), min(w - 1, cx + r) + 1):
+                try:
+                    if img.pixelColor(xx, yy).alpha() > 8:
+                        return True
+                except Exception:
+                    return False
+        return False
+
+    def _raster_text_rect_hit(self, item, scene_pos):
+        if item is None or not getattr(item, "data", {}).get('rasterized_text'):
+            return False
+        rect = getattr(item, '_raster_rect', QRectF())
+        if rect.isNull():
+            return False
+        try:
+            return rect.contains(item.mapFromScene(QPointF(scene_pos)))
+        except Exception:
+            return False
+
+    def _raster_text_item_at(self, scene_pos):
+        """객체화 텍스트를 페인팅 레이어보다 먼저 직접 찾는다.
+
+        기존 scene.items(scene_pos) / itemAt() 경로는 최종 페인팅 레이어, 배경 픽스맵,
+        ScrollHandDrag 상태에 막혀 객체화 텍스트가 선택되지 않을 수 있다.
+        그래서 모든 TypesettingItem을 직접 검사한다.
+        """
+        raster_items = []
+        try:
+            for item in self.scene.items():
+                if isinstance(item, TypesettingItem) and not getattr(item, "is_paste_preview", False):
+                    if bool(getattr(item, "data", {}).get('rasterized_text')):
+                        raster_items.append(item)
+        except Exception:
+            return None
+
+        # 이미 선택된 객체는 투명 영역 안쪽을 눌러도 다시 잡히게 한다.
+        for item in raster_items:
+            try:
+                if item.isSelected() and self._raster_text_rect_hit(item, scene_pos):
+                    return item
+            except Exception:
+                pass
+
+        # 우선순위 1: 실제 보이는 알파 픽셀.
+        for item in raster_items:
+            if self._raster_text_alpha_hit(item, scene_pos, radius=3):
+                return item
+
+        # 우선순위 2: 투명 여백 포함 래스터 박스.
+        # 얇은 글자나 완전히 지워진 객체도 선택/이동할 수 있게 마지막 폴백으로 둔다.
+        for item in raster_items:
+            if self._raster_text_rect_hit(item, scene_pos):
+                return item
+        return None
+
+    def _begin_raster_text_view_drag(self, item, scene_pos, event):
+        if item is None:
+            return False
+        try:
+            if not (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+                for selected in list(self.scene.selectedItems()):
+                    if selected is not item:
+                        selected.setSelected(False)
+            item.setSelected(True)
+            if hasattr(self.main, "on_scene_selection_changed"):
+                self.main.on_scene_selection_changed()
+        except Exception:
+            pass
+
+        self._raster_view_drag_item = item
+        self._raster_view_drag_scene_press = QPointF(scene_pos)
+        self._raster_view_drag_item_press = QPointF(item.pos())
+        try:
+            self._raster_view_drag_old_offsets = (
+                int(item.data.get('x_off', 0) or 0),
+                int(item.data.get('y_off', 0) or 0),
+            )
+        except Exception:
+            self._raster_view_drag_old_offsets = (0, 0)
+        self._raster_view_drag_moved = False
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
+        self._log_final_text_hit_debug(f"🔎 객체 텍스트 선택: ID {item.data.get('id')}")
+        return True
+
+    def _finish_raster_text_view_drag(self):
+        item = self._raster_view_drag_item
+        if item is None:
+            return
+        old_offsets = self._raster_view_drag_old_offsets or (
+            int(item.data.get('x_off', 0) or 0),
+            int(item.data.get('y_off', 0) or 0),
+        )
+        self._raster_view_drag_item = None
+        self._raster_view_drag_scene_press = None
+        self._raster_view_drag_item_press = None
+        self._raster_view_drag_old_offsets = None
+        self._raster_view_drag_moved = False
+        self.unsetCursor()
+
+        try:
+            rect = list(item.data.get('rect') or [0, 0, 1, 1])
+            while len(rect) < 4:
+                rect.append(1)
+            new_x_off = int(round(float(item.pos().x()) - float(rect[0])))
+            new_y_off = int(round(float(item.pos().y()) - float(rect[1])))
+        except Exception:
+            return
+
+        old_x_off, old_y_off = old_offsets
+        if new_x_off == old_x_off and new_y_off == old_y_off:
+            return
+
+        try:
+            if hasattr(self.main, 'push_page_text_undo'):
+                self.main.push_page_text_undo('텍스트 객체 이동')
+        except Exception:
+            pass
+
+        item.data['x_off'] = new_x_off
+        item.data['y_off'] = new_y_off
+        try:
+            item.update()
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self.main, 'sync_final_text_scene_to_data'):
+                self.main.sync_final_text_scene_to_data()
+        except Exception:
+            pass
+
+        if getattr(item, 'update_cb', None):
+            try:
+                item.update_cb(f"📍 텍스트 객체 이동됨 (ID: {item.data.get('id')})")
+                return
+            except Exception:
+                pass
+
+        try:
+            if hasattr(self.main, 'auto_save_project'):
+                self.main.auto_save_project()
+        except Exception:
+            pass
+
 
     def _cursor_for_transform_action(self, action):
         if action == 'rotate':
@@ -302,10 +518,15 @@ class MuleImageViewer(QGraphicsView):
         self.final_paint_img = below_qimg
         self.final_paint_item = self.scene.addPixmap(QPixmap.fromImage(below_qimg))
         self.final_paint_item.setZValue(8)
+        # 페인팅 레이어는 화면에는 보이지만 선택/이동 클릭을 잡아먹으면 안 된다.
+        # 특히 위쪽 페인팅 레이어(z=80)는 텍스트보다 위에 있어서,
+        # 마우스를 받으면 객체화된 텍스트가 클릭/선택/이동되지 않는다.
+        self.final_paint_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
 
         self.final_paint_above_img = above_qimg
         self.final_paint_above_item = self.scene.addPixmap(QPixmap.fromImage(above_qimg))
         self.final_paint_above_item.setZValue(80)
+        self.final_paint_above_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
 
     def get_final_paint_layer_png_bytes(self, above=False):
         item = self.final_paint_above_item if above else self.final_paint_item
@@ -601,14 +822,14 @@ class MuleImageViewer(QGraphicsView):
         self.ocr_region_overlay_items = []
 
     def _ocr_region_preview_pen(self):
-        return QPen(QColor(45, 140, 255, 230), 2, Qt.PenStyle.SolidLine)
+        return QPen(QColor(95, 205, 255, 235), 2, Qt.PenStyle.SolidLine)
 
     def _draw_ocr_region_preview(self, now):
         self.clear_ocr_region_preview()
         if self.ocr_region_start is None:
             return
         pen = self._ocr_region_preview_pen()
-        brush = QBrush(QColor(45, 140, 255, 90))
+        brush = QBrush(QColor(95, 205, 255, 70))
         if getattr(self, "ocr_region_shape", "rect") == "rect":
             rect = QRectF(self.ocr_region_start, now).normalized()
             self.ocr_region_preview_item = self.scene.addRect(rect, pen, brush)
@@ -631,10 +852,30 @@ class MuleImageViewer(QGraphicsView):
             return
         rect = QRectF(self.quick_ocr_start, now).normalized()
         pen = QPen(QColor(45, 140, 255, 230), 2, Qt.PenStyle.DashLine)
-        brush = QBrush(QColor(45, 140, 255, 90))
+        brush = QBrush(QColor(95, 205, 255, 70))
         self.quick_ocr_preview_item = self.scene.addRect(rect, pen, brush)
         self.quick_ocr_preview_item.setZValue(87)
         self.quick_ocr_preview_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+
+    def clear_raster_erase_preview(self):
+        item = getattr(self, "raster_erase_preview_item", None)
+        if item is not None:
+            try:
+                self.scene.removeItem(item)
+            except Exception:
+                pass
+        self.raster_erase_preview_item = None
+
+    def _draw_raster_erase_preview(self, now):
+        self.clear_raster_erase_preview()
+        if self.raster_erase_start is None:
+            return
+        rect = QRectF(self.raster_erase_start, now).normalized()
+        pen = QPen(QColor(255, 80, 80), 2, Qt.PenStyle.DashLine)
+        brush = QBrush(QColor(255, 80, 80, 45))
+        self.raster_erase_preview_item = self.scene.addRect(rect, pen, brush)
+        self.raster_erase_preview_item.setZValue(91)
+        self.raster_erase_preview_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
 
     def clear_area_paint_preview(self):
         item = getattr(self, "area_paint_preview_item", None)
@@ -840,7 +1081,7 @@ class MuleImageViewer(QGraphicsView):
         if not regions:
             return
         w, h = self._scene_rect_bounds()
-        red_pen = QPen(QColor(255, 40, 40, 240), 3, Qt.PenStyle.SolidLine)
+        red_pen = QPen(QColor(95, 205, 255, 240), 3, Qt.PenStyle.SolidLine)
         no_brush = QBrush(Qt.BrushStyle.NoBrush)
         label_font = QFont("Arial", 11, QFont.Weight.Bold)
         for region in regions or []:
@@ -891,7 +1132,7 @@ class MuleImageViewer(QGraphicsView):
                 label_bg = self.scene.addRect(
                     QRectF(label_x, max(0.0, label_y - br.height() - pad_y * 2), br.width() + pad_x * 2, br.height() + pad_y * 2),
                     QPen(Qt.PenStyle.NoPen),
-                    QBrush(QColor(255, 220, 40, 235))
+                    QBrush(QColor(165, 245, 120, 235))
                 )
                 label_bg.setZValue(85)
                 label_bg.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
@@ -1034,12 +1275,20 @@ class MuleImageViewer(QGraphicsView):
         if not src_items:
             return
 
-        first = src_items[0].get('rect') or [0, 0, 1, 1]
         try:
-            base_x = float(first[0]) + float(src_items[0].get('x_off', 0) or 0)
-            base_y = float(first[1]) + float(src_items[0].get('y_off', 0) or 0)
+            base_x, base_y = self.main.text_clipboard_visible_anchor(src_items)
         except Exception:
-            base_x, base_y = 0.0, 0.0
+            first = src_items[0].get('rect') or [0, 0, 1, 1]
+            try:
+                base_x = float(first[0]) + float(src_items[0].get('x_off', 0) or 0)
+                base_y = float(first[1]) + float(src_items[0].get('y_off', 0) or 0)
+            except Exception:
+                base_x, base_y = 0.0, 0.0
+        try:
+            px, py = self.main.text_clipboard_paste_origin_from_cursor(src_items, scene_pos)
+        except Exception:
+            px -= 263.0
+            py -= 83.0
 
         for d in src_items:
             rect = list(d.get('rect') or [0, 0, 260, 80])
@@ -1172,6 +1421,29 @@ class MuleImageViewer(QGraphicsView):
                 e.accept()
                 return
 
+        if (
+            e.button() == Qt.MouseButton.LeftButton
+            and self._is_final_move_mode()
+            and not (e.modifiers() & Qt.KeyboardModifier.AltModifier)
+        ):
+            pt = self.mapToScene(e.pos())
+            raster_item = self._raster_text_item_at(pt)
+            if raster_item is not None:
+                if self._begin_raster_text_view_drag(raster_item, pt, e):
+                    e.accept()
+                    return
+            else:
+                try:
+                    if self._final_text_hit_debug_enabled():
+                        clicked = self.itemAt(e.pos())
+                        clicked_name = type(clicked).__name__ if clicked is not None else 'None'
+                        stack = []
+                        for item in self.scene.items(pt):
+                            stack.append(f"{type(item).__name__}:z={item.zValue()}")
+                        self._log_final_text_hit_debug(f"🔎 객체 텍스트 선택 실패: itemAt={clicked_name}, stack={', '.join(stack[:8])}")
+                except Exception:
+                    pass
+
         if getattr(self.main, "cb_mode", None) is not None and self.main.cb_mode.currentIndex() == 4:
             active_transform = self.main.current_transform_data_item() if hasattr(self.main, 'current_transform_data_item') else None
             if active_transform is not None:
@@ -1183,18 +1455,42 @@ class MuleImageViewer(QGraphicsView):
                 # 핸들/테두리/회전 핸들이 QGraphicsView 기본 hit-test에 안 잡히는 경우를 직접 처리한다.
                 if active_item is not None and e.button() == Qt.MouseButton.LeftButton:
                     local = active_item.mapFromScene(pt)
-                    action = active_item.transform_action_at(local)
-
-                    if e.modifiers() & Qt.KeyboardModifier.AltModifier:
-                        if active_item.transform_rect().adjusted(-10, -10, 10, 10).contains(local):
-                            action = 'move'
-
-                    if action:
-                        if active_item.begin_transform_action(action, local, pt):
+                    if active_item.data.get('_skew_mode', False):
+                        action = active_item.skew_action_at(local)
+                        if action and active_item.begin_skew_action(action, local, pt):
                             self._active_transform_item = active_item
                             self.setCursor(self._cursor_for_transform_action(action))
                             e.accept()
                             return
+                    elif active_item.data.get('_trapezoid_mode', False):
+                        action = active_item.trapezoid_action_at(local)
+                        if action and active_item.begin_trapezoid_action(action, local, pt):
+                            self._active_transform_item = active_item
+                            self.setCursor(self._cursor_for_transform_action(action))
+                            e.accept()
+                            return
+                    elif active_item.data.get('_arc_mode', False):
+                        action = active_item.arc_action_at(local)
+                        if not action:
+                            action = active_item.create_or_replace_arc_handle_at(local)
+                        if action and active_item.begin_arc_action(action, local, pt):
+                            self._active_transform_item = active_item
+                            self.setCursor(self._cursor_for_transform_action(action))
+                            e.accept()
+                            return
+                    else:
+                        action = active_item.transform_action_at(local)
+
+                        if e.modifiers() & Qt.KeyboardModifier.AltModifier:
+                            if active_item.transform_rect().adjusted(-10, -10, 10, 10).contains(local):
+                                action = 'move'
+
+                        if action:
+                            if active_item.begin_transform_action(action, local, pt):
+                                self._active_transform_item = active_item
+                                self.setCursor(self._cursor_for_transform_action(action))
+                                e.accept()
+                                return
 
                 if (
                     e.button() == Qt.MouseButton.LeftButton
@@ -1237,6 +1533,16 @@ class MuleImageViewer(QGraphicsView):
                 pt = self.mapToScene(e.pos())
                 self.main.create_final_text_at(int(pt.x()), int(pt.y()))
                 return
+
+        if self.draw_mode == 'raster_erase' and e.button() == Qt.MouseButton.LeftButton:
+            if getattr(self.main, "cb_mode", None) is None or self.main.cb_mode.currentIndex() != 4:
+                e.accept()
+                return
+            self.is_raster_erasing = True
+            self.raster_erase_start = self.mapToScene(e.pos())
+            self._draw_raster_erase_preview(self.raster_erase_start)
+            e.accept()
+            return
 
         if self.draw_mode == 'area_paint' and e.button() == Qt.MouseButton.LeftButton:
             if getattr(self.main, "cb_mode", None) is None or self.main.cb_mode.currentIndex() != 4:
@@ -1313,6 +1619,16 @@ class MuleImageViewer(QGraphicsView):
                 and self.main.cb_mode.currentIndex() == 4
                 and self.draw_mode in ('draw', 'erase')
             )
+            if final_mode and self.draw_mode == 'erase':
+                # 최종화면 지우개는 배경 페인팅 레이어와 텍스트 객체 레이어를 같이 지나갈 수 있어야 한다.
+                # 이전 방식은 첫 클릭 지점이 객체 위일 때만 객체 지우개로 전환되어,
+                # 바깥에서 글자 쪽으로 긁으면 래스터 텍스트가 지워지지 않았다.
+                # 이제는 지우개 스트로크 전체가 항상 객체화 텍스트도 함께 검사한다.
+                pt = self.mapToScene(e.pos())
+                self.is_raster_text_brush_erasing = True
+                if hasattr(self.main, "erase_raster_text_brush_line"):
+                    self.main.erase_raster_text_brush_line(pt, pt, self.brush_size)
+
             if final_mode:
                 target_item = self.final_paint_above_item if getattr(self.main, "final_paint_above_text", False) else self.final_paint_item
             else:
@@ -1370,15 +1686,137 @@ class MuleImageViewer(QGraphicsView):
             if target is not None:
                 e.accept()
                 return
+
+            if getattr(self.main, "cb_mode", None) is not None and self.main.cb_mode.currentIndex() == 4:
+                active_item = self._active_transform_item_obj()
+                if active_item is not None and active_item.data.get('_skew_mode', False):
+                    pt = self.mapToScene(e.pos())
+                    local = active_item.mapFromScene(pt)
+                    action = active_item.skew_action_at(local)
+                    if action:
+                        current_pct = float(active_item.data.get('skew_x' if action in ('top', 'bottom') else 'skew_y', 0) or 0)
+                        current_angle = math.degrees(math.atan(current_pct / 100.0))
+                        angle, ok = QInputDialog.getDouble(self, "평행사변형 변형", "기울임 각도(도):", current_angle, -45.0, 45.0, 1)
+                        if ok:
+                            try:
+                                if hasattr(self.main, 'push_page_text_undo'):
+                                    self.main.push_page_text_undo('평행사변형 변형 각도 지정')
+                            except Exception:
+                                pass
+                            active_item.set_text_skew_angle(action, angle)
+                            try:
+                                self.main.auto_save_project()
+                                self.main.mode_chg(4)
+                                self.main.reselect_text_items([active_item.data.get('id')])
+                                self.main.log(f"🔷 평행사변형 변형 각도 지정: {angle}°")
+                            except Exception:
+                                pass
+                        e.accept()
+                        return
+                if active_item is not None and active_item.data.get('_trapezoid_mode', False):
+                    pt = self.mapToScene(e.pos())
+                    local = active_item.mapFromScene(pt)
+                    action = active_item.trapezoid_action_at(local)
+                    if action:
+                        if action in ('top_left', 'bottom_left', 'left'):
+                            side_key = 'trap_left'
+                            side_name = '왼쪽'
+                        elif action in ('top_right', 'bottom_right', 'right'):
+                            side_key = 'trap_right'
+                            side_name = '오른쪽'
+                        elif action == 'top':
+                            side_key = 'trap_top'
+                            side_name = '위쪽'
+                        else:
+                            side_key = 'trap_bottom'
+                            side_name = '아래쪽'
+                        current_pct = int(round(float(active_item.data.get(side_key, 0) or 0)))
+                        value, ok = QInputDialog.getInt(self, '사다리꼴 변형', f'{side_name} 크기(%)', current_pct, -95, 95, 1)
+                        if ok:
+                            try:
+                                if hasattr(self.main, 'push_page_text_undo'):
+                                    self.main.push_page_text_undo('사다리꼴 변형 수치 지정')
+                            except Exception:
+                                pass
+                            if side_key == 'trap_left':
+                                active_item.set_text_trapezoid_values(left_pct=value)
+                            elif side_key == 'trap_right':
+                                active_item.set_text_trapezoid_values(right_pct=value)
+                            elif side_key == 'trap_top':
+                                active_item.set_text_trapezoid_values(top_pct=value)
+                            else:
+                                active_item.set_text_trapezoid_values(bottom_pct=value)
+                            try:
+                                self.main.auto_save_project()
+                                self.main.mode_chg(4)
+                                self.main.reselect_text_items([active_item.data.get('id')])
+                                self.main.log(f"🔷 사다리꼴 변형 수치 지정: {side_name} {value}%")
+                            except Exception:
+                                pass
+                        e.accept()
+                        return
+                if active_item is not None and active_item.data.get('_arc_mode', False):
+                    pt = self.mapToScene(e.pos())
+                    local = active_item.mapFromScene(pt)
+                    action = active_item.arc_action_at(local)
+                    if action:
+                        idx = active_item._arc_index_from_action(action) if hasattr(active_item, '_arc_index_from_action') else -1
+                        handles = active_item._arc_handles() if hasattr(active_item, '_arc_handles') else []
+                        if 0 <= idx < len(handles):
+                            handle = handles[idx]
+                            side = str(handle.get('side') or '')
+                            side_name = {'top':'위쪽','bottom':'아래쪽','left':'왼쪽','right':'오른쪽'}.get(side, side)
+                            current_pct = int(round(float(handle.get('value', 0) or 0)))
+                            value, ok = QInputDialog.getInt(self, '부채꼴 변형', f'{side_name} 제어점 휘어짐(%)', current_pct, -100, 100, 1)
+                            if ok:
+                                try:
+                                    if hasattr(self.main, 'push_page_text_undo'):
+                                        self.main.push_page_text_undo('부채꼴 변형 수치 지정')
+                                except Exception:
+                                    pass
+                                active_item.set_text_arc_handle_value(idx, value)
+                                try:
+                                    self.main.auto_save_project()
+                                    self.main.mode_chg(4)
+                                    self.main.reselect_text_items([active_item.data.get('id')])
+                                    self.main.log(f"🔷 부채꼴 변형 수치 지정: {side_name} 제어점 {value}%")
+                                except Exception:
+                                    pass
+                        e.accept()
+                        return
         super().mouseDoubleClickEvent(e)
 
     def mouseMoveEvent(self, e):
+        if self._raster_view_drag_item is not None:
+            item = self._raster_view_drag_item
+            try:
+                pt = self.mapToScene(e.pos())
+                delta = QPointF(pt) - QPointF(self._raster_view_drag_scene_press)
+                item.setPos(QPointF(self._raster_view_drag_item_press) + delta)
+                item.update()
+                self._raster_view_drag_moved = True
+                self.setCursor(Qt.CursorShape.SizeAllCursor)
+            except Exception:
+                pass
+            e.accept()
+            return
+
         if self._active_transform_item is not None:
             item = self._active_transform_item
             pt = self.mapToScene(e.pos())
             try:
-                item.update_transform_action(item.mapFromScene(pt), pt)
-                self.setCursor(self._cursor_for_transform_action(getattr(item, '_transform_action', None)))
+                if getattr(item, '_skew_action', None):
+                    item.update_skew_action(item.mapFromScene(pt), pt)
+                    self.setCursor(self._cursor_for_transform_action(getattr(item, '_skew_action', None)))
+                elif getattr(item, '_trapezoid_action', None):
+                    item.update_trapezoid_action(item.mapFromScene(pt), pt)
+                    self.setCursor(self._cursor_for_transform_action(getattr(item, '_trapezoid_action', None)))
+                elif getattr(item, '_arc_action', None):
+                    item.update_arc_action(item.mapFromScene(pt), pt)
+                    self.setCursor(self._cursor_for_transform_action(getattr(item, '_arc_action', None)))
+                else:
+                    item.update_transform_action(item.mapFromScene(pt), pt)
+                    self.setCursor(self._cursor_for_transform_action(getattr(item, '_transform_action', None)))
             except Exception:
                 pass
             e.accept()
@@ -1386,16 +1824,30 @@ class MuleImageViewer(QGraphicsView):
 
         if getattr(self.main, "cb_mode", None) is not None and self.main.cb_mode.currentIndex() == 4:
             active_item = self._active_transform_item_obj()
-            if active_item is not None and active_item.data.get('_transform_mode', False):
+            if active_item is not None and (active_item.data.get('_transform_mode', False) or active_item.data.get('_skew_mode', False) or active_item.data.get('_trapezoid_mode', False) or active_item.data.get('_arc_mode', False)):
                 pt = self.mapToScene(e.pos())
                 local = active_item.mapFromScene(pt)
-                action = active_item.transform_action_at(local)
-                if e.modifiers() & Qt.KeyboardModifier.AltModifier and active_item.transform_rect().adjusted(-10, -10, 10, 10).contains(local):
-                    action = 'move'
+                if active_item.data.get('_skew_mode', False):
+                    action = active_item.skew_action_at(local)
+                elif active_item.data.get('_trapezoid_mode', False):
+                    action = active_item.trapezoid_action_at(local)
+                elif active_item.data.get('_arc_mode', False):
+                    action = active_item.arc_action_at(local)
+                else:
+                    action = active_item.transform_action_at(local)
+                    if e.modifiers() & Qt.KeyboardModifier.AltModifier and active_item.transform_rect().adjusted(-10, -10, 10, 10).contains(local):
+                        action = 'move'
                 if action:
                     self.setCursor(self._cursor_for_transform_action(action))
                 else:
                     self.unsetCursor()
+
+        if self.draw_mode == 'raster_erase' and getattr(self, "is_raster_erasing", False):
+            now = self.mapToScene(e.pos())
+            self._draw_raster_erase_preview(now)
+            e.accept()
+            return
+
 
         if self.draw_mode == 'area_paint' and getattr(self, "is_area_painting", False):
             now = self.mapToScene(e.pos())
@@ -1506,6 +1958,14 @@ class MuleImageViewer(QGraphicsView):
             self.show_paste_preview(getattr(self.main, "text_clipboard", []), self.mapToScene(e.pos()))
             return
 
+        if self.draw_mode == 'erase' and getattr(self, "is_raster_text_brush_erasing", False) and self.last_pt:
+            now = self.mapToScene(e.pos())
+            if hasattr(self.main, "erase_raster_text_brush_line"):
+                self.main.erase_raster_text_brush_line(self.last_pt, now, self.brush_size)
+            # 여기서 return하지 않는다. 같은 스트로크가 기존 최종 페인팅 레이어도
+            # 계속 지울 수 있어야 지우개 동작이 자연스럽다. last_pt 갱신은 아래
+            # 일반 draw/erase 처리에서 한 번만 한다.
+
         if self.draw_mode in ('draw', 'erase') and self.last_pt:
             final_mode = getattr(self.main, "cb_mode", None) is not None and self.main.cb_mode.currentIndex() == 4
             if final_mode:
@@ -1539,13 +1999,55 @@ class MuleImageViewer(QGraphicsView):
         super().mouseMoveEvent(e)
 
     def mouseReleaseEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            try:
+                if hasattr(self.main, '_hide_eyedropper_color_feedback'):
+                    self.main._hide_eyedropper_color_feedback()
+            except Exception:
+                pass
+
+        if self._raster_view_drag_item is not None:
+            self._finish_raster_text_view_drag()
+            e.accept()
+            return
+
         if self._active_transform_item is not None:
             try:
-                self._active_transform_item.finish_transform_action()
+                if getattr(self._active_transform_item, '_transform_action', None):
+                    self._active_transform_item.finish_transform_action()
+                elif getattr(self._active_transform_item, '_skew_action', None):
+                    self._active_transform_item.finish_skew_action()
+                elif getattr(self._active_transform_item, '_trapezoid_action', None):
+                    self._active_transform_item.finish_trapezoid_action()
+                elif getattr(self._active_transform_item, '_arc_action', None):
+                    self._active_transform_item.finish_arc_action()
             except Exception:
                 pass
             self._active_transform_item = None
             self.unsetCursor()
+            e.accept()
+            return
+
+        if self.draw_mode == 'erase' and getattr(self, "is_raster_text_brush_erasing", False):
+            self.is_raster_text_brush_erasing = False
+            if hasattr(self.main, "finish_raster_text_brush_erase"):
+                self.main.finish_raster_text_brush_erase()
+            # return하지 않는다. 같은 지우개 스트로크에서 일반 최종 페인팅 레이어도
+            # 지웠다면 아래 was_painting 정리/Undo 확정까지 같이 지나가야 한다.
+
+
+        if self.draw_mode == 'raster_erase' and getattr(self, "is_raster_erasing", False):
+            end_pos = self.mapToScene(e.pos())
+            rect = QRectF(self.raster_erase_start, end_pos).normalized() if self.raster_erase_start is not None else QRectF()
+            self.is_raster_erasing = False
+            self.raster_erase_start = None
+            self.clear_raster_erase_preview()
+            if hasattr(self.main, "apply_raster_text_erase_rect"):
+                self.main.apply_raster_text_erase_rect(rect)
+            try:
+                self.main.set_tool(None)
+            except Exception:
+                self.draw_mode = None
             e.accept()
             return
 

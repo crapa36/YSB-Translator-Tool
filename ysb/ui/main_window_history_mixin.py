@@ -8,19 +8,20 @@ class MainWindowHistoryMixin:
         self.log(f"🖌️ 최종 브러시 불투명도: {self.final_paint_opacity}%")
 
     def update_final_paint_option_bar_visibility(self):
-        show = (
-            hasattr(self, "final_paint_option_bar")
-            and self.cb_mode.currentIndex() == 4
-            and getattr(self.view, "draw_mode", None) == "draw"
-        )
+        # 최종 브러시 옵션도 상단 공유 옵션바에 편입한다.
         if hasattr(self, "final_paint_option_bar"):
-            self.final_paint_option_bar.setVisible(bool(show))
+            self.final_paint_option_bar.hide()
         if hasattr(self, "sb_final_paint_opacity"):
             self.sb_final_paint_opacity.blockSignals(True)
             try:
                 self.sb_final_paint_opacity.setValue(int(self.final_paint_opacity))
             finally:
                 self.sb_final_paint_opacity.blockSignals(False)
+        try:
+            if hasattr(self, "refresh_shared_option_bar"):
+                self.refresh_shared_option_bar()
+        except Exception:
+            pass
 
     def update_final_paint_z_order(self):
         """최종 페인팅 레이어는 항상 아래/위 두 장으로 고정한다."""
@@ -137,6 +138,56 @@ class MainWindowHistoryMixin:
         self.log("💾 최종 페인팅 자동 저장")
         self.auto_save_project()
 
+    def _hide_eyedropper_color_feedback(self):
+        try:
+            popup = getattr(self, '_eyedropper_color_popup', None)
+            if popup is not None:
+                popup.hide()
+        except Exception:
+            pass
+
+    def _show_eyedropper_color_feedback(self, hex_color):
+        try:
+            QApplication.clipboard().setText(str(hex_color))
+        except Exception:
+            pass
+        try:
+            html = (
+                f'<div style="white-space:nowrap; font-weight:bold;">'
+                f'<span style="display:inline-block; width:14px; height:14px; border-radius:7px; '
+                f'background:{hex_color}; border:1px solid #222;">&nbsp;&nbsp;&nbsp;</span> '
+                f'{hex_color}</div>'
+            )
+            popup = getattr(self, '_eyedropper_color_popup', None)
+            if popup is None:
+                popup = QLabel()
+                popup.setWindowFlags(Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+                popup.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+                popup.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+                popup.setTextFormat(Qt.TextFormat.RichText)
+                self._eyedropper_color_popup = popup
+            popup.setText(html)
+            if self.is_light_theme():
+                popup.setStyleSheet('QLabel { background:#ffffff; color:#111827; border:1px solid #cfd7e5; border-radius:4px; padding:4px; }')
+            else:
+                popup.setStyleSheet('QLabel { background:#1f2430; color:#ffffff; border:1px solid #4b5563; border-radius:4px; padding:4px; }')
+            popup.adjustSize()
+            # 좌클릭을 누르고 있는 동안만 보이는 색상 팝업이다.
+            # QToolTip을 새로 띄우지 않고 같은 QLabel을 갱신해서 깜빡임을 줄인다.
+            popup.move(QCursor.pos() + QPoint(4, 4))
+            if not popup.isVisible():
+                popup.show()
+            else:
+                popup.update()
+        except Exception:
+            pass
+
+    def _apply_eyedropper_color_from_bgr(self, b, g, r, source_label="스포이드"):
+        self.final_paint_color = QColor(int(r), int(g), int(b)).name(QColor.NameFormat.HexRgb).upper()
+        self.update_color_button_styles()
+        self._show_eyedropper_color_feedback(self.final_paint_color)
+        self.log(f"🧪 {source_label}: {self.final_paint_color} 클립보드 복사")
+
     def pick_final_paint_color_from_scene(self, x, y):
         if self.cb_mode.currentIndex() != 4:
             return
@@ -152,9 +203,19 @@ class MainWindowHistoryMixin:
         if x < 0 or y < 0 or x >= w or y >= h:
             return
         b, g, r = [int(v) for v in img[y, x]]
-        self.final_paint_color = QColor(r, g, b).name(QColor.NameFormat.HexRgb).upper()
-        self.update_color_button_styles()
-        self.log(f"🧪 스포이드: {self.final_paint_color}")
+        self._apply_eyedropper_color_from_bgr(b, g, r, "스포이드")
+
+    def pick_final_paint_color_from_source_scene(self, x, y):
+        if self.cb_mode.currentIndex() != 4:
+            return
+        img = self.get_source_display_image(self.idx)
+        if img is None:
+            return
+        h, w = img.shape[:2]
+        if x < 0 or y < 0 or x >= w or y >= h:
+            return
+        b, g, r = [int(v) for v in img[y, x]]
+        self._apply_eyedropper_color_from_bgr(b, g, r, "원본 비교창 스포이드")
 
     def apply_final_paint_to_background(self):
         if self.cb_mode.currentIndex() != 4:
@@ -192,7 +253,7 @@ class MainWindowHistoryMixin:
         self.mode_chg(self.cb_mode.currentIndex())
         self.log("📌 최종 페인팅을 원본 탭 기준 이미지로 반영했습니다.")
 
-    def create_final_text_at(self, x, y):
+    def create_final_text_at(self, x, y, centered=True):
         if self.cb_mode.currentIndex() != 4:
             return
         curr = self.data.get(self.idx)
@@ -213,7 +274,7 @@ class MainWindowHistoryMixin:
             'id': new_id,
             'text': '',
             'translated_text': '',
-            'rect': [int(x - w / 2), int(y - h / 2), w, h],
+            'rect': [int(x - w / 2), int(y - h / 2), w, h] if centered else [int(x), int(y), w, h],
             'use_inpaint': True,
             'font_family': self.cb_font.currentFont().family(),
             'font_size': int(self.sb_font_size.value()),
@@ -712,7 +773,7 @@ class MainWindowHistoryMixin:
         if not curr:
             return None
         for d in curr.get('data', []) or []:
-            if d.get('_transform_mode', False):
+            if d.get('_transform_mode', False) or d.get('_skew_mode', False) or d.get('_trapezoid_mode', False) or d.get('_arc_mode', False):
                 return d
         return None
 
@@ -1488,18 +1549,57 @@ class MainWindowHistoryMixin:
         active = self.current_transform_data_item()
         if active is None:
             return False
+        was_skew = bool(active.get('_skew_mode', False))
+        was_trapezoid = bool(active.get('_trapezoid_mode', False))
+        was_arc = bool(active.get('_arc_mode', False))
         active.pop('_transform_mode', None)
+        active.pop('_skew_mode', None)
+        active.pop('_trapezoid_mode', None)
+        active.pop('_arc_mode', None)
         if refresh and self.cb_mode.currentIndex() == 4:
             selected_id = active.get('id')
             self.mode_chg(4)
             if selected_id is not None:
                 self.reselect_text_items([selected_id])
         self.auto_save_project()
-        self.log("🔷 텍스트 변형 모드 종료")
+        if was_arc:
+            self.log("🔷 부채꼴 변형 종료")
+        elif was_trapezoid:
+            self.log("🔷 사다리꼴 변형 종료")
+        elif was_skew:
+            self.log("🔷 평행사변형 변형 종료")
+        else:
+            self.log("🔷 텍스트 변형 모드 종료")
+        return True
+
+    def undo_last_arc_transform_point(self):
+        active = self.current_transform_data_item() if hasattr(self, 'current_transform_data_item') else None
+        if not isinstance(active, dict) or not active.get('_arc_mode'):
+            return False
+        handles = active.get('arc_handles')
+        if not isinstance(handles, list) or not handles:
+            return False
+        handles.pop()
+        active['arc_handles'] = handles
+        try:
+            active['arc_active_index'] = len(handles) - 1 if handles else -1
+        except Exception:
+            pass
+        selected_id = active.get('id')
+        if self.cb_mode.currentIndex() == 4:
+            self.mode_chg(4)
+            if selected_id is not None:
+                self.reselect_text_items([selected_id])
+        self.auto_save_project()
+        self.log(f"↩️ 부채꼴 제어점 제거: 남은 점 {len(handles)}개")
+        self.update_undo_redo_buttons()
         return True
 
     def can_general_undo(self):
         try:
+            active = self.current_transform_data_item() if hasattr(self, 'current_transform_data_item') else None
+            if isinstance(active, dict) and active.get('_arc_mode') and isinstance(active.get('arc_handles'), list) and active.get('arc_handles'):
+                return True
             if getattr(getattr(self, "view", None), "draw_mode", None) == 'ocr_region_select' and getattr(self, 'ocr_region_temp_history', None):
                 return True
             if getattr(self, "project_undo_stack", None):
@@ -1585,6 +1685,8 @@ class MainWindowHistoryMixin:
             pass
 
     def handle_general_undo(self):
+        if self.undo_last_arc_transform_point():
+            return
         if getattr(self.view, 'draw_mode', None) == 'ocr_region_select' and getattr(self, 'ocr_region_temp_history', None):
             if self.undo_last_ocr_analysis_region_temp():
                 return
