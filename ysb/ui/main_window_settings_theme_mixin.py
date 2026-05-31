@@ -7,44 +7,44 @@ class MainWindowSettingsThemeMixin:
         """통합 설정/옵션 계열 창 전용 몽글 카드 스타일."""
         if self.is_light_theme():
             return """
-                QDialog { background:#f4f6fa; color:#22252b; }
+                QDialog { background:#F5EFF3; color:#242329; }
                 QScrollArea { background:transparent; border:0; }
-                QLabel { color:#22252b; }
+                QLabel { color:#242329; }
                 QFrame#SettingsBlock {
                     background:#ffffff;
-                    border:1px solid #dfe5ef;
+                    border:1px solid #DED8DC;
                     border-radius:16px;
                 }
                 QFrame#SettingsItem {
                     background:#f9fbfe;
-                    border:1px solid #e4eaf3;
+                    border:1px solid #E7E1E5;
                     border-radius:14px;
                 }
-                QLabel#SettingsItemTitle { font-size:13px; font-weight:700; color:#1f232b; }
-                QLabel#SettingsTitle, QLabel#SettingsDialogTitle { font-size:22px; font-weight:800; color:#1f232b; }
-                QLabel#SettingsSectionTitle { font-size:16px; font-weight:750; color:#1f232b; }
-                QLabel#SettingsDescription { color:#667085; line-height:140%; }
+                QLabel#SettingsItemTitle { font-size:13px; font-weight:700; color:#211F23; }
+                QLabel#SettingsTitle, QLabel#SettingsDialogTitle { font-size:22px; font-weight:800; color:#211F23; }
+                QLabel#SettingsSectionTitle { font-size:16px; font-weight:750; color:#211F23; }
+                QLabel#SettingsDescription { color:#6F666D; line-height:140%; }
                 QLabel#SettingsPath {
-                    color:#667085;
-                    background:#f1f4f9;
-                    border:1px solid #e0e6f0;
+                    color:#6F666D;
+                    background:#F2EDEF;
+                    border:1px solid #E3DDE1;
                     border-radius:0px;
                     padding:3px 6px;
                 }
                 QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QFontComboBox, QSpinBox, QDoubleSpinBox, QKeySequenceEdit {
                     background:#ffffff;
-                    color:#22252b;
-                    border:1px solid #cfd7e5;
+                    color:#242329;
+                    border:1px solid #D1C9CE;
                     border-radius:0px;
                     padding:3px 6px;
-                    selection-background-color:#dbeafe;
+                    selection-background-color:#F5E8EA;
                     selection-color:#111827;
                 }
                 QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QFontComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QKeySequenceEdit:focus {
-                    border:1px solid #8fb4e8;
+                    border:1px solid #C78A90;
                     background:#ffffff;
                 }
-QCheckBox, QRadioButton { color:#22252b; spacing:9px; }
+QCheckBox, QRadioButton { color:#242329; spacing:9px; }
                 QCheckBox::indicator, QRadioButton::indicator {
                     width:15px; height:15px;
                     border:1px solid #aab4c3;
@@ -53,147 +53,164 @@ QCheckBox, QRadioButton { color:#22252b; spacing:9px; }
                 }
                 QRadioButton::indicator { border-radius:0px; }
                 QCheckBox::indicator:checked, QRadioButton::indicator:checked {
-                    background:#7aa8e8;
-                    border:1px solid #7aa8e8;
+                    background:#A85D66;
+                    border:1px solid #A85D66;
                 }
                 QPushButton {
-                    background:#f8fafc;
-                    color:#22252b;
-                    border:1px solid #cfd7e5;
+                    background:#FAF5F7;
+                    color:#242329;
+                    border:1px solid #D1C9CE;
                     border-radius:0px;
                     padding:4px 10px;
                 }
-                QPushButton:hover { background:#edf4ff; border-color:#aac4e8; }
-                QPushButton:pressed { background:#e3edf9; }
-                QPushButton:disabled { background:#edf0f5; color:#9aa4b2; border-color:#dde3ec; }
-                QTabWidget::pane { border:1px solid #dfe5ef; border-radius:0px; background:#ffffff; }
+                QPushButton:hover { background:#FBF5F6; border-color:#D7A3A9; }
+                QPushButton:pressed { background:#F5E8EA; }
+                QPushButton:disabled { background:#F0EAED; color:#A29A9F; border-color:#E0DADF; }
+                QTabWidget::pane { border:1px solid #DED8DC; border-radius:0px; background:#ffffff; }
                 QTabBar::tab {
-                    background:#edf1f7;
-                    color:#4b5563;
-                    border:1px solid #d9e0ea;
+                    background:#EEEFF3;
+                    color:#555056;
+                    border:1px solid #DAD4D8;
                     border-bottom:none;
                     border-top-left-radius:10px;
                     border-top-right-radius:3px;
                     padding:4px 10px;
                 }
-                QTabBar::tab:selected { background:#ffffff; color:#1f232b; font-weight:700; }
+                QTabBar::tab:selected { background:#ffffff; color:#211F23; font-weight:700; }
                 QListWidget, QTableWidget, QTreeWidget {
                     background:#ffffff;
-                    color:#22252b;
-                    border:1px solid #dfe5ef;
+                    color:#242329;
+                    border:1px solid #DED8DC;
                     border-radius:0px;
-                    alternate-background-color:#f7f9fd;
-                    selection-background-color:#dbeafe;
+                    alternate-background-color:#F8F3F5;
+                    selection-background-color:#F5E8EA;
                     selection-color:#111827;
                 }
                 QHeaderView::section {
-                    background:#f1f4f9;
+                    background:#F2EDEF;
                     color:#374151;
                     border:0;
-                    border-right:1px solid #dfe5ef;
+                    border-right:1px solid #DED8DC;
                     padding:7px;
                 }
-                QScrollBar:vertical { background:#eef2f8; width:12px; margin:0; border:0; border-radius:0px; }
-                QScrollBar::handle:vertical { background:#cbd5e1; min-height:30px; border-radius:0px; }
+                QScrollBar:vertical { background:#F1ECEF; width:12px; margin:0; border:0; border-radius:0px; }
+                QScrollBar::handle:vertical { background:#CBC4C9; min-height:30px; border-radius:0px; }
                 QScrollBar::handle:vertical:hover { background:#b7c3d4; }
                 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }
-                QScrollBar:horizontal { background:#eef2f8; height:12px; margin:0; border:0; border-radius:0px; }
-                QScrollBar::handle:horizontal { background:#cbd5e1; min-width:30px; border-radius:0px; }
+                QScrollBar:horizontal { background:#F1ECEF; height:12px; margin:0; border:0; border-radius:0px; }
+                QScrollBar::handle:horizontal { background:#CBC4C9; min-width:30px; border-radius:0px; }
                 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width:0; }
             """
         return """
-            QDialog { background:#202226; color:#f2f4f8; }
+            QDialog { background:#101113; color:#E0DADF; }
             QScrollArea { background:transparent; border:0; }
-            QLabel { color:#f2f4f8; }
+            QLabel { color:#E0DADF; }
             QFrame#SettingsBlock {
-                background:#282c33;
-                border:1px solid #3b414c;
+                background:#18171A;
+                border:1px solid #2E2A30;
                 border-radius:16px;
             }
             QFrame#SettingsItem {
-                background:#24282f;
-                border:1px solid #363c47;
+                background:#171719;
+                border:1px solid #3A363B;
                 border-radius:14px;
             }
             QLabel#SettingsItemTitle { font-size:13px; font-weight:700; color:#ffffff; }
             QLabel#SettingsTitle, QLabel#SettingsDialogTitle { font-size:22px; font-weight:800; color:#ffffff; }
             QLabel#SettingsSectionTitle { font-size:16px; font-weight:750; color:#ffffff; }
-            QLabel#SettingsDescription { color:#b5bfce; line-height:140%; }
+            QLabel#SettingsDescription { color:#9A9098; line-height:140%; }
             QLabel#SettingsPath {
                 color:#c6ceda;
-                background:#1f2228;
-                border:1px solid #3b414c;
+                background:#211F23;
+                border:1px solid #2E2A30;
                 border-radius:0px;
                 padding:3px 6px;
             }
             QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QFontComboBox, QSpinBox, QDoubleSpinBox, QKeySequenceEdit {
-                background:#1f2228;
-                color:#f5f7fb;
-                border:1px solid #434a56;
+                background:#211F23;
+                color:#F6F1F4;
+                border:1px solid #3D383E;
                 border-radius:0px;
                 padding:3px 6px;
-                selection-background-color:#4c6f9f;
+                selection-background-color:#8A4A52;
                 selection-color:#ffffff;
             }
             QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QFontComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QKeySequenceEdit:focus {
-                border:1px solid #7ea2d6;
-                background:#222630;
+                border:1px solid #A85D66;
+                background:#111827;
             }
-QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
+            QComboBox QAbstractItemView, QFontComboBox QAbstractItemView {
+                background:#111827;
+                color:#E8E1E6;
+                border:1px solid #3D383E;
+                outline:0;
+                selection-background-color:#8A4A52;
+                selection-color:#ffffff;
+                padding:2px;
+            }
+            QComboBox QAbstractItemView::item, QFontComboBox QAbstractItemView::item {
+                min-height:22px;
+                padding:3px 8px;
+            }
+            QComboBox QAbstractItemView::item:hover, QFontComboBox QAbstractItemView::item:hover {
+                background:#332B30;
+                color:#ffffff;
+            }
+QCheckBox, QRadioButton { color:#E0DADF; spacing:9px; }
             QCheckBox::indicator, QRadioButton::indicator {
                 width:15px; height:15px;
-                border:1px solid #6f7786;
-                background:#1f2228;
+                border:1px solid #3A363B;
+                background:#211F23;
                 border-radius:0px;
             }
             QRadioButton::indicator { border-radius:0px; }
             QCheckBox::indicator:checked, QRadioButton::indicator:checked {
-                background:#78a6e6;
-                border:1px solid #78a6e6;
+                background:#8A4A52;
+                border:1px solid #A85D66;
             }
             QPushButton {
-                background:#333843;
-                color:#f2f4f8;
-                border:1px solid #555d6c;
+                background:#28262B;
+                color:#E0DADF;
+                border:1px solid #3A363B;
                 border-radius:0px;
                 padding:4px 10px;
             }
-            QPushButton:hover { background:#3d4654; border-color:#718098; }
-            QPushButton:pressed { background:#2b303a; }
-            QPushButton:disabled { background:#2a2d33; color:#858d9a; border-color:#3f4550; }
-            QTabWidget::pane { border:1px solid #3b414c; border-radius:0px; background:#24282f; }
+            QPushButton:hover { background:#332B30; border-color:#665A62; }
+            QPushButton:pressed { background:#111827; }
+            QPushButton:disabled { background:#171719; color:#746B72; border-color:#2E2A30; }
+            QTabWidget::pane { border:1px solid #2E2A30; border-radius:0px; background:#171719; }
             QTabBar::tab {
-                background:#2a2e36;
-                color:#b5bfce;
-                border:1px solid #3b414c;
+                background:#171719;
+                color:#9A9098;
+                border:1px solid #2E2A30;
                 border-bottom:none;
                 border-top-left-radius:10px;
                 border-top-right-radius:3px;
                 padding:4px 10px;
             }
-            QTabBar::tab:selected { background:#333842; color:#ffffff; font-weight:700; }
+            QTabBar::tab:selected { background:#28262B; color:#ffffff; font-weight:700; }
             QListWidget, QTableWidget, QTreeWidget {
-                background:#24282f;
-                color:#f2f4f8;
-                border:1px solid #3b414c;
+                background:#171719;
+                color:#E0DADF;
+                border:1px solid #2E2A30;
                 border-radius:0px;
-                alternate-background-color:#282d35;
-                selection-background-color:#3d587d;
+                alternate-background-color:#1D1B1F;
+                selection-background-color:#8A4A52;
                 selection-color:#ffffff;
             }
             QHeaderView::section {
-                background:#2d323b;
-                color:#d7deea;
+                background:#141416;
+                color:#CBC4C9;
                 border:0;
-                border-right:1px solid #3b414c;
+                border-right:1px solid #2E2A30;
                 padding:7px;
             }
-            QScrollBar:vertical { background:#20242b; width:12px; margin:0; border:0; border-radius:0px; }
-            QScrollBar::handle:vertical { background:#424a57; min-height:30px; border-radius:0px; }
-            QScrollBar::handle:vertical:hover { background:#566173; }
+            QScrollBar:vertical { background:#171719; width:12px; margin:0; border:0; border-radius:0px; }
+            QScrollBar::handle:vertical { background:#3D383E; min-height:30px; border-radius:0px; }
+            QScrollBar::handle:vertical:hover { background:#5C555B; }
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }
-            QScrollBar:horizontal { background:#20242b; height:12px; margin:0; border:0; border-radius:0px; }
-            QScrollBar::handle:horizontal { background:#424a57; min-width:30px; border-radius:0px; }
+            QScrollBar:horizontal { background:#171719; height:12px; margin:0; border:0; border-radius:0px; }
+            QScrollBar::handle:horizontal { background:#3D383E; min-width:30px; border-radius:0px; }
             QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width:0; }
         """
 
@@ -241,6 +258,8 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         """로그/설정창의 실제 경로 표시 여부를 따로 조정하는 전용 설정창."""
         old_show_paths_in_log = bool(getattr(self, "show_paths_in_log", False))
         old_show_cache_paths_in_settings = bool(getattr(self, "show_cache_paths_in_settings", False))
+        old_interface_tooltips_enabled = bool(getattr(self, "interface_tooltips_enabled", True))
+        old_use_light_file_dialog = bool(getattr(self, "use_light_file_dialog", True))
 
         dlg = QDialog(self)
         dlg.setWindowTitle(self.tr_ui("파일 경로 표시"))
@@ -323,13 +342,154 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         close_btn.clicked.connect(dlg.reject)
         dlg.exec()
 
+    def open_output_options_dialog(self):
+        """출력 이미지/클린본 저장 형식을 설정한다.
+        기본값은 PNG이고, 최종 출력과 클린본을 각각 독립적으로 고를 수 있다.
+        """
+        old_output_fmt = normalize_output_image_format(getattr(self, "output_image_format", DEFAULT_OUTPUT_IMAGE_FORMAT))
+        old_clean_fmt = normalize_output_image_format(getattr(self, "clean_image_format", DEFAULT_OUTPUT_IMAGE_FORMAT))
+        old_output_quality = normalize_output_image_quality(getattr(self, "output_image_quality", DEFAULT_OUTPUT_IMAGE_QUALITY))
+        old_clean_quality = normalize_output_image_quality(getattr(self, "clean_image_quality", DEFAULT_OUTPUT_IMAGE_QUALITY))
+        old_render_quality = normalize_output_text_render_quality(getattr(self, "output_text_render_quality", DEFAULT_OUTPUT_TEXT_RENDER_QUALITY))
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(self.tr_ui("출력 옵션"))
+        dlg.resize(620, 420)
+        try:
+            dlg.setStyleSheet(self.settings_dialog_style())
+        except Exception:
+            pass
+
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(18, 18, 18, 14)
+        layout.setSpacing(12)
+
+        title = QLabel(self.tr_ui("출력 옵션"))
+        title.setObjectName("SettingsDialogTitle")
+        layout.addWidget(title)
+
+        desc = QLabel(self.tr_ui("최종 출력 이미지와 클린본의 저장 형식, 그리고 출력할 때 사용할 텍스트 렌더 품질을 선택합니다. 형식을 바꿔 다시 출력하면 같은 이름의 기존 PNG/JPG/WebP 파일은 새 형식 파일로 교체됩니다."))
+        desc.setObjectName("SettingsDescription")
+        desc.setWordWrap(True)
+        layout.addWidget(desc)
+
+        block = QFrame()
+        block.setObjectName("SettingsBlock")
+        block_lay = QGridLayout(block)
+        block_lay.setContentsMargins(16, 14, 16, 14)
+        block_lay.setHorizontalSpacing(12)
+        block_lay.setVerticalSpacing(10)
+
+        cb_output = QComboBox()
+        cb_clean = QComboBox()
+        for fmt, label in self.output_format_label_pairs():
+            cb_output.addItem(label, fmt)
+            cb_clean.addItem(label, fmt)
+        try:
+            cb_output.setCurrentIndex(max(0, cb_output.findData(old_output_fmt)))
+            cb_clean.setCurrentIndex(max(0, cb_clean.findData(old_clean_fmt)))
+        except Exception:
+            pass
+
+        sp_output_q = QSpinBox()
+        sp_output_q.setRange(1, 100)
+        sp_output_q.setValue(old_output_quality)
+        sp_output_q.setSuffix(" %")
+        sp_clean_q = QSpinBox()
+        sp_clean_q.setRange(1, 100)
+        sp_clean_q.setValue(old_clean_quality)
+        sp_clean_q.setSuffix(" %")
+
+        def add_row(row, title_text, desc_text, combo, quality_spin):
+            name = QLabel(self.tr_ui(title_text))
+            name.setObjectName("SettingsItemTitle")
+            info = QLabel(self.tr_ui(desc_text))
+            info.setObjectName("SettingsDescription")
+            info.setWordWrap(True)
+            block_lay.addWidget(name, row, 0)
+            block_lay.addWidget(combo, row, 1)
+            block_lay.addWidget(QLabel(self.tr_ui("품질")), row, 2)
+            block_lay.addWidget(quality_spin, row, 3)
+            block_lay.addWidget(info, row + 1, 0, 1, 4)
+
+        add_row(0, "최종 출력 이미지", "result 폴더에 저장되는 식질 완료 이미지 형식입니다.", cb_output, sp_output_q)
+        add_row(2, "클린본", "clean 폴더에 저장되는 글자 제거 배경 이미지 형식입니다. 파일명은 원본 파일명을 따릅니다.", cb_clean, sp_clean_q)
+
+        cb_render = QComboBox()
+        for value, label in self.output_text_render_quality_label_pairs():
+            cb_render.addItem(label, value)
+        try:
+            cb_render.setCurrentIndex(max(0, cb_render.findData(old_render_quality)))
+        except Exception:
+            pass
+        render_name = QLabel(self.tr_ui("텍스트 출력 렌더"))
+        render_name.setObjectName("SettingsItemTitle")
+        render_info = QLabel(self.tr_ui("출력 시 텍스트를 더 큰 임시 캔버스에 렌더링한 뒤 축소해 획과 후광 가장자리를 부드럽게 만듭니다. 작업 화면 속도에는 영향이 없고, 배율이 높을수록 출력 시간이 늘어날 수 있습니다."))
+        render_info.setObjectName("SettingsDescription")
+        render_info.setWordWrap(True)
+        block_lay.addWidget(render_name, 4, 0)
+        block_lay.addWidget(cb_render, 4, 1, 1, 3)
+        block_lay.addWidget(render_info, 5, 0, 1, 4)
+
+        def update_quality_enabled():
+            cb_output_fmt = normalize_output_image_format(cb_output.currentData())
+            cb_clean_fmt = normalize_output_image_format(cb_clean.currentData())
+            sp_output_q.setEnabled(cb_output_fmt in ("jpg", "webp"))
+            sp_clean_q.setEnabled(cb_clean_fmt in ("jpg", "webp"))
+        cb_output.currentIndexChanged.connect(update_quality_enabled)
+        cb_clean.currentIndexChanged.connect(update_quality_enabled)
+        update_quality_enabled()
+
+        layout.addWidget(block)
+
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        btn_ok = QPushButton(self.tr_ui("확인"))
+        btn_cancel = QPushButton(self.tr_ui("닫기"))
+        btns.addWidget(btn_ok)
+        btns.addWidget(btn_cancel)
+        layout.addLayout(btns)
+
+        def on_ok():
+            new_output_fmt = normalize_output_image_format(cb_output.currentData())
+            new_clean_fmt = normalize_output_image_format(cb_clean.currentData())
+            new_output_quality = normalize_output_image_quality(sp_output_q.value())
+            new_clean_quality = normalize_output_image_quality(sp_clean_q.value())
+            new_render_quality = normalize_output_text_render_quality(cb_render.currentData())
+            self.output_image_format = new_output_fmt
+            self.clean_image_format = new_clean_fmt
+            self.output_image_quality = new_output_quality
+            self.clean_image_quality = new_clean_quality
+            self.output_text_render_quality = new_render_quality
+            self.app_options[OUTPUT_IMAGE_FORMAT_KEY] = new_output_fmt
+            self.app_options[CLEAN_IMAGE_FORMAT_KEY] = new_clean_fmt
+            self.app_options[OUTPUT_IMAGE_QUALITY_KEY] = new_output_quality
+            self.app_options[CLEAN_IMAGE_QUALITY_KEY] = new_clean_quality
+            self.app_options[OUTPUT_TEXT_RENDER_QUALITY_KEY] = new_render_quality
+            self.save_app_options_cache()
+            try:
+                self.log(f"📤 출력 옵션 저장: 결과={new_output_fmt.upper()} / 클린본={new_clean_fmt.upper()} / 텍스트렌더={new_render_quality}")
+            except Exception:
+                pass
+            dlg.accept()
+
+        btn_ok.clicked.connect(on_ok)
+        btn_cancel.clicked.connect(dlg.reject)
+        return dlg.exec() == QDialog.DialogCode.Accepted
+
     def open_settings_overview_dialog(self):
         """설정과 옵션을 한 번에 보는 통합 창.
         - 확인: 이 창에서 직접 바꾼 설정을 저장하고 닫는다.
         - 닫기/X: 이 창에서 직접 바꾼 설정을 저장하지 않고 닫는다.
         - 복잡한 옵션은 각 전용 관리창의 확인/닫기 규칙을 따른다.
         """
-        old_auto_save = bool(getattr(self, "auto_save_enabled", False))
+        _dlg_t0 = time.time()
+        try:
+            self.audit_boundary_event("SETTINGS_DIALOG_BUILD_ENTER", dialog_key="settings_overview", memory=memory_text())
+        except Exception:
+            pass
+        # 자동저장 모드는 v2.4 QA6에서 폐지되었다.
+        self.auto_save_enabled = False
         old_theme = str(getattr(self, "ui_theme", THEME_DARK) or THEME_DARK)
         old_language = normalize_ui_language(getattr(self, "ui_language", LANG_KO))
         old_temp_enabled = self.is_temp_auto_cleanup_enabled()
@@ -338,8 +498,13 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         old_output_display = normalize_page_display_mode(getattr(self, "output_display_name_mode", DEFAULT_PAGE_DISPLAY_MODE))
         old_show_paths_in_log = bool(getattr(self, "show_paths_in_log", False))
         old_show_cache_paths_in_settings = bool(getattr(self, "show_cache_paths_in_settings", False))
+        old_interface_tooltips_enabled = bool(getattr(self, "interface_tooltips_enabled", True))
 
         dlg = QDialog(self)
+        dlg.setProperty("dialog_timing_log_key", "settings_overview")
+        dlg.setProperty("dialog_timing_created_at", _dlg_t0)
+        dlg.installEventFilter(self)
+        dlg.setUpdatesEnabled(False)
         dlg.setWindowTitle(self.tr_ui("설정 / 옵션"))
         dlg.setModal(True)
         dlg.resize(820, 760)
@@ -403,13 +568,13 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
             "프로그램의 기본 동작과 작업 환경을 정하는 항목입니다. 여기서 직접 바꾼 값은 확인을 눌러야 저장됩니다.",
         )
 
-        cb_auto = QCheckBox(self.tr_ui("자동저장 모드"), dlg)
-        cb_auto.setChecked(old_auto_save)
+        cb_interface_tooltips = QCheckBox(self.tr_ui("표시"), dlg)
+        cb_interface_tooltips.setChecked(old_interface_tooltips_enabled)
         add_item(
             settings_layout,
-            "자동저장 모드",
-            "ON이면 변경 사항을 실제 프로젝트에 바로 저장합니다. OFF이면 임시 작업 캐시에 먼저 저장하고, 프로젝트 저장 시 확정합니다.",
-            cb_auto,
+            "인터페이스 툴팁 표시",
+            "버튼, 메뉴, 툴바에 뜨는 설명용 툴팁을 표시합니다. 스포이드 색상 표시 같은 작업용 안내는 이 설정과 별개로 유지됩니다.",
+            cb_interface_tooltips,
         )
 
         combo_theme = QComboBox(dlg)
@@ -450,6 +615,15 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
             "옵션 및 설정창에 캐시 위치 경로 표시",
             "API, 단축키 같은 옵션/설정 관리창에서 실제 캐시 파일 위치를 표시합니다. 끄면 캐시 경로는 숨깁니다.",
             cb_show_cache_paths,
+        )
+
+        cb_light_file_dialog = QCheckBox(self.tr_ui("사용"), dlg)
+        cb_light_file_dialog.setChecked(old_use_light_file_dialog)
+        add_item(
+            settings_layout,
+            "경량 파일 선택창 사용",
+            "Windows 파일창이 느린 환경에서 Qt 경량 파일창을 사용합니다. 기본 파일 탐색기보다 덜 익숙할 수 있지만 열리는 시간이 줄어들 수 있습니다.",
+            cb_light_file_dialog,
         )
 
         def fill_page_name_combo(combo, current_value):
@@ -499,7 +673,7 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
             # 통합 설정창에서는 개별 작업 폴더 설정창을 다시 띄우지 않는다.
             # 여기서는 경로값만 바꾸고, 실제 저장/재기동 확인은 통합 설정창의 [확인]에서 처리한다.
             current = str(workspace_target.get("path") or old_workspace_root)
-            selected = QFileDialog.getExistingDirectory(dlg, self.tr_ui("작업 폴더 위치 선택"), current)
+            selected = self.get_existing_directory_logged("workspace_location_select", dlg, self.tr_ui("작업 폴더 위치 선택"), current) if hasattr(self, "get_existing_directory_logged") else QFileDialog.getExistingDirectory(dlg, self.tr_ui("작업 폴더 위치 선택"), current)
             if selected:
                 try:
                     target = normalize_workspace_root_from_user(selected)
@@ -545,11 +719,29 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         temp_row.addWidget(combo_days)
         add_item(
             settings_layout,
-            "임시 파일 관리",
-            "오래된 임시 작업 폴더를 자동으로 정리할지 정합니다. 즉시 삭제는 별도 확인 후 바로 실행됩니다.",
+            "사용자 데이터 및 임시파일 정리",
+            "AppData 실행 캐시와 임시 데이터는 자동 정리 대상입니다. 최근 프로젝트 정보, 설정 정보, 개인정보는 사용자가 직접 누를 때만 삭제합니다.",
             temp_widget,
-            "지금 정리",
-            lambda: self.delete_temp_files_now(dlg),
+            "관리",
+            self.cleanup_temp_files_dialog,
+        )
+
+        add_item(
+            settings_layout,
+            "작업 폴더 용량 관리",
+            ".ysbt를 열어 작업할 때 생성되는 실제 작업 폴더들을 날짜순으로 보고, 폴더별 용량 확인/열기/삭제를 직접 관리합니다.",
+            None,
+            "관리",
+            self.open_workspace_folder_size_manager_dialog,
+        )
+
+        add_item(
+            settings_layout,
+            "출력 옵션",
+            "최종 출력 이미지와 클린본의 저장 형식을 각각 PNG/JPG/WebP 중에서 선택합니다. 형식을 바꿔 다시 출력하면 같은 이름의 기존 파일은 새 형식으로 교체됩니다.",
+            None,
+            "설정",
+            self.open_output_options_dialog,
         )
 
         add_item(
@@ -635,7 +827,6 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         save_applied = {"ok": False, "restart": False}
 
         def apply_settings_overview_changes():
-            new_auto_save = bool(cb_auto.isChecked())
             new_theme = str(combo_theme.currentData() or THEME_DARK)
             if new_theme not in (THEME_DARK, THEME_LIGHT):
                 new_theme = THEME_DARK
@@ -646,6 +837,8 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
             new_output_display = normalize_page_display_mode(combo_output_name.currentData())
             new_show_paths_in_log = bool(cb_show_paths_log.isChecked())
             new_show_cache_paths_in_settings = bool(cb_show_cache_paths.isChecked())
+            new_interface_tooltips_enabled = bool(cb_interface_tooltips.isChecked())
+            new_use_light_file_dialog = bool(cb_light_file_dialog.isChecked())
 
             # 확인 → 저장 확인에서 예를 누른 뒤에만 실제 저장/적용한다.
             if new_theme != old_theme:
@@ -672,18 +865,18 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
                 self.log("🧾 로그 경로 표시: ON" if new_show_paths_in_log else "🧾 로그 경로 표시: OFF")
             if new_show_cache_paths_in_settings != old_show_cache_paths_in_settings:
                 self.log("🧾 설정창 캐시 경로 표시: ON" if new_show_cache_paths_in_settings else "🧾 설정창 캐시 경로 표시: OFF")
-            if new_auto_save != old_auto_save:
+            if new_interface_tooltips_enabled != old_interface_tooltips_enabled:
                 try:
-                    self.act_auto_save_mode.blockSignals(True)
-                    self.act_auto_save_mode.setChecked(new_auto_save)
-                    self.act_auto_save_mode.blockSignals(False)
+                    self.set_interface_tooltips_enabled(new_interface_tooltips_enabled, persist=False, announce=True)
                 except Exception:
-                    pass
-                self.toggle_auto_save_mode(new_auto_save)
+                    self.interface_tooltips_enabled = new_interface_tooltips_enabled
+            if new_use_light_file_dialog != old_use_light_file_dialog:
+                self.use_light_file_dialog = new_use_light_file_dialog
+                self.log("📂 경량 파일 선택창: ON" if new_use_light_file_dialog else "📂 경량 파일 선택창: OFF")
             else:
-                self.save_app_options_cache()
-            if (display_changed or path_visibility_changed) and new_auto_save == old_auto_save:
-                self.save_app_options_cache()
+                self.use_light_file_dialog = new_use_light_file_dialog
+            self.auto_save_enabled = False
+            self.save_app_options_cache()
             self.log("⚙️ 설정 / 옵션 저장 완료")
             save_applied["ok"] = True
 
@@ -741,7 +934,26 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         btns.rejected.connect(dlg.reject)
         root.addWidget(btns)
 
-        if dlg.exec() != QDialog.DialogCode.Accepted:
+        try:
+            self.audit_boundary_event("SETTINGS_DIALOG_BUILD_DONE", dialog_key="settings_overview", elapsed_ms=int((time.time() - _dlg_t0) * 1000), memory=memory_text())
+        except Exception:
+            pass
+        try:
+            dlg.setUpdatesEnabled(True)
+            dlg.update()
+        except Exception:
+            pass
+        try:
+            dlg.setProperty("dialog_timing_exec_enter_at", time.time())
+            self.audit_boundary_event("SETTINGS_DIALOG_EXEC_ENTER", dialog_key="settings_overview", memory=memory_text())
+        except Exception:
+            pass
+        _settings_result = dlg.exec()
+        try:
+            self.audit_boundary_event("SETTINGS_DIALOG_EXEC_RETURN", dialog_key="settings_overview", result=int(_settings_result), elapsed_ms=int((time.time() - float(dlg.property("dialog_timing_exec_enter_at") or time.time())) * 1000), memory=memory_text())
+        except Exception:
+            pass
+        if _settings_result != QDialog.DialogCode.Accepted:
             self.log("⚙️ 설정 / 옵션 변경 취소")
             return
 
@@ -1005,22 +1217,22 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
             if self.is_light_theme():
                 btn.setStyleSheet(
                     "QToolButton { "
-                    "background:#f8fafc; color:#22252b; border:1px solid #cfd7e5; "
+                    "background:#FAF5F7; color:#242329; border:1px solid #D1C9CE; "
                     "border-radius:0px; padding:3px 10px; font-weight:700; "
                     "}"
-                    "QToolButton:hover { background:#edf4ff; border-color:#aac4e8; color:#111827; }"
-                    "QToolButton:pressed { background:#dbeafe; border-color:#8fb4e8; }"
-                    "QToolButton:disabled { background:#edf1f7; color:#9aa4b2; border-color:#dfe5ef; }"
+                    "QToolButton:hover { background:#FBF5F6; border-color:#D7A3A9; color:#111827; }"
+                    "QToolButton:pressed { background:#F5E8EA; border-color:#C78A90; }"
+                    "QToolButton:disabled { background:#EEEFF3; color:#A29A9F; border-color:#DED8DC; }"
                 )
             else:
                 btn.setStyleSheet(
                     "QToolButton { "
-                    "background:#333843; color:#f2f4f8; border:1px solid #555d6c; "
+                    "background:#28262B; color:#E0DADF; border:1px solid #3A363B; "
                     "border-radius:0px; padding:3px 10px; font-weight:700; "
                     "}"
-                    "QToolButton:hover { background:#3d587d; border-color:#7ea2d6; color:#ffffff; }"
-                    "QToolButton:pressed { background:#26384f; border-color:#5f83b5; }"
-                    "QToolButton:disabled { background:#2a2f38; color:#7d8594; border-color:#3b414c; }"
+                    "QToolButton:hover { background:#332B30; border-color:#665A62; color:#ffffff; }"
+                    "QToolButton:pressed { background:#5B3136; border-color:#A85D66; }"
+                    "QToolButton:disabled { background:#171719; color:#746B72; border-color:#2E2A30; }"
                 )
             btn.update()
         except Exception:
@@ -1044,6 +1256,93 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
             btn.setEnabled(bool(in_editor and self.has_open_project()))
         except Exception:
             pass
+
+    def install_menu_timing_logs(self):
+        """상단 메뉴 지연 원인 분석용 timing 로그를 연결한다."""
+        try:
+            menubar = self.menuBar()
+        except Exception:
+            menubar = None
+        try:
+            if menubar is not None:
+                menubar.setObjectName("MainMenuBar")
+        except Exception:
+            pass
+
+        menu_specs = [
+            ("project_menu", "project", "프로젝트"),
+            ("work_menu", "work", "작업"),
+            ("batch_menu", "batch", "일괄 작업"),
+            ("auto_menu", "auto", "자동화 작업"),
+            ("cloud_menu", "cloud", "클라우드"),
+            ("option_menu", "option", "옵션"),
+            ("settings_menu", "settings", "설정"),
+            ("help_menu", "help", "도움말"),
+        ]
+
+        for attr, key, title in menu_specs:
+            menu = getattr(self, attr, None)
+            if menu is None:
+                continue
+            try:
+                menu.setObjectName(f"TopMenu_{key}")
+            except Exception:
+                pass
+            try:
+                if bool(menu.property("menu_timing_log_connected")):
+                    continue
+            except Exception:
+                pass
+            try:
+                menu.setProperty("menu_timing_log_connected", True)
+            except Exception:
+                pass
+
+            def _on_about_to_show(_menu=menu, _key=key, _title=title):
+                t0 = time.time()
+                try:
+                    press_t = float(getattr(self, "_last_menu_bar_press_time", 0.0) or 0.0)
+                    since_press = int((t0 - press_t) * 1000) if press_t else None
+                except Exception:
+                    since_press = None
+                try:
+                    self.audit_boundary_event(
+                        "MENU_ABOUT_TO_SHOW_ENTER",
+                        menu_key=_key,
+                        title=_menu.title(),
+                        fallback_title=self.tr_ui(_title),
+                        action_count=len(_menu.actions()),
+                        since_press_ms=since_press,
+                        memory=memory_text(),
+                    )
+                except Exception:
+                    pass
+
+                def _done():
+                    try:
+                        self.audit_boundary_event(
+                            "MENU_ABOUT_TO_SHOW_DONE",
+                            menu_key=_key,
+                            title=_menu.title(),
+                            elapsed_ms=int((time.time() - t0) * 1000),
+                            action_count=len(_menu.actions()),
+                            memory=memory_text(),
+                        )
+                    except Exception:
+                        pass
+
+                try:
+                    QTimer.singleShot(0, _done)
+                except Exception:
+                    _done()
+
+            try:
+                menu.aboutToShow.connect(_on_about_to_show)
+            except Exception as e:
+                try:
+                    self.audit_boundary_event("MENU_LOG_CONNECT_ERROR", menu_key=key, error=str(e))
+                except Exception:
+                    pass
 
     def setup_menu(self):
         menubar = self.menuBar()
@@ -1081,6 +1380,7 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
 
         work_menu.addSection(self.tr_ui("작업류"))
         work_menu.addAction(self.actions["work_analyze"])
+        work_menu.addAction(self.actions["paint_reanalyze"])
         work_menu.addAction(self.actions["work_translate"])
         work_menu.addAction(self.actions["work_inpaint"])
         work_menu.addSeparator()
@@ -1093,7 +1393,8 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         work_menu.addSeparator()
 
         work_menu.addSection(self.tr_ui("이미지 교체류"))
-        work_menu.addAction(self.actions["work_inpaint_source"])
+        if "work_import_clean_background" in self.actions:
+            work_menu.addAction(self.actions["work_import_clean_background"])
         if "final_paint_to_background" in self.actions:
             work_menu.addAction(self.actions["final_paint_to_background"])
         work_menu.addAction(self.actions["work_restore_original_source"])
@@ -1103,6 +1404,8 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         work_menu.addAction(self.actions["work_quick_ocr"])
         work_menu.addAction(self.actions["work_text_number_width"])
         work_menu.addAction(self.actions["work_reset_text_rects"])
+        work_menu.addSeparator()
+        work_menu.addAction(self.actions["work_output_preview"])
 
         batch_menu = menubar.addMenu(self.tr_ui("일괄 작업")); self.batch_menu = batch_menu
         batch_menu.addSection(self.tr_ui("기본 동작"))
@@ -1111,13 +1414,13 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
 
         batch_menu.addSection(self.tr_ui("일괄 작업류"))
         batch_menu.addAction(self.actions["batch_analyze"])
+        batch_menu.addAction(self.actions["batch_reanalyze"])
         batch_menu.addAction(self.actions["batch_translate"])
         batch_menu.addAction(self.actions["batch_inpaint"])
         batch_menu.addSeparator()
 
         batch_menu.addSection(self.tr_ui("텍스트 수정류"))
         batch_menu.addAction(self.actions["batch_extract_text"])
-        batch_menu.addAction(self.actions["batch_import_translation"])
         batch_menu.addAction(self.actions["batch_clear_translation"])
         batch_menu.addAction(self.actions["batch_clean_text"])
         batch_menu.addSeparator()
@@ -1157,7 +1460,9 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         option_menu.addAction(self.actions["option_ocr_analysis_regions"])
         option_menu.addAction(self.actions["option_cleanup_outputs"])
         settings_menu = menubar.addMenu(self.tr_ui("설정")); self.settings_menu = settings_menu
-        settings_menu.addAction(self.actions["option_auto_save_mode"])
+        if "setting_interface_tooltips" in self.actions:
+            settings_menu.addAction(self.actions["setting_interface_tooltips"])
+        settings_menu.addSeparator()
         settings_menu.addAction(self.actions["option_theme_settings"])
         settings_menu.addAction(self.actions["option_language_settings"])
         settings_menu.addAction(self.actions["setting_page_tab_display_name"])
@@ -1169,6 +1474,8 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         settings_menu.addAction(self.actions["option_unregister_ysbt"])
         settings_menu.addSeparator()
         settings_menu.addAction(self.actions["setting_file_path_visibility"])
+        settings_menu.addAction(self.actions["option_workspace_size_manager"])
+        settings_menu.addAction(self.actions["setting_output_options"])
 
         help_menu = menubar.addMenu(self.tr_ui("도움말")); self.help_menu = help_menu
         help_menu.addAction(self.actions["help_program_manual"])
@@ -1177,7 +1484,19 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         help_menu.addSeparator()
         help_menu.addAction(self.actions["help_about"])
 
+        try:
+            self.sync_interface_tooltips_action_state()
+        except Exception:
+            pass
+
         self.setup_project_exit_button(menubar)
+        try:
+            self.install_menu_timing_logs()
+        except Exception as e:
+            try:
+                self.audit_boundary_event("MENU_LOG_SETUP_ERROR", error=str(e))
+            except Exception:
+                pass
 
     def setup_ui(self):
         self.main_stack = QStackedWidget()
@@ -1198,29 +1517,37 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         self.launcher_widget.cloudRequested.connect(lambda: self.open_cloud_overview_dialog(include_project_backup=False))
         self.launcher_widget.optionsRequested.connect(self.open_settings_overview_dialog)
         self.launcher_widget.helpRequested.connect(self.open_launcher_help)
+        self.launcher_widget.droppedProjectOpenRequested.connect(lambda path: self.open_project_path(path, external_request=True))
         self.launcher_widget.recentProjectOpenRequested.connect(self.confirm_open_recent_project)
         self.launcher_widget.recentProjectRemoveRequested.connect(self.remove_recent_project_from_launcher)
         self.launcher_widget.recentProjectRevealRequested.connect(self.reveal_recent_project_in_folder)
         self.main_stack.addWidget(self.launcher_widget)
 
         w = QWidget()
+        w.setObjectName("EditorRoot")
         self.editor_widget = w
         self.main_stack.addWidget(w)
         self.main_stack.setCurrentWidget(self.launcher_widget)
         lay = QHBoxLayout(w)
-        split = EditorSplitter(Qt.Orientation.Horizontal, default_right_width=700)
+        split = EditorSplitter(Qt.Orientation.Horizontal, default_right_width=460)
         self.editor_splitter = split
         split.setHandleWidth(8)
         lay.addWidget(split)
 
         # Left Panel
         lp = QWidget()
+        lp.setObjectName("LeftPanel")
         lp.setMinimumWidth(0)
         lp.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         ll = QHBoxLayout(lp)
         ll.setContentsMargins(0, 0, 0, 0)
 
         self.view = MuleImageViewer(self)
+        self.view.setObjectName("MainCanvasView")
+        try:
+            self.view.brush_size = max(1, min(500, int(self.app_options.get("brush_size", getattr(self.view, "brush_size", 25)) or 25)))
+        except Exception:
+            self.view.brush_size = 25
         self.view.scene.selectionChanged.connect(self.on_scene_selection_changed)
         try:
             self.view.installEventFilter(self)
@@ -1230,32 +1557,40 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
             pass
 
         tb = QToolBar(orientation=Qt.Orientation.Vertical)
-        tb.setStyleSheet("background:#24282f; border:1px solid #3b414c; border-radius:0px;")
-        self.act_brush = QAction("🖌️", self, triggered=lambda: self.set_tool('draw'))
+        tb.setStyleSheet(
+            "QToolBar { background:#171719; border:1px solid #2E2A30; border-radius:0px; padding:4px; }"
+            "QToolButton:checked { background:#8A4A52; border:1px solid #A85D66; color:#ffffff; font-weight:700; }"
+        )
+        self.act_brush = QAction("🖌️", self, triggered=lambda *args: self.set_tool('draw'))
+        self.act_brush.setCheckable(True)
         tb.addAction(self.act_brush)
-        self.act_erase = QAction("🧼", self, triggered=lambda: self.set_tool('erase'))
+        self.act_erase = QAction("🧼", self, triggered=lambda *args: self.set_tool('erase'))
+        self.act_erase.setCheckable(True)
         tb.addAction(self.act_erase)
 
-        self.act_reanal = QAction("🔄", self)
-        self.act_reanal.triggered.connect(self.reanalyze_mask)
-        tb.addAction(self.act_reanal)
-
+        # 재분석은 좌측 도구 툴바에서 제거하고, 작업 메뉴/단축키(F5)로만 제공한다.
 
         self.act_magic = QAction("⭐", self)
+        self.act_magic.setCheckable(True)
         self.act_magic.triggered.connect(lambda *args: self.set_tool('magic_wand'))
         tb.addAction(self.act_magic)
         try:
             _magic_btn = tb.widgetForAction(self.act_magic)
             if _magic_btn is not None:
-                _magic_btn.setStyleSheet("font-size:18px; color:#ffd43b;")
+                _magic_btn.setStyleSheet(
+                    "QToolButton { font-size:18px; color:#ffd43b; }"
+                    "QToolButton:checked { background:#8A4A52; border:1px solid #A85D66; color:#ffffff; font-weight:700; }"
+                )
         except Exception:
             pass
 
         self.act_mask_wrap = QAction("🩹", self)
+        self.act_mask_wrap.setCheckable(True)
         self.act_mask_wrap.triggered.connect(lambda *args: self.set_tool('mask_wrap'))
         tb.addAction(self.act_mask_wrap)
 
         self.act_mask_cut = QAction("🔪", self)
+        self.act_mask_cut.setCheckable(True)
         self.act_mask_cut.triggered.connect(lambda *args: self.set_tool('mask_cut'))
         tb.addAction(self.act_mask_cut)
 
@@ -1285,6 +1620,7 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         tb.addAction(self.act_final_paint_color)
 
         self.act_final_area_paint = QAction("▦", self)
+        self.act_final_area_paint.setCheckable(True)
         self.act_final_area_paint.setToolTip("")
         self.act_final_area_paint.setStatusTip("")
         self.act_final_area_paint.setWhatsThis("")
@@ -1302,11 +1638,42 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
             pass
 
         self.act_final_text_tool = QAction("T", self)
+        self.act_final_text_tool.setCheckable(True)
         self.act_final_text_tool.triggered.connect(lambda *args: self.set_tool("final_text"))
         tb.addAction(self.act_final_text_tool)
 
+        # 좌측 도구 버튼은 클릭/단축키 어느 쪽으로 켜도 같은 선택 상태를 보여야 한다.
+        # 즉시 실행 액션(색상 선택, 배경 반영 등)은 제외하고 draw_mode를 가진 도구만 묶는다.
+        self.left_tool_actions = {
+            'draw': self.act_brush,
+            'erase': self.act_erase,
+            'magic_wand': self.act_magic,
+            'mask_wrap': self.act_mask_wrap,
+            'mask_cut': self.act_mask_cut,
+            'area_paint': self.act_final_area_paint,
+            'final_text': self.act_final_text_tool,
+        }
+        self.left_tool_buttons = {}
+        try:
+            for _tool, _act in self.left_tool_actions.items():
+                _btn = tb.widgetForAction(_act)
+                if _btn is None:
+                    continue
+                self.left_tool_buttons[_tool] = _btn
+                try:
+                    _btn.setCheckable(True)
+                except Exception:
+                    pass
+                try:
+                    _btn.setProperty("ysb_left_tool_button", True)
+                    _btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         self.act_final_paint_to_bg = QAction("↧", self)
-        self.act_final_paint_to_bg.triggered.connect(self.apply_final_paint_to_background)
+        self.act_final_paint_to_bg.triggered.connect(self.use_final_background_as_source)
         tb.addAction(self.act_final_paint_to_bg)
 
         self.act_final_paint_above_text = QAction("T↓", self)
@@ -1322,6 +1689,7 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         ll.addWidget(tb)
 
         vc = QWidget()
+        vc.setObjectName("CanvasPanel")
         vl = QVBoxLayout(vc)
         vl.setContentsMargins(0, 0, 0, 0)
 
@@ -1438,7 +1806,7 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         self.btn_text_effect_arc = QPushButton("⌒")
         self.btn_text_effect_rasterize = QPushButton("▣")
         for _btn, _tip in (
-            (self.btn_text_effect_gradient, "문자/획 그라데이션"),
+            (self.btn_text_effect_gradient, "고급 텍스트/획 옵션"),
             (self.btn_text_effect_transform, "텍스트 변형"),
             (self.btn_text_effect_skew, "평행사변형 변형"),
             (self.btn_text_effect_trapezoid, "사다리꼴 변형"),
@@ -1468,14 +1836,24 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         final_paint_bar = QHBoxLayout(self.final_paint_option_bar)
         final_paint_bar.setContentsMargins(6, 1, 6, 1)
         final_paint_bar.setSpacing(6)
+        self.sb_brush_size = QSpinBox()
+        self.sb_brush_size.setRange(1, 500)
+        self.sb_brush_size.setSingleStep(1)
+        self.sb_brush_size.setValue(max(1, min(500, int(getattr(self.view, "brush_size", 25) or 25))))
+        self.sb_brush_size.setSuffix(" px")
+        self.sb_brush_size.setFixedWidth(84)
+        self.sb_brush_size.setToolTip("")
+        self.sb_brush_size.valueChanged.connect(self.on_brush_size_changed)
         self.sb_final_paint_opacity = QSpinBox()
         self.sb_final_paint_opacity.setRange(1, 100)
         self.sb_final_paint_opacity.setValue(100)
         self.sb_final_paint_opacity.setSuffix(" %")
         self.sb_final_paint_opacity.setFixedWidth(80)
         self.sb_final_paint_opacity.valueChanged.connect(self.on_final_paint_opacity_changed)
-        final_paint_bar.addWidget(QLabel("브러시"))
-        final_paint_bar.addWidget(QLabel("불투명도"))
+        final_paint_bar.addWidget(QLabel(self.tr_ui("브러시")))
+        final_paint_bar.addWidget(QLabel(self.tr_ui("크기")))
+        final_paint_bar.addWidget(self.sb_brush_size)
+        final_paint_bar.addWidget(QLabel(self.tr_ui("불투명도")))
         final_paint_bar.addWidget(self.sb_final_paint_opacity)
         final_paint_bar.addStretch()
         self.final_paint_option_bar.hide()
@@ -1527,7 +1905,7 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         self.sb_magic_expand.setSuffix(" px")
         self.sb_magic_expand.setFixedWidth(80)
         self.sb_magic_expand.setToolTip("요술봉 영역확장 범위")
-        self.btn_magic_fill = QPushButton("마스킹 칠하기")
+        self.btn_magic_fill = QPushButton(self.tr_ui("마스킹 칠하기"))
         self.btn_magic_fill.clicked.connect(self.fill_magic_wand_mask)
         magic_bar.addWidget(QLabel("요술봉"))
         magic_bar.addWidget(QLabel("RGB 허용범위"))
@@ -1633,6 +2011,15 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         source_compare_bar_lay.setSpacing(6)
         source_compare_bar_lay.addStretch()
 
+        self.cb_text_effect_preview = QCheckBox(self.tr_ui("텍스트 이펙트 미리보기"))
+        try:
+            _effect_preview_checked = bool(self.get_page_text_effect_preview_enabled())
+        except Exception:
+            _effect_preview_checked = bool(getattr(self, "text_effect_preview_enabled", True))
+        self.cb_text_effect_preview.setChecked(_effect_preview_checked)
+        self.cb_text_effect_preview.setToolTip(self.tr_ui("후광, 그림자, 2중 획 같은 무거운 텍스트 효과를 현재 페이지 작업 화면에 표시합니다. 끄면 이 페이지의 화면 조작이 가벼워지며 최종 출력에는 영향을 주지 않습니다."))
+        self.cb_text_effect_preview.toggled.connect(self.on_text_effect_preview_toggled)
+
         self.source_compare_controls = QWidget()
         source_compare_controls_lay = QHBoxLayout(self.source_compare_controls)
         source_compare_controls_lay.setContentsMargins(0, 0, 0, 0)
@@ -1646,9 +2033,11 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         source_compare_controls_lay.addWidget(self.btn_source_compare_close)
         try:
             if hasattr(self, "shared_option_right_layout"):
+                self.shared_option_right_layout.addWidget(self.cb_text_effect_preview)
                 self.shared_option_right_layout.addWidget(self.source_compare_controls)
         except Exception:
             pass
+        self.cb_text_effect_preview.show()
         self.source_compare_controls.hide()
         self.source_compare_bar.hide()
         vl.addWidget(self.source_compare_bar)
@@ -1659,10 +2048,11 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
             pass
 
         self.source_compare_view = QGraphicsView()
+        self.source_compare_view.setObjectName("SourceCompareView")
         self.source_compare_scene = QGraphicsScene(self.source_compare_view)
         self.source_compare_view.setScene(self.source_compare_scene)
         self.source_compare_view.setRenderHint(QPainter.RenderHint.Antialiasing)
-        self.source_compare_view.setBackgroundBrush(QBrush(QColor(30, 30, 30)))
+        self.source_compare_view.setBackgroundBrush(QBrush(QColor("#0B0C0E")))
         self.source_compare_view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.source_compare_view.setMinimumWidth(0)
         try:
@@ -1704,7 +2094,8 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         self.btn_prev_page.clicked.connect(self.prev)
         cl.addWidget(self.btn_prev_page)
         self.btn_page = QPushButton("0 / 0")
-        self.btn_page.setStyleSheet("border:none; font-weight:bold; color:#f2f2f2;")
+        self.btn_page.setToolTip("")
+        self.btn_page.setStyleSheet("border:none; font-weight:bold; color:#CBC4C9;")
         self.btn_page.clicked.connect(self.jump_page)
         cl.addWidget(self.btn_page)
         self.btn_next_page = QPushButton("▶")
@@ -1732,19 +2123,20 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         self.update_undo_redo_buttons()
 
         cl.addStretch()
-        self.btn_text_mask_reanalyze = QPushButton(self.tr_ui("🔄 재분석"))
-        self.btn_text_mask_reanalyze.setStyleSheet("background:#3d587d;color:#ffffff;font-weight:700;border:1px solid #7ea2d6;border-radius:0px;padding:6px 10px")
-        self.btn_text_mask_reanalyze.clicked.connect(self.reanalyze_mask)
-        self.btn_text_mask_reanalyze.hide()
-        cl.addWidget(self.btn_text_mask_reanalyze)
+        self.btn_reanalyze = QPushButton(self.tr_ui("↻ 재분석"), clicked=self.reanalyze_mask)
+        self.btn_reanalyze.setStyleSheet("QPushButton { background:#28262B;color:#E0DADF;font-weight:700;border:1px solid #3A363B;border-radius:0px;padding:6px 10px; } QPushButton:hover { background:#332B30; border-color:#665A62; }")
+        self.btn_reanalyze.setVisible(False)
+        cl.addWidget(self.btn_reanalyze)
         self.btn_analyze = QPushButton(self.tr_ui("⚡ 분석"), clicked=self.anal)
-        self.btn_analyze.setStyleSheet("background:#7d4a4a;color:#ffffff;font-weight:700;border:1px solid #a86b6b;border-radius:0px;padding:6px 10px")
+        self.btn_analyze.setStyleSheet("QPushButton { background:#8A4A52;color:#ffffff;font-weight:800;border:1px solid #A85D66;border-radius:0px;padding:6px 13px; } QPushButton:hover { background:#6F3940; border-color:#C78A90; } QPushButton:pressed { background:#5B3136; }")
         cl.addWidget(self.btn_analyze)
+        self.update_paint_toolbar_visibility()
         vl.addLayout(cl)
         split.addWidget(lp)
 
         # Right Panel
         rp = QWidget()
+        rp.setObjectName("RightPanel")
         # 오른쪽 작업 패널은 기본 상태에서는 사용자지정 콤보박스까지 보이도록 충분한 폭을 잡는다.
         # 단, splitter를 끌면 왼쪽/오른쪽 모두 거의 끝까지 접을 수 있게 최소 폭은 낮게 둔다.
         rp.setMinimumWidth(0)
@@ -1755,6 +2147,7 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
 
         self.right_panel = rp
         self.right_scroll = QScrollArea()
+        self.right_scroll.setObjectName("RightPanelScroll")
         self.right_scroll.setWidgetResizable(True)
         self.right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.right_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
@@ -1769,7 +2162,7 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         # 우측 기본 폭은 주요 컨트롤이 보이는 선에서 너무 넓지 않게 맞춘다.
         split.setStretchFactor(0, 5)
         split.setStretchFactor(1, 0)
-        split.setSizes([1200, 700])
+        split.setSizes([1280, 460])
 
         # 글꼴 프리셋은 옵션 메뉴의 "글꼴 프리셋 관리"에서 다룬다.
         # 캐시/자동저장 로직 호환을 위해 컨트롤 객체는 숨겨 둔다.
@@ -1784,25 +2177,77 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         self.btn_preset_apply_all = QPushButton("전체 적용", self)
         self.btn_preset_apply_all.hide()
 
-        # 우측 인터페이스 1줄: 선택 텍스트 스타일
-        style_line = QHBoxLayout()
-        style_line.setContentsMargins(0, 0, 0, 0)
-        style_line.setSpacing(6)
+        # 우측 인터페이스: 텍스트 / AI / 기타 3영역 압축 배치
+        # 원칙: 기존 위젯/시그널은 유지하고, 큰 그룹박스 없이 작은 제목줄+촘촘한 행으로만 재배치한다.
+        def _right_section_title(text):
+            lbl = QLabel(self.tr_ui(text))
+            lbl.setObjectName("RightSectionTitle")
+            lbl.setFixedHeight(17)
+            if self.is_light_theme():
+                lbl.setStyleSheet("QLabel#RightSectionTitle { color:#555056; font-weight:700; padding:0px 0px 1px 0px; }")
+            else:
+                lbl.setStyleSheet("QLabel#RightSectionTitle { color:#b7c4d4; font-weight:700; padding:0px 0px 1px 0px; }")
+            return lbl
+
+        def _compact_row(spacing=3):
+            lay = QHBoxLayout()
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setSpacing(spacing)
+            return lay
+
+        def _short_label(text, width=None):
+            lbl = QLabel(self.tr_ui(text))
+            lbl.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+            lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            if width is not None:
+                lbl.setFixedWidth(width)
+            return lbl
+
+        def _fixed_combo(widget, width):
+            widget.setFixedHeight(26)
+            widget.setFixedWidth(width)
+            widget.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            # 콤보 팝업은 Qt 기본 view를 유지한다.
+            # 직접 QListView를 붙이면 일부 환경에서 팝업이 두 번 열리는 것처럼 번쩍일 수 있다.
+            return widget
+
+        def _fixed_button(widget, width=None):
+            widget.setFixedHeight(26)
+            if width is not None:
+                widget.setFixedWidth(width)
+            else:
+                widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+            return widget
+
+        _right_control_line_width = 424
+
+        def _row_widget(layout, object_name):
+            box = QWidget()
+            box.setObjectName(object_name)
+            box.setFixedWidth(_right_control_line_width)
+            box.setFixedHeight(26)
+            box.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            box.setLayout(layout)
+            return box
+
+        # === 텍스트 ===
+        rl.addWidget(_right_section_title("텍스트"))
+
         self.cb_font = QFontComboBox()
-        self.cb_font.setFixedWidth(150)
+        self.cb_font.setFixedWidth(145)
         self.cb_font.setFixedHeight(26)
         self.cb_font.setToolTip("글꼴")
         self.sb_font_size = QSpinBox()
-        self.sb_font_size.setRange(10, 300)
+        self.sb_font_size.setRange(10, 600)
         self.sb_font_size.setValue(35)
         self.sb_font_size.setSuffix(" px")
-        self.sb_font_size.setFixedWidth(100)
+        self.sb_font_size.setFixedWidth(72)
         self.sb_font_size.setToolTip("글꼴 크기")
         self.sb_strk = QSpinBox()
         self.sb_strk.setRange(0, 100)
         self.sb_strk.setValue(3)
         self.sb_strk.setSuffix(" px")
-        self.sb_strk.setFixedWidth(90)
+        self.sb_strk.setFixedWidth(62)
         self.sb_strk.setToolTip("획 크기")
 
         self.btn_text_color = QPushButton("")
@@ -1817,7 +2262,7 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         self.btn_align_right = QPushButton("▷≡")
         for b in (self.btn_align_left, self.btn_align_center, self.btn_align_right):
             b.setCheckable(True)
-            b.setFixedWidth(42)
+            b.setFixedWidth(40)
             b.setFixedHeight(26)
             b.setToolTip("글자 정렬")
 
@@ -1825,28 +2270,28 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         self.sb_line_spacing.setRange(50, 300)
         self.sb_line_spacing.setValue(100)
         self.sb_line_spacing.setSuffix(" %")
-        self.sb_line_spacing.setFixedWidth(78)
+        self.sb_line_spacing.setFixedWidth(73)
         self.sb_line_spacing.setToolTip("행간")
 
         self.sb_letter_spacing = QSpinBox()
         self.sb_letter_spacing.setRange(-100, 200)
         self.sb_letter_spacing.setValue(0)
         self.sb_letter_spacing.setSuffix(" px")
-        self.sb_letter_spacing.setFixedWidth(78)
+        self.sb_letter_spacing.setFixedWidth(73)
         self.sb_letter_spacing.setToolTip("자간")
 
         self.sb_char_width = QSpinBox()
         self.sb_char_width.setRange(10, 300)
         self.sb_char_width.setValue(100)
         self.sb_char_width.setSuffix(" %")
-        self.sb_char_width.setFixedWidth(78)
+        self.sb_char_width.setFixedWidth(73)
         self.sb_char_width.setToolTip("문자 너비")
 
         self.sb_char_height = QSpinBox()
         self.sb_char_height.setRange(10, 300)
         self.sb_char_height.setValue(100)
         self.sb_char_height.setSuffix(" %")
-        self.sb_char_height.setFixedWidth(78)
+        self.sb_char_height.setFixedWidth(73)
         self.sb_char_height.setToolTip("문자 높이")
 
         self.btn_bold = QPushButton("B")
@@ -1858,51 +2303,55 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
             (self.btn_strike, "취소선"),
         ):
             b.setCheckable(True)
-            b.setFixedWidth(32)
+            b.setFixedWidth(40)
             b.setFixedHeight(26)
             b.setToolTip(tip)
 
-        self.apply_text_style_button_styles()
-
-        style_line.addWidget(QLabel("폰트"))
-        style_line.addWidget(self.cb_font)
-        style_line.addWidget(QLabel("크기"))
-        style_line.addWidget(self.sb_font_size)
-        style_line.addWidget(self.btn_text_color)
-        style_line.addWidget(QLabel("획"))
-        style_line.addWidget(self.sb_strk)
-        style_line.addWidget(self.btn_stroke_color)
-        style_line.addWidget(self.btn_align_left)
-        style_line.addWidget(self.btn_align_center)
-        style_line.addWidget(self.btn_align_right)
-        style_line.addStretch()
-        rl.addLayout(style_line)
-
-        # 우측 인터페이스 2줄: 글꼴 상세 옵션
-        detail_line = QHBoxLayout()
-        detail_line.setContentsMargins(0, 0, 0, 0)
-        detail_line.setSpacing(6)
-        detail_line.addWidget(QLabel("행간"))
-        detail_line.addWidget(self.sb_line_spacing)
-        detail_line.addWidget(QLabel("자간"))
-        detail_line.addWidget(self.sb_letter_spacing)
-        detail_line.addWidget(QLabel("너비"))
-        detail_line.addWidget(self.sb_char_width)
-        detail_line.addWidget(QLabel("높이"))
-        detail_line.addWidget(self.sb_char_height)
-        detail_line.addWidget(self.btn_bold)
-        detail_line.addWidget(self.btn_italic)
-        detail_line.addWidget(self.btn_strike)
-
-        self.cb_item_text_preset = QComboBox()
-        self.cb_item_text_preset.setMinimumWidth(100)
-        self.cb_item_text_preset.setMaximumWidth(110)
+        self.cb_item_text_preset = StableComboBox()
+        self.cb_item_text_preset.setObjectName("item_text_preset_combo")
+        self.cb_item_text_preset.setFixedWidth(120)
         self.cb_item_text_preset.setFixedHeight(26)
         self.cb_item_text_preset.setToolTip("개별 글꼴 프리셋")
-        detail_line.addWidget(self.cb_item_text_preset)
 
-        detail_line.addStretch()
-        rl.addLayout(detail_line)
+        self.apply_text_style_button_styles()
+
+        text_line1 = _compact_row()
+        text_line1.addWidget(_short_label("폰트", 28))
+        text_line1.addWidget(self.cb_font)
+        text_line1.addWidget(_short_label("크기", 28))
+        text_line1.addWidget(self.sb_font_size)
+        text_line1.addWidget(self.btn_text_color)
+        text_line1.addWidget(_short_label("획", 16))
+        text_line1.addWidget(self.sb_strk)
+        text_line1.addWidget(self.btn_stroke_color)
+        text_line1_widget = _row_widget(text_line1, "RightTextLine1")
+        rl.addWidget(text_line1_widget)
+
+        text_line2 = _compact_row(spacing=2)
+        text_line2.addWidget(self.btn_bold)
+        text_line2.addWidget(self.btn_italic)
+        text_line2.addWidget(self.btn_strike)
+        text_line2.addWidget(self.btn_align_left)
+        text_line2.addWidget(self.btn_align_center)
+        text_line2.addWidget(self.btn_align_right)
+        text_line2.addStretch(1)
+        text_line2.addWidget(_short_label("프리셋", 42))
+        text_line2.addWidget(self.cb_item_text_preset)
+        text_line2_widget = _row_widget(text_line2, "RightTextLine2")
+        rl.addWidget(text_line2_widget)
+
+        text_line3 = _compact_row(spacing=2)
+        text_line3.addWidget(_short_label("행간", 28))
+        text_line3.addWidget(self.sb_line_spacing)
+        text_line3.addWidget(_short_label("자간", 28))
+        text_line3.addWidget(self.sb_letter_spacing)
+        text_line3.addStretch(1)
+        text_line3.addWidget(_short_label("너비", 28))
+        text_line3.addWidget(self.sb_char_width)
+        text_line3.addWidget(_short_label("높이", 28))
+        text_line3.addWidget(self.sb_char_height)
+        text_line3_widget = _row_widget(text_line3, "RightTextLine3")
+        rl.addWidget(text_line3_widget)
 
         self.text_style_control_widgets = [
             self.cb_font, self.sb_font_size, self.btn_text_color,
@@ -1917,20 +2366,18 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
             getattr(self, 'btn_text_effect_arc', None), getattr(self, 'btn_text_effect_rasterize', None),
         ]
 
-        # 우측 인터페이스 3줄: 자주 쓰는 작업만 남긴 압축 배치
-        # 지문 추출 / 번역문 불러오기 / 인페인팅 원본 전환은 메뉴와 단축키로만 사용한다.
-        al = QHBoxLayout()
-        al.setContentsMargins(0, 0, 0, 0)
-        al.setSpacing(6)
-        self.cb_ocr_language = QComboBox()
-        self.cb_ocr_language.setFixedHeight(26)
-        self.cb_ocr_language.setMinimumWidth(92)
-        self.cb_ocr_language.setMaximumWidth(120)
+        # === AI ===
+        rl.addWidget(_right_section_title("AI"))
+        ai_line = _compact_row(spacing=2)
+        self.cb_ocr_language = StableComboBox()
+        self.cb_ocr_language.setObjectName("ocr_language_combo")
+        _fixed_combo(self.cb_ocr_language, 78)
         self.refresh_ocr_language_combo(save=False)
         self.cb_ocr_language.currentIndexChanged.connect(self.on_ocr_language_toolbar_changed)
 
-        self.cb_trans_provider = QComboBox()
-        self.cb_trans_provider.setFixedHeight(26)
+        self.cb_trans_provider = StableComboBox()
+        self.cb_trans_provider.setObjectName("trans_provider_combo")
+        _fixed_combo(self.cb_trans_provider, 88)
         self.cb_trans_provider.addItem("OpenAI", "openai")
         self.cb_trans_provider.addItem("DeepSeek", "deepseek")
         self.cb_trans_provider.addItem("Google", "google")
@@ -1946,29 +2393,43 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         self.sb_trans_chunk.setFixedHeight(26)
         self.sb_trans_chunk.setStatusTip(self.tr_msg("한 번의 API 요청에 묶어서 보낼 텍스트 줄 수"))
         self.sb_trans_chunk.valueChanged.connect(self.on_translation_chunk_changed)
+        self.sb_trans_chunk.hide()
 
         self.cb_show_final_text = QCheckBox("텍스트 표시")
         self.cb_show_final_text.setChecked(True)
         self.cb_show_final_text.setFixedHeight(26)
+        self.cb_show_final_text.setFixedWidth(104)
         self.cb_show_final_text.toggled.connect(self.on_show_final_text_toggled)
 
         self.btn_translate = QPushButton("🌐 번역", clicked=self.trans)
-        self.btn_translate.setFixedHeight(26)
-        self.btn_inpaint = QPushButton("🎨 인페인팅", clicked=self.run_inpainting, styleSheet="background:#456f56;color:#ffffff;border:1px solid #6f9b7b;border-radius:0px;padding:4px 10px")
-        self.btn_inpaint.setFixedHeight(26)
-        self.btn_text_cleanup = QPushButton("🧹 텍스트 정리", clicked=self.clean_text_current)
-        self.btn_text_cleanup.setFixedHeight(26)
+        _fixed_button(self.btn_translate, 95)
+        self.btn_inpaint = QPushButton("🎨 인페인팅", clicked=self.run_inpainting, styleSheet="QPushButton { background:#2f5d4a;color:#ffffff;border:1px solid #5f8d70;border-radius:0px;padding:4px 8px;font-weight:700; } QPushButton:hover { background:#3b6e57; border-color:#7fa68d; } QPushButton:pressed { background:#254838; }")
+        _fixed_button(self.btn_inpaint, 95)
 
-        al.addWidget(QLabel("OCR언어"))
-        al.addWidget(self.cb_ocr_language)
-        al.addWidget(QLabel("번역AI"))
-        al.addWidget(self.cb_trans_provider)
-        al.addWidget(self.btn_translate)
-        al.addWidget(self.btn_inpaint)
-        al.addWidget(self.btn_text_cleanup)
-        al.addWidget(self.cb_show_final_text)
-        al.addStretch()
-        rl.addLayout(al)
+        ai_line.addWidget(_short_label("OCR", 24))
+        ai_line.addWidget(self.cb_ocr_language)
+        ai_line.addWidget(_short_label("번역", 28))
+        ai_line.addWidget(self.cb_trans_provider)
+        ai_line.addStretch(1)
+        ai_line.addWidget(self.btn_translate)
+        ai_line.addWidget(self.btn_inpaint)
+        ai_line_widget = _row_widget(ai_line, "RightAiLine")
+        rl.addWidget(ai_line_widget)
+
+        # === 기타 ===
+        rl.addWidget(_right_section_title("기타"))
+        misc_line = _compact_row()
+        self.btn_export_result = QPushButton(self.tr_ui("📤 결과물 출력"), clicked=self.export_result, styleSheet="QPushButton { background:#8A4A52;color:#ffffff;font-weight:600;border:1px solid #A85D66;border-radius:0px;min-height:0px;max-height:26px;padding:0px 6px; } QPushButton:hover { background:#6F3940; border-color:#C78A90; } QPushButton:pressed { background:#5B3136; }")
+        _fixed_button(self.btn_export_result, 124)
+        self.btn_text_cleanup = QPushButton("🧹 텍스트 정리", clicked=self.clean_text_current)
+        _fixed_button(self.btn_text_cleanup, 124)
+        misc_line.addWidget(self.btn_export_result)
+        misc_line.addWidget(self.btn_text_cleanup)
+        misc_line.addWidget(self.cb_show_final_text)
+        misc_line.addSpacing(60)
+        misc_line.addStretch(1)
+        rl.addLayout(misc_line)
+        self.apply_action_button_theme_styles()
 
         self.tab = TextTableWidget(0, 4)
         self.tab.setHorizontalHeaderLabels(["ID", "X", "원문", "번역"])
@@ -1993,10 +2454,12 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         self.tab.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.tab.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.tab.setStyleSheet(
-            "QTableWidget { background:#26282d; color:#f2f2f2; gridline-color:#4a4d55; border:1px solid #3b414c; border-radius:0px; }"
-            "QTableWidget::item:selected { background:#3d587d; color:#ffffff; }"
+            "QTableWidget { background:#171719; color:#E8E1E6; gridline-color:#2C282D; border:1px solid #293241; border-radius:0px; }"
+            "QTableWidget::item { padding:3px 4px; }"
+            "QTableWidget::item:selected { background:#8A4A52; color:#ffffff; }"
+            "QTableWidget QTableCornerButton::section { background:#141416; border:1px solid #293241; }"
         )
-        rl.addWidget(self.tab)
+        rl.addWidget(self.tab, 1)
 
         self.tab.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.tab.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
@@ -2006,8 +2469,6 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         self.tab.verticalHeader().setVisible(False)
         self.tab.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
 
-        self.btn_export_result = QPushButton(self.tr_ui("📤 결과물 출력"), clicked=self.export_result, styleSheet="background:#3d587d;color:#ffffff;font-weight:700;border:1px solid #7ea2d6;border-radius:0px;height:40px")
-        rl.addWidget(self.btn_export_result)
 
         # 작업 로그는 하단에 작은 조작 막대를 두고, 막대의 버튼으로 접고 펼친다.
         # 버튼을 큰 빈 로그 영역 안에 띄우지 않도록 로그 본문과 조작 막대를 분리한다.
@@ -2046,7 +2507,7 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         rl.addWidget(self.log_panel)
         self.refresh_log_panel_state(save=False)
         self.flush_pending_log_messages()
-        split.setSizes([1200, 700])
+        split.setSizes([1280, 460])
 
         self.cb_text_preset.currentIndexChanged.connect(self.on_text_preset_selected)
         self.btn_preset_save.clicked.connect(self.save_text_preset_named)
@@ -2086,16 +2547,38 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         self.btn_text_effect_trapezoid.clicked.connect(self.toggle_selected_text_trapezoid_quick)
         self.btn_text_effect_arc.clicked.connect(self.toggle_selected_text_arc_quick)
         self.btn_text_effect_rasterize.clicked.connect(self.rasterize_selected_text_quick)
+
+        # G단계: 툴바 버튼/작업 콤보는 클릭용 컨트롤이다.
+        # 스타일 버튼을 누른 뒤 포커스가 OCR 언어 콤보로 튀면 휠/키 입력이
+        # 엉뚱한 곳에 먹으므로, 작업 캔버스 포커스를 빼앗지 않게 한다.
+        for _focus_widget in (
+            getattr(self, 'btn_align_left', None), getattr(self, 'btn_align_center', None), getattr(self, 'btn_align_right', None),
+            getattr(self, 'btn_bold', None), getattr(self, 'btn_italic', None), getattr(self, 'btn_strike', None),
+            getattr(self, 'btn_text_color', None), getattr(self, 'btn_stroke_color', None),
+            getattr(self, 'btn_translate', None), getattr(self, 'btn_inpaint', None), getattr(self, 'btn_text_cleanup', None),
+            getattr(self, 'cb_ocr_language', None), getattr(self, 'cb_trans_provider', None), getattr(self, 'cb_show_final_text', None),
+            getattr(self, 'btn_item_text_color', None), getattr(self, 'btn_item_stroke_color', None),
+            getattr(self, 'btn_item_align_left', None), getattr(self, 'btn_item_align_center', None), getattr(self, 'btn_item_align_right', None),
+            getattr(self, 'btn_text_effect_gradient', None), getattr(self, 'btn_text_effect_transform', None),
+            getattr(self, 'btn_text_effect_skew', None), getattr(self, 'btn_text_effect_trapezoid', None),
+            getattr(self, 'btn_text_effect_arc', None), getattr(self, 'btn_text_effect_rasterize', None),
+        ):
+            try:
+                if _focus_widget is not None:
+                    _focus_widget.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            except Exception:
+                pass
+
         self.page_required_widgets = [
             getattr(self, 'tb', None), getattr(self, 'view', None), getattr(self, 'btn_prev_page', None), getattr(self, 'btn_next_page', None),
-            getattr(self, 'cb_mode', None), getattr(self, 'btn_page', None), getattr(self, 'btn_text_mask_reanalyze', None), getattr(self, 'btn_analyze', None),
+            getattr(self, 'cb_mode', None), getattr(self, 'btn_page', None), getattr(self, 'btn_analyze', None),
             getattr(self, 'cb_ocr_language', None), getattr(self, 'cb_trans_provider', None), getattr(self, 'btn_translate', None), getattr(self, 'btn_inpaint', None), getattr(self, 'btn_text_cleanup', None),
             getattr(self, 'cb_show_final_text', None), getattr(self, 'tab', None), getattr(self, 'btn_export_result', None),
             getattr(self, 'page_tab_bar', None), getattr(self, 'btn_page_tab_menu', None),
         ]
         self.page_required_action_keys = [
-            'work_analyze', 'work_quick_ocr', 'paint_reanalyze', 'work_translate', 'work_inpaint', 'work_inpaint_source',
-            'batch_analyze', 'batch_translate', 'batch_inpaint', 'work_page_prev', 'work_page_next', 'work_page_list', 'work_page_full_name',
+            'work_analyze', 'work_quick_ocr', 'paint_reanalyze', 'work_translate', 'work_inpaint', 'final_paint_to_background',
+            'batch_analyze', 'batch_reanalyze', 'batch_translate', 'batch_inpaint', 'work_page_prev', 'work_page_next', 'work_page_list', 'work_page_full_name',
         ]
         self.update_color_button_styles()
         self.apply_text_style_button_styles()
@@ -2104,6 +2587,10 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         self.install_main_input_enter_escape_filters()
         try:
             self.configure_stable_numeric_inputs()
+        except Exception:
+            pass
+        try:
+            self.configure_live_text_numeric_inputs()
         except Exception:
             pass
 
@@ -2149,25 +2636,25 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
     def apply_log_panel_theme(self):
         light = self.is_light_theme() if hasattr(self, "is_light_theme") else False
         if light:
-            panel_style = "QWidget#LogPanel { background:#ffffff; border:1px solid #dfe5ef; border-radius:0px; }"
-            header_style = "QWidget#LogPanelFooter { background:#eef2f8; border:0; border-top:1px solid #dfe5ef; }"
+            panel_style = "QWidget#LogPanel { background:#ffffff; border:1px solid #DED8DC; border-radius:0px; }"
+            header_style = "QWidget#LogPanelFooter { background:#F1ECEF; border:0; border-top:1px solid #DED8DC; }"
             title_style = "color:#374151; font-weight:700;"
             button_style = (
-                "QPushButton#LogPanelToggleButton { background:#f8fafc; color:#374151; border:1px solid #cfd7e5; "
+                "QPushButton#LogPanelToggleButton { background:#FAF5F7; color:#374151; border:1px solid #D1C9CE; "
                 "border-radius:0px; padding:2px 8px; font-weight:700; }"
-                "QPushButton#LogPanelToggleButton:hover { background:#edf4ff; border-color:#aac4e8; }"
+                "QPushButton#LogPanelToggleButton:hover { background:#FBF5F6; border-color:#D7A3A9; }"
             )
             log_style = "background:#ffffff;color:#25704a;border:0;border-radius:0px;"
         else:
-            panel_style = "QWidget#LogPanel { background:#1f2228; border:1px solid #3b414c; border-radius:0px; }"
-            header_style = "QWidget#LogPanelFooter { background:#24282f; border:0; border-top:1px solid #3b414c; }"
-            title_style = "color:#d7deea; font-weight:700;"
+            panel_style = "QWidget#LogPanel { background:#101113; border:1px solid #2E2A30; border-radius:0px; }"
+            header_style = "QWidget#LogPanelFooter { background:#171719; border:0; border-top:1px solid #2E2A30; }"
+            title_style = "color:#CBC4C9; font-weight:700;"
             button_style = (
-                "QPushButton#LogPanelToggleButton { background:#333843; color:#f2f4f8; border:1px solid #555d6c; "
+                "QPushButton#LogPanelToggleButton { background:#28262B; color:#E0DADF; border:1px solid #3A363B; "
                 "border-radius:0px; padding:2px 8px; font-weight:700; }"
-                "QPushButton#LogPanelToggleButton:hover { background:#3d4654; border-color:#718098; }"
+                "QPushButton#LogPanelToggleButton:hover { background:#332B30; border-color:#665A62; }"
             )
-            log_style = "background:#1f2228;color:#8ee0a1;border:0;border-radius:0px;"
+            log_style = "background:#101113;color:#8fd8a8;border:0;border-radius:0px;"
         try:
             if hasattr(self, "log_panel") and self.log_panel is not None:
                 self.log_panel.setStyleSheet(panel_style)
@@ -2203,8 +2690,18 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
             parts.append(shortcut)
         if desc:
             parts.append(self.tr_msg(desc))
+        text = "\n".join(parts)
         try:
-            widget.setToolTip("\n".join(parts))
+            widget.setToolTip(text)
+            # 메인윈도우는 QApplication 전역 eventFilter로 native tooltip을 막는다.
+            # 프리셋/설정 대화상자 컨트롤은 native tooltip을 허용해야 창 위에서 바로 보인다.
+            widget.setProperty("allow_native_tooltip", True)
+            try:
+                for child in widget.findChildren(QWidget):
+                    child.setToolTip(text)
+                    child.setProperty("allow_native_tooltip", True)
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -2437,27 +2934,22 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
     def make_ysbt_path_with_uuid_suffix(self, path: str, project_uuid: str | None = None):
         """사용자가 고른 .ysbt 경로를 확정한다.
 
-        v1.6 정책:
-        - .ysbt 파일명에는 UUID를 붙이지 않는다.
-        - UUID는 패키지 내부 manifest.json에 저장한다.
-        - 작업 폴더를 만들 때만 파일명 뒤에 uuid 짧은값을 붙인다.
-
-        함수명은 기존 호출부 호환을 위해 유지한다.
-        반환: (ysbt_path, display_project_name, project_uuid)
+        정책:
+        - 파일명에는 UUID/YSBT 문구를 강제로 붙이지 않는다. 확장자만 .ysbt로 맞춘다.
+        - 구형 이름_고유번호.ysbt를 저장할 때도 기존 ID를 누적/계승하지 않고 새 내부 UUID로 교체한다.
+        - UUID는 패키지 manifest와 작업 폴더명에만 사용한다.
         """
         path = self.normalize_ysb_path(path)
         path_obj = Path(path)
-        display_name, existing_code = self.split_uuid_suffix_from_name(path_obj.stem)
-        if project_uuid:
-            final_uuid = str(project_uuid)
-        elif existing_code:
-            # 구버전 이름_고유번호.ysbt를 저장할 때도 파일명은 정리하되,
-            # 기존 코드 앞자리는 내부 UUID에 이어받는다.
-            random_tail = uuid.uuid4().hex[len(existing_code):]
-            final_uuid = (existing_code + random_tail)[:32]
-        else:
-            final_uuid = uuid.uuid4().hex
-        clean_path = path_obj.with_name(safe_project_name(display_name) + YSB_EXTENSION)
+        display_name, _existing_code = self.split_uuid_suffix_from_name(path_obj.stem)
+        try:
+            cleaned = re.sub(r"(?:[\s_-]+YSBT)$", "", str(display_name or ""), flags=re.IGNORECASE).strip(" _-. ")
+            if cleaned:
+                display_name = clean_workspace_name(cleaned)
+        except Exception:
+            pass
+        final_uuid = str(project_uuid) if project_uuid else uuid.uuid4().hex
+        clean_path = path_obj.with_name(safe_project_name(display_name or "ysb_project") + YSB_EXTENSION)
         return str(clean_path), display_name, final_uuid
 
     def translate_child_widgets(self, root_widget):
@@ -2545,15 +3037,17 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
             "work_page_full_name": "현재 페이지 이름 보기",
             "work_page_rename_source": "페이지 탭 파일명 변경",
             "work_page_delete_current": "현재 페이지 탭 삭제",
-            "work_page_delete_all": "전체 페이지 탭 삭제",
+            "work_page_delete_all": "일괄 페이지탭 삭제",
             "work_open_current_project_folder": "현재 프로젝트의 작업 폴더로 이동하기",
             "work_analyze": "분석",
+            "paint_reanalyze": "재분석",
             "work_quick_ocr": "빠른 OCR 설정",
             "quick_ocr_execute": "빠른 OCR 실행",
             "work_text_number_width": "텍스트 넘버 크기 변경",
             "work_translate": "번역",
             "work_inpaint": "인페인팅",
-            "work_inpaint_source": "인페인팅을 원본으로",
+            "work_import_clean_background": "클린본 불러오기",
+            "work_inpaint_source": "배경을 원본으로 쓰기",
             "work_restore_original_source": "원본으로 돌아가기",
             "work_extract_text": "지문 추출",
             "work_import_translation": "번역문 불러오기",
@@ -2561,11 +3055,12 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
             "work_clean_text": "텍스트 정리",
             "work_reset_text_rects": "현재 텍스트 기준으로 영역 재설정",
             "work_export": "출력",
+            "work_output_preview": "출력 미리보기",
             "batch_analyze": "일괄 분석",
+            "batch_reanalyze": "일괄 재분석",
             "batch_translate": "일괄 번역",
             "batch_inpaint": "일괄 인페인팅",
             "batch_extract_text": "일괄 지문 추출",
-            "batch_import_translation": "일괄 번역문 불러오기",
             "batch_clear_translation": "일괄 번역문 내용 지우기",
             "batch_clean_text": "일괄 텍스트 정리",
             "batch_reset_text_rects": "일괄 현재 텍스트 기준으로 영역 재설정",
@@ -2574,11 +3069,13 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
             "auto_text_size_batch": "일괄 자동 텍스트 크기 조정",
             "auto_linebreak_current": "자동 줄 내림",
             "auto_linebreak_batch": "일괄 자동 줄 내림",
-            "option_auto_save_mode": "자동저장 모드",
+            "option_auto_save_mode": "자동저장 모드(폐지됨)",
             "option_theme_settings": "테마 설정",
             "option_language_settings": "언어 설정",
             "setting_page_tab_display_name": "페이지 탭 표시명 설정",
             "setting_output_display_name": "출력 표시명 설정",
+            "setting_output_options": "출력 옵션",
+            "setting_interface_tooltips": "인터페이스 툴팁 표시",
             "setting_file_path_visibility": "파일 경로 표시",
             "option_api_settings": "API 관리",
             "option_translation_prompt": "번역 프롬프트 입력",
@@ -2588,7 +3085,8 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
             "option_cleanup_outputs": "출력물 삭제",
             "option_workspace_location": "작업 폴더 위치 변경",
             "option_workspace_reset_default": "작업 폴더 위치 기본값으로 변경",
-            "option_cleanup_temp_files": "임시 파일 관리",
+            "option_cleanup_temp_files": "사용자 데이터 및 임시파일 정리",
+            "option_workspace_size_manager": "작업 폴더 용량 관리",
             "option_register_ysb": ".ysbt 확장자 연결 등록",
             "option_unregister_ysbt": ".ysbt 확장자 연결 해제",
             "option_shortcut_settings": "단축키 통합 관리",
@@ -2612,7 +3110,7 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
             "paint_mask_toggle": "마스크 ON/OFF",
             "view_text_toggle": "텍스트 표시 ON/OFF",
             "final_paint_color": "최종 페인팅 색상",
-            "final_paint_to_background": "최종 페인팅을 배경에 반영",
+            "final_paint_to_background": "배경을 원본으로 쓰기",
             "final_text_tool": "최종 텍스트 도구",
             "final_paint_above_toggle": "텍스트 위 페인팅 ON/OFF",
             "final_paint_opacity_inc": "브러시 불투명도 증가",
@@ -2625,6 +3123,11 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
                     action.setText(self.tr_ui(ko))
                 except Exception:
                     pass
+
+        try:
+            self.sync_interface_tooltips_action_state()
+        except Exception:
+            pass
 
         try:
             if hasattr(self, "launcher_widget"):
@@ -2707,8 +3210,6 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
             # QSpinBox specialValueText("자동")는 최솟값 전용이라 음수/기본값 UX와 충돌한다.
             if hasattr(self, "btn_analyze"):
                 self.btn_analyze.setText(self.tr_ui("⚡ 분석"))
-            if hasattr(self, "btn_text_mask_reanalyze"):
-                self.btn_text_mask_reanalyze.setText(self.tr_ui("🔄 재분석"))
             if hasattr(self, "btn_mask_wrap_rect"):
                 self.btn_mask_wrap_rect.setText(self.tr_ui("▭ 사각형"))
             if hasattr(self, "btn_mask_wrap_free"):
@@ -2721,6 +3222,12 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
                 self.btn_area_paint_rect.setText(self.tr_ui("▭ 사각형"))
             if hasattr(self, "btn_area_paint_free"):
                 self.btn_area_paint_free.setText(self.tr_ui("✎ 자유형"))
+            if hasattr(self, "btn_magic_fill"):
+                try:
+                    mode = self.cb_mode.currentIndex() if hasattr(self, "cb_mode") else 2
+                    self.btn_magic_fill.setText(self.tr_ui("영역 칠하기") if mode == 4 else self.tr_ui("마스킹 칠하기"))
+                except Exception:
+                    self.btn_magic_fill.setText(self.tr_ui("마스킹 칠하기"))
             if hasattr(self, "btn_translate"):
                 self.btn_translate.setText(self.tr_ui("🌐 번역"))
             if hasattr(self, "btn_inpaint"):
@@ -2829,15 +3336,15 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
             if mb is not None:
                 if light:
                     mb.setStyleSheet(
-                        "QMenuBar { background-color:#ffffff; color:#22252b; border-bottom:1px solid #e0e6f0; padding:2px 4px; }"
+                        "QMenuBar { background-color:#ffffff; color:#242329; border-bottom:1px solid #E3DDE1; padding:2px 4px; }"
                         "QMenuBar::item { background:transparent; padding:6px 10px; border-radius:0px; }"
-                        "QMenuBar::item:selected { background:#edf4ff; color:#111827; }"
+                        "QMenuBar::item:selected { background:#FBF5F6; color:#111827; }"
                     )
                 else:
                     mb.setStyleSheet(
-                        "QMenuBar { background-color:#1d1f23; color:#f2f4f8; border-bottom:1px solid #303640; padding:2px 4px; }"
+                        "QMenuBar { background-color:#101113; color:#E0DADF; border-bottom:1px solid #2E2A30; padding:2px 4px; }"
                         "QMenuBar::item { background:transparent; padding:6px 10px; border-radius:0px; }"
-                        "QMenuBar::item:selected { background:#303640; color:#ffffff; }"
+                        "QMenuBar::item:selected { background:#28262B; color:#ffffff; }"
                     )
                 mb.update()
         except Exception:
@@ -2896,7 +3403,7 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
                 QDialog { background:#f6f7f9; color:#202124; }
                 QLabel { color:#202124; }
                 QComboBox { background:#ffffff; color:#202124; border:1px solid #b9bec7; padding:4px; }
-                QPushButton { background:#ffffff; color:#202124; border:1px solid #aeb4bf; padding:5px 14px; }
+                QPushButton { background:#ffffff; color:#202124; border:1px solid #B2ABB0; padding:5px 14px; }
                 QPushButton:hover { background:#e9eef7; }
             """)
         else:
@@ -2904,8 +3411,8 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
                 QDialog { background:#1f1f22; color:#f2f2f2; }
                 QLabel { color:#f2f2f2; }
                 QComboBox { background:#2d2f34; color:#f5f5f5; border:1px solid #53565f; padding:4px; }
-                QPushButton { background:#353841; color:#f2f2f2; border:1px solid #5a5d66; padding:5px 14px; }
-                QPushButton:hover { background:#424652; }
+                QPushButton { background:#383238; color:#f2f2f2; border:1px solid #625C63; padding:5px 14px; }
+                QPushButton:hover { background:#454047; }
             """)
 
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -2918,6 +3425,52 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         self.save_app_options_cache()
         self.apply_theme(selected)
         self.log(f"🎨 테마 변경: {'화이트 테마' if selected == THEME_LIGHT else '다크 테마'}")
+
+    def themed_action_button_style(self, kind="primary"):
+        light = self.is_light_theme() if hasattr(self, "is_light_theme") else False
+        if light:
+            if kind == "primary":
+                return (
+                    "QPushButton { background:#F5E8EA; color:#5B3136; border:1px solid #D7A3A9; border-radius:0px; padding:4px 10px; }"
+                    "QPushButton:hover { background:#EEDBDE; border-color:#C78A90; }"
+                    "QPushButton:pressed { background:#E6D0D4; border-color:#A85D66; }"
+                    "QPushButton:disabled { background:#F2F3F5; color:#B3ACB2; border-color:#DED8DC; }"
+                )
+            return (
+                "QPushButton { background:#FFFFFF; color:#374151; border:1px solid #DED8DC; border-radius:0px; padding:4px 10px; }"
+                "QPushButton:hover { background:#FBF5F6; border-color:#D7A3A9; }"
+                "QPushButton:pressed { background:#F5E8EA; border-color:#C78A90; }"
+                "QPushButton:disabled { background:#F2F3F5; color:#B3ACB2; border-color:#DED8DC; }"
+            )
+        if kind == "primary":
+            return (
+                "QPushButton { background:#8A4A52; color:#FFFFFF; border:1px solid #A85D66; border-radius:0px; padding:4px 10px; }"
+                "QPushButton:hover { background:#A85D66; border-color:#C78A90; }"
+                "QPushButton:pressed { background:#6F3940; border-color:#C78A90; }"
+                "QPushButton:disabled { background:#252328; color:#827A80; border-color:#555056; }"
+            )
+        return (
+            "QPushButton { background:#211F23; color:#E0DADF; border:1px solid #555056; border-radius:0px; padding:4px 10px; }"
+            "QPushButton:hover { background:#2A2E35; border-color:#8A4A52; }"
+            "QPushButton:pressed { background:#171719; border-color:#A85D66; }"
+            "QPushButton:disabled { background:#252328; color:#827A80; border-color:#555056; }"
+        )
+
+    def apply_action_button_theme_styles(self):
+        try:
+            # 특수색(파랑/초록)을 제거하고, 현재 테마의 공통 색 체계를 따른다.
+            if hasattr(self, "btn_analyze") and self.btn_analyze:
+                self.btn_analyze.setStyleSheet(self.themed_action_button_style("primary"))
+            if hasattr(self, "btn_inpaint") and self.btn_inpaint:
+                self.btn_inpaint.setStyleSheet(self.themed_action_button_style("primary"))
+            if hasattr(self, "btn_export_result") and self.btn_export_result:
+                self.btn_export_result.setStyleSheet(self.themed_action_button_style("primary"))
+            if hasattr(self, "btn_reanalyze") and self.btn_reanalyze:
+                self.btn_reanalyze.setStyleSheet(self.themed_action_button_style("secondary"))
+            if hasattr(self, "btn_text_cleanup") and self.btn_text_cleanup:
+                self.btn_text_cleanup.setStyleSheet(self.themed_action_button_style("secondary"))
+        except Exception:
+            pass
 
     def apply_native_title_bar_theme(self, widget=None, dark=None):
         """Windows 네이티브 제목 표시줄 테마 적용은 공개판에서 비활성화한다.
@@ -2945,11 +3498,11 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         if light:
             bg = QColor("#ffffff")
             fg = QColor("#111827")
-            border = "#cfd7e5"
+            border = "#D1C9CE"
         else:
-            bg = QColor("#1f2430")
+            bg = QColor("#242329")
             fg = QColor("#ffffff")
-            border = "#4b5563"
+            border = "#555056"
 
         pal = QPalette()
         pal.setColor(QPalette.ColorRole.ToolTipBase, bg)
@@ -2978,17 +3531,17 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         app = QApplication.instance()
         if app:
             app.setStyleSheet("""
-                QToolTip { background-color:#ffffff; color:#111827; border:1px solid #cfd7e5; border-radius:0px; padding:5px; }
+                QToolTip { background-color:#ffffff; color:#111827; border:1px solid #D1C9CE; border-radius:0px; padding:5px; }
             """)
             pal = QPalette()
-            pal.setColor(QPalette.ColorRole.Window, QColor("#f4f6fa"))
-            pal.setColor(QPalette.ColorRole.WindowText, QColor("#22252b"))
+            pal.setColor(QPalette.ColorRole.Window, QColor("#F5EFF3"))
+            pal.setColor(QPalette.ColorRole.WindowText, QColor("#242329"))
             pal.setColor(QPalette.ColorRole.Base, QColor("#ffffff"))
-            pal.setColor(QPalette.ColorRole.AlternateBase, QColor("#f7f9fd"))
-            pal.setColor(QPalette.ColorRole.Text, QColor("#22252b"))
-            pal.setColor(QPalette.ColorRole.Button, QColor("#f8fafc"))
-            pal.setColor(QPalette.ColorRole.ButtonText, QColor("#22252b"))
-            pal.setColor(QPalette.ColorRole.Highlight, QColor("#dbeafe"))
+            pal.setColor(QPalette.ColorRole.AlternateBase, QColor("#F8F3F5"))
+            pal.setColor(QPalette.ColorRole.Text, QColor("#242329"))
+            pal.setColor(QPalette.ColorRole.Button, QColor("#FAF5F7"))
+            pal.setColor(QPalette.ColorRole.ButtonText, QColor("#242329"))
+            pal.setColor(QPalette.ColorRole.Highlight, QColor("#F5E8EA"))
             pal.setColor(QPalette.ColorRole.HighlightedText, QColor("#111827"))
             pal.setColor(QPalette.ColorRole.ToolTipBase, QColor("#ffffff"))
             pal.setColor(QPalette.ColorRole.ToolTipText, QColor("#111827"))
@@ -2996,32 +3549,36 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
             self.apply_tooltip_theme(light=True)
 
         self.setStyleSheet("""
-            QMainWindow, QWidget { background-color:#f4f6fa; color:#22252b; }
+            QMainWindow, QWidget { background-color:#F5EFF3; color:#242329; }
             QMenuBar {
                 background-color:#ffffff;
-                color:#22252b;
-                border-bottom:1px solid #e0e6f0;
+                color:#242329;
+                border-bottom:1px solid #E3DDE1;
                 padding:2px 4px;
             }
             QMenuBar::item { background:transparent; padding:6px 10px; border-radius:0px; }
-            QMenuBar::item:selected { background:#edf4ff; }
+            QMenuBar::item:selected { background:#FBF5F6; }
             QMenu {
                 background-color:#ffffff;
-                color:#22252b;
-                border:1px solid #dfe5ef;
+                color:#242329;
+                border:1px solid #DED8DC;
                 border-radius:0px;
                 padding:6px;
             }
             QMenu::separator { height:1px; background:#e3e8f1; margin:6px 6px; }
             QMenu::item { padding:7px 28px 7px 12px; border-radius:0px; }
-            QMenu::item:selected { background-color:#edf4ff; color:#111827; }
-            QMessageBox { background:#f4f6fa; color:#111827; }
+            QMenu::item:selected { background-color:#FBF5F6; color:#111827; }
+            QMessageBox { background:#F5EFF3; color:#111827; }
             QMessageBox QLabel { color:#111827; }
-            QMessageBox QPushButton { background:#ffffff; color:#111827; border:1px solid #cfd7e5; border-radius:0px; padding:4px 10px; min-width:56px; }
-            QMessageBox QPushButton:hover { background:#edf4ff; border-color:#aac4e8; }
-            QLabel, QCheckBox, QRadioButton, QGroupBox { color:#22252b; }
+            QMessageBox QPushButton { background:#ffffff; color:#111827; border:1px solid #D1C9CE; border-radius:0px; padding:4px 10px; min-width:56px; }
+            QMessageBox QPushButton:hover { background:#FBF5F6; border-color:#D7A3A9; }
+            QProgressDialog, QProgressDialog QWidget { background:#F5EFF3; color:#111827; }
+            QProgressDialog QLabel { color:#111827; }
+            QProgressBar { background:#E7E2E5; color:#111827; border:1px solid #D1C9CE; border-radius:0px; height:16px; text-align:center; }
+            QProgressBar::chunk { background:#8A4A52; border-radius:0px; }
+            QLabel, QCheckBox, QRadioButton, QGroupBox { color:#242329; }
             QGroupBox {
-                border:1px solid #dfe5ef;
+                border:1px solid #DED8DC;
                 border-radius:0px;
                 margin-top:12px;
                 padding:10px;
@@ -3030,59 +3587,59 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
             QGroupBox::title { subcontrol-origin:margin; left:12px; padding:0 5px; color:#374151; }
             QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QFontComboBox, QSpinBox, QDoubleSpinBox, QKeySequenceEdit {
                 background-color:#ffffff;
-                color:#22252b;
-                border:1px solid #cfd7e5;
+                color:#242329;
+                border:1px solid #D1C9CE;
                 border-radius:0px;
                 padding:3px 6px;
-                selection-background-color:#dbeafe;
+                selection-background-color:#F5E8EA;
                 selection-color:#111827;
             }
             QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QFontComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QKeySequenceEdit:focus {
-                border:1px solid #8fb4e8;
+                border:1px solid #C78A90;
             }
             QAbstractItemView {
                 background-color:#ffffff;
-                color:#22252b;
-                border:1px solid #dfe5ef;
+                color:#242329;
+                border:1px solid #DED8DC;
                 border-radius:0px;
-                alternate-background-color:#f7f9fd;
-                selection-background-color:#dbeafe;
+                alternate-background-color:#F8F3F5;
+                selection-background-color:#F5E8EA;
                 selection-color:#111827;
-                gridline-color:#e4eaf3;
+                gridline-color:#E7E1E5;
             }
             QHeaderView::section {
-                background-color:#f1f4f9;
+                background-color:#F2EDEF;
                 color:#374151;
                 border:0;
-                border-right:1px solid #dfe5ef;
+                border-right:1px solid #DED8DC;
                 padding:7px;
             }
             QPushButton {
-                background-color:#f8fafc;
-                color:#22252b;
-                border:1px solid #cfd7e5;
+                background-color:#FAF5F7;
+                color:#242329;
+                border:1px solid #D1C9CE;
                 border-radius:0px;
                 padding:4px 10px;
             }
-            QPushButton:hover { background-color:#edf4ff; border-color:#aac4e8; }
-            QPushButton:pressed { background-color:#e3edf9; }
-            QPushButton:disabled { background-color:#edf0f5; color:#9aa4b2; border-color:#dde3ec; }
+            QPushButton:hover { background-color:#FBF5F6; border-color:#D7A3A9; }
+            QPushButton:pressed { background-color:#F5E8EA; }
+            QPushButton:disabled { background-color:#F0EAED; color:#A29A9F; border-color:#E0DADF; }
             QToolBar {
-                background-color:#eef2f8;
-                border:1px solid #dfe5ef;
+                background-color:#F1ECEF;
+                border:1px solid #DED8DC;
                 border-radius:0px;
-                spacing:5px;
+                spacing:8px;
                 padding:4px;
             }
             QToolButton {
-                background-color:#f8fafc;
-                color:#22252b;
-                border:1px solid #cfd7e5;
+                background-color:#FAF5F7;
+                color:#242329;
+                border:1px solid #D1C9CE;
                 border-radius:0px;
                 padding:5px;
             }
-            QToolButton:hover { background-color:#edf4ff; border-color:#aac4e8; }
-            QToolButton:checked { background-color:#dbeafe; border-color:#8fb4e8; }
+            QToolButton:hover { background-color:#FBF5F6; border-color:#D7A3A9; }
+            QToolButton:checked { background-color:#F5E8EA; border-color:#C78A90; }
             QCheckBox::indicator, QRadioButton::indicator {
                 width:15px; height:15px;
                 border:1px solid #aab4c3;
@@ -3090,46 +3647,63 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
                 border-radius:0px;
             }
             QRadioButton::indicator { border-radius:0px; }
-            QCheckBox::indicator:checked, QRadioButton::indicator:checked { background:#7aa8e8; border:1px solid #7aa8e8; }
-            QSplitter::handle { background:#dfe5ef; }
-            QTabWidget::pane { border:1px solid #dfe5ef; border-radius:0px; background:#ffffff; }
+            QCheckBox::indicator:checked, QRadioButton::indicator:checked { background:#A85D66; border:1px solid #A85D66; }
+            QSplitter::handle { background:#DED8DC; }
+            QTabWidget::pane { border:1px solid #DED8DC; border-radius:0px; background:#ffffff; }
             QTabBar::tab {
-                background:#edf1f7;
-                color:#4b5563;
+                background:#EEEFF3;
+                color:#555056;
                 padding:8px 12px;
-                border:1px solid #d9e0ea;
+                border:1px solid #DAD4D8;
                 border-bottom:none;
                 border-top-left-radius:10px;
                 border-top-right-radius:3px;
             }
-            QTabBar::tab:selected { background:#ffffff; color:#1f232b; font-weight:bold; }
-            QTabBar::tab:hover { background:#edf4ff; }
-            QScrollBar:vertical { background:#eef2f8; width:12px; margin:0; border:0; border-radius:0px; }
-            QScrollBar::handle:vertical { background:#cbd5e1; min-height:30px; border-radius:0px; }
+            QTabBar::tab:selected { background:#ffffff; color:#211F23; font-weight:bold; }
+            QTabBar::tab:hover { background:#FBF5F6; }
+            QScrollBar:vertical { background:#F1ECEF; width:12px; margin:0; border:0; border-radius:0px; }
+            QScrollBar::handle:vertical { background:#CBC4C9; min-height:30px; border-radius:0px; }
             QScrollBar::handle:vertical:hover { background:#b7c3d4; }
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }
-            QScrollBar:horizontal { background:#eef2f8; height:12px; margin:0; border:0; border-radius:0px; }
-            QScrollBar::handle:horizontal { background:#cbd5e1; min-width:30px; border-radius:0px; }
+            QScrollBar:horizontal { background:#F1ECEF; height:12px; margin:0; border:0; border-radius:0px; }
+            QScrollBar::handle:horizontal { background:#CBC4C9; min-width:30px; border-radius:0px; }
             QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width:0; }
-            QToolTip { background-color:#ffffff; color:#111827; border:1px solid #cfd7e5; border-radius:0px; padding:5px; }
+            QToolTip { background-color:#ffffff; color:#111827; border:1px solid #D1C9CE; border-radius:0px; padding:5px; }
         """)
         if hasattr(self, 'tb') and self.tb:
-            self.tb.setStyleSheet("background:#eef2f8; border:1px solid #dfe5ef; border-radius:0px;")
+            self.tb.setStyleSheet(
+                "QToolBar { background:#F1ECEF; border:1px solid #DED8DC; border-radius:0px; padding:4px; }"
+                "QToolButton { background:#FAF5F7; color:#242329; border:1px solid #D1C9CE; border-radius:0px; padding:5px; }"
+                "QToolButton:hover { background:#FBF5F6; border-color:#D7A3A9; }"
+                "QToolButton:checked { background:#F5E8EA; border:2px solid #C78A90; color:#111827; font-weight:700; }"
+            )
+            try:
+                self.update_left_tool_action_states()
+            except Exception:
+                pass
         if hasattr(self, 'mask_toggle_wrap') and self.mask_toggle_wrap:
             self.mask_toggle_wrap.setStyleSheet("")
         if hasattr(self, 'btn_page') and self.btn_page:
-            self.btn_page.setStyleSheet("border:none; font-weight:bold; color:#22252b;")
+            self.btn_page.setStyleSheet("border:none; font-weight:bold; color:#242329;")
         self.apply_page_tab_style()
         self.apply_text_style_button_styles()
         if hasattr(self, 'tab') and self.tab:
             self.tab.setStyleSheet(
-                "QTableWidget { background:#ffffff; color:#22252b; gridline-color:#e4eaf3; border:1px solid #dfe5ef; border-radius:0px; }"
-                "QTableWidget::item:selected { background:#dbeafe; color:#111827; }"
-                "QTableWidget QTableCornerButton::section { background:#f1f4f9; border:1px solid #dfe5ef; }"
+                "QTableWidget { background:#ffffff; color:#242329; gridline-color:#E7E1E5; border:1px solid #DED8DC; border-radius:0px; }"
+                "QTableWidget::item:selected { background:#F5E8EA; color:#111827; }"
+                "QTableWidget QTableCornerButton::section { background:#F2EDEF; border:1px solid #DED8DC; }"
             )
             self.repaint_text_table_theme()
         self.apply_log_panel_theme()
+        self.apply_action_button_theme_styles()
         self.update_color_button_styles()
+        try:
+            if getattr(self, "_task_progress_overlay", None) is not None:
+                self._task_progress_overlay.apply_theme(True)
+            if getattr(self, "_task_alert_overlay", None) is not None:
+                self._task_alert_overlay.apply_theme(True)
+        except Exception:
+            pass
         self.schedule_native_title_bar_theme(self, dark=False)
 
     def apply_dark_theme(self):
@@ -3137,158 +3711,186 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
         app = QApplication.instance()
         if app:
             app.setStyleSheet("""
-                QToolTip { background-color:#1f2430; color:#ffffff; border:1px solid #4b5563; border-radius:0px; padding:5px; }
+                QToolTip { background-color:#141416; color:#ffffff; border:1px solid #555056; border-radius:0px; padding:5px; }
             """)
             pal = QPalette()
-            pal.setColor(QPalette.ColorRole.Window, QColor("#202226"))
-            pal.setColor(QPalette.ColorRole.WindowText, QColor("#f2f4f8"))
-            pal.setColor(QPalette.ColorRole.Base, QColor("#24282f"))
-            pal.setColor(QPalette.ColorRole.AlternateBase, QColor("#282d35"))
-            pal.setColor(QPalette.ColorRole.Text, QColor("#f2f4f8"))
-            pal.setColor(QPalette.ColorRole.Button, QColor("#333843"))
-            pal.setColor(QPalette.ColorRole.ButtonText, QColor("#f2f4f8"))
-            pal.setColor(QPalette.ColorRole.Highlight, QColor("#3d587d"))
+            pal.setColor(QPalette.ColorRole.Window, QColor("#101113"))
+            pal.setColor(QPalette.ColorRole.WindowText, QColor("#E0DADF"))
+            pal.setColor(QPalette.ColorRole.Base, QColor("#171719"))
+            pal.setColor(QPalette.ColorRole.AlternateBase, QColor("#1D1B1F"))
+            pal.setColor(QPalette.ColorRole.Text, QColor("#E0DADF"))
+            pal.setColor(QPalette.ColorRole.Button, QColor("#28262B"))
+            pal.setColor(QPalette.ColorRole.ButtonText, QColor("#E0DADF"))
+            pal.setColor(QPalette.ColorRole.Highlight, QColor("#8A4A52"))
             pal.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
-            pal.setColor(QPalette.ColorRole.ToolTipBase, QColor("#1f2430"))
+            pal.setColor(QPalette.ColorRole.ToolTipBase, QColor("#141416"))
             pal.setColor(QPalette.ColorRole.ToolTipText, QColor("#ffffff"))
             app.setPalette(pal)
 
         self.setStyleSheet("""
-            QMainWindow, QWidget { background-color:#202226; color:#f2f4f8; }
+            QMainWindow, QWidget { background-color:#101113; color:#E0DADF; }
+            QWidget#EditorRoot { background-color:#0f1117; }
+            QWidget#LeftPanel { background-color:#0f1117; }
+            QWidget#CanvasPanel { background-color:#0B0C0E; }
+            QWidget#RightPanel { background-color:#171719; }
+            QScrollArea#RightPanelScroll { background:#171719; border:0; border-left:1px solid #2E2A30; }
+            QScrollArea#RightPanelScroll > QWidget > QWidget { background:#171719; }
+            QGraphicsView#MainCanvasView, QGraphicsView#SourceCompareView { background:#0B0C0E; border:1px solid #293241; }
             QMenuBar {
-                background-color:#1d1f23;
-                color:#f2f4f8;
-                border-bottom:1px solid #303640;
+                background-color:#101113;
+                color:#E0DADF;
+                border-bottom:1px solid #2E2A30;
                 padding:2px 4px;
             }
             QMenuBar::item { background:transparent; padding:6px 10px; border-radius:0px; }
-            QMenuBar::item:selected { background:#303640; }
+            QMenuBar::item:selected { background:#28262B; }
             QMenu {
-                background-color:#282c33;
-                color:#f2f4f8;
-                border:1px solid #3b414c;
+                background-color:#18171A;
+                color:#E0DADF;
+                border:1px solid #2E2A30;
                 border-radius:0px;
                 padding:6px;
             }
-            QMenu::separator { height:1px; background:#3b414c; margin:6px 6px; }
+            QMenu::separator { height:1px; background:#2E2A30; margin:6px 6px; }
             QMenu::item { padding:7px 28px 7px 12px; border-radius:0px; }
-            QMenu::item:selected { background-color:#38404c; color:#ffffff; }
-            QMessageBox { background:#24272d; color:#f2f4f8; }
-            QMessageBox QLabel { color:#f2f4f8; }
-            QMessageBox QPushButton { background:#333843; color:#f2f4f8; border:1px solid #586173; border-radius:0px; padding:4px 10px; min-width:56px; }
-            QMessageBox QPushButton:hover { background:#3d4654; border-color:#74839a; }
-            QLabel, QCheckBox, QRadioButton, QGroupBox { color:#f2f4f8; }
+            QMenu::item:selected { background-color:#28262B; color:#ffffff; }
+            QMessageBox { background:#171719; color:#E0DADF; }
+            QMessageBox QLabel { color:#E0DADF; }
+            QMessageBox QPushButton { background:#28262B; color:#E0DADF; border:1px solid #3A363B; border-radius:0px; padding:4px 10px; min-width:56px; }
+            QMessageBox QPushButton:hover { background:#332B30; border-color:#665A62; }
+            QProgressDialog, QProgressDialog QWidget { background:#171719; color:#E0DADF; }
+            QProgressDialog QLabel { color:#E0DADF; }
+            QProgressBar { background:#111827; color:#ffffff; border:1px solid #555056; border-radius:0px; height:16px; text-align:center; }
+            QProgressBar::chunk { background:#8A4A52; border-radius:0px; }
+            QLabel, QCheckBox, QRadioButton, QGroupBox { color:#E0DADF; }
             QGroupBox {
-                border:1px solid #3b414c;
+                border:1px solid #2E2A30;
                 border-radius:0px;
                 margin-top:12px;
                 padding:10px;
-                background:#282c33;
+                background:#18171A;
             }
-            QGroupBox::title { subcontrol-origin:margin; left:12px; padding:0 5px; color:#d7deea; }
+            QGroupBox::title { subcontrol-origin:margin; left:12px; padding:0 5px; color:#CBC4C9; }
             QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QFontComboBox, QSpinBox, QDoubleSpinBox, QKeySequenceEdit {
-                background-color:#1f2228;
-                color:#f5f7fb;
-                border:1px solid #434a56;
+                background-color:#211F23;
+                color:#F6F1F4;
+                border:1px solid #3D383E;
                 border-radius:0px;
                 padding:3px 6px;
-                selection-background-color:#4c6f9f;
+                selection-background-color:#8A4A52;
                 selection-color:#ffffff;
             }
             QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QFontComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QKeySequenceEdit:focus {
-                border:1px solid #7ea2d6;
-                background:#222630;
+                border:1px solid #A85D66;
+                background:#111827;
             }
             QAbstractItemView {
-                background-color:#24282f;
-                color:#f2f4f8;
-                border:1px solid #3b414c;
+                background-color:#171719;
+                color:#E0DADF;
+                border:1px solid #2E2A30;
                 border-radius:0px;
-                alternate-background-color:#282d35;
-                selection-background-color:#3d587d;
+                alternate-background-color:#1D1B1F;
+                selection-background-color:#8A4A52;
                 selection-color:#ffffff;
-                gridline-color:#38404a;
+                gridline-color:#2C282D;
             }
             QHeaderView::section {
-                background-color:#2d323b;
-                color:#d7deea;
+                background-color:#141416;
+                color:#CBC4C9;
                 border:0;
-                border-right:1px solid #3b414c;
+                border-right:1px solid #2E2A30;
                 padding:7px;
             }
             QPushButton {
-                background-color:#333843;
-                color:#f2f4f8;
-                border:1px solid #555d6c;
+                background-color:#28262B;
+                color:#E0DADF;
+                border:1px solid #3A363B;
                 border-radius:0px;
                 padding:4px 10px;
             }
-            QPushButton:hover { background-color:#3d4654; border-color:#718098; }
-            QPushButton:pressed { background-color:#2b303a; }
-            QPushButton:disabled { background-color:#2a2d33; color:#858d9a; border-color:#3f4550; }
+            QPushButton:hover { background-color:#332B30; border-color:#665A62; }
+            QPushButton:pressed { background-color:#111827; }
+            QPushButton:disabled { background-color:#171719; color:#746B72; border-color:#2E2A30; }
             QToolBar {
-                background-color:#24282f;
-                border:1px solid #3b414c;
+                background-color:#171719;
+                border:1px solid #2E2A30;
                 border-radius:0px;
-                spacing:5px;
+                spacing:8px;
                 padding:4px;
             }
             QToolButton {
-                background-color:#333843;
-                color:#f2f4f8;
-                border:1px solid #555d6c;
+                background-color:#28262B;
+                color:#E0DADF;
+                border:1px solid #3A363B;
                 border-radius:0px;
                 padding:5px;
             }
-            QToolButton:hover { background-color:#3d4654; border-color:#718098; }
-            QToolButton:checked { background-color:#3d587d; border-color:#7ea2d6; }
+            QToolButton:hover { background-color:#332B30; border-color:#665A62; }
+            QToolButton:checked { background-color:#8A4A52; border-color:#A85D66; }
             QCheckBox::indicator, QRadioButton::indicator {
                 width:15px; height:15px;
-                border:1px solid #6f7786;
-                background:#1f2228;
+                border:1px solid #3A363B;
+                background:#211F23;
                 border-radius:0px;
             }
             QRadioButton::indicator { border-radius:0px; }
-            QCheckBox::indicator:checked, QRadioButton::indicator:checked { background:#78a6e6; border:1px solid #78a6e6; }
-            QSplitter::handle { background:#303640; }
-            QTabWidget::pane { border:1px solid #3b414c; border-radius:0px; background:#24282f; }
+            QCheckBox::indicator:checked, QRadioButton::indicator:checked { background:#8A4A52; border:1px solid #A85D66; }
+            QSplitter::handle { background:#2E2A30; }
+            QTabWidget::pane { border:1px solid #2E2A30; border-radius:0px; background:#171719; }
             QTabBar::tab {
-                background:#2a2e36;
-                color:#b5bfce;
+                background:#171719;
+                color:#9A9098;
                 padding:8px 12px;
-                border:1px solid #3b414c;
+                border:1px solid #2E2A30;
                 border-bottom:none;
                 border-top-left-radius:10px;
                 border-top-right-radius:3px;
             }
-            QTabBar::tab:selected { background:#333842; color:#ffffff; font-weight:bold; }
-            QTabBar::tab:hover { background:#38404c; }
-            QScrollBar:vertical { background:#20242b; width:12px; margin:0; border:0; border-radius:0px; }
-            QScrollBar::handle:vertical { background:#424a57; min-height:30px; border-radius:0px; }
-            QScrollBar::handle:vertical:hover { background:#566173; }
+            QTabBar::tab:selected { background:#28262B; color:#ffffff; font-weight:bold; }
+            QTabBar::tab:hover { background:#332B30; }
+            QScrollBar:vertical { background:#171719; width:12px; margin:0; border:0; border-radius:0px; }
+            QScrollBar::handle:vertical { background:#3D383E; min-height:30px; border-radius:0px; }
+            QScrollBar::handle:vertical:hover { background:#5C555B; }
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }
-            QScrollBar:horizontal { background:#20242b; height:12px; margin:0; border:0; border-radius:0px; }
-            QScrollBar::handle:horizontal { background:#424a57; min-width:30px; border-radius:0px; }
+            QScrollBar:horizontal { background:#171719; height:12px; margin:0; border:0; border-radius:0px; }
+            QScrollBar::handle:horizontal { background:#3D383E; min-width:30px; border-radius:0px; }
             QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width:0; }
-            QToolTip { background-color:#1f2430; color:#ffffff; border:1px solid #4b5563; border-radius:0px; padding:5px; }
+            QToolTip { background-color:#141416; color:#ffffff; border:1px solid #555056; border-radius:0px; padding:5px; }
         """)
         if hasattr(self, 'tb') and self.tb:
-            self.tb.setStyleSheet("background:#24282f; border:1px solid #3b414c; border-radius:0px;")
+            self.tb.setStyleSheet(
+                "QToolBar { background:#171719; border:1px solid #2E2A30; border-radius:0px; padding:4px; }"
+                "QToolButton { background:#28262B; color:#E0DADF; border:1px solid #3A363B; border-radius:0px; padding:5px; }"
+                "QToolButton:hover { background:#332B30; border-color:#665A62; }"
+                "QToolButton:checked { background:#8A4A52; border:2px solid #A85D66; color:#ffffff; font-weight:700; }"
+            )
+            try:
+                self.update_left_tool_action_states()
+            except Exception:
+                pass
         if hasattr(self, 'mask_toggle_wrap') and self.mask_toggle_wrap:
             self.mask_toggle_wrap.setStyleSheet("")
         if hasattr(self, 'btn_page') and self.btn_page:
-            self.btn_page.setStyleSheet("border:none; font-weight:bold; color:#f2f4f8;")
+            self.btn_page.setStyleSheet("border:none; font-weight:bold; color:#E0DADF;")
         self.apply_page_tab_style()
         self.apply_text_style_button_styles()
         if hasattr(self, 'tab') and self.tab:
             self.tab.setStyleSheet(
-                "QTableWidget { background:#24282f; color:#f2f4f8; gridline-color:#38404a; border:1px solid #3b414c; border-radius:0px; }"
-                "QTableWidget::item:selected { background:#3d587d; color:#ffffff; }"
-                "QTableWidget QTableCornerButton::section { background:#2d323b; border:1px solid #3b414c; }"
+                "QTableWidget { background:#171719; color:#E0DADF; gridline-color:#2C282D; border:1px solid #2E2A30; border-radius:0px; }"
+                "QTableWidget::item:selected { background:#8A4A52; color:#ffffff; }"
+                "QTableWidget QTableCornerButton::section { background:#141416; border:1px solid #2E2A30; }"
             )
             self.repaint_text_table_theme()
         self.apply_log_panel_theme()
+        self.apply_action_button_theme_styles()
         self.update_color_button_styles()
+        try:
+            if getattr(self, "_task_progress_overlay", None) is not None:
+                self._task_progress_overlay.apply_theme(False)
+            if getattr(self, "_task_alert_overlay", None) is not None:
+                self._task_alert_overlay.apply_theme(False)
+        except Exception:
+            pass
 
     def make_color_icon(self, color_value):
         pix = QPixmap(22, 22)
@@ -3322,17 +3924,18 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
                 btn.setFixedSize(26, 26)
                 tip_bg = "#ffffff" if self.is_light_theme() else "#000000"
                 tip_fg = "#111827" if self.is_light_theme() else "#ffffff"
-                tip_border = "#cfd7e5" if self.is_light_theme() else "#4b5563"
+                tip_border = "#D1C9CE" if self.is_light_theme() else "#555056"
                 btn.setStyleSheet(
-                    f"QPushButton {{ background:{color}; border:1px solid #555d6c; border-radius:0px; padding:0px; }}"
-                    f"QPushButton:hover {{ border:1px solid #9cc2ff; }}"
+                    f"QPushButton {{ background:{color}; border:1px solid #3A363B; border-radius:0px; padding:0px; }}"
+                    f"QPushButton:hover {{ border:1px solid #C78A90; }}"
                     f"QToolTip {{ background-color:{tip_bg}; color:{tip_fg}; border:1px solid {tip_border}; border-radius:0px; padding:5px; }}"
                 )
 
         if hasattr(self, "act_final_paint_color"):
             self.act_final_paint_color.setIcon(self.make_color_icon(self.final_paint_color))
             self.act_final_paint_color.setText("")
-            self.act_final_paint_color.setStatusTip(f"최종 페인팅 색상: {self.final_paint_color}")
+            self.act_final_paint_color.setStatusTip(f"{self.tr_ui('최종 페인팅 색상')}: {self.final_paint_color} / {self.tr_ui('스포이드: Alt+마우스 좌클릭')}")
+            self.act_final_paint_color.setToolTip(f"{self.tr_ui('최종 페인팅 색상')}: {self.final_paint_color}\n{self.tr_ui('스포이드: Alt+마우스 좌클릭')}")
             try:
                 w = self.tb.widgetForAction(self.act_final_paint_color) if hasattr(self, "tb") else None
                 if w is not None:
@@ -3340,9 +3943,9 @@ QCheckBox, QRadioButton { color:#f2f4f8; spacing:9px; }
                     w.setProperty("force_color_tooltip_text", True)
                     tip_bg = "#ffffff" if self.is_light_theme() else "#000000"
                     tip_fg = "#111827" if self.is_light_theme() else "#ffffff"
-                    tip_border = "#cfd7e5" if self.is_light_theme() else "#4b5563"
+                    tip_border = "#D1C9CE" if self.is_light_theme() else "#555056"
                     w.setStyleSheet(
-                        f"QToolButton {{ border:1px solid #3b414c; border-radius:0px; padding:2px; }}"
+                        f"QToolButton {{ border:1px solid #2E2A30; border-radius:0px; padding:2px; }}"
                         f"QToolTip {{ background-color:{tip_bg}; color:{tip_fg}; border:1px solid {tip_border}; border-radius:0px; padding:5px; }}"
                     )
             except Exception:

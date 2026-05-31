@@ -148,6 +148,33 @@ UI_KO_EN = {
  '개별 인페인팅': 'Inpaint Current',
  '개별 지문 추출': 'Extract Text Current',
  '개별 출력': 'Export Current',
+ '출력 미리보기': 'Export Preview',
+ '현재 페이지 출력 미리보기를 생성하는 중입니다...': 'Generating an export preview for the current page...',
+ '실제 출력과 동일한 옵션으로 미리보기를 생성하는 중입니다...': 'Generating a preview with the same options as actual export...',
+ '실제 출력 파일과 같은 포맷으로 미리보기를 확인하는 중입니다.': 'Loading the preview in the same format as the actual export file.',
+ '출력 옵션 창을 열지 못했습니다:': 'Could not open the output options dialog:',
+ '출력 렌더 기준으로 미리보기를 만드는 중입니다.': 'Rendering the preview using export settings.',
+ '출력 미리보기 준비 완료': 'Export preview ready',
+ '미리보기할 현재 페이지 데이터가 없습니다.': 'There is no current page data to preview.',
+ '출력 미리보기를 생성하지 못했습니다.': 'Could not generate the export preview.',
+ '출력 미리보기 이미지를 읽지 못했습니다.': 'Could not read the export preview image.',
+ '현재 페이지가 실제 출력에서 어떻게 보일지 렌더링한 미리보기입니다. 텍스트 이펙트 미리보기가 꺼져 있어도 출력 기준 이펙트는 모두 적용됩니다.': 'This preview shows how the current page will look when exported. Export effects are fully applied even if Text Effect Preview is turned off.',
+ '미리보기 이미지를 그대로 실제 출력 폴더에 저장하고 포토샵 스크립트도 함께 저장합니다.': 'Save the preview image exactly as shown into the actual output folder and also save the Photoshop script.',
+ '출력 중...': 'Exporting...',
+ '미리보기 결과를 실제 출력 폴더에 저장했습니다.': 'Saved the preview result to the actual output folder.',
+ '미리보기 결과 출력 실패:': 'Failed to export the preview result:',
+ '미리보기 임시 출력 폴더를 찾지 못했습니다.': 'Could not find the temporary preview output folder.',
+ '미리보기 결과 파일이 없습니다.': 'There is no preview result file.',
+ '미리보기 출력 파일을 저장하지 못했습니다.': 'Could not save the preview output files.',
+ '출력 준비 중...': 'Preparing export...',
+ '출력 진행 중...': 'Exporting...',
+ '현재 페이지 데이터를 정리하는 중입니다.': 'Preparing the current page data.',
+ '출력 배경과 페인팅 레이어를 준비하는 중입니다.': 'Preparing the export background and paint layers.',
+ '기본 출력 이미지를 생성하는 중입니다.': 'Creating the base export image.',
+ '최종화면 기준으로 텍스트를 렌더링하는 중입니다.': 'Rendering text from the Final Result view.',
+ '최종 이미지를 재구성 렌더링하는 중입니다.': 'Rendering the final image from data.',
+ '텍스트 위 페인팅을 합성하는 중입니다.': 'Compositing the paint layer above text.',
+ '출력 완료': 'Export complete',
  '개별 텍스트 정리': 'Clean Text Current',
  '개별 프리셋 삭제': 'Delete Item Preset',
  '개별 프리셋 추가': 'Add Item Preset',
@@ -380,8 +407,22 @@ UI_KO_EN = {
  '인페인팅 시작': 'Inpainting started',
  '인페인팅 완료': 'Inpainting complete',
  '인페인팅 입력': 'Inpainting input',
+ '인페인팅 입력 축소': 'Inpaint input resized',
+ '인페인팅 해상도 확인': 'Inpaint size check',
+ '일괄 인페인팅 해상도 확인': 'Batch inpaint size check',
+ '현재 이미지가 LaMa 권장 해상도를 넘을 수 있습니다.': 'This image may exceed the recommended LaMa resolution.',
+ '선택한 페이지 중 일부가 LaMa 권장 해상도를 넘습니다.': 'Some selected pages exceed the recommended LaMa resolution.',
+ '현재 이미지': 'Current image',
+ '권장 기준': 'Recommended limit',
+ '인페인팅용 축소 예상': 'Estimated inpaint resize',
+ '리사이즈 후 진행': 'Resize and continue',
+ '그대로 진행': 'Continue without resize',
+ '선택한 전체 페이지에 같은 기준으로 적용': 'Apply the same limit to all selected pages',
+ '기준 초과 페이지': 'Pages over the limit',
+ '외 추가 페이지가 있습니다.': '{count} more page(s)',
+ '인페인팅 리사이즈 취소': 'Inpaint resize canceled',
  '인페인팅을 먼저 해주세요.': 'Please run inpainting first.',
- '인페인팅을 원본으로': 'Use Inpainted as Source',
+ '인페인팅을 원본으로': 'Use Background as Source',
  '일괄': 'Batch',
  '일괄 analyze 완료!': 'Batch analyze complete!',
  '일괄 inpaint 완료!': 'Batch inpaint complete!',
@@ -393,6 +434,7 @@ UI_KO_EN = {
  '일괄 번역문 불러오기': 'Batch Import Translation',
  '일괄 번역문 불러오기 완료': 'Batch translation import complete',
  '일괄 분석': 'Batch Analyze',
+    '일괄 재분석': 'Batch Re-analyze',
  '일괄 불러오기 실패': 'Batch Import Failed',
  '일괄 인페인팅': 'Batch Inpaint',
  '일괄 자동 줄 내림': 'Batch Auto Line Break',
@@ -426,6 +468,7 @@ UI_KO_EN = {
  '자동저장 모드': 'Auto Save Mode',
  '자동저장 모드 OFF': 'Auto Save Mode OFF',
  '자동저장 모드 OFF: 변경 사항은 작업 캐시에만 저장됩니다.': 'Auto Save Mode OFF: changes are saved only to the work cache.',
+'자동저장 모드는 폐지되었습니다. 변경 사항은 작업 캐시에 보관되고, 프로젝트 저장 시 YSBT에 확정됩니다.': 'Auto Save has been removed. Changes are kept in the work cache and are committed to YSBT when you save the project.',
  '자동저장 모드 ON': 'Auto Save Mode ON',
  '자동저장 모드 ON: 변경 사항이 실제 프로젝트에 바로 저장됩니다.': 'Auto Save Mode ON: changes are saved directly to the actual project.',
  '자동저장 전환': 'Switch Auto Save',
@@ -451,6 +494,8 @@ UI_KO_EN = {
  '작업 폴더를 설정했습니다.': 'Workspace folder has been set.',
  '작업탭 변경': 'Change Work Tab',
  '재분석': 'Re-analyze',
+ '현재 텍스트 마스크를 기준으로 OCR 분석 영역을 다시 만들고, 기존 마스크는 재사용합니다.': 'Rebuilds OCR analysis areas from the current text mask and reuses the existing mask.',
+ '선택한 페이지마다 현재 텍스트 마스크를 기준으로 OCR 분석 영역을 다시 만들고, 기존 마스크는 재사용합니다.': 'For each selected page, rebuilds OCR analysis areas from the current text mask and reuses the existing mask.',
  '저장': 'Save',
  '저장 실패': 'Save Failed',
  '저장 안 함': "Don't Save",
@@ -505,8 +550,19 @@ UI_KO_EN = {
  '최종 페인팅 Auto Save': 'Final paint auto-saved',
  '최종 페인팅 색상': 'Final paint color',
  '최종 페인팅 자동 저장': 'Final paint auto-saved',
- '최종 페인팅을 배경에 반영': 'Apply Final Paint to Background',
- '최종 페인팅을 원본 탭 기준 이미지로 반영했습니다.': 'Final paint has been applied to the Original tab base image.',
+ '최종 페인팅을 배경에 반영': 'Use Background as Source',
+ '최종 페인팅을 원본 탭 기준 이미지로 반영했습니다.': 'Final paint has been applied to the Original tab working source image.',
+ '클린본 불러오기': 'Import Clean Background',
+ '클린본 이미지 불러오기': 'Import Clean Background Image',
+ '선택한 클린본 파일명과 일치하는 페이지를 찾지 못했습니다.': 'No page matched the selected clean background file names.',
+ '파일명 매칭': 'filename matching',
+ '이미지 파일': 'Image Files',
+ '모든 파일': 'All Files',
+ '배경을 원본으로 쓰기': 'Use Background as Source',
+ '최종결과 배경을 원본 탭의 작업용 기준 이미지로 반영했습니다.': 'Final result background has been applied as the Original tab working source image.',
+ '원본으로 쓸 최종결과 배경이 없습니다. 먼저 인페인팅/클린본/최종 페인팅을 준비해 주세요.': 'There is no final-result background to use as the source. Prepare an inpainted image, clean image, or final paint first.',
+ '반영할 배경 이미지를 만들 수 없습니다.': 'Could not create a background image to apply.',
+
  '최종화면 브러시 색상의 알파값을 조절합니다.': 'Adjusts the alpha value of final-screen brush color.',
  '최종화면에서만 사용할 수 있습니다.': 'This can only be used on the final screen.',
  '최종화면을 클릭하면 텍스트 영역을 만듭니다. 내용 작성 후 Ctrl+Return을 누르거나 다른 곳을 클릭하면 작성이 완료됩니다.': 'Click the final screen to create a text '
@@ -795,10 +851,26 @@ UI_EN_KO = {en: ko for ko, en in UI_KO_EN.items()}
 
 
 UI_KO_EN.update({
-    "텍스트 고급 효과": "Advanced Text Effects",
-    "선택한 텍스트 라인에 문자/획 그라데이션을 적용합니다. 기울임은 우클릭 메뉴의 텍스트 기울이기 조정에서 직접 조정합니다.": "Apply fill/stroke gradients to the selected text lines. Adjust skew directly from the text skew context-menu mode.",
+    "고급...": "Advanced...",
+    "고급 옵션": "Advanced Options",
+    "고급 텍스트/획 옵션": "Advanced Text/Stroke Options",
+    "선택한 텍스트 라인에 고급 텍스트/획 옵션을 적용합니다. 기울임은 우클릭 메뉴의 텍스트 기울이기 조정에서 직접 조정합니다.": "Apply fill/stroke gradients to the selected text lines. Adjust skew directly from the text skew context-menu mode.",
     "문자 그라데이션": "Fill Gradient",
     "획 그라데이션": "Stroke Gradient",
+    "선택한 텍스트 라인에 문자/획 그라데이션과 2중 획을 적용합니다. 평행사변형/사다리꼴/부채꼴 변형은 우클릭 메뉴에서 직접 조정합니다.": "Apply fill/stroke gradients and a second outline to the selected text lines. Adjust parallelogram/trapezoid/fan transforms directly from the context menu.",
+    "2중 획": "Second Outline",
+    "문자 그림자": "Text Shadow",
+    "문자 후광": "Text Glow",
+    "텍스트": "Text",
+    "획": "Stroke",
+    "효과": "Effects",
+    "인터페이스 툴팁 표시": "Show Interface Tooltips",
+    "버튼, 메뉴, 툴바에 뜨는 설명용 툴팁을 표시합니다. 스포이드 색상 표시 같은 작업용 안내는 이 설정과 별개로 유지됩니다.": "Show helper tooltips for buttons, menus, and toolbars. Working hints such as the eyedropper color popup remain separate from this setting.",
+    "불투명도": "Opacity",
+    "X 이동": "X Offset",
+    "Y 이동": "Y Offset",
+    "흐림": "Blur",
+    "두께": "Width",
     "사용": "Use",
     "색 1": "Color 1",
     "색 2": "Color 2",
@@ -810,10 +882,10 @@ UI_KO_EN.update({
     "세로 기울임": "Vertical skew",
     "적용": "Apply",
     "닫기": "Close",
-    "문자/획 그라데이션...": "Fill/Stroke Gradient...",
+    "고급 텍스트/획 옵션...": "Advanced Text/Stroke Options...",
     "텍스트 기울이기 조정": "Adjust Text Skew",
 
-    "선택한 텍스트 라인에 문자/획 그라데이션을 적용합니다. 평행사변형 변형/사다리꼴 변형/부채꼴 변형은 우클릭 메뉴에서 직접 조정합니다.": "Apply fill/stroke gradients to the selected text lines. Adjust parallelogram/trapezoid/fan transforms directly from the context menu.",
+    "선택한 텍스트 라인에 고급 텍스트/획 옵션을 적용합니다. 평행사변형 변형/사다리꼴 변형/부채꼴 변형은 우클릭 메뉴에서 직접 조정합니다.": "Apply advanced text/stroke options to the selected text lines. Adjust parallelogram/trapezoid/fan transforms directly from the context menu.",
     "평행사변형 변형": "Parallelogram Transform",
     "사다리꼴 변형": "Trapezoid Transform",
     "부채꼴 변형": "Fan Transform",
@@ -826,6 +898,7 @@ UI_KO_EN.update({
     "현재 페이지의 OCR 분석 영역만 지울까요?\n\n다른 페이지의 OCR 분석 영역은 유지됩니다.": "Clear OCR analysis regions only on the current page?\n\nOCR analysis regions on other pages will be kept.",
     "현재 페이지 OCR 분석 범위 해제": "Clear Current Page OCR Analysis Region",
     "텍스트를 객체로 변환": "Convert Text to Object",
+    "원위치 붙여넣기": "Paste at Same Position",
     "객체 일부 지우기": "Erase Part of Object",
     "객체로 변환된 텍스트는 내용을 직접 수정할 수 없습니다.": "Converted text objects cannot be edited as text.",
     "일부 지우기는 객체로 변환된 텍스트에서만 사용할 수 있습니다.": "Partial erase can only be used on converted text objects.",
@@ -888,6 +961,7 @@ API_TR_KO_EN = {'API 관리': 'API Settings',
  '입력칸을 전부 비울까요?': 'Clear all input fields?',
  '제공자를 사용합니다.': 'provider will be used.',
  '찾아보기': 'Browse',
+ '대기 시간(초)': 'Wait (sec)',
  '키 보이기': 'Show Keys',
  '호환 예시: OpenRouter, Groq, xAI Grok, Together, LM Studio, vLLM, Ollama OpenAI 호환 서버': 'Compatible examples: '
                                                                                       'OpenRouter, Groq, xAI Grok, '
@@ -1077,11 +1151,12 @@ SHORTCUT_TR_KO_EN = {'.ysbt 확장자 연결 등록': 'Register .ysbt Associatio
  '이름': 'Name',
  '이미 사용 중인 단축키입니다.': 'This shortcut is already in use.',
  '이전 페이지': 'Previous Page',
- '인페인팅을 원본으로': 'Use Inpaint as Source',
+ '인페인팅을 원본으로': 'Use Background as Source',
  '일괄 번역': 'Batch Translate',
  '일괄 번역문 내용 지우기': 'Batch Clear Translation',
  '일괄 번역문 불러오기': 'Batch Import Translation',
  '일괄 분석': 'Batch Analyze',
+    '일괄 재분석': 'Batch Re-analyze',
  '일괄 인페인팅': 'Batch Inpaint',
  '일괄 자동 줄 내림': 'Batch Auto Line Break',
  '일괄 자동 텍스트 크기 조정': 'Batch Auto Text Size',
@@ -1109,7 +1184,7 @@ SHORTCUT_TR_KO_EN = {'.ysbt 확장자 연결 등록': 'Register .ysbt Associatio
  '최종 브러시 불투명도 증가': 'Increase Final Brush Opacity',
  '최종 텍스트 도구': 'Final Text Tool',
  '최종 페인팅 색상': 'Final Paint Color',
- '최종 페인팅을 배경에 반영': 'Apply Final Paint to Background',
+ '최종 페인팅을 배경에 반영': 'Use Background as Source',
  '추가할 기능을 선택해주세요.': 'Please select a function to add.',
  '축소': 'Zoom Out',
  '클릭하면 이 기능을 매크로에서 제거합니다.': 'Click to remove this function from the macro.',
@@ -1774,3 +1849,271 @@ API_TR_KO_EN.update({
     'Local판 전용 OCR입니다. 이미지 안의 텍스트 영역을 찾아 PaddleOCR로 원문을 인식합니다.': 'Local edition OCR. It finds text areas in the image and recognizes the original text with PaddleOCR.',
     'Local판 전용 일본어 만화 OCR입니다. 일본어 만화 원문 인식에 특화된 모델을 사용합니다.': 'Local edition Japanese manga OCR. It uses a model specialized for recognizing original Japanese manga text.',
 })
+
+# v2.4.0 QA patch: Magic Wand step undo + eyedropper feedback
+_V240_QA1_UI_KO_EN = {
+    '스포이드 색상 적용': 'Eyedropper color applied',
+    '⚠️ 스포이드로 색상을 가져오지 못했습니다.': '⚠️ Could not pick a color with the eyedropper.',
+    '최종화면': 'Final view',
+    '원본 비교창': 'Source compare view',
+}
+UI_KO_EN.update(_V240_QA1_UI_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _V240_QA1_UI_KO_EN.items()})
+
+# v2.4.0 QA2 P1/P2: eyedropper popup + fixed shortcut display
+_V240_QA2_UI_KO_EN = {
+    '클립보드에 복사됨': 'Copied to clipboard',
+}
+UI_KO_EN.update(_V240_QA2_UI_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _V240_QA2_UI_KO_EN.items()})
+
+SHORTCUT_TR_KO_EN.update({
+    '줄내림, 뒤로가기, 앞으로 가기는 작업 안정성을 위해 고정 단축키로 표시만 됩니다.': 'Line break, Undo, and Redo are fixed shortcuts for work stability and are shown as read-only.',
+    '고정': 'Fixed',
+    '고정 단축키라서 끌 수 없습니다.': 'This fixed shortcut cannot be disabled.',
+    '고정 단축키라서 변경할 수 없습니다.': 'This fixed shortcut cannot be changed.',
+    '고정 단축키 충돌': 'Fixed Shortcut Conflict',
+})
+
+# v2.4.0 QA5: user data / temporary file cleanup manager
+_V240_QA5_CLEANUP_UI_KO_EN = {
+    '사용자 데이터 및 임시파일 정리': 'User Data and Temporary File Cleanup',
+    'AppData에는 PC별 실행 정보와 로그가, 작업 폴더 cache에는 앱 옵션/API 설정/작업 캐시가 저장됩니다. 삭제할 항목을 확인한 뒤 선택하세요.': 'AppData stores PC-specific runtime data and logs, while the workspace cache stores app options, API settings, and work caches. Review the items before deleting them.',
+    '저장 위치': 'Storage Locations',
+    'AppData 실행 데이터': 'AppData Runtime Data',
+    '작업 폴더': 'Workspace Folder',
+    'AppData 폴더 열기': 'Open AppData Folder',
+    '작업 폴더 열기': 'Open Workspace Folder',
+    '항목': 'Item',
+    '구분': 'Category',
+    '위험도': 'Risk',
+    '파일/폴더': 'Files/Folders',
+    '용량': 'Size',
+    '설명': 'Description',
+    '로컬 단어장, 가져온 폰트, 실제 workspaces 프로젝트, .ysbt 파일, local_models는 기본 정리 대상에서 제외됩니다.': 'Local glossaries, imported fonts, actual workspaces projects, .ysbt files, and local_models are excluded from default cleanup.',
+    '오래된 임시 작업 자동 정리': 'Auto-clean old temporary work',
+    '다시 스캔': 'Rescan',
+    '선택 항목 삭제': 'Delete Selected Items',
+    '닫기': 'Close',
+    '폴더 열기 실패': 'Failed to Open Folder',
+    '폴더를 열지 못했습니다.': 'Could not open the folder.',
+    '런처 임시 상태 파일': 'Launcher Temporary State Files',
+    '런처와 메인 프로그램 사이에서 쓰는 진행률/신호 파일입니다. 삭제해도 다음 실행 때 다시 생성됩니다.': 'Progress/signal files used between the launcher and the main program. They will be recreated on the next run.',
+    '실행 로그': 'Runtime Logs',
+    '크래시/런처/작업 실행 로그입니다. 디버깅이 끝난 뒤 정리할 수 있습니다.': 'Crash, launcher, and work execution logs. You can clean them up after debugging.',
+    '런처 메타데이터': 'Launcher Metadata',
+    '더블클릭 열기 큐, 실행 시간 통계, 확장자 연결 사전 점검 상태입니다.': 'Double-click open queue, launch-time statistics, and file association preflight state.',
+    '작업 폴더 캐시': 'Workspace Cache',
+    '최근 프로젝트 썸네일': 'Recent Project Thumbnails',
+    '홈 화면 최근 프로젝트 카드용 썸네일 캐시입니다. 필요하면 다시 생성됩니다.': 'Thumbnail cache for recent project cards on the home screen. It can be regenerated when needed.',
+    '클라우드 백업 임시 ZIP': 'Cloud Backup Temporary ZIPs',
+    '클라우드 백업/복원 전에 만든 로컬 안전 백업입니다. 최근 백업이 필요 없을 때만 삭제하세요.': 'Local safety backups created before cloud backup/restore. Delete only when you no longer need recent backups.',
+    '작업 폴더 임시 데이터': 'Workspace Temporary Data',
+    '임시 프로젝트/작업 캐시': 'Temporary Projects / Work Cache',
+    '현재 열려 있는 작업을 제외한 temp/work_sessions 임시 작업 폴더입니다. 삭제 후에는 해당 임시 작업을 복구할 수 없습니다.': 'Temporary work folders in temp/work_sessions, excluding the currently open work. They cannot be recovered after deletion.',
+    '최근 프로젝트 기록': 'Recent Project History',
+    '홈 화면의 최근 프로젝트 목록입니다. 프로젝트 파일 자체는 삭제하지 않습니다.': 'Recent project list on the home screen. This does not delete project files themselves.',
+    '설정 초기화': 'Reset Settings',
+    '작업 폴더 위치 설정': 'Workspace Location Setting',
+    'AppData의 workspace_config.json입니다. 삭제하면 다음 실행 때 작업 폴더를 다시 지정해야 할 수 있습니다.': 'The workspace_config.json file in AppData. If deleted, you may need to choose the workspace folder again on the next run.',
+    '앱 옵션': 'App Options',
+    '언어, 테마, 프롬프트, 마스크 확장값, 작업 옵션 등이 초기화됩니다.': 'Language, theme, prompts, mask expansion values, and work options will be reset.',
+    '단축키 설정': 'Shortcut Settings',
+    '사용자가 바꾼 단축키 설정이 초기화됩니다.': 'User-customized shortcuts will be reset.',
+    '텍스트/글꼴 프리셋': 'Text / Font Presets',
+    '텍스트 프리셋과 개별 아이템 프리셋을 초기화합니다.': 'Resets text presets and per-item presets.',
+    '민감 정보': 'Sensitive Data',
+    'API 설정/키 캐시': 'API Settings / Key Cache',
+    'OCR/번역/인페인팅 API 설정과 키가 들어가는 작업 폴더 cache/api_cache.json입니다.': 'The workspace cache/api_cache.json file that stores OCR/translation/inpainting API settings and keys.',
+    '클라우드 로그인/백업 설정': 'Cloud Login / Backup Settings',
+    'Google Drive 토큰, OAuth 클라이언트, 클라우드 백업 설정입니다. 삭제 후에는 다시 로그인/설정해야 합니다.': 'Google Drive tokens, OAuth client data, and cloud backup settings. You must log in or configure them again after deletion.',
+    '안전': 'Safe',
+    '주의': 'Caution',
+    '설정': 'Settings',
+    '민감': 'Sensitive',
+    '선택 항목 없음': 'No Items Selected',
+    '삭제할 항목을 선택하세요.': 'Select items to delete.',
+    '선택한 항목을 삭제합니다. 이 작업은 되돌릴 수 없습니다.': 'The selected items will be deleted. This cannot be undone.',
+    '설정/민감 정보가 포함되어 있습니다. 삭제 후에는 재설정이나 재로그인이 필요할 수 있습니다.': 'Settings or sensitive data are included. You may need to reconfigure or log in again after deletion.',
+    '대상': 'Targets',
+    '개': ' item(s)',
+    '계속할까요?': 'Continue?',
+    '사용자 데이터 삭제 확인': 'Confirm User Data Deletion',
+    '삭제 완료': 'Deletion Complete',
+    '선택 항목 삭제가 완료되었습니다.': 'Selected item deletion is complete.',
+    '삭제': 'Deleted',
+    '실패': 'Failed',
+}
+UI_KO_EN.update(_V240_QA5_CLEANUP_UI_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _V240_QA5_CLEANUP_UI_KO_EN.items()})
+
+# QA12a: re-analysis tooltip/detail translations
+SHORTCUT_TR_KO_EN.update({
+    '현재 텍스트 마스크를 기준으로 OCR 분석 영역을 다시 만들고, 기존 마스크는 재사용합니다.': 'Rebuilds OCR analysis areas from the current text mask and reuses the existing mask.',
+    '선택한 페이지마다 현재 텍스트 마스크를 기준으로 OCR 분석 영역을 다시 만들고, 기존 마스크는 재사용합니다.': 'For each selected page, rebuilds OCR analysis areas from the current text mask and reuses the existing mask.',
+})
+
+# QA21 UI strings
+_QA21_UI_KO_EN = {
+    "↻ 재분석": "↻ Re-analyze",
+    "크기": "Size",
+    "브러시 크기": "Brush Size",
+    "브러시와 지우개의 두께를 1px 단위로 조절합니다.": "Adjust the brush and eraser thickness in 1 px steps.",
+    "텍스트 마스크를 유지한 채 현재 페이지를 다시 분석합니다.": "Re-analyze the current page while keeping the text mask.",
+}
+UI_KO_EN.update(_QA21_UI_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _QA21_UI_KO_EN.items()})
+
+# G step: simplified user data/cache cleanup manager + focus wording
+_G_STEP_CLEANUP_SIMPLIFIED_KO_EN = {
+    '작업 중 쌓이는 캐시는 자동 정리할 수 있고, 최근 프로젝트/설정/개인정보는 사용자가 직접 누를 때만 삭제합니다.': 'Work caches can be cleaned automatically; recent projects, settings, and private information are deleted only when the user explicitly presses delete.',
+    'AppData': 'AppData',
+    '오래된 캐시 자동 정리': 'Auto-clean old cache',
+    '자동 정리 대상은 작업폴더 캐시와 AppData 캐시뿐입니다.': 'Only workspace cache and AppData cache are included in automatic cleanup.',
+    '자동정리': 'Auto-clean',
+    '작업폴더 캐시 삭제': 'Delete Workspace Cache',
+    '작업 중 쌓인 임시 작업 폴더와 재생성 가능한 작업 캐시입니다.': 'Temporary work folders and regenerable work caches accumulated during editing.',
+    'AppData 캐시 삭제': 'Delete AppData Cache',
+    '실행 로그, 런처 상태, 앱 실행 중 생긴 임시 데이터입니다.': 'Runtime logs, launcher state, and temporary data created while the app runs.',
+    '최근 프로젝트 정보 삭제': 'Delete Recent Project Info',
+    '최근 열었던 프로젝트 목록과 홈 화면 썸네일 정보입니다. 프로젝트 파일 자체는 삭제하지 않습니다.': 'Recent project list and home-screen thumbnail information. This does not delete project files.',
+    '설정 정보 삭제': 'Delete Settings Info',
+    '언어, 테마, 단축키, 프리셋, 작업 폴더 위치 같은 사용자 설정입니다.': 'User settings such as language, theme, shortcuts, presets, and workspace folder location.',
+    '개인정보 삭제': 'Delete Private Info',
+    'API 키, 클라우드 로그인 토큰, 클라우드 백업 설정 같은 민감 정보입니다.': 'Sensitive information such as API keys, cloud login tokens, and cloud backup settings.',
+    '삭제할 항목 없음': 'No Items to Delete',
+    '삭제할 수 있는 항목이 없습니다.': 'There are no deletable items.',
+    '이 항목을 삭제합니다. 이 작업은 되돌릴 수 없습니다.': 'This item will be deleted. This cannot be undone.',
+    '이 항목은 자동 정리 대상이 아니며, 사용자가 직접 누를 때만 삭제됩니다.': 'This item is not part of automatic cleanup and is deleted only when the user explicitly presses delete.',
+    '삭제 후 API 키나 클라우드 로그인을 다시 설정해야 할 수 있습니다.': 'After deletion, you may need to set API keys or cloud login again.',
+    '삭제 확인': 'Confirm Deletion',
+    '폴더 열기': 'Open Folder',
+    '작업 폴더 캐시와 AppData 캐시는 자동 정리 대상입니다. 최근 프로젝트 정보, 설정 정보, 개인정보는 사용자가 직접 누를 때만 삭제합니다.': 'Workspace cache and AppData cache are automatic cleanup targets. Recent project info, settings info, and private info are deleted only when the user explicitly presses delete.',
+    '관리': 'Manage',
+    '사용자 데이터 및 임시파일 정리': 'User Data and Temporary File Cleanup',
+}
+UI_KO_EN.update(_G_STEP_CLEANUP_SIMPLIFIED_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _G_STEP_CLEANUP_SIMPLIFIED_KO_EN.items()})
+SHORTCUT_TR_KO_EN.update({
+    '사용자 데이터 및 임시파일 정리': 'User Data and Temporary File Cleanup',
+})
+# English reverse shortcut table is not used; shortcut translation is KO -> EN only.
+
+# S step: separate workspace folder size manager from temporary/cache cleanup
+_S_STEP_WORKSPACE_SIZE_MANAGER_KO_EN = {
+    '작업 폴더 용량 관리': 'Workspace Folder Size Manager',
+    '작업 폴더는 .ysbt 파일을 열어 작업할 때 생성되는 작업 공간입니다. 삭제해도 .ysbt 파일 자체는 삭제되지 않지만, 저장되지 않은 작업 내용은 사라질 수 있습니다. 현재 열려 있는 작업 폴더는 삭제할 수 없습니다.': 'Workspace folders are work areas created when opening .ysbt files. Deleting them does not delete the .ysbt file itself, but unsaved work may be lost. The currently open workspace folder cannot be deleted.',
+    '작업 폴더 위치': 'Workspace Folder Location',
+    '전체 폴더 열기': 'Open Root Folder',
+    '수정': 'Modified',
+    '현재 열림': 'Currently Open',
+    '프로젝트 폴더': 'Project Folder',
+    '표시할 작업 폴더가 없습니다.': 'No workspace folders to display.',
+    '총': 'Total',
+    '이 작업 폴더를 삭제합니다. 이 작업은 되돌릴 수 없습니다.': 'This workspace folder will be deleted. This cannot be undone.',
+    '작업 폴더 삭제 확인': 'Confirm Workspace Folder Deletion',
+    '작업 폴더를 삭제하지 못했습니다.': 'Could not delete the workspace folder.',
+    '삭제할 수 없음': 'Cannot Delete',
+    '현재 열려 있는 작업 폴더는 삭제할 수 없습니다.': 'The currently open workspace folder cannot be deleted.',
+    '실행 캐시와 임시 데이터는 자동 정리할 수 있고, 최근 프로젝트/설정/개인정보는 사용자가 직접 누를 때만 삭제합니다. 작업 폴더 용량은 별도의 작업 폴더 용량 관리에서 확인합니다.': 'Runtime cache and temporary data can be cleaned automatically; recent projects, settings, and private information are deleted only when the user explicitly presses delete. Workspace folder size is handled in the separate workspace folder size manager.',
+    '자동 정리 대상은 AppData 실행 캐시와 임시 데이터뿐입니다. 작업 폴더는 별도 관리창에서 직접 삭제합니다.': 'Only AppData runtime cache and temporary data are included in automatic cleanup. Workspace folders are deleted manually in a separate manager.',
+    'AppData 실행 캐시와 임시 데이터는 자동 정리 대상입니다. 최근 프로젝트 정보, 설정 정보, 개인정보는 사용자가 직접 누를 때만 삭제합니다.': 'AppData runtime cache and temporary data are automatic cleanup targets. Recent project info, settings info, and private info are deleted only when the user explicitly presses delete.',
+    '.ysbt를 열어 작업할 때 생성되는 실제 작업 폴더들을 날짜순으로 보고, 폴더별 용량 확인/열기/삭제를 직접 관리합니다.': 'View actual workspace folders created when opening .ysbt files by date, and manage size/open/delete per folder manually.',
+}
+UI_KO_EN.update(_S_STEP_WORKSPACE_SIZE_MANAGER_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _S_STEP_WORKSPACE_SIZE_MANAGER_KO_EN.items()})
+SHORTCUT_TR_KO_EN.update({
+    '작업 폴더 용량 관리': 'Workspace Folder Size Manager',
+})
+
+# Z step: same-position paste shortcut label
+SHORTCUT_TR_KO_EN.update({
+    "원위치 붙여넣기": "Paste at Same Position",
+})
+
+
+# v2.4.0 unified translation import translations
+UI_KO_EN.update({
+    '선택한 번역문 파일명과 일치하는 페이지를 찾지 못했습니다.': 'No page matched the selected translation file names.',
+})
+UI_EN_KO = {en: ko for ko, en in UI_KO_EN.items()}
+
+
+# v2.4.0 temp/work sessions cleanup row translations
+UI_KO_EN.update({
+    '임시 작업/복구 캐시 삭제': 'Delete Temporary Work/Recovery Cache',
+    '저장되지 않은 작업 복구용 temp와 work_sessions 캐시입니다. 현재 열려 있는 작업은 제외됩니다.': 'Temporary temp and work_sessions recovery cache for unsaved work. The currently open work is excluded.',
+    '임시 작업/복구 캐시는 용량이 크게 커질 수 있으므로 최상단에 표시합니다. 현재 열려 있는 작업은 삭제 대상에서 제외됩니다. 실제 작업 폴더 용량은 별도의 작업 폴더 용량 관리에서 확인합니다.': 'Temporary work/recovery cache can grow very large, so it is shown at the top. The currently open work is excluded from deletion. Check actual work folder sizes in the separate Work Folder Size Manager.',
+    '자동 정리 대상은 AppData 실행 캐시뿐입니다. 임시 작업/복구 캐시와 작업 폴더는 사용자가 직접 확인하고 삭제합니다.': 'Automatic cleanup only targets AppData runtime cache. Temporary work/recovery cache and work folders must be checked and deleted manually.',
+    '현재 열려 있는 작업은 제외되지만, 다른 저장되지 않은 복구 작업은 사라질 수 있습니다.': 'The currently open work is excluded, but other unsaved recovery work may be removed.',
+})
+UI_EN_KO = {en: ko for ko, en in UI_KO_EN.items()}
+
+
+# v2.4.0 temp/work sessions auto cleanup wording translations
+UI_KO_EN.update({
+    '자동 정리 대상이지만 용량이 클 수 있어 직접 삭제할 수도 있습니다. 현재 열려 있는 작업은 제외됩니다.': 'This is automatically cleaned up, but it can grow large, so you can also delete it manually. The currently open work is excluded.',
+    '임시 작업/복구 캐시는 자동 정리되지만 용량이 크게 커질 수 있어 최상단에 표시합니다. 현재 열려 있는 작업은 삭제 대상에서 제외됩니다. 실제 작업 폴더 용량은 별도의 작업 폴더 용량 관리에서 확인합니다.': 'Temporary work/recovery cache is cleaned up automatically, but it can grow very large, so it is shown at the top. The currently open work is excluded from deletion. Check actual work folder sizes in the separate Work Folder Size Manager.',
+    '자동 정리 대상은 AppData 실행 캐시와 오래된 임시 작업/복구 캐시입니다. 실제 작업 폴더는 사용자가 직접 확인하고 삭제합니다.': 'Automatic cleanup targets AppData runtime cache and old temporary work/recovery cache. Actual work folders must be checked and deleted manually.',
+})
+UI_EN_KO = {en: ko for ko, en in UI_KO_EN.items()}
+
+# v2.4.0 crash report package helper (Stage 1)
+_V240_BUG_REPORT_UI_KO_EN = {
+    "치명적 오류 보고": "Fatal Error Report",
+    "이전 실행에서 치명적인 오류가 감지되었습니다.": "A fatal error was detected during the previous run.",
+    "문제 해결을 위해 최근 로그를 묶어 개발자에게 보낼 수 있습니다. 프로젝트 파일과 작업 이미지는 자동으로 포함하지 않습니다.": "You can package recent logs and send them to the developer for troubleshooting. Project files and work images are not included automatically.",
+    "오류 시각": "Error time",
+    "오류 종류": "Error type",
+    "오류 내용": "Error message",
+    "메일 제목": "Email subject",
+    "예: 텍스트 이동 중 튕김": "Example: Crash while moving text",
+    "상세 설명": "Details",
+    "어떤 작업 중이었는지 적어주세요.": "Please describe what you were doing.",
+    "최근 로그 포함": "Include recent logs",
+    "사용자 경로를 가능한 한 가려서 포함": "Redact user paths where possible",
+    "포함 예정 로그": "Logs to include",
+    "최근 로그를 찾지 못했습니다.": "No recent logs were found.",
+    "생성 후 메일 작성창을 열고, 로그 ZIP/EML/본문 TXT가 있는 폴더를 같이 엽니다. 실제 전송은 사용자가 직접 확인한 뒤 진행합니다.": "After creation, the email compose window and the folder containing the log ZIP/EML/body TXT will open. The user must review and send the email manually.",
+    "생성 후 작성 중 메일용 EML 초안을 열고, 로그 ZIP/본문 TXT가 있는 폴더를 같이 엽니다. EML 초안이 작성창으로 열리면 보내기만 누르면 됩니다. 실제 전송은 사용자가 직접 확인한 뒤 진행합니다.": "After creation, an unsent EML draft and the folder containing the log ZIP/body TXT will open. If the EML draft opens in a compose window, you can review it and press Send. The user must review and send the email manually.",
+    "생성 후 제목별 버그 리포트 폴더를 만들고, 그 안에 작성 중 메일용 EML 초안/로그 ZIP/본문 TXT를 넣습니다. EML 초안이 작성창으로 열리면 보내기만 누르면 됩니다. 실제 전송은 사용자가 직접 확인한 뒤 진행합니다.": "After creation, a title-based bug report folder will be created, containing the unsent EML draft, log ZIP, and body TXT. If the EML draft opens in a compose window, you can review it and press Send. The user must review and send the email manually.",
+    "리포트 패키지 만들기": "Create report package",
+    "다음에 다시 묻기": "Ask again next time",
+    "이번 오류 다시 묻지 않기": "Don't ask again for this error",
+    "버그 리포트 패키지를 만들었습니다.": "Bug report package created.",
+    "받는 사람": "To",
+    "제목": "Subject",
+    "메일 본문은 클립보드에도 복사했습니다.": "The email body was also copied to the clipboard.",
+    "EML 초안이 작성창으로 열리면 내용을 확인한 뒤 보내기만 누르면 됩니다.": "If the EML draft opens in a compose window, review it and press Send.",
+    "메일 작성창이 열리지 않으면 TXT 내용을 복사하고 ZIP을 첨부해서 보내주세요.": "If the email compose window does not open, copy the TXT contents and attach the ZIP manually.",
+    "버그 리포트 생성 완료": "Bug Report Created",
+}
+UI_KO_EN.update(_V240_BUG_REPORT_UI_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _V240_BUG_REPORT_UI_KO_EN.items()})
+
+
+# v2.4.0 text effect preview toggle
+_TEXT_EFFECT_PREVIEW_TOGGLE_KO_EN = {
+    "텍스트 이펙트 미리보기": "Text Effect Preview",
+    "후광, 그림자, 2중 획 같은 무거운 텍스트 효과를 작업 화면에 표시합니다. 끄면 화면 조작이 가벼워지며 최종 출력에는 영향을 주지 않습니다.": "Shows heavy text effects such as glow, shadow, and secondary stroke in the editor preview. Turning this off can improve navigation performance and does not affect final export.",
+    "후광, 그림자, 2중 획 같은 무거운 텍스트 효과를 현재 페이지 작업 화면에 표시합니다. 끄면 이 페이지의 화면 조작이 가벼워지며 최종 출력에는 영향을 주지 않습니다.": "Shows heavy text effects such as glow, shadow, and secondary stroke on the current page editor preview. Turning this off can improve navigation performance for this page and does not affect final export.",
+    "텍스트 이펙트 미리보기 켜짐": "Text effect preview enabled",
+    "텍스트 이펙트 미리보기 꺼짐 - 최종 출력에는 영향 없음": "Text effect preview disabled - final export is not affected",
+}
+UI_KO_EN.update(_TEXT_EFFECT_PREVIEW_TOGGLE_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _TEXT_EFFECT_PREVIEW_TOGGLE_KO_EN.items()})
+
+# v2.4.0 export output render options
+_OUTPUT_RENDER_OPTIONS_KO_EN = {
+    "최종 출력 이미지와 클린본의 저장 형식, 그리고 출력할 때 사용할 텍스트 렌더 품질을 선택합니다. 형식을 바꿔 다시 출력하면 같은 이름의 기존 PNG/JPG/WebP 파일은 새 형식 파일로 교체됩니다.": "Choose the save format for final output and clean images, and the text render quality used for export. If you change the format and export again, existing PNG/JPG/WebP files with the same name will be replaced by the new format file.",
+    "텍스트 출력 렌더": "Text export render",
+    "출력 시 텍스트를 더 큰 임시 캔버스에 렌더링한 뒤 축소해 획과 후광 가장자리를 부드럽게 만듭니다. 작업 화면 속도에는 영향이 없고, 배율이 높을수록 출력 시간이 늘어날 수 있습니다.": "Renders text on a larger temporary canvas during export and downsamples it to smooth stroke and glow edges. This does not affect editor performance; higher scales can take longer to export.",
+    "기본 렌더 (1x)": "Standard render (1x)",
+    "고품질 렌더 (2x)": "High quality render (2x)",
+    "최고품질 렌더 (3x)": "Best quality render (3x)",
+    "실험적 렌더 (4x)": "Experimental render (4x)",
+    "↩️ 출력 취소": "↩️ Export cancelled",
+    "↩️ 일괄 출력 취소": "↩️ Batch export cancelled",
+}
+UI_KO_EN.update(_OUTPUT_RENDER_OPTIONS_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _OUTPUT_RENDER_OPTIONS_KO_EN.items()})

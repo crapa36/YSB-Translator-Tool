@@ -108,6 +108,10 @@ def resource_path(name: str) -> Path:
     aliases = {
         "ysb_icon.ico": ["assets/YSB_icon.ico", "assets/ysb_icon.ico", "YSB_icon.ico", "ysb_icon.ico"],
         "YSB_icon.ico": ["assets/YSB_icon.ico", "assets/ysb_icon.ico", "YSB_icon.ico", "ysb_icon.ico"],
+        "ysbt_file_icon.ico": ["assets/ysbt_file_icon.ico", "ysbt_file_icon.ico"],
+        "YSBT_file_icon.ico": ["assets/ysbt_file_icon.ico", "ysbt_file_icon.ico"],
+        "ysb_launcher_icon.ico": ["assets/ysb_launcher_icon.ico", "ysb_launcher_icon.ico"],
+        "YSB_launcher_icon.ico": ["assets/ysb_launcher_icon.ico", "ysb_launcher_icon.ico"],
         "ysb_splash.png": ["assets/ysb_splash.png", "ysb_splash.png"],
         "ysb_splash_boot.png": ["assets/ysb_splash_boot.png", "ysb_splash_boot.png"],
         "ysb_logo.png": ["assets/ysb_logo.png", "ysb_logo.png"],
@@ -837,8 +841,40 @@ def opener_association_command() -> str:
     return f'"{sys.executable}" "{exe}" "%1"'
 
 
+def _stable_ysbt_icon_path() -> Path | None:
+    """Windows DefaultIcon에 넣을 .ysbt 전용 아이콘을 안정 경로에 준비한다."""
+    try:
+        src = resource_path("ysbt_file_icon.ico")
+        if not src.exists():
+            return None
+        dst_dir = app_config_dir() / "assets"
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        dst = dst_dir / "ysbt_file_icon.ico"
+        try:
+            if (
+                (not dst.exists())
+                or src.stat().st_size != dst.stat().st_size
+                or int(src.stat().st_mtime) > int(dst.stat().st_mtime)
+            ):
+                import shutil as _shutil
+                _shutil.copy2(src, dst)
+        except Exception:
+            if not dst.exists():
+                return None
+        return dst
+    except Exception:
+        return None
+
+
 def opener_association_icon() -> str:
     exe = current_opener_executable_path()
+    ico = _stable_ysbt_icon_path()
+    if ico and ico.exists():
+        return f'"{ico}",0'
+
+    ico = resource_path("ysbt_file_icon.ico")
+    if ico.exists():
+        return f'"{ico}",0'
     return f'"{exe}",0'
 
 
@@ -868,10 +904,34 @@ def get_registered_ysbt_command() -> str | None:
         return None
 
 
+def get_registered_ysbt_icon() -> str | None:
+    if not sys.platform.startswith("win"):
+        return None
+    try:
+        import winreg
+        if get_ysbt_prog_id() != YSBT_PROG_ID:
+            return None
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, rf"Software\Classes\{YSBT_PROG_ID}\DefaultIcon") as k:
+            icon, _ = winreg.QueryValueEx(k, "")
+        return str(icon)
+    except Exception:
+        return None
+
+
+def _normalize_registry_value(value: str | None) -> str:
+    return str(value or "").strip().strip('"').replace("/", "\\").lower()
+
+
+def is_ysbt_association_icon_current_for_opener() -> bool:
+    registered = _normalize_registry_value(get_registered_ysbt_icon())
+    current = _normalize_registry_value(opener_association_icon())
+    return bool(registered and current and registered == current)
+
+
 def is_ysbt_association_current_for_opener() -> bool:
     registered = (get_registered_ysbt_command() or "").strip().lower()
     current = opener_association_command().strip().lower()
-    return bool(registered and registered == current)
+    return bool(registered and registered == current and is_ysbt_association_icon_current_for_opener())
 
 
 def is_ysbt_association_ours_but_different() -> bool:
@@ -879,7 +939,9 @@ def is_ysbt_association_ours_but_different() -> bool:
         return False
     registered = (get_registered_ysbt_command() or "").strip().lower()
     current = opener_association_command().strip().lower()
-    return bool(registered and registered != current)
+    if bool(registered and registered != current):
+        return True
+    return not is_ysbt_association_icon_current_for_opener()
 
 
 def register_ysbt_association_to_opener():
@@ -902,6 +964,7 @@ def register_ysbt_association_to_opener():
 
     try:
         _ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x0000, None, None)
+        _ctypes.windll.shell32.SHChangeNotify(0x00002000, 0x0000, None, None)
     except Exception:
         pass
     return True
@@ -1084,7 +1147,7 @@ def _launcher_show_workspace_setup_dialog(reason: str = "", reason_kind: str = "
     root = tk.Tk()
     root.withdraw()
     root.title(TEXT[initial_lang]["window"])
-    root.configure(bg="#1f2126")
+    root.configure(bg="#1E1D20")
     root.resizable(False, False)
     try:
         root.attributes("-topmost", True)
@@ -1096,40 +1159,40 @@ def _launcher_show_workspace_setup_dialog(reason: str = "", reason_kind: str = "
     assoc_var = tk.BooleanVar(value=True)
     reason_text = str(reason or TEXT[initial_lang]["reason_missing"])
 
-    frame = tk.Frame(root, bg="#1f2126", padx=12, pady=12)
+    frame = tk.Frame(root, bg="#1E1D20", padx=12, pady=12)
     frame.pack(fill="both", expand=True)
-    title_label = tk.Label(frame, bg="#1f2126", fg="#ffffff", font=("Malgun Gothic", 12, "bold"), anchor="w")
+    title_label = tk.Label(frame, bg="#1E1D20", fg="#ffffff", font=("Malgun Gothic", 12, "bold"), anchor="w")
     title_label.grid(row=0, column=0, columnspan=5, sticky="ew", pady=(0, 8))
-    reason_label = tk.Label(frame, bg="#1f2126", fg="#ffd966", font=("Malgun Gothic", 9, "bold"), justify="left", anchor="w")
+    reason_label = tk.Label(frame, bg="#1E1D20", fg="#ffd966", font=("Malgun Gothic", 9, "bold"), justify="left", anchor="w")
     reason_label.grid(row=1, column=0, columnspan=5, sticky="ew", pady=(0, 10))
-    folder_label = tk.Label(frame, bg="#1f2126", fg="#ffffff", font=("Malgun Gothic", 9), anchor="w")
+    folder_label = tk.Label(frame, bg="#1E1D20", fg="#ffffff", font=("Malgun Gothic", 9), anchor="w")
     folder_label.grid(row=2, column=0, sticky="w", pady=(0, 8))
-    path_entry = tk.Entry(frame, textvariable=path_var, width=56, bg="#2a2e36", fg="#ffffff", insertbackground="#ffffff", relief="solid", bd=1)
+    path_entry = tk.Entry(frame, textvariable=path_var, width=56, bg="#2B282D", fg="#ffffff", insertbackground="#ffffff", relief="solid", bd=1)
     path_entry.grid(row=2, column=1, columnspan=2, sticky="ew", padx=(6, 6), pady=(0, 8))
-    browse_btn = tk.Button(frame, bg="#384050", fg="#ffffff", activebackground="#46536a", activeforeground="#ffffff", relief="solid", bd=1, padx=12)
+    browse_btn = tk.Button(frame, bg="#3A343A", fg="#ffffff", activebackground="#51464D", activeforeground="#ffffff", relief="solid", bd=1, padx=12)
     browse_btn.grid(row=2, column=3, sticky="ew", padx=(0, 6), pady=(0, 8))
     default_btn = tk.Button(frame, bg="#4a5366", fg="#ffffff", activebackground="#58657c", activeforeground="#ffffff", relief="solid", bd=1, padx=8)
     default_btn.grid(row=2, column=4, sticky="ew", pady=(0, 8))
-    language_label = tk.Label(frame, bg="#1f2126", fg="#ffffff", font=("Malgun Gothic", 9), anchor="w")
+    language_label = tk.Label(frame, bg="#1E1D20", fg="#ffffff", font=("Malgun Gothic", 9), anchor="w")
     language_label.grid(row=3, column=0, sticky="w", pady=(0, 8))
     lang_menu = tk.OptionMenu(frame, lang_var, "ko", "en")
-    lang_menu.configure(bg="#2a2e36", fg="#ffffff", activebackground="#384050", activeforeground="#ffffff", relief="solid", bd=1, width=8, highlightthickness=0)
+    lang_menu.configure(bg="#2B282D", fg="#ffffff", activebackground="#3A343A", activeforeground="#ffffff", relief="solid", bd=1, width=8, highlightthickness=0)
     try:
-        lang_menu["menu"].configure(bg="#2a2e36", fg="#ffffff", activebackground="#46536a", activeforeground="#ffffff")
+        lang_menu["menu"].configure(bg="#2B282D", fg="#ffffff", activebackground="#51464D", activeforeground="#ffffff")
         lang_menu["menu"].entryconfig(0, label="한국어")
         lang_menu["menu"].entryconfig(1, label="English")
     except Exception:
         pass
     lang_menu.grid(row=3, column=1, sticky="w", padx=(6, 0), pady=(0, 8))
-    assoc_check = tk.Checkbutton(frame, variable=assoc_var, bg="#1f2126", fg="#ffffff", selectcolor="#2a2e36", activebackground="#1f2126", activeforeground="#ffffff", font=("Malgun Gothic", 9))
+    assoc_check = tk.Checkbutton(frame, variable=assoc_var, bg="#1E1D20", fg="#ffffff", selectcolor="#2B282D", activebackground="#1E1D20", activeforeground="#ffffff", font=("Malgun Gothic", 9))
     assoc_check.grid(row=3, column=2, columnspan=3, sticky="w", pady=(0, 8))
-    desc_label = tk.Label(frame, bg="#1f2126", fg="#f2f4f8", font=("Malgun Gothic", 8), justify="left", anchor="w", wraplength=660)
+    desc_label = tk.Label(frame, bg="#1E1D20", fg="#F4EEF2", font=("Malgun Gothic", 8), justify="left", anchor="w", wraplength=660)
     desc_label.grid(row=4, column=0, columnspan=5, sticky="ew", pady=(0, 12))
-    btn_frame = tk.Frame(frame, bg="#1f2126")
+    btn_frame = tk.Frame(frame, bg="#1E1D20")
     btn_frame.grid(row=5, column=0, columnspan=5, sticky="e")
-    ok_btn = tk.Button(btn_frame, bg="#46536a", fg="#ffffff", activebackground="#566684", activeforeground="#ffffff", relief="solid", bd=1, padx=14)
+    ok_btn = tk.Button(btn_frame, bg="#51464D", fg="#ffffff", activebackground="#566684", activeforeground="#ffffff", relief="solid", bd=1, padx=14)
     ok_btn.pack(side="left", padx=(0, 8))
-    close_btn = tk.Button(btn_frame, bg="#384050", fg="#ffffff", activebackground="#46536a", activeforeground="#ffffff", relief="solid", bd=1, padx=14)
+    close_btn = tk.Button(btn_frame, bg="#3A343A", fg="#ffffff", activebackground="#51464D", activeforeground="#ffffff", relief="solid", bd=1, padx=14)
     close_btn.pack(side="left")
     frame.grid_columnconfigure(2, weight=1)
 

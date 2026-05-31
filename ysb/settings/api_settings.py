@@ -77,12 +77,12 @@ def api_dialog_soft_qss(theme="dark"):
             QScrollArea { background:transparent; border:0; }
             QWidget#ApiDialogBody { background:transparent; }
             QLabel { color:#202124; }
-            QLabel#SettingsDialogTitle { font-size:22px; font-weight:800; color:#15171a; }
-            QLabel#SettingsDescription { color:#5b6472; }
-            QLabel#SettingsSectionTitle { font-size:16px; font-weight:750; color:#15171a; }
-            QLabel#SettingsItemTitle { font-size:13px; font-weight:700; color:#15171a; }
-            QFrame#SettingsBlock { background:#ffffff; border:1px solid #d9dde7; border-radius:12px; }
-            QFrame#SettingsItem { background:#f8fafc; border:1px solid #e3e7ee; border-radius:10px; }
+            QLabel#SettingsDialogTitle { font-size:22px; font-weight:800; color:#141416; }
+            QLabel#SettingsDescription { color:#625A61; }
+            QLabel#SettingsSectionTitle { font-size:16px; font-weight:750; color:#141416; }
+            QLabel#SettingsItemTitle { font-size:13px; font-weight:700; color:#141416; }
+            QFrame#SettingsBlock { background:#ffffff; border:1px solid #DAD4D8; border-radius:12px; }
+            QFrame#SettingsItem { background:#FAF5F7; border:1px solid #e3e7ee; border-radius:10px; }
             QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {
                 background:#ffffff; color:#202124; border:1px solid #c8ced8; border-radius:5px; padding:5px;
                 selection-background-color:#cfe3ff; selection-color:#000000;
@@ -90,8 +90,8 @@ def api_dialog_soft_qss(theme="dark"):
             QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {
                 border:1px solid #7da7df; background:#ffffff;
             }
-            QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled { background:#eef1f6; color:#8a93a2; }
-            QPushButton { background:#ffffff; color:#202124; border:1px solid #aeb4bf; border-radius:7px; padding:7px 12px; }
+            QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled { background:#F0EAED; color:#8a93a2; }
+            QPushButton { background:#ffffff; color:#202124; border:1px solid #B2ABB0; border-radius:7px; padding:7px 12px; }
             QPushButton:hover { background:#e9eef7; border-color:#8fa7c8; }
             QPushButton:pressed { background:#dfe7f3; }
             QPushButton:disabled { background:#edf0f4; color:#9aa0aa; border-color:#d3d7df; }
@@ -99,25 +99,25 @@ def api_dialog_soft_qss(theme="dark"):
             QCheckBox::indicator, QRadioButton::indicator { width:14px; height:14px; border:1px solid #8d96a4; background:#ffffff; }
             QCheckBox::indicator:checked, QRadioButton::indicator:checked { background:#4b8de8; border:1px solid #4b8de8; }
             QTabWidget::pane {
-                border:1px solid #dfe5ef;
+                border:1px solid #DED8DC;
                 border-radius:0px;
                 background:#ffffff;
                 top:-1px;
             }
             QTabBar::tab {
-                background:#edf1f7;
-                color:#4b5563;
-                border:1px solid #d9e0ea;
+                background:#EEEFF3;
+                color:#555056;
+                border:1px solid #DAD4D8;
                 border-bottom:none;
                 border-top-left-radius:10px;
                 border-top-right-radius:10px;
                 padding:4px 10px;
                 min-width:100px;
             }
-            QTabBar::tab:selected { background:#ffffff; color:#1f232b; font-weight:700; }
-            QTabBar::tab:!selected { background:#edf1f7; color:#667085; }
-            QTabBar::tab:hover { background:#edf4ff; color:#111827; }
-            QScrollBar:vertical { background:#eef1f6; width:12px; margin:0; border:0; }
+            QTabBar::tab:selected { background:#ffffff; color:#211F23; font-weight:700; }
+            QTabBar::tab:!selected { background:#EEEFF3; color:#6F666D; }
+            QTabBar::tab:hover { background:#FBF5F6; color:#111827; }
+            QScrollBar:vertical { background:#F0EAED; width:12px; margin:0; border:0; }
             QScrollBar::handle:vertical { background:#c7ceda; min-height:30px; border-radius:5px; }
             QScrollBar::handle:vertical:hover { background:#aeb8c8; }
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }
@@ -131,44 +131,44 @@ def api_dialog_soft_qss(theme="dark"):
         QLabel#SettingsDescription { color:#b6bdc9; }
         QLabel#SettingsSectionTitle { font-size:16px; font-weight:750; color:#ffffff; }
         QLabel#SettingsItemTitle { font-size:13px; font-weight:700; color:#ffffff; }
-        QFrame#SettingsBlock { background:#292c33; border:1px solid #454a55; border-radius:12px; }
+        QFrame#SettingsBlock { background:#292c33; border:1px solid #49434A; border-radius:12px; }
         QFrame#SettingsItem { background:#24272e; border:1px solid #3d414b; border-radius:10px; }
         QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {
-            background:#202228; color:#f5f5f5; border:1px solid #454a55; border-radius:5px; padding:5px;
+            background:#202228; color:#f5f5f5; border:1px solid #49434A; border-radius:5px; padding:5px;
             selection-background-color:#4b79ff; selection-color:#ffffff;
         }
         QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {
             border:1px solid #6f8fca; background:#23262d;
         }
         QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled { background:#1d1f25; color:#838996; }
-        QPushButton { background:#353841; color:#f2f2f2; border:1px solid #5a5d66; border-radius:7px; padding:7px 12px; }
-        QPushButton:hover { background:#424652; border-color:#788094; }
+        QPushButton { background:#383238; color:#f2f2f2; border:1px solid #625C63; border-radius:7px; padding:7px 12px; }
+        QPushButton:hover { background:#454047; border-color:#788094; }
         QPushButton:pressed { background:#2d3038; }
         QPushButton:disabled { background:#2a2b2f; color:#8b8d93; border-color:#44474f; }
         QCheckBox, QRadioButton { color:#f2f2f2; spacing:8px; }
         QCheckBox::indicator, QRadioButton::indicator { width:14px; height:14px; border:1px solid #72757f; background:#202228; }
         QCheckBox::indicator:checked, QRadioButton::indicator:checked { background:#5da9ff; border:1px solid #5da9ff; }
         QTabWidget::pane {
-            border:1px solid #3b414c;
+            border:1px solid #3A363B;
             border-radius:0px;
-            background:#24282f;
+            background:#252328;
             top:-1px;
         }
         QTabBar::tab {
-            background:#2a2e36;
-            color:#b5bfce;
-            border:1px solid #3b414c;
+            background:#2B282D;
+            color:#BDB6BB;
+            border:1px solid #3A363B;
             border-bottom:none;
             border-top-left-radius:10px;
             border-top-right-radius:10px;
             padding:4px 10px;
             min-width:100px;
         }
-        QTabBar::tab:selected { background:#333842; color:#ffffff; font-weight:700; }
-        QTabBar::tab:!selected { background:#2a2e36; color:#b5bfce; }
-        QTabBar::tab:hover { background:#38404c; color:#ffffff; }
+        QTabBar::tab:selected { background:#373136; color:#ffffff; font-weight:700; }
+        QTabBar::tab:!selected { background:#2B282D; color:#BDB6BB; }
+        QTabBar::tab:hover { background:#3A343A; color:#ffffff; }
         QScrollBar:vertical { background:#202228; width:12px; margin:0; border:0; }
-        QScrollBar::handle:vertical { background:#454a55; min-height:30px; border-radius:5px; }
+        QScrollBar::handle:vertical { background:#49434A; min-height:30px; border-radius:5px; }
         QScrollBar::handle:vertical:hover { background:#5a6170; }
         QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }
     """
@@ -227,8 +227,11 @@ class ApiSettings:
     lama_replicate_api_token: str = ""
     stable_replicate_api_token: str = ""
     repaint_model: str = "allenhooo/lama:cdac78a1bec5b23c07fd29692fb70baa513ea403a39e643c48ec5edadb15fe72"
+    replicate_lama_wait_seconds: int = 3
     stable_inpaint_model: str = "stability-ai/stable-diffusion-inpainting:95b7223104132402a9ae91cc677285bc5eb997834bd2349fa486f53910fd68b3"
     stable_inpaint_prompt: str = "remove text and restore the original background"
+    stable_inpaint_wait_seconds: int = 3
+    local_lama_wait_seconds: int = 0
     gemini_inpaint_model: str = "gemini-2.5-flash-image"
     gemini_inpaint_prompt: str = (
         "Remove the text only inside the white mask area and reconstruct the original manga background. "
@@ -353,8 +356,11 @@ def apply_settings_to_config(settings: ApiSettings):
 
         Config.INPAINT_MODEL = settings.repaint_model.strip()
         Config.REPAINT_MODEL = Config.INPAINT_MODEL  # 구버전 호환
+        Config.REPLICATE_LAMA_WAIT_SECONDS = max(0, int(getattr(settings, "replicate_lama_wait_seconds", 3) or 0))
         Config.STABLE_INPAINT_MODEL = settings.stable_inpaint_model.strip() or "stability-ai/stable-diffusion-inpainting:95b7223104132402a9ae91cc677285bc5eb997834bd2349fa486f53910fd68b3"
         Config.STABLE_INPAINT_PROMPT = settings.stable_inpaint_prompt.strip() or "remove text and restore the original background"
+        Config.STABLE_INPAINT_WAIT_SECONDS = max(0, int(getattr(settings, "stable_inpaint_wait_seconds", 3) or 0))
+        Config.LOCAL_LAMA_WAIT_SECONDS = max(0, int(getattr(settings, "local_lama_wait_seconds", 0) or 0))
         gemini_inpaint_model = settings.gemini_inpaint_model.strip() or "gemini-2.5-flash-image"
         # The old preview model was shut down; auto-migrate old cache values.
         if gemini_inpaint_model == "gemini-2.5-flash-image":
@@ -428,14 +434,14 @@ class ApiSettingsDialog(QDialog):
         except Exception:
             pass
         tabs.setStyleSheet("""
-            QTabWidget#SettingsTabs::pane { border:1px solid #3b414c; background:#24282f; top:-1px; }
+            QTabWidget#SettingsTabs::pane { border:1px solid #3A363B; background:#252328; top:-1px; }
             QTabWidget#SettingsTabs QTabBar::tab {
-                background:#2a2e36; color:#b5bfce; border:1px solid #3b414c; border-bottom:none;
+                background:#2B282D; color:#BDB6BB; border:1px solid #3A363B; border-bottom:none;
                 border-top-left-radius:8px; border-top-right-radius:8px;
                 padding:7px 18px; min-width:78px; font-weight:600;
             }
-            QTabWidget#SettingsTabs QTabBar::tab:selected { background:#333842; color:#ffffff; font-weight:800; }
-            QTabWidget#SettingsTabs QTabBar::tab:hover { background:#38404c; color:#ffffff; }
+            QTabWidget#SettingsTabs QTabBar::tab:selected { background:#373136; color:#ffffff; font-weight:800; }
+            QTabWidget#SettingsTabs QTabBar::tab:hover { background:#3A343A; color:#ffffff; }
         """)
         layout.addWidget(tabs, 1)
 
@@ -497,6 +503,7 @@ class ApiSettingsDialog(QDialog):
                 "title": "Replicate LaMa",
                 "fields": [
                     ("Model", "repaint_model", False, "owner/model:version"),
+                    ("대기 시간(초)", "replicate_lama_wait_seconds", False, 3, "spin", (0, 120), " sec" if self._ui_language == LANG_EN else "초"),
                     ("API Token", "lama_replicate_api_token", True, "LaMa Replicate API Token"),
                 ],
             },
@@ -506,6 +513,7 @@ class ApiSettingsDialog(QDialog):
                 "fields": [
                     ("Model", "stable_inpaint_model", False, "stability-ai/stable-diffusion-inpainting:95b72231..."),
                     ("Prompt", "stable_inpaint_prompt", False, "remove text and restore the original background"),
+                    ("대기 시간(초)", "stable_inpaint_wait_seconds", False, 3, "spin", (0, 120), " sec" if self._ui_language == LANG_EN else "초"),
                     ("API Token", "stable_replicate_api_token", True, "Stable Replicate API Token"),
                 ],
             },
@@ -526,7 +534,9 @@ class ApiSettingsDialog(QDialog):
                     "provider": "local_lama",
                     "title": "LOCAL LaMa",
                     "description": "Local판 전용 인페인팅입니다. 현재 페인팅 마스크를 simple-lama-inpainting으로 로컬에서 지웁니다. API Key를 사용하지 않습니다.",
-                    "fields": [],
+                    "fields": [
+                        ("대기 시간(초)", "local_lama_wait_seconds", False, 0, "spin", (0, 120), " sec" if self._ui_language == LANG_EN else "초"),
+                    ],
                 },
             ])
         self._add_api_section(inpaint_content_layout, tr_api("인페인팅", self._ui_language), inpaint_cards, "selected_inpaint_provider")
@@ -700,6 +710,7 @@ class ApiSettingsDialog(QDialog):
                 label, key, secret, placeholder = field[:4]
                 field_type = field[4] if len(field) >= 5 else "text"
                 field_choices = field[5] if len(field) >= 6 else []
+                field_suffix = field[6] if len(field) >= 7 else None
                 lab = QLabel(tr_api(label, self._ui_language), item)
                 lab.setMinimumWidth(110)
                 grid.addWidget(lab, r, 0)
@@ -728,7 +739,10 @@ class ApiSettingsDialog(QDialog):
                         edit.setValue(int(data.get(key, placeholder) or placeholder or min_v))
                     except Exception:
                         edit.setValue(min_v)
-                    edit.setSuffix(" items" if self._ui_language == LANG_EN else "개")
+                    if field_suffix is None:
+                        edit.setSuffix(" items" if self._ui_language == LANG_EN else "개")
+                    else:
+                        edit.setSuffix(str(field_suffix))
                     grid.addWidget(edit, r, 1)
                 else:
                     edit = QLineEdit(item)
@@ -870,8 +884,11 @@ class ApiSettingsDialog(QDialog):
             lama_replicate_api_token=self._first_edit_text("lama_replicate_api_token") or self.settings.replicate_api_token,
             stable_replicate_api_token=self._first_edit_text("stable_replicate_api_token") or self.settings.replicate_api_token,
             repaint_model=self._first_edit_text("repaint_model") or "allenhooo/lama:cdac78a1bec5b23c07fd29692fb70baa513ea403a39e643c48ec5edadb15fe72",
+            replicate_lama_wait_seconds=int(self._first_edit_text("replicate_lama_wait_seconds") or 3),
             stable_inpaint_model=self._first_edit_text("stable_inpaint_model") or "stability-ai/stable-diffusion-inpainting:95b7223104132402a9ae91cc677285bc5eb997834bd2349fa486f53910fd68b3",
             stable_inpaint_prompt=self._first_edit_text("stable_inpaint_prompt") or "remove text and restore the original background",
+            stable_inpaint_wait_seconds=int(self._first_edit_text("stable_inpaint_wait_seconds") or 3),
+            local_lama_wait_seconds=int(self._first_edit_text("local_lama_wait_seconds") or 0),
             gemini_inpaint_model=self._first_edit_text("gemini_inpaint_model") or "gemini-2.5-flash-image",
             gemini_inpaint_prompt=self._first_edit_text("gemini_inpaint_prompt") or (
                 "Remove the text only inside the white mask area and reconstruct the original manga background. "

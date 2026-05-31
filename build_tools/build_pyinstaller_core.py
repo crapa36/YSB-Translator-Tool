@@ -56,7 +56,13 @@ LAUNCHER_ENTRY = PROJECT_ROOT / "ysb_launcher.py"
 YSB_PACKAGE_DIR = PROJECT_ROOT / "ysb"
 
 ASSETS_DIR = PROJECT_ROOT / "assets"
+GENERATED_ICON_DIR = BUILD_TOOLS_DIR / "_generated_icons"
 ICON_FILE = ASSETS_DIR / "ysb_icon.ico"
+ICON_PNG_FILE = ASSETS_DIR / "ysb_icon.png"
+YSBT_FILE_ICON = ASSETS_DIR / "ysbt_file_icon.ico"
+YSBT_FILE_ICON_PNG = ASSETS_DIR / "ysbt_file_icon.png"
+LAUNCHER_ICON = ASSETS_DIR / "ysb_launcher_icon.ico"
+LAUNCHER_ICON_PNG = ASSETS_DIR / "ysb_launcher_icon.png"
 SPLASH_FILE = ASSETS_DIR / "ysb_splash.png"
 BOOT_SPLASH_FILE = ASSETS_DIR / "ysb_splash_boot.png"
 LOGO_FILE = ASSETS_DIR / "ysb_logo.png"
@@ -123,6 +129,52 @@ def require_file(path: Path, label: str) -> None:
 def require_dir(path: Path, label: str) -> None:
     if not path.exists() or not path.is_dir():
         raise FileNotFoundError(f"{label} not found: {path}")
+
+
+def _make_build_icon_from_png(src: Path, out_name: str) -> Path | None:
+    """Build-time helper: allow icon assets to be kept as PNG and convert to ICO."""
+    if not src.exists():
+        return None
+    GENERATED_ICON_DIR.mkdir(parents=True, exist_ok=True)
+    dst = GENERATED_ICON_DIR / out_name
+    try:
+        from PIL import Image
+        with Image.open(src) as im:
+            im = im.convert("RGBA")
+            im.save(dst, sizes=[(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)])
+        log(f"[icon] Generated {dst.name} from {src.relative_to(PROJECT_ROOT)}")
+        return dst
+    except Exception as exc:
+        raise RuntimeError(f"Failed to convert icon PNG to ICO: {src} ({exc})") from exc
+
+
+def _first_existing_icon(candidates: list[Path], generated_name: str) -> Path | None:
+    for candidate in candidates:
+        if candidate.exists() and candidate.suffix.lower() == ".ico":
+            return candidate
+    for candidate in candidates:
+        if candidate.exists() and candidate.suffix.lower() == ".png":
+            return _make_build_icon_from_png(candidate, generated_name)
+    return None
+
+
+def main_build_icon() -> Path:
+    icon = _first_existing_icon([ICON_FILE, ICON_PNG_FILE, ASSETS_DIR / "ysb_logo_icon.ico", ASSETS_DIR / "ysb_logo_icon.png"], "ysb_icon.ico")
+    return icon or ICON_FILE
+
+
+def ysbt_build_icon() -> Path | None:
+    return _first_existing_icon([YSBT_FILE_ICON, YSBT_FILE_ICON_PNG], "ysbt_file_icon.ico")
+
+
+def launcher_build_icon() -> Path:
+    icon = _first_existing_icon([LAUNCHER_ICON, LAUNCHER_ICON_PNG], "ysb_launcher_icon.ico")
+    if icon:
+        return icon
+    icon = ysbt_build_icon()
+    if icon:
+        return icon
+    return main_build_icon()
 
 
 def pyinstaller_executable() -> list[str]:
@@ -352,7 +404,13 @@ def base_args(onefile: bool) -> list[str]:
 
 
 def runtime_asset_args(include_logo: bool) -> list[str]:
-    files = [ICON_FILE, SPLASH_FILE, BOOT_SPLASH_FILE]
+    files = [main_build_icon(), SPLASH_FILE, BOOT_SPLASH_FILE]
+    ysbt_icon = ysbt_build_icon()
+    launcher_icon = _first_existing_icon([LAUNCHER_ICON, LAUNCHER_ICON_PNG], "ysb_launcher_icon.ico")
+    if ysbt_icon is not None:
+        files.append(ysbt_icon)
+    if launcher_icon is not None:
+        files.append(launcher_icon)
     if include_logo and LOGO_FILE.exists():
         files.append(LOGO_FILE)
 
@@ -646,7 +704,7 @@ def build_lite() -> None:
         "--name",
         LITE_NAME,
         "--icon",
-        str(ICON_FILE),
+        str(main_build_icon()),
         "--version-file",
         str(VERSION_LITE_MAIN),
         str(LITE_ENTRY),
@@ -659,7 +717,7 @@ def build_local() -> None:
         "--name",
         LOCAL_NAME,
         "--icon",
-        str(ICON_FILE),
+        str(main_build_icon()),
         "--version-file",
         str(VERSION_LOCAL_MAIN),
         str(LOCAL_ENTRY),
@@ -668,11 +726,13 @@ def build_local() -> None:
 
 
 def build_launcher() -> None:
+    launcher_icon = launcher_build_icon()
+    log(f"[icon] Launcher build icon: {launcher_icon.relative_to(PROJECT_ROOT) if launcher_icon.is_relative_to(PROJECT_ROOT) else launcher_icon}")
     args = pyinstaller_executable() + launcher_args() + [
         "--name",
         LAUNCHER_NAME,
         "--icon",
-        str(ICON_FILE),
+        str(launcher_icon),
         "--version-file",
         str(VERSION_LAUNCHER),
         str(LAUNCHER_ENTRY),
@@ -1045,7 +1105,7 @@ def validate_layout(edition: str) -> None:
     require_file(YSB_PACKAGE_DIR / "editions" / "current.py", "edition selector")
     require_file(YSB_PACKAGE_DIR / "ui" / "main_window.py", "ysb.ui.main_window")
     require_file(YSB_PACKAGE_DIR / "core" / "ysb_launcher.py", "ysb.core.ysb_launcher")
-    require_file(ICON_FILE, "Icon file")
+    require_file(main_build_icon(), "Icon file")
     require_file(SPLASH_FILE, "Splash file")
     require_file(BOOT_SPLASH_FILE, "Boot splash file")
     require_file(VERSION_LAUNCHER, "Launcher version file")

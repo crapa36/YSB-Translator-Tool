@@ -22,6 +22,8 @@ from typing import Any
 import cv2
 import numpy as np
 
+from ysb.utils.runtime_logger import append_log, exception_text, file_size, format_bytes, image_size, log_dir, memory_text
+
 from .base import OcrRequest, OcrResult
 
 
@@ -118,7 +120,10 @@ class _ExternalPaddleWorkerClient:
         self.device = device
         self.proc: subprocess.Popen[str] | None = None
         self.log_handle = None
-        self.log_path = _app_root() / "ysb_paddle_ocr_worker.log"
+        try:
+            self.log_path = log_dir() / "ysb_paddle_ocr_worker.log"
+        except Exception:
+            self.log_path = _app_root() / "ysb_paddle_ocr_worker.log"
 
     def close(self) -> None:
         proc = self.proc
@@ -166,6 +171,7 @@ class _ExternalPaddleWorkerClient:
             self.log_handle.write("\n=== YSB External PaddleOCR worker start ===\n")
             self.log_handle.write(f"python={python}\nworker={worker}\napp_root={_app_root()}\n")
             self.log_handle.flush()
+            append_log(self.log_path, "PADDLE EXTERNAL WORKER START", python=python, worker=worker, app_root=_app_root(), memory=memory_text())
         except Exception:
             self.log_handle = subprocess.DEVNULL  # type: ignore[assignment]
 
@@ -189,12 +195,24 @@ class _ExternalPaddleWorkerClient:
             ready = json.loads(ready_line)
         except Exception:
             ready = {}
+        append_log(self.log_path, "PADDLE EXTERNAL WORKER READY", ready=ready, memory=memory_text())
         if not ready.get("ready"):
             raise RuntimeError(f"External PaddleOCR worker did not become ready: {ready_line}")
 
     def run_image(self, image_path: str) -> OcrResult:
         self._start()
         assert self.proc is not None and self.proc.stdin is not None and self.proc.stdout is not None
+        img_size = image_size(image_path)
+        append_log(
+            self.log_path,
+            "PADDLE OCR REQUEST",
+            image_path=image_path,
+            file_size=format_bytes(file_size(image_path)),
+            image_size=(f"{img_size[0]}x{img_size[1]}" if img_size else "unknown"),
+            language=self.language,
+            device=self.device,
+            memory=memory_text(),
+        )
         req = {
             "image_path": image_path,
             "language": self.language,
@@ -207,6 +225,14 @@ class _ExternalPaddleWorkerClient:
             if not line:
                 raise RuntimeError("External PaddleOCR worker stopped without response.")
             data = json.loads(line)
+            append_log(
+                self.log_path,
+                "PADDLE OCR RESPONSE",
+                ok=bool(data.get("ok")),
+                line_count=len(data.get("lines") or []),
+                error=str(data.get("error") or ""),
+                memory=memory_text(),
+            )
             return OcrResult(
                 ok=bool(data.get("ok")),
                 engine="paddleocr_external",
@@ -215,6 +241,7 @@ class _ExternalPaddleWorkerClient:
                 raw=data,
             )
         except Exception as e:
+            append_log(self.log_path, "PADDLE OCR EXCEPTION", error=repr(e), traceback=exception_text(e), memory=memory_text())
             self.close()
             return OcrResult(ok=False, engine="paddleocr_external", error=str(e), raw=None)
 

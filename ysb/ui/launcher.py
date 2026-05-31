@@ -15,7 +15,7 @@ import time
 import zipfile
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, pyqtSignal, QSize
+from PyQt6.QtCore import Qt, pyqtSignal, QSize, QEvent
 from PyQt6.QtGui import QPixmap, QPainter, QColor, QAction, QPixmapCache
 from PyQt6.QtWidgets import (
     QWidget, QFrame, QLabel, QPushButton, QToolButton, QVBoxLayout, QHBoxLayout,
@@ -410,6 +410,7 @@ class LauncherWidget(QWidget):
     cloudRequested = pyqtSignal()
     optionsRequested = pyqtSignal()
     helpRequested = pyqtSignal()
+    droppedProjectOpenRequested = pyqtSignal(str)
     recentProjectOpenRequested = pyqtSignal(str)
     recentProjectRemoveRequested = pyqtSignal(str)
     recentProjectRevealRequested = pyqtSignal(str)
@@ -421,6 +422,7 @@ class LauncherWidget(QWidget):
         self.lang = normalize_language(lang)
         self.theme = str(theme or "dark").lower()
         self.setObjectName("LauncherWidget")
+        self.setAcceptDrops(True)
         self._build()
         self.apply_style()
         self.refresh()
@@ -463,6 +465,8 @@ class LauncherWidget(QWidget):
 
         side = QFrame()
         side.setObjectName("LauncherSidePanel")
+        side.setAcceptDrops(True)
+        side.installEventFilter(self)
         side.setFixedWidth(310)
         sl = QVBoxLayout(side)
         sl.setContentsMargins(22, 22, 22, 22)
@@ -499,6 +503,8 @@ class LauncherWidget(QWidget):
 
         main = QFrame()
         main.setObjectName("LauncherMainPanel")
+        main.setAcceptDrops(True)
+        main.installEventFilter(self)
         ml = QVBoxLayout(main)
         ml.setContentsMargins(0, 0, 0, 0)
         ml.setSpacing(12)
@@ -516,9 +522,17 @@ class LauncherWidget(QWidget):
 
         self.scroll = QScrollArea()
         self.scroll.setObjectName("LauncherRecentScroll")
+        self.scroll.setAcceptDrops(True)
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        try:
+            self.scroll.viewport().setAcceptDrops(True)
+            self.scroll.viewport().installEventFilter(self)
+        except Exception:
+            pass
         self.cards_container = QWidget()
+        self.cards_container.setAcceptDrops(True)
+        self.cards_container.installEventFilter(self)
         self.cards_layout = QGridLayout(self.cards_container)
         self.cards_layout.setContentsMargins(0, 0, 0, 0)
         self.cards_layout.setHorizontalSpacing(14)
@@ -578,26 +592,86 @@ class LauncherWidget(QWidget):
             self.cards_layout.addWidget(card, row, col)
         self.cards_layout.setRowStretch((len(projects) + 2) // 3, 1)
 
+    def _ysbt_path_from_mime(self, mime):
+        try:
+            if mime is None or not mime.hasUrls():
+                return ""
+            for url in mime.urls():
+                try:
+                    if not url.isLocalFile():
+                        continue
+                    path = os.path.abspath(str(url.toLocalFile() or ""))
+                    if path.lower().endswith(".ysbt") and os.path.isfile(path):
+                        return path
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return ""
+
+    def _handle_ysbt_drag_enter(self, event):
+        path = self._ysbt_path_from_mime(event.mimeData() if event is not None else None)
+        if path:
+            event.acceptProposedAction()
+            return True
+        return False
+
+    def dragEnterEvent(self, event):
+        if self._handle_ysbt_drag_enter(event):
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        if self._handle_ysbt_drag_enter(event):
+            return
+        super().dragMoveEvent(event)
+
+    def dropEvent(self, event):
+        path = self._ysbt_path_from_mime(event.mimeData() if event is not None else None)
+        if path:
+            event.acceptProposedAction()
+            self.droppedProjectOpenRequested.emit(path)
+            return
+        super().dropEvent(event)
+
+    def eventFilter(self, obj, event):
+        try:
+            if event.type() == QEvent.Type.DragEnter:
+                if self._handle_ysbt_drag_enter(event):
+                    return True
+            if event.type() == QEvent.Type.DragMove:
+                if self._handle_ysbt_drag_enter(event):
+                    return True
+            if event.type() == QEvent.Type.Drop:
+                path = self._ysbt_path_from_mime(event.mimeData() if event is not None else None)
+                if path:
+                    event.acceptProposedAction()
+                    self.droppedProjectOpenRequested.emit(path)
+                    return True
+        except Exception:
+            pass
+        return super().eventFilter(obj, event)
+
     def apply_style(self):
         if self.theme == "light":
             self.setStyleSheet("""
-                #LauncherWidget { background:#f5f7fb; color:#202124; }
-                #LauncherSidePanel { background:#ffffff; border:1px solid #d9dde7; border-radius:16px; }
+                #LauncherWidget { background:#F6F1F4; color:#202124; }
+                #LauncherSidePanel { background:#ffffff; border:1px solid #DAD4D8; border-radius:16px; }
                 #LauncherMainPanel { background:transparent; }
-                #LauncherAppTitle { font-size:26px; font-weight:800; color:#15171a; }
-                #LauncherSubtitle, #LauncherDescription, #LauncherFootnote, #RecentProjectMeta { color:#5b6472; }
+                #LauncherAppTitle { font-size:26px; font-weight:800; color:#141416; }
+                #LauncherSubtitle, #LauncherDescription, #LauncherFootnote, #RecentProjectMeta { color:#625A61; }
                 #LauncherDescription { font-size:13px; line-height:145%; }
-                #LauncherSectionTitle { font-size:22px; font-weight:750; color:#15171a; }
-                #LauncherPrimaryButton { background:transparent; color:#1769d1; border:0; border-left:3px solid #2f80ed; border-radius:0; font-weight:800; text-align:left; padding:8px 12px; }
+                #LauncherSectionTitle { font-size:22px; font-weight:750; color:#141416; }
+                #LauncherPrimaryButton { background:transparent; color:#8A4A52; border:0; border-left:3px solid #8A4A52; border-radius:0; font-weight:800; text-align:left; padding:8px 12px; }
                 #LauncherSideButton { background:transparent; color:#202124; border:0; border-radius:0; text-align:left; padding:8px 12px; }
-                #LauncherSideButton:hover, #LauncherPrimaryButton:hover { background:#edf4ff; }
+                #LauncherSideButton:hover, #LauncherPrimaryButton:hover { background:#FBF5F6; }
                 #LauncherRefreshButton { background:#ffffff; color:#202124; border:1px solid #cbd2df; border-radius:10px; text-align:left; padding:8px 14px; }
-                #LauncherRefreshButton:hover { background:#edf4ff; }
+                #LauncherRefreshButton:hover { background:#FBF5F6; }
                 #LauncherRecentScroll { background:transparent; }
-                #RecentProjectCard { background:#ffffff; border:1px solid #d9dde7; border-radius:14px; }
+                #RecentProjectCard { background:#ffffff; border:1px solid #DAD4D8; border-radius:14px; }
                 #RecentProjectCard:hover { border:1px solid #8bbcff; background:#fafdff; }
-                #RecentProjectThumbnail { background:#eef1f6; border-radius:10px; color:#7a828f; }
-                #RecentProjectTitle { font-size:15px; font-weight:700; color:#15171a; }
+                #RecentProjectThumbnail { background:#F0EAED; border-radius:10px; color:#7a828f; }
+                #RecentProjectTitle { font-size:15px; font-weight:700; color:#141416; }
                 #RecentProjectStatus { color:#267344; font-size:12px; }
                 #RecentProjectStatusMissing { color:#c43d3d; font-size:12px; }
                 #LauncherEmptyText { color:#687284; font-size:15px; padding:40px; }
@@ -611,14 +685,14 @@ class LauncherWidget(QWidget):
                 #LauncherSubtitle, #LauncherDescription, #LauncherFootnote, #RecentProjectMeta { color:#b6bdc9; }
                 #LauncherDescription { font-size:13px; line-height:145%; }
                 #LauncherSectionTitle { font-size:22px; font-weight:750; color:#ffffff; }
-                #LauncherPrimaryButton { background:transparent; color:#79b7ff; border:0; border-left:3px solid #2f80ed; border-radius:0; font-weight:800; text-align:left; padding:8px 12px; }
+                #LauncherPrimaryButton { background:transparent; color:#C78A90; border:0; border-left:3px solid #8A4A52; border-radius:0; font-weight:800; text-align:left; padding:8px 12px; }
                 #LauncherSideButton { background:transparent; color:#f2f2f2; border:0; border-radius:0; text-align:left; padding:8px 12px; }
                 #LauncherSideButton:hover, #LauncherPrimaryButton:hover { background:#343842; }
-                #LauncherRefreshButton { background:#353841; color:#f2f2f2; border:1px solid #5a5d66; border-radius:10px; text-align:left; padding:8px 14px; }
-                #LauncherRefreshButton:hover { background:#424652; }
+                #LauncherRefreshButton { background:#383238; color:#f2f2f2; border:1px solid #625C63; border-radius:10px; text-align:left; padding:8px 14px; }
+                #LauncherRefreshButton:hover { background:#454047; }
                 #LauncherRecentScroll { background:transparent; }
-                #RecentProjectCard { background:#292c33; border:1px solid #454a55; border-radius:14px; }
-                #RecentProjectCard:hover { border:1px solid #6aa9ff; background:#30343d; }
+                #RecentProjectCard { background:#292c33; border:1px solid #49434A; border-radius:14px; }
+                #RecentProjectCard:hover { border:1px solid #6aa9ff; background:#322E34; }
                 #RecentProjectThumbnail { background:#181a1f; border-radius:10px; color:#8d95a3; }
                 #RecentProjectTitle { font-size:15px; font-weight:700; color:#ffffff; }
                 #RecentProjectStatus { color:#75d68a; font-size:12px; }

@@ -75,26 +75,46 @@ def _app_root() -> Path:
         return Path.cwd()
 
 
-def external_paddleocr_worker_status() -> tuple[bool, str]:
+def _external_paddleocr_worker_file() -> Path:
+    """Return the same external PaddleOCR worker path used by ysb.engines.ocr.paddle_ocr."""
     root = _app_root()
-    worker = root / "local_runtime" / "paddle_ocr_worker.py"
+    preferred = root / "local_runtime" / "paddle" / "paddle_ocr_worker.py"
+    if preferred.exists():
+        return preferred
+    return root / "local_runtime" / "paddle_ocr_worker.py"
+
+
+def _external_paddleocr_python_candidates() -> list[Path]:
+    """Return the same PaddleOCR Python runtime candidates used by the real OCR adapter."""
+    root = _app_root()
+    candidates: list[Path] = []
     env_python = os.environ.get("YSB_PADDLEOCR_PYTHON")
-    python_candidates = []
     if env_python:
-        python_candidates.append(Path(env_python).expanduser())
-    python_candidates.extend([
+        candidates.append(Path(env_python).expanduser())
+    candidates.extend([
+        root / "local_runtime" / "paddle" / "python" / "python.exe",
         root / "local_runtime" / "python" / "python.exe",
+        root / "local_runtime" / "paddle_ocr_venv" / "Scripts" / "python.exe",
+        root / "local_runtime" / "paddle_ocr_venv" / "bin" / "python",
         root / "local_runtime" / "ocr_venv" / "Scripts" / "python.exe",
         root / "local_runtime" / "ocr_venv" / "bin" / "python",
         root / ".venv" / "Scripts" / "python.exe",
         root / ".venv" / "bin" / "python",
     ])
+    if not getattr(sys, "frozen", False):
+        candidates.append(Path(sys.executable))
+    return candidates
+
+
+def external_paddleocr_worker_status() -> tuple[bool, str]:
+    worker = _external_paddleocr_worker_file()
+    python_candidates = _external_paddleocr_python_candidates()
     if not worker.exists():
         return False, f"External PaddleOCR worker not found: {worker}"
     for py in python_candidates:
         if py.exists():
-            return True, f"External PaddleOCR worker ready: {py}"
-    return False, "External PaddleOCR Python runtime not found. local_runtime/python/python.exe를 확인해 주세요."
+            return True, f"External PaddleOCR worker ready: {py} / worker: {worker}"
+    return False, "External PaddleOCR Python runtime not found. local_runtime/paddle/python/python.exe를 확인해 주세요."
 
 
 def paddleocr_available() -> bool:

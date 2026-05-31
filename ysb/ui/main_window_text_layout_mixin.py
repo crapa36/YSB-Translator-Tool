@@ -3,6 +3,36 @@ from ysb.ui.main_window_support import *
 
 class MainWindowTextLayoutMixin:
 
+    def strip_object_display_prefix_for_data(self, value):
+        """Remove table-only object labels from real OCR/translation text."""
+        text = str(value or "")
+        prefixes = ("[객체] ", "[객체]", "[Object] ", "[Object]", "[OBJECT] ", "[OBJECT]")
+        changed = True
+        while changed:
+            changed = False
+            left = text.lstrip()
+            leading = text[:len(text) - len(left)]
+            for prefix in prefixes:
+                if left.startswith(prefix):
+                    left = left[len(prefix):]
+                    text = leading + left
+                    changed = True
+                    break
+        return text
+
+    def sanitize_text_data_object_prefixes(self, item):
+        if not isinstance(item, dict):
+            return False
+        changed = False
+        for key in ("text", "translated_text", "object_source_text"):
+            if key in item:
+                clean = self.strip_object_display_prefix_for_data(item.get(key))
+                if clean != str(item.get(key, "") or ""):
+                    item[key] = clean
+                    changed = True
+        return changed
+
+
     def text_preset_dir(self):
         path = get_cache_dir() / "text_preset"
         path.mkdir(parents=True, exist_ok=True)
@@ -39,13 +69,17 @@ class MainWindowTextLayoutMixin:
         except Exception:
             state = {}
         state.setdefault("style", self.current_style_snapshot() if hasattr(self, "cb_font") else {})
-        state.setdefault("include", {k: True for k, _ in self.style_field_specs()})
+        state.setdefault("include", {**{k: True for k, _ in self.style_field_specs()}, "advanced_text_options": bool(self.style_has_advanced_text_options(state.get("style") or {}))})
         return state
 
     def save_item_text_preset_state(self, style=None, include=None, selected=None):
+        _style = self.normalize_style_dict(style or self.current_style_snapshot())
+        _include_raw = include or {}
+        _include = {k: bool(_include_raw.get(k, False)) for k, _ in self.style_field_specs()}
+        _include["advanced_text_options"] = bool(_include_raw.get("advanced_text_options", bool(self.style_has_advanced_text_options(_style))))
         state = {
-            "style": self.normalize_style_dict(style or self.current_style_snapshot()),
-            "include": {k: bool((include or {}).get(k, False)) for k, _ in self.style_field_specs()},
+            "style": _style,
+            "include": _include,
             "selected": selected or None,
         }
         self.item_text_preset_dir().mkdir(parents=True, exist_ok=True)
@@ -73,8 +107,140 @@ class MainWindowTextLayoutMixin:
             ("strike", "취소선"),
         ]
 
+    def advanced_text_effect_fields(self):
+        return [
+            "text_gradient_enabled", "text_gradient_color1", "text_gradient_color2", "text_gradient_angle", "text_gradient_ratio",
+            "stroke_gradient_enabled", "stroke_gradient_color1", "stroke_gradient_color2", "stroke_gradient_angle", "stroke_gradient_ratio",
+            "double_stroke_enabled", "double_stroke_color", "double_stroke_width",
+            "text_shadow_enabled", "text_shadow_color", "text_shadow_opacity", "text_shadow_offset_x", "text_shadow_offset_y", "text_shadow_blur",
+            "text_glow_enabled", "text_glow_color", "text_glow_opacity", "text_glow_offset_x", "text_glow_offset_y", "text_glow_size", "text_glow_blur",
+        ]
+
+    def default_advanced_text_options(self):
+        return {
+            "text_gradient_enabled": False,
+            "text_gradient_color1": "#000000",
+            "text_gradient_color2": "#FFFFFF",
+            "text_gradient_angle": 0,
+            "text_gradient_ratio": 50,
+            "stroke_gradient_enabled": False,
+            "stroke_gradient_color1": "#FFFFFF",
+            "stroke_gradient_color2": "#000000",
+            "stroke_gradient_angle": 0,
+            "stroke_gradient_ratio": 50,
+            "double_stroke_enabled": False,
+            "double_stroke_color": "#000000",
+            "double_stroke_width": 0,
+            "text_shadow_enabled": False,
+            "text_shadow_color": "#000000",
+            "text_shadow_opacity": 45,
+            "text_shadow_offset_x": 3,
+            "text_shadow_offset_y": 3,
+            "text_shadow_blur": 4,
+            "text_glow_enabled": False,
+            "text_glow_color": "#FFFFFF",
+            "text_glow_opacity": 35,
+            "text_glow_offset_x": 0,
+            "text_glow_offset_y": 0,
+            "text_glow_size": 3,
+            "text_glow_blur": 8,
+        }
+
+    def normalize_advanced_text_options(self, values=None):
+        raw = dict(values or {})
+        nested = raw.get("advanced_text_options")
+        if isinstance(nested, dict):
+            raw.update(nested)
+        out = self.default_advanced_text_options()
+
+        def _bool(key):
+            return bool(raw.get(key, out.get(key, False)))
+
+        def _int(key, default, lo=None, hi=None):
+            try:
+                value = int(raw.get(key, default))
+            except Exception:
+                value = int(default)
+            if lo is not None:
+                value = max(lo, value)
+            if hi is not None:
+                value = min(hi, value)
+            return value
+
+        def _color(key, default):
+            text = str(raw.get(key, default) or default)
+            try:
+                c = QColor(text)
+                if c.isValid():
+                    return c.name(QColor.NameFormat.HexRgb).upper()
+            except Exception:
+                pass
+            return str(default).upper()
+
+        for key in ("text_gradient_enabled", "stroke_gradient_enabled", "double_stroke_enabled", "text_shadow_enabled", "text_glow_enabled"):
+            out[key] = _bool(key)
+        for key, default in (
+            ("text_gradient_color1", "#000000"), ("text_gradient_color2", "#FFFFFF"),
+            ("stroke_gradient_color1", "#FFFFFF"), ("stroke_gradient_color2", "#000000"),
+            ("double_stroke_color", "#000000"), ("text_shadow_color", "#000000"), ("text_glow_color", "#FFFFFF"),
+        ):
+            out[key] = _color(key, default)
+        out["text_gradient_angle"] = _int("text_gradient_angle", 0, -360, 360)
+        out["text_gradient_ratio"] = _int("text_gradient_ratio", 50, 1, 99)
+        out["stroke_gradient_angle"] = _int("stroke_gradient_angle", 0, -360, 360)
+        out["stroke_gradient_ratio"] = _int("stroke_gradient_ratio", 50, 1, 99)
+        out["double_stroke_width"] = _int("double_stroke_width", 0, 0, 80)
+        out["text_shadow_opacity"] = _int("text_shadow_opacity", 45, 0, 100)
+        out["text_shadow_offset_x"] = _int("text_shadow_offset_x", 3, -300, 300)
+        out["text_shadow_offset_y"] = _int("text_shadow_offset_y", 3, -300, 300)
+        out["text_shadow_blur"] = _int("text_shadow_blur", 4, 0, 200)
+        out["text_glow_opacity"] = _int("text_glow_opacity", 35, 0, 100)
+        out["text_glow_offset_x"] = _int("text_glow_offset_x", 0, -300, 300)
+        out["text_glow_offset_y"] = _int("text_glow_offset_y", 0, -300, 300)
+        out["text_glow_size"] = _int("text_glow_size", 3, 0, 200)
+        out["text_glow_blur"] = _int("text_glow_blur", 8, 0, 200)
+        return out
+
+    def style_has_advanced_text_options(self, style):
+        adv = self.normalize_advanced_text_options(style or {})
+        return any(bool(adv.get(k)) for k in (
+            "text_gradient_enabled", "stroke_gradient_enabled", "double_stroke_enabled", "text_shadow_enabled", "text_glow_enabled"
+        ))
+
+    def flatten_style_with_advanced_options(self, style):
+        style = dict(style or {})
+        adv = self.normalize_advanced_text_options(style)
+        out = dict(style)
+        out["advanced_text_options"] = adv
+        for key in self.advanced_text_effect_fields():
+            out[key] = adv.get(key)
+        return out
+
+    def style_with_advanced_options(self, style, advanced_options=None):
+        out = self.normalize_style_dict(style)
+        adv_source = advanced_options if advanced_options is not None else (style or {})
+        out["advanced_text_options"] = self.normalize_advanced_text_options(adv_source)
+        return out
+
+    def open_preset_advanced_text_options_dialog(self, style, parent_dialog=None, preview_callback=None):
+        base = self.flatten_style_with_advanced_options(style or {})
+        dlg = TextAdvancedEffectDialog(base, parent_dialog or self)
+        try:
+            dlg.setWindowTitle(self.tr_ui("고급 텍스트/획 옵션"))
+        except Exception:
+            pass
+        if callable(preview_callback):
+            try:
+                dlg.previewChanged.connect(lambda values: preview_callback(self.style_with_advanced_options(style or {}, values)))
+            except Exception:
+                pass
+        result = dlg.exec()
+        if result != QDialog.DialogCode.Accepted:
+            return None
+        return self.normalize_advanced_text_options(dlg.values())
+
     def style_summary_text(self, style, include=None):
-        style = self.normalize_style_dict(style)
+        style = self.style_with_advanced_options(style or {})
         include = include or {k: True for k, _ in self.style_field_specs()}
         parts = []
         def yes(v): return "ON" if v else "OFF"
@@ -97,6 +263,8 @@ class MainWindowTextLayoutMixin:
             elif key in ("bold", "italic", "strike"):
                 value = yes(bool(value))
             parts.append(f"{label}:{value}")
+        if include.get("advanced_text_options", True) and self.style_has_advanced_text_options(style):
+            parts.append("고급:ON")
         return " / ".join(parts) if parts else "포함 옵션 없음"
 
     def page_preset_state(self):
@@ -120,7 +288,7 @@ class MainWindowTextLayoutMixin:
             json.dump(state, f, ensure_ascii=False, indent=2)
 
     def current_style_snapshot(self):
-        return self.normalize_style_dict({
+        style = {
             "font_family": self.cb_font.currentFont().family(),
             "font_size": int(self.sb_font_size.value()),
             "stroke_width": int(self.sb_strk.value()),
@@ -134,7 +302,11 @@ class MainWindowTextLayoutMixin:
             "bold": bool(self.btn_bold.isChecked()) if hasattr(self, "btn_bold") else self.default_bold,
             "italic": bool(self.btn_italic.isChecked()) if hasattr(self, "btn_italic") else self.default_italic,
             "strike": bool(self.btn_strike.isChecked()) if hasattr(self, "btn_strike") else self.default_strike,
-        })
+        }
+        adv = getattr(self, "_current_text_preset_advanced_options", None)
+        if isinstance(adv, dict) and self.style_has_advanced_text_options({"advanced_text_options": adv}):
+            style["advanced_text_options"] = self.normalize_advanced_text_options(adv)
+        return self.normalize_style_dict(style)
 
     def normalize_style_dict(self, style):
         style = dict(style or {})
@@ -153,7 +325,7 @@ class MainWindowTextLayoutMixin:
                 value = min(hi, value)
             return value
 
-        return {
+        out = {
             "font_family": str(style.get("font_family") or self.cb_font.currentFont().family()),
             "font_size": _int("font_size", self.sb_font_size.value(), 1, 1000),
             "stroke_width": _int("stroke_width", self.sb_strk.value(), 0, 300),
@@ -168,6 +340,9 @@ class MainWindowTextLayoutMixin:
             "italic": bool(style.get("italic", False)),
             "strike": bool(style.get("strike", False)),
         }
+        if isinstance(style.get("advanced_text_options"), dict) or any(k in style for k in self.advanced_text_effect_fields()):
+            out["advanced_text_options"] = self.normalize_advanced_text_options(style)
+        return out
 
     def apply_style_to_controls(self, style):
         style = self.normalize_style_dict(style)
@@ -193,6 +368,10 @@ class MainWindowTextLayoutMixin:
                 self._set_widget_checked_blocked(self.btn_italic, bool(style["italic"]))
             if hasattr(self, "btn_strike"):
                 self._set_widget_checked_blocked(self.btn_strike, bool(style["strike"]))
+            if isinstance(style.get("advanced_text_options"), dict) or any(k in style for k in self.advanced_text_effect_fields()):
+                self._current_text_preset_advanced_options = self.normalize_advanced_text_options(style)
+            else:
+                self._current_text_preset_advanced_options = self.default_advanced_text_options()
             self.update_color_button_styles()
         finally:
             self._style_signal_lock = False
@@ -209,6 +388,21 @@ class MainWindowTextLayoutMixin:
             self.save_page_preset_state(state)
         except Exception as e:
             self.log(f"⚠️ 프리셋 자동저장 실패: {e}")
+
+    def schedule_last_text_preset_save(self, active="__last__", delay_ms=800):
+        """글꼴/크기/행간 스핀박스 조작 중 프리셋 JSON을 매 틱마다 쓰지 않고 한 번으로 묶는다."""
+        try:
+            self._pending_last_text_preset_active = active
+            timer = getattr(self, "_last_text_preset_save_timer", None)
+            if timer is None:
+                timer = QTimer(self)
+                timer.setSingleShot(True)
+                timer.timeout.connect(lambda: self.save_last_text_preset(getattr(self, "_pending_last_text_preset_active", "__last__")))
+                self._last_text_preset_save_timer = timer
+            timer.stop()
+            timer.start(max(100, int(delay_ms or 800)))
+        except Exception:
+            self.save_last_text_preset(active)
 
     def load_text_preset_cache(self):
         if not hasattr(self, "cb_text_preset"):
@@ -550,9 +744,11 @@ class MainWindowTextLayoutMixin:
                     style = self.normalize_style_dict(raw.get("style"))
                     include = raw.get("include") or {}
                     include = {k: bool(include.get(k, False)) for k, _ in self.style_field_specs()}
+                    include["advanced_text_options"] = bool((raw.get("include") or {}).get("advanced_text_options", bool(self.style_has_advanced_text_options(style))))
                     # 예전 파일/비어있는 파일은 전부 포함으로 보정
                     if not any(include.values()):
                         include = {k: True for k, _ in self.style_field_specs()}
+                        include["advanced_text_options"] = bool(self.style_has_advanced_text_options(style))
                     preset = {
                         "style": style,
                         "include": include,
@@ -562,7 +758,7 @@ class MainWindowTextLayoutMixin:
                 else:
                     preset = {
                         "style": self.normalize_style_dict(raw),
-                        "include": {k: True for k, _ in self.style_field_specs()},
+                        "include": {**{k: True for k, _ in self.style_field_specs()}, "advanced_text_options": bool(self.style_has_advanced_text_options(self.normalize_style_dict(raw)))},
                         "enabled": True,
                         "shortcut": "",
                     }
@@ -578,9 +774,13 @@ class MainWindowTextLayoutMixin:
     def save_item_text_preset_named(self, name, preset):
         safe = self.safe_preset_name(name)
         path = self.item_text_preset_path(safe)
+        style = self.normalize_style_dict(preset.get("style"))
+        include_raw = preset.get("include") or {}
+        include = {k: bool(include_raw.get(k, False)) for k, _ in self.style_field_specs()}
+        include["advanced_text_options"] = bool(include_raw.get("advanced_text_options", bool(self.style_has_advanced_text_options(style))))
         payload = {
-            "style": self.normalize_style_dict(preset.get("style")),
-            "include": {k: bool((preset.get("include") or {}).get(k, False)) for k, _ in self.style_field_specs()},
+            "style": style,
+            "include": include,
             "enabled": bool(preset.get("enabled", True)),
             "shortcut": str(preset.get("shortcut", "") or ""),
         }
@@ -677,6 +877,10 @@ class MainWindowTextLayoutMixin:
         for key, _label in self.style_field_specs():
             if include.get(key, False):
                 subset[key] = style.get(key)
+        if include.get("advanced_text_options", False):
+            adv = self.normalize_advanced_text_options(style)
+            for key in self.advanced_text_effect_fields():
+                subset[key] = adv.get(key)
         return subset
 
     def apply_item_text_preset_by_name(self, name, from_combo=False, record_undo=True):
@@ -734,7 +938,17 @@ class MainWindowTextLayoutMixin:
         확인은 페이지 적용이 아니라 '마지막 설정' 저장 전용이다.
         실제 반영은 현재 페이지에 적용 / 전체 페이지에 적용 버튼에서만 수행한다.
         """
+        _dlg_t0 = time.time()
+        try:
+            self.audit_boundary_event("PRESET_DIALOG_BUILD_ENTER", dialog_key="page_text_preset", memory=memory_text())
+        except Exception:
+            pass
         dialog = QDialog(self)
+        dialog.setProperty("dialog_timing_log_key", "page_text_preset")
+        dialog.setProperty("dialog_timing_created_at", _dlg_t0)
+        dialog.installEventFilter(self)
+        # 구성 중에는 그리지 않아서 흰색 빈 창이 먼저 보이는 느낌을 줄인다.
+        dialog.setUpdatesEnabled(False)
         dialog.setWindowTitle(self.tr_ui("페이지 글꼴 프리셋 관리"))
         dialog.resize(1040, 620)
         dialog.setStyleSheet(self.settings_dialog_style())
@@ -763,6 +977,7 @@ class MainWindowTextLayoutMixin:
         dialog_text_color = {"value": original_style_snapshot.get("text_color", "#000000")}
         dialog_stroke_color = {"value": original_style_snapshot.get("stroke_color", "#FFFFFF")}
         dialog_align = {"value": original_style_snapshot.get("align", "center")}
+        dialog_advanced_options = {"value": self.normalize_advanced_text_options(original_style_snapshot)}
 
         # ---------- style editor ----------
         editor = QWidget(dialog)
@@ -795,8 +1010,10 @@ class MainWindowTextLayoutMixin:
         dlg_char_width = QSpinBox(dialog); dlg_char_width.setRange(10, 300); dlg_char_width.setValue(100); dlg_char_width.setSuffix(" %"); dlg_char_width.setFixedWidth(86); dlg_char_width.setFixedHeight(26)
         dlg_char_height = QSpinBox(dialog); dlg_char_height.setRange(10, 300); dlg_char_height.setValue(100); dlg_char_height.setSuffix(" %"); dlg_char_height.setFixedWidth(86); dlg_char_height.setFixedHeight(26)
         dlg_bold = QPushButton("B", dialog); dlg_italic = QPushButton("I", dialog); dlg_strike = QPushButton("S", dialog)
+        dlg_advanced = QPushButton(self.tr_ui("고급..."), dialog)
         for b, tip in ((dlg_bold, "굵게"), (dlg_italic, "기울이기"), (dlg_strike, "취소선")):
             b.setCheckable(True); b.setFixedWidth(32); b.setFixedHeight(26); b.setToolTip(tip)
+        dlg_advanced.setFixedHeight(26); dlg_advanced.setMinimumWidth(68)
         dlg_bold.setStyleSheet("font-weight:bold;"); dlg_italic.setStyleSheet("font-style:italic;"); dlg_strike.setStyleSheet("text-decoration: line-through;")
         self.install_style_editor_shortcuts(dialog, {
             "font": dlg_font,
@@ -819,7 +1036,7 @@ class MainWindowTextLayoutMixin:
         row2.addWidget(QLabel(self.tr_ui("자간"))); row2.addWidget(dlg_letter_spacing)
         row2.addWidget(QLabel(self.tr_ui("너비"))); row2.addWidget(dlg_char_width)
         row2.addWidget(QLabel(self.tr_ui("높이"))); row2.addWidget(dlg_char_height)
-        row2.addWidget(dlg_bold); row2.addWidget(dlg_italic); row2.addWidget(dlg_strike)
+        row2.addWidget(dlg_bold); row2.addWidget(dlg_italic); row2.addWidget(dlg_strike); row2.addWidget(dlg_advanced)
         row2.addStretch()
         editor_l.addLayout(row2)
         layout.addWidget(editor)
@@ -827,7 +1044,7 @@ class MainWindowTextLayoutMixin:
         def refresh_color_buttons():
             tip_bg = "#ffffff" if self.is_light_theme() else "#000000"
             tip_fg = "#111827" if self.is_light_theme() else "#ffffff"
-            tip_border = "#cfd7e5" if self.is_light_theme() else "#4b5563"
+            tip_border = "#D1C9CE" if self.is_light_theme() else "#555056"
             dlg_text_color_btn.setStyleSheet(
                 f"QPushButton {{ background:{dialog_text_color['value']}; border:1px solid #444; padding:0px; }}"
                 f"QToolTip {{ background-color:{tip_bg}; color:{tip_fg}; border:1px solid {tip_border}; border-radius:0px; padding:5px; }}"
@@ -836,12 +1053,12 @@ class MainWindowTextLayoutMixin:
                 f"QPushButton {{ background:{dialog_stroke_color['value']}; border:1px solid #444; padding:0px; }}"
                 f"QToolTip {{ background-color:{tip_bg}; color:{tip_fg}; border:1px solid {tip_border}; border-radius:0px; padding:5px; }}"
             )
-            checked_style = "background:#dbeafe; color:#111827; border:1px solid #8fb4e8; border-radius:0px;" if self.is_light_theme() else "background:#3d587d; color:#ffffff; border:1px solid #7ea2d6; border-radius:0px;"
+            checked_style = "background:#F5E8EA; color:#111827; border:1px solid #C78A90; border-radius:0px;" if self.is_light_theme() else "background:#5B3136; color:#ffffff; border:1px solid #C78A90; border-radius:0px;"
             for align, btn in (("left", dlg_align_left), ("center", dlg_align_center), ("right", dlg_align_right)):
                 btn.setStyleSheet(checked_style if dialog_align["value"] == align else "")
 
         def dialog_style_snapshot():
-            return self.normalize_style_dict({
+            return self.style_with_advanced_options({
                 "font_family": dlg_font.currentFont().family(),
                 "font_size": int(dlg_size.value()),
                 "stroke_width": int(dlg_stroke.value()),
@@ -855,7 +1072,7 @@ class MainWindowTextLayoutMixin:
                 "bold": bool(dlg_bold.isChecked()),
                 "italic": bool(dlg_italic.isChecked()),
                 "strike": bool(dlg_strike.isChecked()),
-            })
+            }, dialog_advanced_options["value"])
 
         def apply_style_to_dialog(style):
             style = self.normalize_style_dict(style)
@@ -874,6 +1091,7 @@ class MainWindowTextLayoutMixin:
                 dlg_bold.setChecked(bool(style["bold"]))
                 dlg_italic.setChecked(bool(style["italic"]))
                 dlg_strike.setChecked(bool(style["strike"]))
+                dialog_advanced_options["value"] = self.normalize_advanced_text_options(style)
                 refresh_color_buttons()
             finally:
                 dialog_lock["value"] = False
@@ -885,6 +1103,34 @@ class MainWindowTextLayoutMixin:
         rows_layout.setSpacing(4)
         scroll = QScrollArea(dialog); scroll.setWidgetResizable(True); scroll.setWidget(rows_widget); scroll.setMinimumHeight(300)
         layout.addWidget(scroll, 1)
+
+        def preset_tip(widget, title, desc="", key=""):
+            try:
+                self.set_dialog_control_tooltip(widget, title, key, desc)
+            except Exception:
+                try:
+                    widget.setToolTip("\n".join([self.tr_ui(title), self.tr_msg(desc) if desc else ""]))
+                    widget.setProperty("allow_native_tooltip", True)
+                except Exception:
+                    pass
+
+        # 프리셋 편집창 상단 설정 컨트롤도 메인 인터페이스와 같은 툴팁을 가진다.
+        preset_tip(dlg_font, "글꼴 선택", "폰트 설정창을 엽니다.", "item_font_select")
+        preset_tip(dlg_size, "글꼴 크기", "현재 페이지 글꼴 프리셋의 글자 크기를 조절합니다.", "text_font_size")
+        preset_tip(dlg_stroke, "획 크기", "현재 페이지 글꼴 프리셋의 외곽선 두께를 조절합니다.", "text_stroke_size")
+        preset_tip(dlg_text_color_btn, "문자 색상", "현재 페이지 글꼴 프리셋의 문자 색상을 선택합니다.", "item_text_color")
+        preset_tip(dlg_stroke_color_btn, "획 색상", "현재 페이지 글꼴 프리셋의 외곽선 색상을 선택합니다.", "item_stroke_color")
+        preset_tip(dlg_line_spacing, "행간", "줄과 줄 사이 간격을 조절합니다.", "text_line_spacing")
+        preset_tip(dlg_letter_spacing, "자간", "글자와 글자 사이 간격을 조절합니다.", "text_letter_spacing")
+        preset_tip(dlg_char_width, "너비", "문자의 가로 비율을 조절합니다.", "text_char_width")
+        preset_tip(dlg_char_height, "높이", "문자의 세로 비율을 조절합니다.", "text_char_height")
+        preset_tip(dlg_bold, "굵게", "굵게 설정을 켜거나 끕니다.", "text_bold_toggle")
+        preset_tip(dlg_italic, "기울이기", "기울이기 설정을 켜거나 끕니다.", "text_italic_toggle")
+        preset_tip(dlg_strike, "취소선", "취소선 설정을 켜거나 끕니다.", "text_strike_toggle")
+        preset_tip(dlg_advanced, "고급 텍스트/획 옵션", "현재 페이지 글꼴 프리셋에 문자/획 그라데이션, 2중 획, 그림자, 후광을 저장합니다.", "text_effect_gradient")
+        preset_tip(dlg_align_left, "왼쪽 정렬", "텍스트를 왼쪽으로 정렬합니다.", "item_align_left")
+        preset_tip(dlg_align_center, "가운데 정렬", "텍스트를 가운데로 정렬합니다.", "item_align_center")
+        preset_tip(dlg_align_right, "오른쪽 정렬", "텍스트를 오른쪽으로 정렬합니다.", "item_align_right")
 
         def load_page_presets():
             presets = {}
@@ -946,12 +1192,18 @@ class MainWindowTextLayoutMixin:
                 summary = QLabel(self.style_summary_text(style)); summary.setWordWrap(True)
                 btn_update = QPushButton("수정 저장")
                 btn_delete = QPushButton("삭제")
+                preset_tip(chk, "프리셋 사용", "체크하면 이 페이지 글꼴 프리셋을 사용할 수 있습니다.")
+                preset_tip(btn_select, "페이지 프리셋 선택", "이 프리셋을 현재 프리셋 편집창에 불러오고, 현재 페이지에 미리보기로 적용합니다.")
+                preset_tip(name_edit, "프리셋 이름", "이름을 바꾸고 Enter를 누르거나 포커스를 빼면 프리셋 이름이 변경됩니다.")
+                preset_tip(summary, "프리셋 내용", "이 프리셋에 저장된 글꼴, 크기, 색상, 행간, 자간 등 스타일 요약입니다.")
+                preset_tip(btn_update, "프리셋 수정 저장", "현재 위쪽 편집값으로 이 페이지 글꼴 프리셋을 덮어씁니다.")
+                preset_tip(btn_delete, "프리셋 삭제", "이 페이지 글꼴 프리셋을 삭제합니다.")
 
                 if not chk.isChecked():
                     if self.is_light_theme():
-                        row.setStyleSheet("background:#f1f3f6; color:#8a8f99;")
-                        summary.setStyleSheet("color:#8a8f99;")
-                        name_edit.setStyleSheet("background:#f7f8fa; color:#8a8f99; border:1px solid #d0d5df;")
+                        row.setStyleSheet("background:#F2EDEF; color:#91888F;")
+                        summary.setStyleSheet("color:#91888F;")
+                        name_edit.setStyleSheet("background:#F8F3F5; color:#91888F; border:1px solid #D2CBD0;")
                     else:
                         row.setStyleSheet("background:#242424; color:#888888;")
                         summary.setStyleSheet("color:#888888;")
@@ -959,8 +1211,8 @@ class MainWindowTextLayoutMixin:
                 is_selected = (selected_name["value"] == name or select_name == name)
                 if is_selected:
                     if self.is_light_theme():
-                        row_style = "background:#e8f1ff; border:1px solid #6fa8ff;"
-                        child_style = "background:#ffffff; color:#202124; border:1px solid #6fa8ff;"
+                        row_style = "background:#e8f1ff; border:1px solid #A85D66;"
+                        child_style = "background:#ffffff; color:#202124; border:1px solid #A85D66;"
                     else:
                         row_style = "background:#31415c; border:1px solid #5b8def;"
                         child_style = "background:#2f5fa7; color:white; border:1px solid #80b4ff;"
@@ -969,8 +1221,8 @@ class MainWindowTextLayoutMixin:
                     btn_select.setStyleSheet("background:#4b79c7; color:white; font-weight:bold; border:1px solid #9cc3ff;")
                     name_edit.setStyleSheet(child_style)
                     summary.setStyleSheet(child_style)
-                    btn_update.setStyleSheet("background:#3d5f92; color:white;")
-                    btn_delete.setStyleSheet("background:#3d5f92; color:white;")
+                    btn_update.setStyleSheet("background:#8A4A52; color:white;")
+                    btn_delete.setStyleSheet("background:#8A4A52; color:white;")
                     selected_name["value"] = name
 
                 row_l.addWidget(chk)
@@ -1071,15 +1323,37 @@ class MainWindowTextLayoutMixin:
             rows_layout.addStretch()
 
         def restore_full_original_state():
+            _restore_t0 = time.time()
+            try:
+                self.audit_boundary_event("PRESET_DIALOG_RESTORE_ENTER", dialog_key="page_text_preset", reason="restore_full_original_state", memory=memory_text())
+            except Exception:
+                pass
             if original_page_snapshot is not None and original_idx in self.data:
                 self.data[original_idx] = copy.deepcopy(original_page_snapshot)
             self.apply_style_to_controls(original_style_snapshot)
             self.load_text_preset_cache()
+
+            def _refresh_after_dialog_close():
+                try:
+                    if self.idx == original_idx:
+                        self.ref_tab()
+                        if self.cb_mode.currentIndex() == 4:
+                            self.mode_chg(4)
+                finally:
+                    try:
+                        self.audit_boundary_event("PRESET_DIALOG_RESTORE_REFRESH_DONE", dialog_key="page_text_preset", memory=memory_text(), throttle_ms=50)
+                    except Exception:
+                        pass
+
             if self.idx == original_idx:
-                self.ref_tab()
-                if self.cb_mode.currentIndex() == 4:
-                    self.mode_chg(4)
+                # 닫는 순간에 화면을 통째로 재구성하면 창이 깜빡이는 느낌이 난다.
+                # 데이터 원복은 즉시 하고, 무거운 화면 재구성은 다음 이벤트 틱으로 미룬다.
+                QTimer.singleShot(0, _refresh_after_dialog_close)
             dialog_state["restored"] = True
+            try:
+                self.audit_boundary_event("PRESET_DIALOG_RESTORE_DONE", dialog_key="page_text_preset", elapsed_ms=int((time.time() - _restore_t0) * 1000), deferred_refresh=True, memory=memory_text())
+            except Exception:
+                pass
 
         def on_dialog_style_changed(*args):
             if dialog_lock["value"]:
@@ -1089,7 +1363,7 @@ class MainWindowTextLayoutMixin:
 
         def pick_dialog_color(target):
             current = dialog_text_color["value"] if target == "text" else dialog_stroke_color["value"]
-            color = QColorDialog.getColor(QColor(current), self, "색상 선택")
+            color = ysb_get_color_with_hex_focus(QColor(current), self, "색상 선택")
             if not color.isValid():
                 return
             if target == "text":
@@ -1101,6 +1375,17 @@ class MainWindowTextLayoutMixin:
         def set_dialog_align(align):
             dialog_align["value"] = align
             on_dialog_style_changed()
+
+        def open_dialog_advanced_options():
+            before = copy.deepcopy(dialog_advanced_options["value"])
+            values = self.open_preset_advanced_text_options_dialog(dialog_style_snapshot(), parent_dialog=dialog, preview_callback=preview_style_on_current_page)
+            if values is None:
+                dialog_advanced_options["value"] = before
+                preview_style_on_current_page(dialog_style_snapshot())
+                return
+            dialog_advanced_options["value"] = values
+            preview_style_on_current_page(dialog_style_snapshot())
+            self.log("🎨 페이지 글꼴 프리셋 고급 옵션 편집")
 
         for widget in (dlg_font, dlg_size, dlg_stroke, dlg_line_spacing, dlg_letter_spacing, dlg_char_width, dlg_char_height):
             if hasattr(widget, "valueChanged"):
@@ -1114,6 +1399,7 @@ class MainWindowTextLayoutMixin:
         dlg_align_left.clicked.connect(self.make_safe_slot(set_dialog_align, "left"))
         dlg_align_center.clicked.connect(self.make_safe_slot(set_dialog_align, "center"))
         dlg_align_right.clicked.connect(self.make_safe_slot(set_dialog_align, "right"))
+        dlg_advanced.clicked.connect(open_dialog_advanced_options)
 
         btn_line = QHBoxLayout()
         btn_add = QPushButton(self.tr_ui("현재 스타일을 새 프리셋으로 추가"), dialog)
@@ -1122,6 +1408,12 @@ class MainWindowTextLayoutMixin:
         btn_apply_all = QPushButton(self.tr_ui("전체 페이지에 적용"), dialog)
         btn_ok = QPushButton(self.tr_ui("확인"), dialog)
         btn_close = QPushButton(self.tr_ui("닫기"), dialog)
+        preset_tip(btn_add, "페이지 프리셋 추가", "현재 위쪽 편집값을 새 페이지 글꼴 프리셋으로 저장합니다.")
+        preset_tip(btn_import, "페이지 프리셋 불러오기", "외부 JSON 파일에서 페이지 글꼴 프리셋을 가져옵니다.")
+        preset_tip(btn_apply_page, "현재 페이지에 적용", "선택한 페이지 글꼴 프리셋을 현재 페이지의 텍스트들에 적용하고 창을 닫습니다.")
+        preset_tip(btn_apply_all, "전체 페이지에 적용", "선택한 페이지 글꼴 프리셋을 전체 페이지에 적용하고 창을 닫습니다.")
+        preset_tip(btn_ok, "확인", "페이지에 적용하지 않고 마지막 설정값만 저장한 뒤 닫습니다.")
+        preset_tip(btn_close, "닫기", "변경사항을 저장하지 않고 창을 닫습니다.")
         btn_line.addWidget(btn_add)
         btn_line.addWidget(btn_import)
         btn_line.addStretch()
@@ -1151,7 +1443,7 @@ class MainWindowTextLayoutMixin:
             self.log(f"💾 페이지 글꼴 프리셋 추가: {safe}")
 
         def import_page_preset():
-            path, _ = QFileDialog.getOpenFileName(dialog, self.tr_ui("페이지 글꼴 프리셋 불러오기"), str(self.text_preset_dir()), "JSON (*.json)")
+            path, _ = self.get_open_file_name_logged("import_page_preset", dialog, self.tr_ui("페이지 글꼴 프리셋 불러오기"), str(self.text_preset_dir()), "JSON (*.json)")
             if not path:
                 return
             try:
@@ -1210,9 +1502,7 @@ class MainWindowTextLayoutMixin:
                 self.data[original_idx] = copy.deepcopy(original_page_snapshot)
             commit_dialog_style()
             if self.idx == original_idx:
-                self.ref_tab()
-                if self.cb_mode.currentIndex() == 4:
-                    self.mode_chg(4)
+                QTimer.singleShot(0, lambda: (self.ref_tab(), self.mode_chg(4) if self.cb_mode.currentIndex() == 4 else None))
             dialog_state["restored"] = True
             self.log("💾 페이지 글꼴 프리셋 마지막 설정 저장 완료")
             dialog.accept()
@@ -1228,7 +1518,25 @@ class MainWindowTextLayoutMixin:
         refresh_color_buttons()
         refresh_rows(selected_name["value"])
 
+        try:
+            self.audit_boundary_event("PRESET_DIALOG_BUILD_DONE", dialog_key="page_text_preset", elapsed_ms=int((time.time() - _dlg_t0) * 1000), memory=memory_text())
+        except Exception:
+            pass
+        try:
+            dialog.setUpdatesEnabled(True)
+            dialog.update()
+        except Exception:
+            pass
+        try:
+            dialog.setProperty("dialog_timing_exec_enter_at", time.time())
+            self.audit_boundary_event("PRESET_DIALOG_EXEC_ENTER", dialog_key="page_text_preset", memory=memory_text())
+        except Exception:
+            pass
         result = dialog.exec()
+        try:
+            self.audit_boundary_event("PRESET_DIALOG_EXEC_RETURN", dialog_key="page_text_preset", result=int(result), elapsed_ms=int((time.time() - float(dialog.property("dialog_timing_exec_enter_at") or time.time())) * 1000), memory=memory_text())
+        except Exception:
+            pass
         if not dialog_state["applied"] and not dialog_state["restored"]:
             restore_full_original_state()
 
@@ -1239,7 +1547,16 @@ class MainWindowTextLayoutMixin:
         확인/닫기로 나가면 실제 텍스트에는 적용하지 않는다.
         실제 적용은 우측 콤보 선택 또는 프리셋 단축키로만 한다.
         """
+        _dlg_t0 = time.time()
+        try:
+            self.audit_boundary_event("PRESET_DIALOG_BUILD_ENTER", dialog_key="item_text_preset", memory=memory_text())
+        except Exception:
+            pass
         dialog = QDialog(self)
+        dialog.setProperty("dialog_timing_log_key", "item_text_preset")
+        dialog.setProperty("dialog_timing_created_at", _dlg_t0)
+        dialog.installEventFilter(self)
+        dialog.setUpdatesEnabled(False)
         dialog.setWindowTitle(self.tr_ui("개별 글꼴 프리셋 관리"))
         dialog.resize(1120, 680)
         dialog.setStyleSheet(self.settings_dialog_style())
@@ -1278,6 +1595,7 @@ class MainWindowTextLayoutMixin:
         dialog_text_color = {"value": base_style["text_color"]}
         dialog_stroke_color = {"value": base_style["stroke_color"]}
         dialog_align = {"value": base_style["align"]}
+        dialog_advanced_options = {"value": self.normalize_advanced_text_options(base_style)}
 
         # ---------- editor ----------
         top = QWidget(dialog)
@@ -1306,8 +1624,10 @@ class MainWindowTextLayoutMixin:
         dlg_char_width = QSpinBox(dialog); dlg_char_width.setRange(10, 300); dlg_char_width.setValue(100); dlg_char_width.setSuffix(" %"); dlg_char_width.setFixedWidth(86); dlg_char_width.setFixedHeight(26)
         dlg_char_height = QSpinBox(dialog); dlg_char_height.setRange(10, 300); dlg_char_height.setValue(100); dlg_char_height.setSuffix(" %"); dlg_char_height.setFixedWidth(86); dlg_char_height.setFixedHeight(26)
         dlg_bold = QPushButton("B", dialog); dlg_italic = QPushButton("I", dialog); dlg_strike = QPushButton("S", dialog)
+        dlg_advanced = QPushButton(self.tr_ui("고급..."), dialog)
         for b, tip in ((dlg_bold, "굵게"), (dlg_italic, "기울이기"), (dlg_strike, "취소선")):
             b.setCheckable(True); b.setFixedWidth(32); b.setFixedHeight(26); b.setToolTip(tip)
+        dlg_advanced.setFixedHeight(26); dlg_advanced.setMinimumWidth(68)
         dlg_bold.setStyleSheet("font-weight:bold;"); dlg_italic.setStyleSheet("font-style:italic;"); dlg_strike.setStyleSheet("text-decoration: line-through;")
         self.install_style_editor_shortcuts(dialog, {
             "font": dlg_font,
@@ -1330,7 +1650,7 @@ class MainWindowTextLayoutMixin:
         row2.addWidget(QLabel(self.tr_ui("자간"))); row2.addWidget(dlg_letter_spacing)
         row2.addWidget(QLabel(self.tr_ui("너비"))); row2.addWidget(dlg_char_width)
         row2.addWidget(QLabel(self.tr_ui("높이"))); row2.addWidget(dlg_char_height)
-        row2.addWidget(dlg_bold); row2.addWidget(dlg_italic); row2.addWidget(dlg_strike)
+        row2.addWidget(dlg_bold); row2.addWidget(dlg_italic); row2.addWidget(dlg_strike); row2.addWidget(dlg_advanced)
         row2.addStretch()
         top_l.addLayout(row2)
 
@@ -1342,11 +1662,16 @@ class MainWindowTextLayoutMixin:
             chk.setChecked(bool(include_default.get(key, False)))
             include_checks[key] = chk
             include_l.addWidget(chk, idx // 7, idx % 7)
+        adv_idx = len(self.style_field_specs())
+        chk_adv = QCheckBox(self.tr_ui("고급 옵션"), include_box)
+        chk_adv.setChecked(bool(include_default.get("advanced_text_options", self.style_has_advanced_text_options(base_style))))
+        include_checks["advanced_text_options"] = chk_adv
+        include_l.addWidget(chk_adv, adv_idx // 7, adv_idx % 7)
         top_l.addWidget(include_box)
         layout.addWidget(top)
 
         def current_dialog_style():
-            return self.normalize_style_dict({
+            return self.style_with_advanced_options({
                 "font_family": dlg_font.currentFont().family(),
                 "font_size": int(dlg_size.value()),
                 "stroke_width": int(dlg_stroke.value()),
@@ -1360,7 +1685,7 @@ class MainWindowTextLayoutMixin:
                 "bold": bool(dlg_bold.isChecked()),
                 "italic": bool(dlg_italic.isChecked()),
                 "strike": bool(dlg_strike.isChecked()),
-            })
+            }, dialog_advanced_options["value"])
 
         def current_include():
             return {k: chk.isChecked() for k, chk in include_checks.items()}
@@ -1368,7 +1693,7 @@ class MainWindowTextLayoutMixin:
         def refresh_color_buttons():
             tip_bg = "#ffffff" if self.is_light_theme() else "#000000"
             tip_fg = "#111827" if self.is_light_theme() else "#ffffff"
-            tip_border = "#cfd7e5" if self.is_light_theme() else "#4b5563"
+            tip_border = "#D1C9CE" if self.is_light_theme() else "#555056"
             dlg_text_color_btn.setStyleSheet(
                 f"QPushButton {{ background:{dialog_text_color['value']}; border:1px solid #444; padding:0px; }}"
                 f"QToolTip {{ background-color:{tip_bg}; color:{tip_fg}; border:1px solid {tip_border}; border-radius:0px; padding:5px; }}"
@@ -1377,7 +1702,7 @@ class MainWindowTextLayoutMixin:
                 f"QPushButton {{ background:{dialog_stroke_color['value']}; border:1px solid #444; padding:0px; }}"
                 f"QToolTip {{ background-color:{tip_bg}; color:{tip_fg}; border:1px solid {tip_border}; border-radius:0px; padding:5px; }}"
             )
-            checked_style = "background:#dbeafe; color:#111827; border:1px solid #8fb4e8; border-radius:0px;" if self.is_light_theme() else "background:#3d587d; color:#ffffff; border:1px solid #7ea2d6; border-radius:0px;"
+            checked_style = "background:#F5E8EA; color:#111827; border:1px solid #C78A90; border-radius:0px;" if self.is_light_theme() else "background:#5B3136; color:#ffffff; border:1px solid #C78A90; border-radius:0px;"
             for align, btn in (("left", dlg_align_left), ("center", dlg_align_center), ("right", dlg_align_right)):
                 btn.setStyleSheet(checked_style if dialog_align["value"] == align else "")
 
@@ -1399,6 +1724,7 @@ class MainWindowTextLayoutMixin:
                 dlg_bold.setChecked(bool(st["bold"]))
                 dlg_italic.setChecked(bool(st["italic"]))
                 dlg_strike.setChecked(bool(st["strike"]))
+                dialog_advanced_options["value"] = self.normalize_advanced_text_options(st)
                 for k, chk in include_checks.items():
                     chk.setChecked(bool(inc.get(k, False)))
                 refresh_color_buttons()
@@ -1438,7 +1764,7 @@ class MainWindowTextLayoutMixin:
 
         def pick_color(target):
             current = dialog_text_color["value"] if target == "text" else dialog_stroke_color["value"]
-            color = QColorDialog.getColor(QColor(current), self, "색상 선택")
+            color = ysb_get_color_with_hex_focus(QColor(current), self, "색상 선택")
             if not color.isValid():
                 return
             if target == "text":
@@ -1450,6 +1776,17 @@ class MainWindowTextLayoutMixin:
         def set_align(a):
             dialog_align["value"] = a
             preview_selected_only()
+
+        def open_item_dialog_advanced_options():
+            before = copy.deepcopy(dialog_advanced_options["value"])
+            values = self.open_preset_advanced_text_options_dialog(current_dialog_style(), parent_dialog=dialog, preview_callback=lambda style: (dialog_advanced_options.__setitem__("value", self.normalize_advanced_text_options(style)), preview_selected_only()))
+            if values is None:
+                dialog_advanced_options["value"] = before
+                preview_selected_only()
+                return
+            dialog_advanced_options["value"] = values
+            preview_selected_only()
+            self.log("🎨 개별 글꼴 프리셋 고급 옵션 편집")
 
         for widget in (dlg_font, dlg_size, dlg_stroke, dlg_line_spacing, dlg_letter_spacing, dlg_char_width, dlg_char_height):
             if hasattr(widget, "valueChanged"):
@@ -1465,6 +1802,7 @@ class MainWindowTextLayoutMixin:
         dlg_align_left.clicked.connect(self.make_safe_slot(set_align, "left"))
         dlg_align_center.clicked.connect(self.make_safe_slot(set_align, "center"))
         dlg_align_right.clicked.connect(self.make_safe_slot(set_align, "right"))
+        dlg_advanced.clicked.connect(open_item_dialog_advanced_options)
 
         # ---------- rows ----------
         rows_widget = QWidget(dialog)
@@ -1472,6 +1810,36 @@ class MainWindowTextLayoutMixin:
         rows_layout.setContentsMargins(0, 0, 0, 0); rows_layout.setSpacing(4)
         scroll = QScrollArea(dialog); scroll.setWidgetResizable(True); scroll.setWidget(rows_widget); scroll.setMinimumHeight(300)
         layout.addWidget(scroll, 1)
+
+        def preset_tip(widget, title, desc="", key=""):
+            try:
+                self.set_dialog_control_tooltip(widget, title, key, desc)
+            except Exception:
+                try:
+                    widget.setToolTip("\n".join([self.tr_ui(title), self.tr_msg(desc) if desc else ""]))
+                    widget.setProperty("allow_native_tooltip", True)
+                except Exception:
+                    pass
+
+        # 프리셋 편집창 상단 설정 컨트롤도 메인 인터페이스와 같은 툴팁을 가진다.
+        preset_tip(dlg_font, "글꼴 선택", "폰트 설정창을 엽니다.", "item_font_select")
+        preset_tip(dlg_size, "글꼴 크기", "개별 글꼴 프리셋의 글자 크기를 조절합니다.", "text_font_size")
+        preset_tip(dlg_stroke, "획 크기", "개별 글꼴 프리셋의 외곽선 두께를 조절합니다.", "text_stroke_size")
+        preset_tip(dlg_text_color_btn, "문자 색상", "개별 글꼴 프리셋의 문자 색상을 선택합니다.", "item_text_color")
+        preset_tip(dlg_stroke_color_btn, "획 색상", "개별 글꼴 프리셋의 외곽선 색상을 선택합니다.", "item_stroke_color")
+        preset_tip(dlg_line_spacing, "행간", "줄과 줄 사이 간격을 조절합니다.", "text_line_spacing")
+        preset_tip(dlg_letter_spacing, "자간", "글자와 글자 사이 간격을 조절합니다.", "text_letter_spacing")
+        preset_tip(dlg_char_width, "너비", "문자의 가로 비율을 조절합니다.", "text_char_width")
+        preset_tip(dlg_char_height, "높이", "문자의 세로 비율을 조절합니다.", "text_char_height")
+        preset_tip(dlg_bold, "굵게", "굵게 설정을 켜거나 끕니다.", "text_bold_toggle")
+        preset_tip(dlg_italic, "기울이기", "기울이기 설정을 켜거나 끕니다.", "text_italic_toggle")
+        preset_tip(dlg_strike, "취소선", "취소선 설정을 켜거나 끕니다.", "text_strike_toggle")
+        preset_tip(dlg_advanced, "고급 텍스트/획 옵션", "개별 글꼴 프리셋에 문자/획 그라데이션, 2중 획, 그림자, 후광을 저장합니다.", "text_effect_gradient")
+        preset_tip(dlg_align_left, "왼쪽 정렬", "텍스트를 왼쪽으로 정렬합니다.", "item_align_left")
+        preset_tip(dlg_align_center, "가운데 정렬", "텍스트를 가운데로 정렬합니다.", "item_align_center")
+        preset_tip(dlg_align_right, "오른쪽 정렬", "텍스트를 오른쪽으로 정렬합니다.", "item_align_right")
+        for _key, _chk in include_checks.items():
+            preset_tip(_chk, "프리셋 포함 옵션", "체크하면 이 항목을 개별 글꼴 프리셋에 포함합니다.")
 
         def refresh_rows(select_name=None):
             while rows_layout.count():
@@ -1499,13 +1867,20 @@ class MainWindowTextLayoutMixin:
                 key_edit = ConfirmingKeySequenceEdit(); key_edit.setKeySequence(key_sequence_from_text(str(preset.get("shortcut", "") or ""))); key_edit.setMaximumWidth(160)
                 btn_update = QPushButton("수정 저장")
                 btn_delete = QPushButton("삭제")
+                preset_tip(chk_enabled, "프리셋 사용", "체크하면 이 개별 글꼴 프리셋을 콤보박스와 단축키에서 사용할 수 있습니다.")
+                preset_tip(btn_select, "개별 프리셋 선택", "이 프리셋을 선택한 텍스트 객체에 미리보기로 적용합니다.")
+                preset_tip(name_edit, "프리셋 이름", "이름을 바꾸고 Enter를 누르거나 포커스를 빼면 프리셋 이름이 변경됩니다.")
+                preset_tip(summary, "프리셋 내용", "이 프리셋에 저장된 글꼴, 크기, 색상, 행간, 자간 등 스타일 요약입니다.")
+                preset_tip(key_edit, "프리셋 단축키", "이 개별 글꼴 프리셋을 바로 적용할 단축키를 지정합니다.")
+                preset_tip(btn_update, "프리셋 수정 저장", "현재 위쪽 편집값과 포함 옵션으로 이 개별 글꼴 프리셋을 덮어씁니다.")
+                preset_tip(btn_delete, "프리셋 삭제", "이 개별 글꼴 프리셋을 삭제합니다.")
 
                 if not chk_enabled.isChecked():
                     if self.is_light_theme():
-                        row.setStyleSheet("background:#f1f3f6; color:#8a8f99;")
-                        summary.setStyleSheet("color:#8a8f99;")
-                        name_edit.setStyleSheet("background:#f7f8fa; color:#8a8f99; border:1px solid #d0d5df;")
-                        key_edit.setStyleSheet("background:#f7f8fa; color:#8a8f99; border:1px solid #d0d5df;")
+                        row.setStyleSheet("background:#F2EDEF; color:#91888F;")
+                        summary.setStyleSheet("color:#91888F;")
+                        name_edit.setStyleSheet("background:#F8F3F5; color:#91888F; border:1px solid #D2CBD0;")
+                        key_edit.setStyleSheet("background:#F8F3F5; color:#91888F; border:1px solid #D2CBD0;")
                     else:
                         row.setStyleSheet("background:#242424; color:#888888;")
                         summary.setStyleSheet("color:#888888;")
@@ -1515,8 +1890,8 @@ class MainWindowTextLayoutMixin:
                 is_selected = (selected_name["value"] == name or select_name == name)
                 if is_selected:
                     if self.is_light_theme():
-                        row_style = "background:#e8f1ff; border:1px solid #6fa8ff;"
-                        child_style = "background:#ffffff; color:#202124; border:1px solid #6fa8ff;"
+                        row_style = "background:#e8f1ff; border:1px solid #A85D66;"
+                        child_style = "background:#ffffff; color:#202124; border:1px solid #A85D66;"
                     else:
                         row_style = "background:#31415c; border:1px solid #5b8def;"
                         child_style = "background:#2f5fa7; color:white; border:1px solid #80b4ff;"
@@ -1526,8 +1901,8 @@ class MainWindowTextLayoutMixin:
                     name_edit.setStyleSheet(child_style)
                     summary.setStyleSheet(child_style)
                     key_edit.setStyleSheet(child_style)
-                    btn_update.setStyleSheet("background:#3d5f92; color:white;")
-                    btn_delete.setStyleSheet("background:#3d5f92; color:white;")
+                    btn_update.setStyleSheet("background:#8A4A52; color:white;")
+                    btn_delete.setStyleSheet("background:#8A4A52; color:white;")
                     selected_name["value"] = name
 
                 row_l.addWidget(chk_enabled)
@@ -1664,6 +2039,10 @@ class MainWindowTextLayoutMixin:
         btn_import = QPushButton(self.tr_ui("불러오기"), dialog)
         btn_ok = QPushButton(self.tr_ui("확인"), dialog)
         btn_close = QPushButton(self.tr_ui("닫기"), dialog)
+        preset_tip(btn_add, "개별 프리셋 추가", "현재 위쪽 편집값과 포함 옵션을 새 개별 글꼴 프리셋으로 저장합니다.")
+        preset_tip(btn_import, "개별 프리셋 불러오기", "외부 JSON 파일에서 개별 글꼴 프리셋을 가져옵니다.")
+        preset_tip(btn_ok, "확인", "개별 프리셋 관리 상태를 저장하고 창을 닫습니다. 미리보기는 원래 페이지 상태로 복구됩니다.")
+        preset_tip(btn_close, "닫기", "변경사항을 저장하지 않고 창을 닫습니다. 미리보기는 원래 페이지 상태로 복구됩니다.")
         btn_line.addWidget(btn_add)
         btn_line.addWidget(btn_import)
         btn_line.addStretch()
@@ -1694,7 +2073,7 @@ class MainWindowTextLayoutMixin:
             self.log(f"💾 개별 글꼴 프리셋 추가: {safe}")
 
         def import_item_preset():
-            path, _ = QFileDialog.getOpenFileName(dialog, self.tr_ui("개별 글꼴 프리셋 불러오기"), str(self.item_text_preset_dir()), "JSON (*.json)")
+            path, _ = self.get_open_file_name_logged("import_item_preset", dialog, self.tr_ui("개별 글꼴 프리셋 불러오기"), str(self.item_text_preset_dir()), "JSON (*.json)")
             if not path:
                 return
             try:
@@ -1703,9 +2082,11 @@ class MainWindowTextLayoutMixin:
                 if isinstance(raw, dict) and "style" in raw:
                     style = self.normalize_style_dict(raw.get("style"))
                     inc = raw.get("include") or {k: True for k, _ in self.style_field_specs()}
+                    inc = dict(inc or {})
+                    inc.setdefault("advanced_text_options", bool(self.style_has_advanced_text_options(style)))
                 else:
                     style = self.normalize_style_dict(raw)
-                    inc = {k: True for k, _ in self.style_field_specs()}
+                    inc = {**{k: True for k, _ in self.style_field_specs()}, "advanced_text_options": bool(self.style_has_advanced_text_options(style))}
             except Exception as e:
                 msg_text = self.tr_ui("프리셋 JSON을 읽지 못했습니다.")
                 QMessageBox.warning(dialog, self.tr_ui("불러오기 실패"), f"{msg_text}\n{e}")
@@ -1726,17 +2107,37 @@ class MainWindowTextLayoutMixin:
             self.log(f"📥 개별 글꼴 프리셋 불러오기 완료: {safe}")
 
         def restore_selected_preview():
+            _restore_t0 = time.time()
+            try:
+                self.audit_boundary_event("PRESET_DIALOG_RESTORE_ENTER", dialog_key="item_text_preset", reason="restore_selected_preview", selected_count=len(selected_snapshot or {}), memory=memory_text())
+            except Exception:
+                pass
             # 개별 프리셋 창은 실제 적용 창이 아니므로, 나갈 때는 창을 열기 전 페이지 상태로 통째로 복구한다.
             if original_page_snapshot is not None and page_idx in self.data:
                 self.data[page_idx] = copy.deepcopy(original_page_snapshot)
             else:
                 self.restore_text_items_by_snapshot(page_idx, selected_snapshot)
+
+            def _refresh_after_dialog_close():
+                try:
+                    if self.idx == page_idx:
+                        self.ref_tab()
+                        if self.cb_mode.currentIndex() == 4:
+                            self.mode_chg(4)
+                            self.reselect_text_items([int(x) for x in selected_snapshot.keys() if str(x).isdigit()])
+                            self.update_item_preset_combo_for_selected_texts()
+                finally:
+                    try:
+                        self.audit_boundary_event("PRESET_DIALOG_RESTORE_REFRESH_DONE", dialog_key="item_text_preset", memory=memory_text(), throttle_ms=50)
+                    except Exception:
+                        pass
+
             if self.idx == page_idx:
-                self.ref_tab()
-                if self.cb_mode.currentIndex() == 4:
-                    self.mode_chg(4)
-                    self.reselect_text_items([int(x) for x in selected_snapshot.keys() if str(x).isdigit()])
-                    self.update_item_preset_combo_for_selected_texts()
+                QTimer.singleShot(0, _refresh_after_dialog_close)
+            try:
+                self.audit_boundary_event("PRESET_DIALOG_RESTORE_DONE", dialog_key="item_text_preset", elapsed_ms=int((time.time() - _restore_t0) * 1000), deferred_refresh=True, memory=memory_text())
+            except Exception:
+                pass
 
         def accept_and_save_state():
             restore_selected_preview()
@@ -1758,7 +2159,25 @@ class MainWindowTextLayoutMixin:
         refresh_color_buttons()
         refresh_rows(selected_name["value"])
         preview_selected_only()
+        try:
+            self.audit_boundary_event("PRESET_DIALOG_BUILD_DONE", dialog_key="item_text_preset", elapsed_ms=int((time.time() - _dlg_t0) * 1000), memory=memory_text())
+        except Exception:
+            pass
+        try:
+            dialog.setUpdatesEnabled(True)
+            dialog.update()
+        except Exception:
+            pass
+        try:
+            dialog.setProperty("dialog_timing_exec_enter_at", time.time())
+            self.audit_boundary_event("PRESET_DIALOG_EXEC_ENTER", dialog_key="item_text_preset", memory=memory_text())
+        except Exception:
+            pass
         result = dialog.exec()
+        try:
+            self.audit_boundary_event("PRESET_DIALOG_EXEC_RETURN", dialog_key="item_text_preset", result=int(result), elapsed_ms=int((time.time() - float(dialog.property("dialog_timing_exec_enter_at") or time.time())) * 1000), memory=memory_text())
+        except Exception:
+            pass
         if result != QDialog.DialogCode.Accepted:
             restore_selected_preview()
 
@@ -1793,6 +2212,7 @@ class MainWindowTextLayoutMixin:
 
     def apply_style_dict_to_data_items(self, items, style):
         style = self.normalize_style_dict(style)
+        advanced = self.normalize_advanced_text_options(style) if self.style_has_advanced_text_options(style) else None
         for item in items or []:
             item.update({
                 'font_family': style['font_family'],
@@ -1809,9 +2229,214 @@ class MainWindowTextLayoutMixin:
                 'italic': style['italic'],
                 'strike': style['strike'],
             })
+            if advanced is not None:
+                for key in self.advanced_text_effect_fields():
+                    item[key] = advanced.get(key)
 
     def apply_current_preset_to_data_items(self, items):
         self.apply_style_dict_to_data_items(items, self.current_style_snapshot())
+
+    def _text_engine_mode_index(self):
+        try:
+            return int(self.cb_mode.currentIndex())
+        except Exception:
+            return int(getattr(self, "last_mode", 0) or 0)
+
+    def make_text_engine_diff_record_for_items(self, reason, items, fields=None, page_idx=None):
+        page_idx = int(self.idx if page_idx is None else page_idx)
+        curr = self.data.get(page_idx) or {}
+        data_list = curr.get('data', []) if isinstance(curr, dict) else []
+        if not hasattr(self, 'text_engine') or self.text_engine is None:
+            return None
+        try:
+            return self.text_engine.make_diff_record_for_items(
+                data_list=data_list,
+                page_idx=page_idx,
+                mode=self._text_engine_mode_index(),
+                reason=str(reason or '텍스트 변경'),
+                items=list(items or []),
+                fields=list(fields or []),
+            )
+        except Exception:
+            return None
+
+    def append_text_engine_diff_for_items(self, reason, items, fields=None, page_idx=None):
+        # QA15: 텍스트 계열 Undo는 부분 diff 최적화를 버리고 현재 페이지 text state 전체를
+        # 순서대로 쌓는다. 스타일/고급 옵션/프리셋/변형 모두 같은 복원 경로를 탄다.
+        try:
+            return self.undo_push_text_line(str(reason or '텍스트 변경'), page_idx=page_idx if page_idx is not None else self.idx, include_masks=False)
+        except Exception:
+            return False
+
+    def mark_text_engine_items_dirty(self, items, fields=None, page_idx=None):
+        page_idx = int(self.idx if page_idx is None else page_idx)
+        ids = []
+        for item in list(items or []):
+            if isinstance(item, dict):
+                sid = item.get('id')
+                if sid is not None:
+                    ids.append(sid)
+        try:
+            if hasattr(self, 'text_engine') and self.text_engine is not None:
+                self.text_engine.mark_dirty(page_idx, ids, list(fields or []))
+            if page_idx == int(getattr(self, 'idx', 0) or 0):
+                self.mark_active_page_dirty('text')
+            elif hasattr(self, 'project_engine') and self.project_engine is not None:
+                self.project_engine.mark_page_dirty(page_idx, 'text')
+        except Exception:
+            pass
+        # journal/checkpoint dirty는 YSBT 저장용 dirty와 별도로 관리한다.
+        try:
+            pages = getattr(self, "_checkpoint_dirty_pages", None)
+            if pages is None:
+                pages = set()
+                self._checkpoint_dirty_pages = pages
+            pages.add(int(page_idx))
+            kinds = getattr(self, "_checkpoint_dirty_kinds", None)
+            if kinds is None:
+                kinds = {}
+                self._checkpoint_dirty_kinds = kinds
+            kinds.setdefault(int(page_idx), set()).add("text")
+        except Exception:
+            pass
+        return ids
+
+    def refresh_text_engine_items(self, ids, *, page_idx=None, update_table=True, refresh_scene=True):
+        page_idx = int(self.idx if page_idx is None else page_idx)
+        ids = [x for x in (ids or []) if x is not None]
+        if not ids or page_idx != int(getattr(self, 'idx', 0) or 0):
+            return False
+        if update_table:
+            try:
+                self.update_table_rows_for_text_ids(ids)
+            except Exception:
+                pass
+        if refresh_scene and self.cb_mode.currentIndex() == 4:
+            try:
+                if not self.refresh_final_text_items_by_ids(ids):
+                    self.schedule_final_text_scene_refresh(30)
+            except Exception:
+                self.schedule_final_text_scene_refresh(30)
+        return True
+
+    def finalize_text_change(self, ids=None, *, items=None, fields=None, page_idx=None, reason="텍스트 변경", delay_ms=1800, update_table=True, refresh_scene=True):
+        """모든 텍스트 변경 루트의 공통 후처리.
+
+        data 수정은 호출부가 이미 끝낸 뒤 들어온다고 보고,
+        여기서는 텍스트 엔진 dirty, 현재 화면 부분 갱신, page journal 체크포인트 예약만 처리한다.
+        ref_tab()/mode_chg(4)는 직접 호출하지 않는다.
+        """
+        page_idx = int(self.idx if page_idx is None else page_idx)
+        ids = [x for x in (ids or []) if x is not None]
+        if items:
+            try:
+                ids = self.mark_text_engine_items_dirty(items, fields=fields, page_idx=page_idx)
+            except Exception:
+                ids = ids or []
+        else:
+            try:
+                if hasattr(self, 'text_engine') and self.text_engine is not None:
+                    self.text_engine.mark_dirty(page_idx, ids, list(fields or []))
+                if page_idx == int(getattr(self, 'idx', 0) or 0):
+                    self.mark_active_page_dirty('text')
+                elif hasattr(self, 'project_engine') and self.project_engine is not None:
+                    self.project_engine.mark_page_dirty(page_idx, 'text')
+                pages = getattr(self, "_checkpoint_dirty_pages", None)
+                if pages is None:
+                    pages = set()
+                    self._checkpoint_dirty_pages = pages
+                pages.add(int(page_idx))
+                kinds = getattr(self, "_checkpoint_dirty_kinds", None)
+                if kinds is None:
+                    kinds = {}
+                    self._checkpoint_dirty_kinds = kinds
+                kinds.setdefault(int(page_idx), set()).add("text")
+            except Exception:
+                pass
+
+        if page_idx == int(getattr(self, 'idx', 0) or 0):
+            try:
+                if ids:
+                    self.refresh_text_engine_items(ids, page_idx=page_idx, update_table=update_table, refresh_scene=refresh_scene)
+                elif refresh_scene and self.cb_mode.currentIndex() == 4:
+                    self.schedule_final_text_scene_refresh(80)
+            except Exception:
+                try:
+                    if refresh_scene:
+                        self.schedule_final_text_scene_refresh(80)
+                except Exception:
+                    pass
+            try:
+                self.schedule_deferred_auto_save_project(delay_ms)
+            except Exception:
+                try:
+                    self.auto_save_project()
+                except Exception:
+                    pass
+        else:
+            try:
+                # 다른 페이지도 복구 대상 journal에 포함해야 하므로 타이머는 현재 페이지에서 한 번 예약한다.
+                self.schedule_deferred_auto_save_project(delay_ms)
+            except Exception:
+                pass
+        return ids
+
+    def update_table_rows_for_text_ids(self, ids):
+        if not hasattr(self, 'tab'):
+            return False
+        ids = {str(x) for x in (ids or []) if x is not None}
+        if not ids:
+            return False
+        curr = self.data.get(self.idx) or {}
+        data = curr.get('data', []) if isinstance(curr, dict) else []
+        by_id = {str(d.get('id')): d for d in data if isinstance(d, dict)}
+        changed = False
+        old_lock = getattr(self, '_table_check_lock', False)
+        self._table_check_lock = True
+        try:
+            self.tab.blockSignals(True)
+            for row in range(1, self.tab.rowCount()):
+                id_item = self.tab.item(row, 0)
+                if not id_item:
+                    continue
+                sid = id_item.text().strip()
+                if sid not in ids or sid not in by_id:
+                    continue
+                d = by_id[sid]
+                try:
+                    self.sanitize_text_data_object_prefixes(d)
+                except Exception:
+                    pass
+                text_value = str(d.get('text', '') or '')
+                trans_value = str(d.get('translated_text', '') or '')
+                item2 = self.tab.item(row, 2)
+                item3 = self.tab.item(row, 3)
+                if item2 is None:
+                    item2 = QTableWidgetItem()
+                    self.tab.setItem(row, 2, item2)
+                if item3 is None:
+                    item3 = QTableWidgetItem()
+                    self.tab.setItem(row, 3, item3)
+                display_trans = ("[객체] " + (trans_value or str(d.get('object_source_text', '') or ''))) if d.get('rasterized_text') else trans_value
+                if item2.text() != text_value:
+                    item2.setText(text_value)
+                    changed = True
+                if item3.text() != display_trans:
+                    item3.setText(display_trans)
+                    changed = True
+                item2.setData(Qt.ItemDataRole.UserRole, text_value)
+                item3.setData(Qt.ItemDataRole.UserRole, trans_value)
+                try:
+                    self.set_table_row_visual(row, bool(d.get('use_inpaint', True)))
+                except Exception:
+                    pass
+        finally:
+            try:
+                self.tab.blockSignals(False)
+            except Exception:
+                pass
+            self._table_check_lock = old_lock
+        return changed
 
     def apply_current_preset_to_page(self, page_idx, refresh=False):
         curr = self.data.get(page_idx)
@@ -1820,13 +2445,16 @@ class MainWindowTextLayoutMixin:
             return 0
         targets = [x for x in curr.get('data', []) if x.get('use_inpaint', True)]
         if targets:
-            self.push_project_undo("현재 페이지 글꼴 프리셋 적용", page_idx=page_idx)
+            self.append_text_engine_diff_for_items("현재 페이지 글꼴 프리셋 적용", targets, fields=list(self.current_style_snapshot().keys()), page_idx=page_idx)
         self.apply_current_preset_to_data_items(targets)
-        if refresh and page_idx == self.idx:
-            self.ref_tab()
-            if self.cb_mode.currentIndex() == 4:
-                self.mode_chg(4)
-        self.auto_save_project()
+        ids = self.finalize_text_change(
+            items=targets,
+            fields=list(self.current_style_snapshot().keys()),
+            page_idx=page_idx,
+            reason="현재 페이지 글꼴 프리셋 적용",
+            delay_ms=1800,
+            refresh_scene=bool(refresh),
+        )
         self.log(f"🎛️ 현재 페이지 프리셋 적용: {len(targets)}개")
         # 현재 페이지 프리셋 적용은 Undo 경계가 아니라 일반 Undo 스택에 포함한다.
         return len(targets)
@@ -1842,18 +2470,26 @@ class MainWindowTextLayoutMixin:
                 continue
             targets = [x for x in curr.get('data', []) if x.get('use_inpaint', True)]
             self.apply_current_preset_to_data_items(targets)
+            if targets:
+                self.mark_text_engine_items_dirty(targets, fields=list(self.current_style_snapshot().keys()), page_idx=i)
             total += len(targets)
             if i == self.idx:
                 touched_current = True
 
         if touched_current and self.idx in self.data:
-            self.ref_tab()
-            if self.cb_mode.currentIndex() == 4:
-                self.mode_chg(4)
+            try:
+                current_targets = [x for x in (self.data.get(self.idx) or {}).get('data', []) if x.get('use_inpaint', True)]
+                current_ids = [x.get('id') for x in current_targets if isinstance(x, dict)]
+                self.refresh_text_engine_items(current_ids, page_idx=self.idx)
+            except Exception:
+                self.schedule_final_text_scene_refresh(80)
 
-        self.auto_save_project()
+        try:
+            self.schedule_deferred_auto_save_project(1800)
+        except Exception:
+            self.auto_save_project()
         if total:
-            self.append_project_undo_record(undo_record)
+            self.undo_push_project(undo_record)
             self.log(f"🎛️ 전체 페이지 프리셋 적용: {total}개")
             # 전체 페이지 프리셋 적용은 Undo 경계가 아니라 일반 Undo 스택에 포함한다.
         else:
@@ -2859,103 +3495,158 @@ class MainWindowTextLayoutMixin:
 
         return changed
 
+    def refresh_final_text_items_by_ids(self, ids):
+        """최종결과 scene 전체 재구성 없이 지정 텍스트 아이템만 제자리 갱신한다."""
+        try:
+            if self.cb_mode.currentIndex() != 4:
+                return False
+            if hasattr(self, 'rebuild_current_page_text_layer_from_data'):
+                return bool(self.rebuild_current_page_text_layer_from_data([x for x in (ids or []) if x is not None]))
+            return False
+        except Exception:
+            return False
+
     def auto_text_size_for_page(self, page_idx, refresh=False):
         changed = 0
+        changed_ids = []
         for item in self.auto_target_items_for_page(page_idx):
             if self.auto_text_size_item(item, page_idx=page_idx):
                 changed += 1
+                changed_ids.append(item.get('id'))
+        if changed_ids:
+            self.mark_text_engine_items_dirty(
+                [x for x in self.auto_target_items_for_page(page_idx) if x.get('id') in changed_ids],
+                fields=['font_size', 'translated_text', 'ocr_lang', 'auto_layout_mode', 'auto_wrap_height_overflow'],
+                page_idx=page_idx,
+            )
         if refresh and page_idx == self.idx:
-            self.ref_tab()
-            if self.cb_mode.currentIndex() == 4:
-                self.mode_chg(4)
+            self.refresh_text_engine_items(changed_ids, page_idx=page_idx)
         return changed
 
     def auto_linebreak_for_page(self, page_idx, refresh=False):
         changed = 0
+        changed_ids = []
         for item in self.auto_target_items_for_page(page_idx):
             if self.auto_wrap_text_for_item(item):
                 changed += 1
+                changed_ids.append(item.get('id'))
+        if changed_ids:
+            self.mark_text_engine_items_dirty(
+                [x for x in self.auto_target_items_for_page(page_idx) if x.get('id') in changed_ids],
+                fields=['translated_text', 'font_size', 'auto_wrap_height_overflow', 'auto_layout_mode'],
+                page_idx=page_idx,
+            )
         if refresh and page_idx == self.idx:
-            self.ref_tab()
-            if self.cb_mode.currentIndex() == 4:
-                self.mode_chg(4)
+            self.refresh_text_engine_items(changed_ids, page_idx=page_idx)
         return changed
 
     def auto_text_size_current(self):
         if not self.paths:
             return
         self.commit_current_page_ui_to_data()
-        undo_rec = self.make_project_undo_record("자동 텍스트 크기 조정")
+        targets = self.auto_target_items_for_page(self.idx)
+        if targets:
+            self.append_text_engine_diff_for_items(
+                "자동 텍스트 크기 조정",
+                targets,
+                fields=['font_size', 'translated_text', 'ocr_lang', 'auto_layout_mode', 'auto_wrap_height_overflow'],
+                page_idx=self.idx,
+            )
         changed = self.auto_text_size_for_page(self.idx, refresh=True)
         if changed:
-            self.append_project_undo_record(undo_rec)
-        self.auto_save_project()
+            self.finalize_text_change(
+                items=targets,
+                fields=['font_size', 'translated_text', 'ocr_lang', 'auto_layout_mode', 'auto_wrap_height_overflow'],
+                page_idx=self.idx,
+                reason='자동 텍스트 크기 조정',
+                delay_ms=1800,
+            )
+        else:
+            try:
+                self.schedule_deferred_auto_save_project(1800)
+            except Exception:
+                self.auto_save_project()
         self.log(f"🤖 자동 텍스트 크기 조정 완료: 현재 페이지 {changed}개")
 
     def auto_text_size_batch(self):
         if not self.paths:
             return
-        if getattr(self, "ui_language", LANG_KO) == LANG_EN:
-            msg = f"Run Batch Auto Text Size on total {len(self.paths)} page(s)?"
-        else:
-            msg = f"자동 텍스트 크기 조정을 총 {len(self.paths)}페이지에 실행합니다."
-        if not self.confirm_batch_operation("일괄 자동 텍스트 크기 조정", msg):
+        title = "일괄 자동 텍스트 크기 조정"
+        selected_indices, selected_label = self.choose_batch_page_indices_for_context(title, "auto_text_size")
+        if selected_indices is None:
             self.log("↩️ 일괄 자동 텍스트 크기 조정 취소")
             return
         self.commit_current_page_ui_to_data()
-        undo_rec = self.make_project_undo_record("일괄 자동 텍스트 크기 조정", full_project=True)
-        total = 0
-        pages = 0
-        for i in range(len(self.paths)):
+
+        def process_page(i):
             changed = self.auto_text_size_for_page(i, refresh=False)
-            if changed:
-                pages += 1
-                total += changed
-        if total:
-            self.append_project_undo_record(undo_rec)
-        self.ref_tab()
-        if self.cb_mode.currentIndex() == 4:
-            self.mode_chg(4)
-        self.auto_save_project()
-        self.log(f"🤖 일괄 자동 텍스트 크기 조정 완료: {pages}페이지 / {total}개")
+            if changed <= 0:
+                return "skipped", "변경된 텍스트 없음"
+            return "done", f"{changed}개 조정"
+
+        result = self.run_page_queue_batch(title, "auto_text_size", selected_indices, selected_label, process_page, visual=False, cancellable=True)
+        try:
+            if self.cb_mode.currentIndex() == 4:
+                self.schedule_final_text_scene_refresh(80)
+            self.schedule_deferred_auto_save_project(1800)
+        except Exception:
+            pass
+
+
 
     def auto_linebreak_current(self):
         if not self.paths:
             return
         self.commit_current_page_ui_to_data()
-        undo_rec = self.make_project_undo_record("자동 줄 내림")
+        targets = self.auto_target_items_for_page(self.idx)
+        if targets:
+            self.append_text_engine_diff_for_items(
+                "자동 줄 내림",
+                targets,
+                fields=['translated_text', 'font_size', 'auto_wrap_height_overflow', 'auto_layout_mode'],
+                page_idx=self.idx,
+            )
         changed = self.auto_linebreak_for_page(self.idx, refresh=True)
         if changed:
-            self.append_project_undo_record(undo_rec)
-        self.auto_save_project()
+            self.finalize_text_change(
+                items=targets,
+                fields=['translated_text', 'font_size', 'auto_wrap_height_overflow', 'auto_layout_mode'],
+                page_idx=self.idx,
+                reason='자동 줄 내림',
+                delay_ms=1800,
+            )
+        else:
+            try:
+                self.schedule_deferred_auto_save_project(1800)
+            except Exception:
+                self.auto_save_project()
         self.log(f"🤖 자동 줄 내림 완료: 현재 페이지 {changed}개")
 
     def auto_linebreak_batch(self):
         if not self.paths:
             return
-        if getattr(self, "ui_language", LANG_KO) == LANG_EN:
-            msg = f"Run Batch Auto Line Break on total {len(self.paths)} page(s)?"
-        else:
-            msg = f"자동 줄 내림을 총 {len(self.paths)}페이지에 실행합니다."
-        if not self.confirm_batch_operation("일괄 자동 줄 내림", msg):
+        title = "일괄 자동 줄 내림"
+        selected_indices, selected_label = self.choose_batch_page_indices_for_context(title, "auto_linebreak")
+        if selected_indices is None:
             self.log("↩️ 일괄 자동 줄 내림 취소")
             return
         self.commit_current_page_ui_to_data()
-        undo_rec = self.make_project_undo_record("일괄 자동 줄 내림", full_project=True)
-        total = 0
-        pages = 0
-        for i in range(len(self.paths)):
+
+        def process_page(i):
             changed = self.auto_linebreak_for_page(i, refresh=False)
-            if changed:
-                pages += 1
-                total += changed
-        if total:
-            self.append_project_undo_record(undo_rec)
-        self.ref_tab()
-        if self.cb_mode.currentIndex() == 4:
-            self.mode_chg(4)
-        self.auto_save_project()
-        self.log(f"🤖 일괄 자동 줄 내림 완료: {pages}페이지 / {total}개")
+            if changed <= 0:
+                return "skipped", "변경된 텍스트 없음"
+            return "done", f"{changed}개 적용"
+
+        result = self.run_page_queue_batch(title, "auto_linebreak", selected_indices, selected_label, process_page, visual=False, cancellable=True)
+        try:
+            if self.cb_mode.currentIndex() == 4:
+                self.schedule_final_text_scene_refresh(80)
+            self.schedule_deferred_auto_save_project(1800)
+        except Exception:
+            pass
+
+
 
     def current_scene_cursor_pos(self):
         try:
@@ -3084,7 +3775,11 @@ class MainWindowTextLayoutMixin:
 
         # 058에서 텍스트 라인 삭제를 프로젝트 스냅샷 Undo로 잡았더니
         # 표/탭 갱신 시 렉이 커져서, 가벼운 기존 page undo 방식으로 되돌린다.
-        self.push_text_line_undo('텍스트 삭제', include_masks=True)
+        undo_ok = self.undo_push_text_line('텍스트 삭제', include_masks=True)
+        try:
+            self.audit_boundary_event("TEXT_DELETE_UNDO_RECORD", count=len(data_items), undo_ok=bool(undo_ok), throttle_ms=100)
+        except Exception:
+            pass
 
         deleted_count = 0
         for d in list(data_items):
@@ -3103,7 +3798,43 @@ class MainWindowTextLayoutMixin:
         self.renumber_text_items_for_current_page(curr)
 
         self.ref_tab()
-        self.refresh_after_text_line_change(autosave=True)
+
+        # 삭제는 현재 선택/키 이벤트가 살아 있는 상태에서 발생할 수 있다.
+        # 이때 scene의 TypesettingItem을 즉시 remove/mode_chg 하면 Qt 내부 참조가 깨져
+        # access violation이 날 수 있으므로, 최종결과 탭의 scene 재구성은 다음 이벤트 루프로 넘긴다.
+        try:
+            mode = int(self.cb_mode.currentIndex())
+        except Exception:
+            mode = 0
+        if mode == 4:
+            try:
+                self.audit_boundary_event(
+                    "TEXT_DELETE_REFRESH_DEFERRED",
+                    deleted_count=deleted_count,
+                    delay_ms=40,
+                    throttle_ms=100,
+                )
+            except Exception:
+                pass
+
+            def _refresh_after_delete():
+                try:
+                    # 2.4.1 안정 흐름처럼 최종결과 탭은 mode_chg(4) 기반으로 다시 그리되,
+                    # 삭제 키 이벤트 콜스택이 끝난 뒤 실행한다.
+                    self.refresh_after_text_line_change(autosave=True)
+                except Exception:
+                    try:
+                        self.schedule_final_text_scene_refresh(80)
+                    except Exception:
+                        pass
+
+            try:
+                QTimer.singleShot(40, _refresh_after_delete)
+            except Exception:
+                _refresh_after_delete()
+        else:
+            self.refresh_after_text_line_change(autosave=True)
+
         self.log((f"🗑️ Text deletion complete: {deleted_count} items / IDs reordered" if self.ui_language == LANG_EN else f"🗑️ 텍스트 삭제 완료: {deleted_count}개 / 번호 재정렬"))
         return True
 
@@ -3207,6 +3938,333 @@ class MainWindowTextLayoutMixin:
         gap = 3.0
         return cx - (group_w / 2.0), cy - group_h - gap
 
+    def schedule_text_table_refresh_after_structure_change(self, selected_ids=None, delay_ms=0, reason='text structure change'):
+        """텍스트 data 개수 변경 뒤 우측 텍스트 라인 표만 안전하게 갱신한다.
+
+        붙여넣기/삭제/복원 직후에는 scene item 개수와 data 개수가 잠깐 다를 수 있다.
+        이때 ref_tab()을 mousePressEvent/keyPressEvent 안에서 즉시 호출하거나
+        mode_chg(4)를 강제로 태우면 Qt scene 생명주기가 꼬일 수 있으므로,
+        표 갱신만 다음 이벤트 루프로 넘겨 분리한다.
+        """
+        ids = [x for x in (selected_ids or []) if x is not None]
+
+        def _refresh_table_only():
+            try:
+                if getattr(self, '_app_is_closing', False) or getattr(self, '_closing_confirmed', False):
+                    return
+            except Exception:
+                pass
+            try:
+                self.ref_tab()
+            except Exception:
+                return
+            if ids:
+                try:
+                    self.select_table_rows_by_ids(ids)
+                except Exception:
+                    pass
+            try:
+                self.audit_boundary_event(
+                    'TEXT_TABLE_REFRESH_AFTER_STRUCTURE_CHANGE',
+                    reason=str(reason or ''),
+                    ids=','.join(str(x) for x in ids),
+                    throttle_ms=100,
+                )
+            except Exception:
+                pass
+
+        try:
+            QTimer.singleShot(max(0, int(delay_ms or 0)), _refresh_table_only)
+        except Exception:
+            _refresh_table_only()
+
+    def _make_live_typesetting_item_for_current_scene(self, data_item, *, z_value=None, selected=False):
+        """Create one live TypesettingItem in the current final-result scene without rebuilding the whole page."""
+        if not isinstance(data_item, dict):
+            return None
+        scene = self._safe_graphics_scene() if hasattr(self, '_safe_graphics_scene') else getattr(getattr(self, 'view', None), 'scene', None)
+        if scene is None:
+            return None
+        item = TypesettingItem(
+            data_item,
+            self.cb_font.currentFont().family() if hasattr(self, 'cb_font') else str(data_item.get('font_family') or 'Arial'),
+            self.sb_font_size.value() if hasattr(self, 'sb_font_size') else int(data_item.get('font_size', 24) or 24),
+            self.sb_strk.value() if hasattr(self, 'sb_strk') else int(data_item.get('stroke_width', 0) or 0),
+            self.on_text_item_moved if hasattr(self, 'on_text_item_moved') else None,
+            text_color=getattr(self, 'default_text_color', '#000000'),
+            stroke_color=getattr(self, 'default_stroke_color', '#FFFFFF'),
+            align=getattr(self, 'default_align', 'center'),
+        )
+        item.main_window = self
+        try:
+            if z_value is not None:
+                item.setZValue(float(z_value))
+            else:
+                item.setZValue(90)
+        except Exception:
+            pass
+        try:
+            if hasattr(getattr(self, 'view', None), '_set_layer_tag'):
+                self.view._set_layer_tag(item, 'movable_text')
+        except Exception:
+            pass
+        try:
+            scene.addItem(item)
+            item.setSelected(bool(selected))
+        except Exception:
+            return None
+        return item
+
+    def _selected_or_source_text_data_for_drag_duplicate(self, source_item):
+        src_data = getattr(source_item, 'data', None)
+        if not isinstance(src_data, dict):
+            return []
+        try:
+            selected = [d for d in self.selected_text_data_items() if isinstance(d, dict)]
+        except Exception:
+            selected = []
+        src_id = str(src_data.get('id'))
+        if not selected or all(str(d.get('id')) != src_id for d in selected):
+            selected = [src_data]
+        # Preserve page order and remove duplicates.
+        seen = set()
+        ordered = []
+        curr = self.data.get(self.idx) or {}
+        selected_ids = {str(d.get('id')) for d in selected}
+        for d in curr.get('data', []) or []:
+            sid = str(d.get('id'))
+            if sid in selected_ids and sid not in seen:
+                ordered.append(d)
+                seen.add(sid)
+        return ordered or [src_data]
+
+    def begin_text_ctrl_drag_duplicate(self, source_item, scene_press_pos):
+        """Ctrl+drag: duplicate selected text items and attach the copies to the mouse."""
+        if getattr(self, '_app_is_closing', False) or getattr(self, '_closing_confirmed', False):
+            return False
+        try:
+            if self.cb_mode.currentIndex() != 4:
+                return False
+        except Exception:
+            return False
+        curr = self.data.get(self.idx)
+        if not curr:
+            return False
+        scene = self._safe_graphics_scene() if hasattr(self, '_safe_graphics_scene') else getattr(getattr(self, 'view', None), 'scene', None)
+        if scene is None:
+            return False
+        sources = self._selected_or_source_text_data_for_drag_duplicate(source_item)
+        sources = [d for d in sources if isinstance(d, dict)]
+        if not sources:
+            return False
+
+        try:
+            self.push_page_text_undo('텍스트 Ctrl 드래그 복제')
+        except Exception:
+            try:
+                self.undo_text_checkpoint('텍스트 Ctrl 드래그 복제')
+            except Exception:
+                pass
+
+        try:
+            scene.clearSelection()
+        except Exception:
+            pass
+
+        new_items = []
+        new_ids = []
+        next_id = self.next_text_id()
+        try:
+            top_z = max([float(getattr(x, 'zValue', lambda: 30)()) for x in scene.items()] or [30.0])
+        except Exception:
+            top_z = 90.0
+        for i, src in enumerate(sources):
+            try:
+                d = copy.deepcopy(src)
+            except Exception:
+                d = dict(src)
+            d['id'] = next_id
+            next_id += 1
+            for _runtime_key in (
+                'pending_new_text', 'force_show', '_qt_item', '_scene_item',
+                '_transform_mode', '_skew_mode', '_trapezoid_mode', '_arc_mode', 'arc_active_index',
+            ):
+                d.pop(_runtime_key, None)
+            if 'manual_text_rect' not in d:
+                d['manual_text_rect'] = True
+            if 'text_anchor_mode' not in d:
+                d['text_anchor_mode'] = 'text'
+            curr.setdefault('data', []).append(d)
+            item = self._make_live_typesetting_item_for_current_scene(d, z_value=top_z + 1 + i, selected=True)
+            if item is None:
+                try:
+                    curr.setdefault('data', []).remove(d)
+                except Exception:
+                    pass
+                continue
+            new_items.append(item)
+            new_ids.append(d.get('id'))
+
+        if not new_items:
+            return False
+
+        press = QPointF(scene_press_pos)
+        state = {
+            'items': new_items,
+            'ids': list(new_ids),
+            'press_scene': press,
+            'press_positions': [QPointF(item.pos()) for item in new_items],
+        }
+        self._text_ctrl_drag_duplicate_state = state
+        try:
+            self._text_item_drag_active = True
+            self._text_item_drag_active_count = max(1, int(getattr(self, '_text_item_drag_active_count', 0) or 0) + 1)
+            self._text_item_drag_active_id = ','.join(str(x) for x in new_ids)
+        except Exception:
+            pass
+        try:
+            self.audit_boundary_event('TEXT_CTRL_DRAG_DUPLICATE_BEGIN', ids=','.join(str(x) for x in new_ids), count=len(new_ids), throttle_ms=80)
+        except Exception:
+            pass
+        return True
+
+    def update_text_ctrl_drag_duplicate(self, scene_pos, *, axis_lock=False, vertical_only=False):
+        state = getattr(self, '_text_ctrl_drag_duplicate_state', None)
+        if not isinstance(state, dict):
+            return False
+        try:
+            delta = QPointF(scene_pos) - QPointF(state.get('press_scene'))
+            if axis_lock or vertical_only:
+                # Shift+Ctrl drag uses axis lock: horizontal if X movement dominates, vertical if Y movement dominates.
+                if abs(float(delta.x())) >= abs(float(delta.y())):
+                    delta.setY(0.0)
+                else:
+                    delta.setX(0.0)
+        except Exception:
+            delta = QPointF(0, 0)
+        for item, press_pos in zip(list(state.get('items') or []), list(state.get('press_positions') or [])):
+            try:
+                item.setPos(QPointF(press_pos) + delta)
+                item.update()
+            except RuntimeError:
+                pass
+            except Exception:
+                pass
+        return True
+
+    def finish_text_ctrl_drag_duplicate(self, *, commit=True):
+        state = getattr(self, '_text_ctrl_drag_duplicate_state', None)
+        self._text_ctrl_drag_duplicate_state = None
+        if not isinstance(state, dict):
+            return False
+        items = [x for x in (state.get('items') or []) if isinstance(x, TypesettingItem)]
+        ids = [x for x in (state.get('ids') or []) if x is not None]
+        if not commit:
+            curr = self.data.get(self.idx) or {}
+            for item in items:
+                try:
+                    if item.scene() is not None:
+                        item.scene().removeItem(item)
+                except Exception:
+                    pass
+                try:
+                    curr.get('data', []).remove(item.data)
+                except Exception:
+                    pass
+            return True
+        for item in items:
+            try:
+                x_off, y_off = item.current_text_offsets_from_item_pos(item.pos())
+                item.data['x_off'] = int(x_off)
+                item.data['y_off'] = int(y_off)
+                item.setSelected(True)
+            except Exception:
+                pass
+        try:
+            self._text_item_drag_active_count = max(0, int(getattr(self, '_text_item_drag_active_count', 0) or 0) - 1)
+            if int(getattr(self, '_text_item_drag_active_count', 0) or 0) <= 0:
+                self._text_item_drag_active = False
+                self._text_item_drag_active_id = None
+        except Exception:
+            pass
+        try:
+            self.schedule_text_table_refresh_after_structure_change(ids, delay_ms=0, reason='텍스트 Ctrl 드래그 복제')
+        except Exception:
+            pass
+        try:
+            self.finalize_text_change(ids=ids, fields=['data', 'x_off', 'y_off'], reason='텍스트 Ctrl 드래그 복제', delay_ms=1500, update_table=False, refresh_scene=False)
+        except Exception:
+            try:
+                self.schedule_deferred_auto_save_project(1500)
+            except Exception:
+                pass
+        try:
+            QTimer.singleShot(30, lambda ids=list(ids): self.reselect_text_items(ids))
+        except Exception:
+            pass
+        try:
+            self.audit_boundary_event('TEXT_CTRL_DRAG_DUPLICATE_DONE', ids=','.join(str(x) for x in ids), count=len(ids), throttle_ms=80)
+        except Exception:
+            pass
+        self.log(f"📋 Ctrl 드래그 복제 완료: {len(ids)}개")
+        return True
+
+    def nudge_selected_text_items(self, dx=0, dy=0):
+        """Move selected text items by keyboard arrows in page coordinates."""
+        try:
+            if self.cb_mode.currentIndex() != 4:
+                return False
+        except Exception:
+            return False
+        data_items = [d for d in self.selected_text_data_items() if isinstance(d, dict)]
+        if not data_items:
+            return False
+        try:
+            dx = int(dx)
+            dy = int(dy)
+        except Exception:
+            return False
+        if dx == 0 and dy == 0:
+            return False
+        ids = [d.get('id') for d in data_items if d.get('id') is not None]
+        if not ids:
+            return False
+        try:
+            self.push_page_text_undo('텍스트 방향키 이동')
+        except Exception:
+            try:
+                self.undo_text_checkpoint('텍스트 방향키 이동')
+            except Exception:
+                pass
+        for d in data_items:
+            try:
+                d['x_off'] = int(round(float(d.get('x_off', 0) or 0))) + dx
+                d['y_off'] = int(round(float(d.get('y_off', 0) or 0))) + dy
+            except Exception:
+                d['x_off'] = int(dx)
+                d['y_off'] = int(dy)
+        # Move live selected scene items immediately.  No full scene rebuild is needed.
+        idset = {str(x) for x in ids}
+        try:
+            for item in self.selected_text_items():
+                if str(getattr(item, 'data', {}).get('id')) in idset:
+                    item.setPos(QPointF(item.pos().x() + dx, item.pos().y() + dy))
+                    item.update()
+        except Exception:
+            pass
+        try:
+            self.finalize_text_change(ids=ids, fields=['x_off', 'y_off'], reason='텍스트 방향키 이동', delay_ms=900, update_table=True, refresh_scene=False)
+        except Exception:
+            try:
+                self.schedule_deferred_auto_save_project(900)
+            except Exception:
+                pass
+        try:
+            self.audit_boundary_event('TEXT_KEYBOARD_NUDGE', ids=','.join(str(x) for x in ids), dx=dx, dy=dy, count=len(ids), throttle_ms=80)
+        except Exception:
+            pass
+        return True
+
     def paste_text_clipboard_at(self, scene_pos=None):
         curr = self.data.get(self.idx)
         if not curr:
@@ -3227,6 +4285,8 @@ class MainWindowTextLayoutMixin:
         # 커서가 텍스트를 가리지 않도록 커서의 위쪽 끝단을 텍스트 묶음의 우측 하단에 맞춘다.
         px, py = self.text_clipboard_paste_origin_from_cursor(src_items, scene_pos)
 
+        # 2.4.1 안정 경로 복원: 붙여넣기는 item 개수가 바뀌는 구조 변경이므로
+        # Command/Checkpoint 경로가 아니라 page text snapshot Undo로 잡는다.
         self.push_page_text_undo('텍스트 붙여넣기')
 
         new_ids = []
@@ -3259,12 +4319,87 @@ class MainWindowTextLayoutMixin:
             new_ids.append(d['id'])
             curr.setdefault('data', []).append(d)
 
-        self.ref_tab()
-        if self.cb_mode.currentIndex() == 4:
-            self.mode_chg(4)
-            self.reselect_text_items(new_ids)
-        self.auto_save_project()
+        # 2.4.1 안정 경로 복원 + 우측 텍스트 라인 즉시 반영:
+        # 붙여넣기 직후에는 data에는 새 항목이 있지만 scene에는 아직 item이 없는 상태가 정상이다.
+        # 이 순간 mode_chg(4)를 즉시 태우면 mousePressEvent 안에서 QGraphicsScene을 갈아엎을 수 있으므로,
+        # scene 갱신은 지연하되 우측 텍스트 라인 표는 다음 이벤트 루프에서 별도로 갱신한다.
+        try:
+            self.schedule_text_table_refresh_after_structure_change(new_ids, delay_ms=0, reason='텍스트 붙여넣기')
+            if self.cb_mode.currentIndex() == 4:
+                self.schedule_final_text_scene_refresh(40)
+                try:
+                    QTimer.singleShot(70, lambda ids=list(new_ids): self.reselect_text_items(ids))
+                except Exception:
+                    self.reselect_text_items(new_ids)
+            self.finalize_text_change(ids=new_ids, fields=['data'], reason='텍스트 붙여넣기', delay_ms=1800)
+        except Exception:
+            self.auto_save_project()
         self.log(f"📋 텍스트 붙여넣기 완료: {len(new_ids)}개")
+        return True
+
+    def paste_text_clipboard_same_position(self):
+        """Ctrl+Shift+V: 복사한 텍스트를 현재 페이지의 같은 이미지 좌표에 붙여넣는다."""
+        if self.cb_mode.currentIndex() != 4:
+            return False
+        curr = self.data.get(self.idx)
+        if not curr:
+            return False
+        if not self.text_clipboard or bool(getattr(self, "text_clipboard_is_plain", False)):
+            self.log("⚠️ 원위치 붙여넣기는 최종결과 탭에서 복사한 텍스트만 사용할 수 있습니다.")
+            return False
+
+        src_items = [copy.deepcopy(d) for d in self.text_clipboard if isinstance(d, dict)]
+        if not src_items:
+            self.log("⚠️ 붙여넣을 텍스트가 없습니다.")
+            return False
+
+        # 2.4.1 안정 경로 복원: 원위치 붙여넣기도 구조 변경이므로 page text snapshot Undo로 잡는다.
+        self.push_page_text_undo('텍스트 원위치 붙여넣기')
+
+        new_ids = []
+        next_id = self.next_text_id()
+        for d in src_items:
+            rect = list(d.get('rect') or [0, 0, 260, 80])
+            while len(rect) < 4:
+                rect.append(1)
+            try:
+                rect = [int(round(float(rect[0]))), int(round(float(rect[1]))), max(1, int(round(float(rect[2])))), max(1, int(round(float(rect[3]))))]
+            except Exception:
+                rect = [0, 0, 260, 80]
+
+            d['id'] = next_id
+            next_id += 1
+            d['rect'] = rect
+            # 원위치 붙여넣기는 복사 당시의 페이지 내부 좌표/오프셋/변형값을 그대로 보존한다.
+            # 단, 임시 선택/생성 플래그와 기존 item 참조성 상태는 새 텍스트에 가져가지 않는다.
+            d.pop('pending_new_text', None)
+            d.pop('force_show', None)
+            d.pop('_qt_item', None)
+            d.pop('_scene_item', None)
+            if 'manual_text_rect' not in d:
+                d['manual_text_rect'] = True
+            if 'text_anchor_mode' not in d:
+                d['text_anchor_mode'] = 'text'
+            new_ids.append(d['id'])
+            curr.setdefault('data', []).append(d)
+
+        # 2.4.1 안정 경로 복원 + 우측 텍스트 라인 즉시 반영:
+        # 원위치 붙여넣기도 scene 갱신은 지연하되, 표 갱신은 다음 이벤트 루프로 분리한다.
+        try:
+            self.schedule_text_table_refresh_after_structure_change(new_ids, delay_ms=0, reason='텍스트 원위치 붙여넣기')
+            if self.cb_mode.currentIndex() == 4:
+                self.schedule_final_text_scene_refresh(40)
+                try:
+                    QTimer.singleShot(70, lambda ids=list(new_ids): self.reselect_text_items(ids))
+                except Exception:
+                    self.reselect_text_items(new_ids)
+            self.finalize_text_change(ids=new_ids, fields=['data'], reason='텍스트 원위치 붙여넣기', delay_ms=1800)
+        except Exception:
+            try:
+                self.schedule_deferred_auto_save_project(1800)
+            except Exception:
+                self.auto_save_project()
+        self.log(f"📋 원위치 붙여넣기 완료: {len(new_ids)}개")
         return True
 
     def windows_clipboard_text(self):
@@ -3361,25 +4496,104 @@ class MainWindowTextLayoutMixin:
         if not data_items:
             self.log("⚠️ " + self.tr_ui("효과를 적용할 편집 가능한 텍스트가 없습니다."))
             return False
-        dlg = TextAdvancedEffectDialog(data_items[0], self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return False
-        values = dlg.values()
+        try:
+            if hasattr(self, "flush_text_scene_geometry_to_data"):
+                self.flush_text_scene_geometry_to_data(data_items, mark_dirty=False, reason="before advanced text options")
+        except Exception:
+            pass
+
+        effect_fields = [
+            "text_gradient_enabled", "text_gradient_color1", "text_gradient_color2", "text_gradient_angle", "text_gradient_ratio",
+            "stroke_gradient_enabled", "stroke_gradient_color1", "stroke_gradient_color2", "stroke_gradient_angle", "stroke_gradient_ratio",
+            "double_stroke_enabled", "double_stroke_color", "double_stroke_width",
+            "text_shadow_enabled", "text_shadow_color", "text_shadow_opacity", "text_shadow_offset_x", "text_shadow_offset_y", "text_shadow_blur",
+            "text_glow_enabled", "text_glow_color", "text_glow_opacity", "text_glow_offset_x", "text_glow_offset_y", "text_glow_size", "text_glow_blur",
+        ]
         selected_ids = [d.get('id') for d in data_items]
-        self.push_page_text_undo('텍스트 고급 효과 변경')
+        original_values = []
         for d in data_items:
-            for k, v in values.items():
-                d[k] = v
+            original_values.append({k: copy.deepcopy(d.get(k)) for k in effect_fields})
+
+        def apply_values_to_items(values, *, refresh_scene=True):
+            if not isinstance(values, dict):
+                return
+            for d in data_items:
+                for k in effect_fields:
+                    if k in values:
+                        d[k] = values[k]
+            if refresh_scene and self.cb_mode.currentIndex() == 4:
+                try:
+                    live_ok = False
+                    try:
+                        if hasattr(self, "refresh_text_items_live_in_place"):
+                            live_ok = bool(self.refresh_text_items_live_in_place(self.selected_text_items(), keep_selection=True))
+                    except Exception:
+                        live_ok = False
+                    if not live_ok and not self.refresh_final_text_items_by_ids(selected_ids):
+                        self.schedule_final_text_scene_refresh(80)
+                    self.reselect_text_items(selected_ids)
+                except Exception:
+                    self.schedule_final_text_scene_refresh(80)
+
+        def restore_originals(*, refresh_scene=True):
+            for d, orig in zip(data_items, original_values):
+                for k in effect_fields:
+                    if orig.get(k) is None:
+                        d.pop(k, None)
+                    else:
+                        d[k] = copy.deepcopy(orig.get(k))
+            if refresh_scene and self.cb_mode.currentIndex() == 4:
+                try:
+                    live_ok = False
+                    try:
+                        if hasattr(self, "refresh_text_items_live_in_place"):
+                            live_ok = bool(self.refresh_text_items_live_in_place(self.selected_text_items(), keep_selection=True))
+                    except Exception:
+                        live_ok = False
+                    if not live_ok and not self.refresh_final_text_items_by_ids(selected_ids):
+                        self.schedule_final_text_scene_refresh(80)
+                    self.reselect_text_items(selected_ids)
+                except Exception:
+                    self.schedule_final_text_scene_refresh(80)
+
+        dlg = TextAdvancedEffectDialog(data_items[0], self)
+        try:
+            dlg.previewChanged.connect(lambda values: apply_values_to_items(values, refresh_scene=True))
+        except Exception:
+            pass
+
+        result = dlg.exec()
+        final_values = dlg.values()
+        if result != QDialog.DialogCode.Accepted:
+            restore_originals(refresh_scene=True)
+            return False
+
+        # 미리보기 중 data가 이미 바뀌었으므로, Undo 기준점은 원본 상태로 잠깐 돌린 뒤 잡는다.
+        restore_originals(refresh_scene=False)
+        self.append_text_engine_diff_for_items('고급 텍스트/획 옵션 변경', data_items, fields=list(final_values.keys()))
+        apply_values_to_items(final_values, refresh_scene=False)
+        for d in data_items:
             try:
                 if bool(d.get('manual_text_rect')) or str(d.get('text_anchor_mode') or '').lower() == 'text':
                     self.shrink_text_rect_to_content(d)
             except Exception:
                 pass
-        self.auto_save_project()
-        if self.cb_mode.currentIndex() == 4:
-            self.mode_chg(4)
+        try:
+            self.finalize_text_change(
+                ids=selected_ids,
+                items=data_items,
+                fields=list(final_values.keys()),
+                reason='고급 텍스트/획 옵션 변경',
+                delay_ms=1800,
+            )
             self.reselect_text_items(selected_ids)
-        self.log(f"🎨 텍스트 고급 효과 적용: {len(data_items)}개")
+        except Exception:
+            try:
+                self.schedule_final_text_scene_refresh(80)
+                self.schedule_deferred_auto_save_project(1800)
+            except Exception:
+                pass
+        self.log(f"🎨 고급 텍스트/획 옵션 적용: {len(data_items)}개")
         return True
 
     def _qimage_to_png_base64(self, image):
@@ -3469,7 +4683,7 @@ class MainWindowTextLayoutMixin:
         ) != QMessageBox.StandardButton.Yes:
             return False
         selected_ids = [d.get('id') for d in data_items]
-        self.push_page_text_undo('텍스트 객체 변환')
+        self.undo_text_checkpoint('텍스트 객체 변환')
         converted = 0
         for d in data_items:
             payload = self.render_text_data_item_to_raster_png(d)
@@ -3489,16 +4703,18 @@ class MainWindowTextLayoutMixin:
             d.pop('_skew_mode', None)
             d.pop('_trapezoid_mode', None)
             d.pop('_arc_mode', None)
-            d['object_source_text'] = str(d.get('translated_text') or '')
+            d['object_source_text'] = self.strip_object_display_prefix_for_data(d.get('translated_text') or '')
             converted += 1
         if not converted:
             self.log("⚠️ 객체 변환에 실패했습니다.")
             return False
-        self.ref_tab()
-        self.auto_save_project()
-        if self.cb_mode.currentIndex() == 4:
-            self.mode_chg(4)
-            self.reselect_text_items(selected_ids)
+        try:
+            if self.cb_mode.currentIndex() == 4:
+                self.schedule_final_text_scene_refresh(80)
+                self.reselect_text_items(selected_ids)
+            self.finalize_text_change(ids=selected_ids, fields=['rasterized_text', 'raster_png'], reason='텍스트 객체 변환', delay_ms=1800)
+        except Exception:
+            self.auto_save_project()
         self.log(f"🧱 텍스트 객체 변환 완료: {converted}개")
         return True
 
@@ -3532,7 +4748,7 @@ class MainWindowTextLayoutMixin:
             self.log("⚠️ 지울 수 있는 텍스트 객체가 없습니다.")
             return False
 
-        self.push_page_text_undo('텍스트 객체 일부 지우기')
+        self.undo_text_checkpoint('텍스트 객체 일부 지우기')
         changed_ids = []
         for d in targets:
             img = self._qimage_from_png_base64(d.get('raster_png'))
@@ -3564,10 +4780,13 @@ class MainWindowTextLayoutMixin:
         if not changed_ids:
             self.log("↩️ 객체 지우기 취소: 선택한 영역이 객체와 겹치지 않습니다.")
             return False
-        self.auto_save_project()
-        if self.cb_mode.currentIndex() == 4:
-            self.mode_chg(4)
-            self.reselect_text_items(changed_ids)
+        try:
+            if self.cb_mode.currentIndex() == 4:
+                self.schedule_final_text_scene_refresh(80)
+                self.reselect_text_items(changed_ids)
+            self.finalize_text_change(ids=changed_ids, fields=['raster_png'], reason='텍스트 객체 일부 지우기', delay_ms=1800)
+        except Exception:
+            self.auto_save_project()
         self.log(f"🧽 텍스트 객체 일부 지우기 완료: {len(changed_ids)}개")
         return True
 
@@ -3595,7 +4814,7 @@ class MainWindowTextLayoutMixin:
         act_paste = menu.addAction("텍스트 붙여넣기")
         act_paste.setEnabled(bool(self.text_clipboard))
         menu.addSeparator()
-        act_effect = menu.addAction(self.tr_ui("문자/획 그라데이션..."))
+        act_effect = menu.addAction(self.tr_ui("고급 텍스트/획 옵션..."))
         act_effect.setEnabled(bool(editable_text_items))
         act_skew = menu.addAction(self.tr_ui("평행사변형 변형"))
         act_skew.setCheckable(True)
@@ -3681,15 +4900,26 @@ class MainWindowTextLayoutMixin:
             self.log("🔷 텍스트 변형 모드 OFF")
 
         if self.cb_mode.currentIndex() == 4:
-            old_suppress = getattr(self, "_suppress_mode_undo", False)
-            self._suppress_mode_undo = True
             try:
-                self.mode_chg(4)
-            finally:
-                self._suppress_mode_undo = old_suppress
-            if selected_id is not None:
-                self.reselect_text_items([selected_id])
-        self.auto_save_project()
+                if selected_id is not None:
+                    if not self.refresh_final_text_items_by_ids([selected_id]):
+                        self.schedule_final_text_scene_refresh(80)
+                    self.reselect_text_items([selected_id])
+                else:
+                    self.schedule_final_text_scene_refresh(80)
+            except Exception:
+                try:
+                    self.schedule_final_text_scene_refresh(80)
+                except Exception:
+                    pass
+        try:
+            self.finalize_text_change(ids=[selected_id] if selected_id is not None else [], fields=['transform_mode'], reason='텍스트 변형 모드 변경', delay_ms=1800)
+        except Exception:
+            try:
+                self.mark_active_page_dirty('text')
+                self.schedule_deferred_auto_save_project(1800)
+            except Exception:
+                pass
 
     def toggle_text_skew_mode(self, data_item):
         """최종화면 텍스트 기울이기 직접 조정 모드 토글."""
@@ -3699,6 +4929,11 @@ class MainWindowTextLayoutMixin:
         enabled = not bool(data_item.get('_skew_mode', False))
         self.clear_text_transform_modes(except_data=data_item)
         selected_id = data_item.get('id')
+        try:
+            if hasattr(self, "flush_text_scene_geometry_to_data"):
+                self.flush_text_scene_geometry_to_data([data_item], mark_dirty=False, reason="before text transform mode")
+        except Exception:
+            pass
 
         if enabled:
             rect_changed = self.ensure_text_anchor_rect(
@@ -3718,15 +4953,26 @@ class MainWindowTextLayoutMixin:
             self.log("🔷 평행사변형 변형 OFF")
 
         if self.cb_mode.currentIndex() == 4:
-            old_suppress = getattr(self, "_suppress_mode_undo", False)
-            self._suppress_mode_undo = True
             try:
-                self.mode_chg(4)
-            finally:
-                self._suppress_mode_undo = old_suppress
-            if selected_id is not None:
-                self.reselect_text_items([selected_id])
-        self.auto_save_project()
+                if selected_id is not None:
+                    if not self.refresh_final_text_items_by_ids([selected_id]):
+                        self.schedule_final_text_scene_refresh(80)
+                    self.reselect_text_items([selected_id])
+                else:
+                    self.schedule_final_text_scene_refresh(80)
+            except Exception:
+                try:
+                    self.schedule_final_text_scene_refresh(80)
+                except Exception:
+                    pass
+        try:
+            self.finalize_text_change(ids=[selected_id] if selected_id is not None else [], fields=['transform_mode'], reason='텍스트 변형 모드 변경', delay_ms=1800)
+        except Exception:
+            try:
+                self.mark_active_page_dirty('text')
+                self.schedule_deferred_auto_save_project(1800)
+            except Exception:
+                pass
 
     def toggle_text_trapezoid_mode(self, data_item):
         """최종화면 텍스트 사다리꼴 변형 직접 조정 모드 토글."""
@@ -3736,6 +4982,11 @@ class MainWindowTextLayoutMixin:
         enabled = not bool(data_item.get('_trapezoid_mode', False))
         self.clear_text_transform_modes(except_data=data_item)
         selected_id = data_item.get('id')
+        try:
+            if hasattr(self, "flush_text_scene_geometry_to_data"):
+                self.flush_text_scene_geometry_to_data([data_item], mark_dirty=False, reason="before text transform mode")
+        except Exception:
+            pass
 
         if enabled:
             rect_changed = self.ensure_text_anchor_rect(
@@ -3755,15 +5006,26 @@ class MainWindowTextLayoutMixin:
             self.log("🔷 사다리꼴 변형 OFF")
 
         if self.cb_mode.currentIndex() == 4:
-            old_suppress = getattr(self, "_suppress_mode_undo", False)
-            self._suppress_mode_undo = True
             try:
-                self.mode_chg(4)
-            finally:
-                self._suppress_mode_undo = old_suppress
-            if selected_id is not None:
-                self.reselect_text_items([selected_id])
-        self.auto_save_project()
+                if selected_id is not None:
+                    if not self.refresh_final_text_items_by_ids([selected_id]):
+                        self.schedule_final_text_scene_refresh(80)
+                    self.reselect_text_items([selected_id])
+                else:
+                    self.schedule_final_text_scene_refresh(80)
+            except Exception:
+                try:
+                    self.schedule_final_text_scene_refresh(80)
+                except Exception:
+                    pass
+        try:
+            self.finalize_text_change(ids=[selected_id] if selected_id is not None else [], fields=['transform_mode'], reason='텍스트 변형 모드 변경', delay_ms=1800)
+        except Exception:
+            try:
+                self.mark_active_page_dirty('text')
+                self.schedule_deferred_auto_save_project(1800)
+            except Exception:
+                pass
 
     def toggle_text_arc_mode(self, data_item):
         """최종화면 텍스트 부채꼴 변형 직접 조정 모드 토글."""
@@ -3773,6 +5035,11 @@ class MainWindowTextLayoutMixin:
         enabled = not bool(data_item.get('_arc_mode', False))
         self.clear_text_transform_modes(except_data=data_item)
         selected_id = data_item.get('id')
+        try:
+            if hasattr(self, "flush_text_scene_geometry_to_data"):
+                self.flush_text_scene_geometry_to_data([data_item], mark_dirty=False, reason="before text transform mode")
+        except Exception:
+            pass
 
         if enabled:
             rect_changed = self.ensure_text_anchor_rect(
@@ -3792,15 +5059,26 @@ class MainWindowTextLayoutMixin:
             self.log("🔷 부채꼴 변형 OFF")
 
         if self.cb_mode.currentIndex() == 4:
-            old_suppress = getattr(self, "_suppress_mode_undo", False)
-            self._suppress_mode_undo = True
             try:
-                self.mode_chg(4)
-            finally:
-                self._suppress_mode_undo = old_suppress
-            if selected_id is not None:
-                self.reselect_text_items([selected_id])
-        self.auto_save_project()
+                if selected_id is not None:
+                    if not self.refresh_final_text_items_by_ids([selected_id]):
+                        self.schedule_final_text_scene_refresh(80)
+                    self.reselect_text_items([selected_id])
+                else:
+                    self.schedule_final_text_scene_refresh(80)
+            except Exception:
+                try:
+                    self.schedule_final_text_scene_refresh(80)
+                except Exception:
+                    pass
+        try:
+            self.finalize_text_change(ids=[selected_id] if selected_id is not None else [], fields=['transform_mode'], reason='텍스트 변형 모드 변경', delay_ms=1800)
+        except Exception:
+            try:
+                self.mark_active_page_dirty('text')
+                self.schedule_deferred_auto_save_project(1800)
+            except Exception:
+                pass
 
     def show_final_background_context_menu(self, global_pos, scene_pos):
         if self.cb_mode.currentIndex() != 4:
@@ -3839,7 +5117,7 @@ class MainWindowTextLayoutMixin:
         editable_text_items = [d for d in data_items if isinstance(d, dict) and not d.get('rasterized_text')]
 
         menu = QMenu(self)
-        act_effect = menu.addAction(self.tr_ui("문자/획 그라데이션..."))
+        act_effect = menu.addAction(self.tr_ui("고급 텍스트/획 옵션..."))
         act_effect.setEnabled(bool(editable_text_items))
         act_skew = menu.addAction(self.tr_ui("평행사변형 변형"))
         act_skew.setEnabled(len(editable_text_items) == 1)
@@ -3888,7 +5166,7 @@ class MainWindowTextLayoutMixin:
                 # 지우개가 객체 바깥에서 시작해도 스트로크가 객체를 통과하면 여기서 정상 기록된다.
                 if not getattr(self, '_raster_text_erase_undo_started', False):
                     try:
-                        self.push_page_text_undo('텍스트 객체 지우개')
+                        self.undo_text_checkpoint('텍스트 객체 지우개')
                     except Exception:
                         pass
                     self._raster_text_erase_undo_started = True
@@ -4006,7 +5284,7 @@ class MainWindowTextLayoutMixin:
 
         # 058에서 프로젝트 스냅샷 Undo로 바꾼 뒤 탭 이동/표 갱신 렉이 커져
         # 행 순서 변경도 기존의 가벼운 page undo 방식으로 되돌린다.
-        self.push_text_line_undo('텍스트 행 순서 변경')
+        self.undo_push_text_line('텍스트 행 순서 변경')
 
         by_id = {str(d.get('id')): d for d in old_data}
         new_data = [by_id[i] for i in id_order if i in by_id]

@@ -30,6 +30,39 @@ import numpy as np
 _ENGINE_CACHE: dict[tuple[Any, ...], Any] = {}
 
 
+def _worker_log_path() -> Path:
+    try:
+        local = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+        if local:
+            d = Path(local) / "YSBTranslator" / "logs"
+            d.mkdir(parents=True, exist_ok=True)
+            return d / "ysb_paddle_ocr_worker_child.log"
+    except Exception:
+        pass
+    try:
+        d = _package_root() / "logs"
+        d.mkdir(parents=True, exist_ok=True)
+        return d / "ysb_paddle_ocr_worker_child.log"
+    except Exception:
+        return Path("ysb_paddle_ocr_worker_child.log")
+
+
+def _worker_log(message: str, **fields: Any) -> None:
+    try:
+        import datetime
+        pairs = []
+        for k, v in fields.items():
+            text = str(v).replace("\n", "\\n").replace("\r", "\\r")
+            if len(text) > 500:
+                text = text[:497] + "..."
+            pairs.append(f"{k}={text!r}" if " " in text else f"{k}={text}")
+        tail = (" | " + " ".join(pairs)) if pairs else ""
+        with _worker_log_path().open("a", encoding="utf-8", errors="replace") as f:
+            f.write(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}] {message}{tail}\n")
+    except Exception:
+        pass
+
+
 def _normalize_lang(language: str) -> str:
     lang = str(language or "ja").strip().lower()
     aliases = {
@@ -355,6 +388,11 @@ def _parse_predict_result(result: Any) -> list[dict[str, Any]]:
 def run_ocr_request(req: dict[str, Any]) -> dict[str, Any]:
     try:
         image_path = str(req.get("image_path") or "")
+        try:
+            stat_size = Path(image_path).stat().st_size if image_path else 0
+        except Exception:
+            stat_size = 0
+        _worker_log("CHILD OCR REQUEST", image_path=image_path, file_size=stat_size, language=req.get("language"), device=req.get("device"))
         if not image_path:
             return {"ok": False, "engine": "paddleocr_external", "error": "image_path is empty", "lines": []}
         language = str(req.get("language") or "ja")
@@ -373,8 +411,10 @@ def run_ocr_request(req: dict[str, Any]) -> dict[str, Any]:
             except TypeError:
                 result = engine.ocr(image_path)
             lines = _parse_old_ocr_result(result)
+        _worker_log("CHILD OCR DONE", image_path=image_path, line_count=len(lines))
         return {"ok": True, "engine": "paddleocr_external", "lines": lines, "error": ""}
     except Exception as e:
+        _worker_log("CHILD OCR EXCEPTION", error=repr(e), traceback=traceback.format_exc())
         return {
             "ok": False,
             "engine": "paddleocr_external",
@@ -385,6 +425,7 @@ def run_ocr_request(req: dict[str, Any]) -> dict[str, Any]:
 
 
 def serve() -> int:
+    _worker_log("CHILD SERVER START", executable=sys.executable, cwd=os.getcwd())
     # Keep protocol stdout clean.  Redirect ordinary prints/Paddle logs to stderr.
     protocol_out = sys.stdout
     sys.stdout = sys.stderr
@@ -397,6 +438,7 @@ def serve() -> int:
         try:
             req = json.loads(line)
             if req.get("cmd") == "shutdown":
+                _worker_log("CHILD SERVER SHUTDOWN")
                 protocol_out.write(json.dumps({"ok": True, "bye": True}, ensure_ascii=False) + "\n")
                 protocol_out.flush()
                 return 0
@@ -405,6 +447,7 @@ def serve() -> int:
             res = {"ok": False, "engine": "paddleocr_external", "lines": [], "error": str(e), "traceback": traceback.format_exc()}
         protocol_out.write(json.dumps(res, ensure_ascii=False) + "\n")
         protocol_out.flush()
+    _worker_log("CHILD SERVER STDIN CLOSED")
     return 0
 
 

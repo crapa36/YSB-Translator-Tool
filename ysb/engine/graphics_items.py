@@ -1,14 +1,27 @@
 import math
 import base64
 import copy
-from PyQt6.QtWidgets import QGraphicsPathItem, QGraphicsRectItem, QInputDialog
-from PyQt6.QtGui import QFont, QFontMetrics, QPainterPath, QPen, QBrush, QColor, QTransform, QImage, QPixmap, QLinearGradient, QPainter, QPolygonF
-from PyQt6.QtCore import Qt, QRectF, QPointF, QBuffer, QByteArray, QIODevice
+from PyQt6.QtWidgets import QGraphicsPathItem, QGraphicsRectItem, QInputDialog, QGraphicsItem, QGraphicsView, QApplication
+from PyQt6.QtGui import QFont, QFontInfo, QFontMetrics, QPainterPath, QPainterPathStroker, QPen, QBrush, QColor, QTransform, QImage, QPixmap, QLinearGradient, QPainter, QPolygonF
+from PyQt6.QtCore import Qt, QRectF, QPointF, QBuffer, QByteArray, QIODevice, QTimer
+
+try:
+    import numpy as _np
+    import cv2 as _cv2
+except Exception:
+    _np = None
+    _cv2 = None
 
 
 # Photoshop의 Faux Italic 느낌에 맞춘 합성 기울임 강도.
 # 너무 크면 글자가 과하게 누워 보이므로, Qt 기본 italic은 끄고 이 값만 적용한다.
 FAUX_ITALIC_SHEAR = -0.13
+
+# 작업 화면 보조 UI 기준 해상도.
+# 텍스트 선택/변형 박스와 핸들만 확대하고 실제 출력용 텍스트 획은 건드리지 않는다.
+GUIDE_BASE_W = 1086.0
+GUIDE_BASE_H = 1449.0
+GUIDE_SCALE_MAX = 6.0
 
 
 def _qcolor(value, fallback):
@@ -18,6 +31,277 @@ def _qcolor(value, fallback):
     return c
 
 
+
+
+
+
+def _strip_object_display_prefix(value):
+    """Remove table-only object labels that must never become real text."""
+    text = str(value or "")
+    prefixes = ("[객체] ", "[객체]", "[Object] ", "[Object]", "[OBJECT] ", "[OBJECT]")
+    changed = True
+    while changed:
+        changed = False
+        left = text.lstrip()
+        leading = text[:len(text) - len(left)]
+        for prefix in prefixes:
+            if left.startswith(prefix):
+                left = left[len(prefix):]
+                text = leading + left
+                changed = True
+                break
+    return text
+
+
+def _stroke_outline_path(path, width):
+    """Build a filled outline path for stable thick CJK strokes."""
+    try:
+        width = float(width or 0.0)
+    except Exception:
+        width = 0.0
+    if path is None or path.isEmpty() or width <= 0.0:
+        return QPainterPath()
+    try:
+        stroker = QPainterPathStroker()
+        stroker.setWidth(width)
+        stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
+        stroker.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        try:
+            stroker.setMiterLimit(1.0)
+        except Exception:
+            pass
+        try:
+            # A slightly lower curve threshold avoids jagged joins on large Korean outlines.
+            stroker.setCurveThreshold(0.18)
+        except Exception:
+            pass
+        return stroker.createStroke(path)
+    except Exception:
+        return QPainterPath()
+
+
+_MASK_STROKE_OFFSET_CACHE = {}
+
+
+def _mask_stroke_offsets(radius):
+    """Return disk offsets used by the Photoshop-like mask stroke renderer.
+
+    QPainterPathStroker still follows glyph contours and can expose broken joins
+    on heavy Korean display fonts.  The mask renderer instead expands the glyph
+    silhouette by repeatedly filling the glyph path around a small disk.  It is
+    closer to a layer-style stroke: slower, but much more stable for thick text
+    outlines and export/object rasterization.
+    """
+    try:
+        radius = max(0.0, float(radius or 0.0))
+    except Exception:
+        radius = 0.0
+    if radius <= 0.0:
+        return []
+    # Keep enough samples for solid strokes, but avoid exploding paint cost on
+    # very thick manga title lettering.  Coarser steps are acceptable because the
+    # final fill and optional SSAA smooth the edge.
+    step = 1.0
+    if radius > 14.0:
+        step = 2.0
+    if radius > 28.0:
+        step = 3.0
+    key = (int(round(radius * 4.0)), int(round(step * 4.0)))
+    cached = _MASK_STROKE_OFFSET_CACHE.get(key)
+    if cached is not None:
+        return cached
+    limit = int(math.ceil(radius / step))
+    offsets = [(0.0, 0.0)]
+    seen = {(0.0, 0.0)}
+    r2 = radius * radius + 1e-6
+    for iy in range(-limit, limit + 1):
+        dy = iy * step
+        for ix in range(-limit, limit + 1):
+            dx = ix * step
+            if dx == 0.0 and dy == 0.0:
+                continue
+            if dx * dx + dy * dy <= r2:
+                pos = (round(dx, 4), round(dy, 4))
+                if pos not in seen:
+                    seen.add(pos)
+                    offsets.append(pos)
+    # Paint far offsets first, then inner offsets.  This leaves the most stable
+    # center/fill result when alpha brushes are used for glow/shadow previews.
+    offsets.sort(key=lambda p: (p[0] * p[0] + p[1] * p[1]), reverse=True)
+    if (0.0, 0.0) not in offsets:
+        offsets.append((0.0, 0.0))
+    _MASK_STROKE_OFFSET_CACHE[key] = offsets
+    return offsets
+
+
+
+
+def _solid_brush_rgba(brush):
+    """Return an RGBA tuple for solid brushes; gradients fall back to path stroker."""
+    try:
+        if isinstance(brush, QBrush):
+            try:
+                style = brush.style()
+                if style not in (Qt.BrushStyle.SolidPattern, Qt.BrushStyle.Dense1Pattern):
+                    # Gradients/patterns need the vector fallback so the brush is preserved.
+                    return None
+            except Exception:
+                pass
+            c = QColor(brush.color())
+        else:
+            c = QColor(brush)
+        if not c.isValid():
+            return None
+        return (int(c.red()), int(c.green()), int(c.blue()), int(c.alpha()))
+    except Exception:
+        return None
+
+
+def _painter_output_lod(painter):
+    """Approximate current painter scale so export masks are built at device quality."""
+    try:
+        t = painter.transform()
+        sx = math.hypot(float(t.m11()), float(t.m12()))
+        sy = math.hypot(float(t.m22()), float(t.m21()))
+        lod = max(sx, sy, 1.0)
+    except Exception:
+        lod = 1.0
+    # 4x is enough for output preview/export and keeps memory bounded.
+    return max(1.0, min(4.0, float(lod)))
+
+
+def _fill_path_mask_outline_cv(painter, path, brush, width):
+    """Fast Photoshop-like stroke: render glyph alpha, dilate with an ellipse, composite color.
+
+    The previous mask stroke painted the glyph path hundreds/thousands of times at
+    different offsets.  It fixed broken CJK joins but was too slow and could look
+    jagged when the offset step was coarse.  This path builds a real alpha mask and
+    expands it with OpenCV morphology, so preview/export is both smoother and much
+    faster for thick Korean lettering.
+    """
+    if _np is None or _cv2 is None:
+        return False
+    rgba = _solid_brush_rgba(brush)
+    if rgba is None:
+        return False
+    try:
+        width = float(width or 0.0)
+    except Exception:
+        width = 0.0
+    if path is None or path.isEmpty() or width <= 0.0:
+        return False
+    try:
+        radius = max(0.5, width * 0.5)
+        lod = _painter_output_lod(painter)
+        pad = max(3.0, radius + 4.0)
+        rect = path.boundingRect().adjusted(-pad, -pad, pad, pad)
+        if rect.width() <= 0 or rect.height() <= 0:
+            return False
+        w = max(1, int(math.ceil(rect.width() * lod)))
+        h = max(1, int(math.ceil(rect.height() * lod)))
+        # Avoid pathological allocations; fallback is slower but safer.
+        if w * h > 36_000_000:
+            return False
+
+        mask_img = QImage(w, h, QImage.Format.Format_Alpha8)
+        mask_img.fill(0)
+        mp = QPainter(mask_img)
+        try:
+            mp.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            mp.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+            mp.scale(lod, lod)
+            mp.translate(-rect.left(), -rect.top())
+            mp.setPen(Qt.PenStyle.NoPen)
+            mp.setBrush(QBrush(QColor(255, 255, 255, 255)))
+            mp.drawPath(path)
+        finally:
+            mp.end()
+
+        bpl = int(mask_img.bytesPerLine())
+        ptr = mask_img.bits()
+        ptr.setsize(bpl * h)
+        alpha = _np.frombuffer(ptr, dtype=_np.uint8).reshape((h, bpl))[:, :w].copy()
+        rpx = max(1, int(math.ceil(radius * lod)))
+        k = rpx * 2 + 1
+        kernel = _cv2.getStructuringElement(_cv2.MORPH_ELLIPSE, (k, k))
+        dilated = _cv2.dilate(alpha, kernel, iterations=1)
+
+        r, g, b, a = rgba
+        if a < 255:
+            dilated = ((dilated.astype(_np.uint16) * int(a)) // 255).astype(_np.uint8)
+        rgba_arr = _np.empty((h, w, 4), dtype=_np.uint8)
+        rgba_arr[:, :, 0] = r
+        rgba_arr[:, :, 1] = g
+        rgba_arr[:, :, 2] = b
+        rgba_arr[:, :, 3] = dilated
+        out_img = QImage(rgba_arr.data, w, h, w * 4, QImage.Format.Format_RGBA8888).copy()
+        painter.drawImage(rect, out_img)
+        return True
+    except Exception:
+        return False
+
+def _fill_path_mask_outline(painter, path, brush, width):
+    """Fill a text stroke as an expanded glyph mask.
+
+    This intentionally does not use QPainterPathStroker.  It paints the glyph
+    fill around a radius disk, so broken/self-intersecting glyph outline joins do
+    not become visible as notches in thick white/black strokes.
+    """
+    if _fill_path_mask_outline_cv(painter, path, brush, width):
+        return True
+    try:
+        width = float(width or 0.0)
+    except Exception:
+        width = 0.0
+    if path is None or path.isEmpty() or width <= 0.0:
+        return False
+    try:
+        radius = max(0.5, width * 0.5)
+        offsets = _mask_stroke_offsets(radius)
+        if not offsets:
+            return False
+        qbrush = brush if isinstance(brush, QBrush) else QBrush(QColor(brush))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(qbrush)
+        for dx, dy in offsets:
+            if dx or dy:
+                painter.save()
+                painter.translate(float(dx), float(dy))
+                painter.drawPath(path)
+                painter.restore()
+            else:
+                painter.drawPath(path)
+        return True
+    except Exception:
+        return False
+
+
+def _fill_path_outline(painter, path, brush, width, *, use_mask=False):
+    """Fill a text stroke with a stable outline strategy.
+
+    Editor preview keeps the lighter outline path for interaction speed.  Export
+    and output preview can pass use_mask=True to use the heavier Photoshop-like
+    expanded-glyph mask stroke that avoids broken thick CJK outlines.
+    """
+    try:
+        width = float(width or 0.0)
+    except Exception:
+        width = 0.0
+    if path is None or path.isEmpty() or width <= 0.0:
+        return False
+    if use_mask:
+        if _fill_path_mask_outline(painter, path, brush, width):
+            return True
+    stroke_path = _stroke_outline_path(path, width)
+    if stroke_path.isEmpty():
+        return False
+    try:
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(brush if isinstance(brush, QBrush) else QBrush(QColor(brush)))
+        painter.drawPath(stroke_path)
+        return True
+    except Exception:
+        return False
 
 
 def _bool_value(value, default=False):
@@ -85,14 +369,180 @@ def _gradient_brush(rect, color1, color2, angle=0, ratio=50):
     center = rect.center()
     grad = QLinearGradient(QPointF(center.x() - dx, center.y() - dy), QPointF(center.x() + dx, center.y() + dy))
 
-    # ratio is interpreted as the point where color 2 becomes dominant.
-    # 50 = normal two-color gradient.  Lower values make color 2 appear earlier;
-    # higher values keep color 1 longer.
+    # v2.3.1 active-page light6:
+    # light5의 hard-edge 방식은 색은 또렷했지만 두 색이 너무 뚝 잘려 보였다.
+    # ratio를 '색 전환 중심'으로 쓰고, 일정 폭 안에서만 부드럽게 섞는다.
+    # 이렇게 하면 검정/빨강 같은 지정색은 양끝에서 유지되면서 중앙부만 자연스럽게 섞인다.
     t = max(1, min(99, _int_value(ratio, 50, 1, 99))) / 100.0
+    blend_width = 0.28
+    start = max(0.0, t - blend_width / 2.0)
+    end = min(1.0, t + blend_width / 2.0)
+    if end <= start + 0.001:
+        start = max(0.0, t - 0.08)
+        end = min(1.0, t + 0.08)
     grad.setColorAt(0.0, c1)
-    grad.setColorAt(t, c2)
+    if start > 0.001:
+        grad.setColorAt(start, c1)
+    mid = max(start, min(end, t))
+    # 중간색을 명시적으로 넣어 Qt의 색 보간이 너무 탁해지는 것을 줄인다.
+    mid_color = QColor(
+        int((c1.red() + c2.red()) / 2),
+        int((c1.green() + c2.green()) / 2),
+        int((c1.blue() + c2.blue()) / 2),
+        int((c1.alpha() + c2.alpha()) / 2),
+    )
+    if start < mid < end:
+        grad.setColorAt(mid, mid_color)
+    grad.setColorAt(end, c2)
     grad.setColorAt(1.0, c2)
     return QBrush(grad)
+
+
+def _soft_effect_color(value, fallback, opacity_pct=100):
+    c = _qcolor(value, fallback)
+    try:
+        alpha = max(0, min(255, int(round(float(opacity_pct or 0) * 255.0 / 100.0))))
+    except Exception:
+        alpha = 255
+    c.setAlpha(alpha)
+    return c
+
+
+def _draw_soft_path_outline(painter, path, color, radius, *, use_mask=False):
+    try:
+        radius = max(0.0, float(radius or 0.0))
+    except Exception:
+        radius = 0.0
+    if path is None or path.isEmpty() or radius <= 0.0:
+        return
+    base_alpha = color.alpha()
+    steps = max(1, int(math.ceil(radius)))
+    for step in range(steps, 0, -1):
+        frac = step / float(steps)
+        pen_color = QColor(color)
+        pen_color.setAlpha(max(1, int(base_alpha * (0.10 + 0.28 * frac))))
+        if not _fill_path_outline(painter, path, QBrush(pen_color), max(1.0, step * 2.0), use_mask=use_mask):
+            pen = QPen(pen_color, max(1.0, step * 2.0))
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawPath(path)
+
+
+def _draw_silhouette_path(painter, path, color, width=0.0, *, use_mask=False):
+    if path is None or path.isEmpty():
+        return
+    try:
+        width = max(0.0, float(width or 0.0))
+    except Exception:
+        width = 0.0
+    brush = QBrush(QColor(color))
+    if width > 0.0:
+        _fill_path_outline(painter, path, brush, width, use_mask=use_mask)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(brush)
+    painter.drawPath(path)
+
+
+def _draw_shadow_path(painter, path, color, dx=0.0, dy=0.0, blur=0.0, silhouette_width=0.0, *, use_mask=False):
+    if path is None or path.isEmpty():
+        return
+    shadow_path = QPainterPath(path)
+    try:
+        shadow_path.translate(float(dx or 0.0), float(dy or 0.0))
+    except Exception:
+        pass
+    try:
+        silhouette_width = max(0.0, float(silhouette_width or 0.0))
+    except Exception:
+        silhouette_width = 0.0
+    try:
+        blur = max(0.0, float(blur or 0.0))
+    except Exception:
+        blur = 0.0
+    if blur > 0.0:
+        blur_color = QColor(color)
+        blur_color.setAlpha(max(1, int(color.alpha() * 0.42)))
+        _draw_soft_path_outline(painter, shadow_path, blur_color, blur + silhouette_width * 0.5, use_mask=use_mask)
+    _draw_silhouette_path(painter, shadow_path, color, silhouette_width, use_mask=use_mask)
+
+
+def _draw_glow_path(painter, path, color, size=0.0, blur=0.0, dx=0.0, dy=0.0, silhouette_width=0.0, *, use_mask=False):
+    if path is None or path.isEmpty():
+        return
+    glow_path = QPainterPath(path)
+    try:
+        glow_path.translate(float(dx or 0.0), float(dy or 0.0))
+    except Exception:
+        pass
+    try:
+        silhouette_width = max(0.0, float(silhouette_width or 0.0))
+    except Exception:
+        silhouette_width = 0.0
+    try:
+        size = max(0.0, float(size or 0.0))
+    except Exception:
+        size = 0.0
+    try:
+        blur = max(0.0, float(blur or 0.0))
+    except Exception:
+        blur = 0.0
+    total_radius = size + blur + silhouette_width * 0.5
+    _draw_soft_path_outline(painter, glow_path, color, total_radius, use_mask=use_mask)
+    if size > 0.0 or silhouette_width > 0.0:
+        fill_color = QColor(color)
+        fill_color.setAlpha(max(1, int(color.alpha() * 0.28)))
+        _draw_silhouette_path(painter, glow_path, fill_color, silhouette_width + size * 2.0, use_mask=use_mask)
+
+
+def _synthetic_bold_width_for(font, font_size, enabled):
+    if not enabled:
+        return 0.0
+    try:
+        actual_bold = bool(QFontInfo(font).bold())
+    except Exception:
+        actual_bold = False
+    try:
+        size = max(1.0, float(font_size))
+    except Exception:
+        size = 24.0
+
+    # 일부 한글/일본어/OTF 계열 폰트는 QFont.setBold(True)를 줘도
+    # 실제 굵기 변화가 거의 없거나 QFontInfo가 requested bold를 actual bold처럼
+    # 보고하는 경우가 있다. 그래서 Bold ON 상태에서는 항상 path 기반 faux bold를
+    # 한 번 더 얹는다. 실제 Bold face가 있는 폰트는 살짝, 없는 폰트는 더 강하게.
+    # G단계: 일부 폰트는 Bold face 선택/요청이 실제 path 두께에 거의 반영되지 않는다.
+    # B 버튼이 켜진 경우에는 폰트의 실제 Bold 지원 여부와 무관하게 눈에 보이는
+    # 합성 굵기를 만든다. 너무 과한 번짐을 막기 위해 글자 크기 비율로 제한한다.
+    ratio = 0.10 if actual_bold else 0.14
+    return max(1.6, min(14.0, size * ratio))
+
+
+def _expand_path_for_synthetic_bold(path, width):
+    """Return a real expanded glyph path for fonts whose Bold face is weak/missing.
+
+    이전 F패치는 paint 단계에서 path 둘레에 같은 색 pen을 한 번 더 그렸다.
+    그러나 획/그라데이션/일부 폰트 조합에서는 체감 굵기 변화가 약해질 수 있어서,
+    G단계에서는 B 버튼이 켜지면 글자 path 자체를 QPainterPathStroker로 확장한다.
+    이렇게 하면 미리보기/선택 bounds/출력용 path가 모두 같은 굵기 기준을 쓴다.
+    """
+    try:
+        width = float(width or 0.0)
+    except Exception:
+        width = 0.0
+    if width <= 0:
+        return path
+    try:
+        stroker = QPainterPathStroker()
+        stroker.setWidth(width)
+        stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
+        stroker.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        expanded = QPainterPath(path)
+        expanded = expanded.united(stroker.createStroke(path))
+        return expanded
+    except Exception:
+        return path
 
 def _projective_transform_for_quads(src_points, dst_points):
     try:
@@ -445,13 +895,19 @@ class TypesettingItem(QGraphicsPathItem):
         super().__init__()
         self.data = data
         self.update_cb = update_cb
+        self._default_font_family = font_family
+        self._default_font_size_px = font_size_px
+        self._default_stroke_width = stroke_width
+        self._default_text_color = text_color
+        self._default_stroke_color = stroke_color
+        self._default_align = align
 
         if _bool_value(data.get('rasterized_text'), False):
             self._init_rasterized_text_item()
             return
 
         # 번역문이 비어 있으면 최종 화면에는 아무 글자도 만들지 않는다.
-        text = str(data.get('translated_text', '') or '')
+        text = _strip_object_display_prefix(data.get('translated_text', '') or '')
         lines = text.split('\n') if text.strip() else ([''] if data.get('force_show') else [])
 
         item_font_family = data.get('font_family') or font_family
@@ -488,7 +944,7 @@ class TypesettingItem(QGraphicsPathItem):
         fm = QFontMetrics(font)
         line_height = max(1, int(fm.lineSpacing() * (line_spacing_pct / 100.0)))
         self._strike_lines = []
-        self._synthetic_bold_width = max(0.0, float(item_font_size) * 0.045) if bool(data.get('bold', False)) else 0.0
+        self._synthetic_bold_width = _synthetic_bold_width_for(font, item_font_size, bool(data.get('bold', False)))
 
         sx = char_width_pct / 100.0
         sy = char_height_pct / 100.0
@@ -522,6 +978,11 @@ class TypesettingItem(QGraphicsPathItem):
         arc_handles = _arc_handles_from_data(data)
         if arc_handles:
             path = _warp_path_by_arc_handles(path, arc_handles)
+
+        if self._synthetic_bold_width > 0:
+            path = _expand_path_for_synthetic_bold(path, self._synthetic_bold_width)
+            # path 자체가 확장됐으므로 paint 단계 중복 faux-bold는 끈다.
+            self._synthetic_bold_width = 0.0
 
         self.setPath(path)
 
@@ -634,6 +1095,297 @@ class TypesettingItem(QGraphicsPathItem):
             | self.GraphicsItemFlag.ItemIsSelectable
             | self.GraphicsItemFlag.ItemSendsGeometryChanges
         )
+        try:
+            # Preview performance: once a text item has been rendered, treat it like a
+            # sticker/pixmap during scroll and pan.  The source data remains editable;
+            # setPath()/prepareGeometryChange() invalidate this cache when style/text changes.
+            self.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
+        except Exception:
+            pass
+
+    def _guide_scale(self):
+        """Scale editor-only text guide boxes/handles by image resolution."""
+        try:
+            main = getattr(self, "main_window", None)
+            view = getattr(main, "view", None) if main is not None else None
+            if view is not None and hasattr(view, "ui_visual_scale"):
+                return max(1.0, min(float(view.ui_visual_scale()), GUIDE_SCALE_MAX))
+        except Exception:
+            pass
+        try:
+            scene = self.scene()
+            if scene is not None:
+                rect = scene.sceneRect()
+                w = float(rect.width())
+                h = float(rect.height())
+                if w <= 1 or h <= 1:
+                    rect = scene.itemsBoundingRect()
+                    w = float(rect.width())
+                    h = float(rect.height())
+                scale = max(w / GUIDE_BASE_W, h / GUIDE_BASE_H)
+                return max(1.0, min(float(scale), GUIDE_SCALE_MAX))
+        except Exception:
+            pass
+        return 1.0
+
+    def _guide_width(self, base=2.0, minimum=1.0):
+        try:
+            return max(float(minimum), float(base) * self._guide_scale())
+        except Exception:
+            return float(base or minimum or 1.0)
+
+    def _guide_size(self, base=14.0, minimum=8.0):
+        try:
+            return max(float(minimum), float(base) * self._guide_scale())
+        except Exception:
+            return float(base or minimum or 8.0)
+
+    def _guide_pad(self, base=8.0, minimum=4.0):
+        try:
+            return max(float(minimum), float(base) * self._guide_scale())
+        except Exception:
+            return float(base or minimum or 4.0)
+
+    def cancel_live_transform_preview(self):
+        """B단계 호환 no-op: Undo/페이지 경계에서 호출돼도 QGraphicsItem을 직접 건드리지 않는다."""
+        self._transform_action = None
+        self._skew_action = None
+        self._trapezoid_action = None
+        self._arc_action = None
+        self._transform_live_rect = None
+        try:
+            main = getattr(self, "main_window", None)
+            if main is not None:
+                main._text_transform_runtime_active = False
+        except Exception:
+            pass
+
+    def _commit_transform_stable(self, selected_id=None):
+        """2.3.1 안정 방식: 변형 확정 후 저장하고 최종화면을 통째로 다시 그린다."""
+        main = getattr(self, "main_window", None)
+        if main is None:
+            return
+        try:
+            main._text_transform_runtime_active = False
+        except Exception:
+            pass
+        try:
+            if hasattr(main, 'schedule_deferred_auto_save_project'):
+                main.schedule_deferred_auto_save_project(500)
+            else:
+                main.auto_save_project()
+            if main.cb_mode.currentIndex() == 4 and selected_id is not None:
+                try:
+                    if hasattr(main, 'refresh_final_text_items_by_ids'):
+                        main.refresh_final_text_items_by_ids([selected_id])
+                    main.reselect_text_items([selected_id])
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _snapshot_text_transform_fields(self, fields):
+        """Capture before/after field values for Command-Diff text transform undo."""
+        field_names = [str(x) for x in (fields or []) if x]
+        main = getattr(self, "main_window", None)
+        if main is not None and hasattr(main, '_snapshot_text_field_values'):
+            try:
+                return main._snapshot_text_field_values(self.data, field_names)
+            except Exception:
+                pass
+        out = {}
+        for field_name in field_names:
+            try:
+                out[field_name] = {
+                    'exists': field_name in self.data,
+                    'value': copy.deepcopy(self.data.get(field_name)),
+                }
+            except Exception:
+                out[field_name] = {
+                    'exists': field_name in self.data,
+                    'value': self.data.get(field_name),
+                }
+        return out
+
+    def _push_text_transform_command(self, before_values, fields, reason='텍스트 변형'):
+        """Push one transform Command-Diff entry after a drag/edit burst finishes."""
+        main = getattr(self, "main_window", None)
+        if main is None:
+            return False
+        field_names = [str(x) for x in (fields or []) if x]
+        if not field_names or not isinstance(before_values, dict):
+            return False
+        after_values = self._snapshot_text_transform_fields(field_names)
+        try:
+            if hasattr(main, 'push_text_transform_command'):
+                return bool(main.push_text_transform_command(
+                    self.data,
+                    before_values=before_values,
+                    after_values=after_values,
+                    reason=reason or '텍스트 변형',
+                    fields=field_names,
+                ))
+            if hasattr(main, 'push_text_geometry_command'):
+                return bool(main.push_text_geometry_command(
+                    self.data,
+                    before_values=before_values,
+                    after_values=after_values,
+                    reason=reason or '텍스트 변형',
+                    fields=field_names,
+                    component_type='text_transform',
+                ))
+        except Exception:
+            return False
+        return False
+
+    def rebuild_text_render_for_live_preview(self, force=False):
+        """변형 핸들 드래그 중 현재 data 값으로 텍스트 path/style을 즉시 다시 만든다.
+
+        기존 구조는 data만 바꾸고 release/mode_chg 이후에 새 아이템을 만들었기 때문에
+        Shear/사다리꼴/부채꼴이 한 박자 늦게 보였다. 이 함수는 선택 아이템 하나만
+        재계산해 드래그 중 WYSIWYG 미리보기를 제공한다.
+        """
+        if getattr(self, '_is_rasterized_text', False) or _bool_value(self.data.get('rasterized_text'), False):
+            self.update()
+            return
+        data = self.data
+        text = _strip_object_display_prefix(data.get('translated_text', '') or '')
+        lines = text.split('\n') if text.strip() else ([''] if data.get('force_show') else [])
+
+        item_font_family = data.get('font_family') or self._default_font_family
+        item_font_size = int(data.get('font_size', self._default_font_size_px) or self._default_font_size_px)
+        item_stroke = int(data.get('stroke_width', self._default_stroke_width) or 0)
+        item_text_color = data.get('text_color') or self._default_text_color
+        item_stroke_color = data.get('stroke_color') or self._default_stroke_color
+        item_align = (data.get('align') or self._default_align or 'center').lower()
+        if item_align not in ('left', 'center', 'right'):
+            item_align = 'center'
+
+        font = QFont(item_font_family)
+        font.setPixelSize(item_font_size)
+        font.setBold(bool(data.get('bold', False)))
+        font.setItalic(bool(data.get('italic', False)))
+
+        try:
+            letter_spacing = int(data.get('letter_spacing', 0) or 0)
+        except Exception:
+            letter_spacing = 0
+        try:
+            line_spacing_pct = max(50, min(300, int(data.get('line_spacing', 100) or 100)))
+        except Exception:
+            line_spacing_pct = 100
+        try:
+            char_width_pct = max(10, min(300, int(data.get('char_width', 100) or 100)))
+        except Exception:
+            char_width_pct = 100
+        try:
+            char_height_pct = max(10, min(300, int(data.get('char_height', 100) or 100)))
+        except Exception:
+            char_height_pct = 100
+
+        fm = QFontMetrics(font)
+        line_height = max(1, int(fm.lineSpacing() * (line_spacing_pct / 100.0)))
+        self._strike_lines = []
+        self._synthetic_bold_width = _synthetic_bold_width_for(font, item_font_size, bool(data.get('bold', False)))
+
+        sx = char_width_pct / 100.0
+        sy = char_height_pct / 100.0
+        path, line_rects = build_typesetting_text_path(lines, font, item_align, line_height, letter_spacing)
+
+        if data.get('strike', False):
+            for line_rect in line_rects:
+                y_line = line_rect.center().y() - fm.ascent() * 0.15
+                self._strike_lines.append((line_rect.left() * sx, y_line * sy, line_rect.right() * sx, y_line * sy))
+
+        if sx != 1.0 or sy != 1.0:
+            tr = QTransform()
+            tr.scale(sx, sy)
+            path = tr.map(path)
+
+        skew_x = _int_value(data.get('skew_x', 0), 0, -100, 100) / 100.0
+        skew_y = _int_value(data.get('skew_y', 0), 0, -100, 100) / 100.0
+        if skew_x or skew_y:
+            tr = QTransform()
+            tr.shear(skew_x, skew_y)
+            path = tr.map(path)
+
+        trap_left = _int_value(data.get('trap_left', 0), 0, -95, 95)
+        trap_right = _int_value(data.get('trap_right', 0), 0, -95, 95)
+        trap_top = _int_value(data.get('trap_top', 0), 0, -95, 95)
+        trap_bottom = _int_value(data.get('trap_bottom', 0), 0, -95, 95)
+        if trap_left or trap_right or trap_top or trap_bottom:
+            path = _apply_trapezoid_transform_to_path(path, trap_left, trap_right, trap_top, trap_bottom)
+
+        arc_handles = _arc_handles_from_data(data)
+        if arc_handles:
+            path = _warp_path_by_arc_handles(path, arc_handles)
+
+        if self._synthetic_bold_width > 0:
+            path = _expand_path_for_synthetic_bold(path, self._synthetic_bold_width)
+            self._synthetic_bold_width = 0.0
+
+        self.prepareGeometryChange()
+        self.setPath(path)
+
+        self.pen_stroke = QPen(
+            _qcolor(item_stroke_color, "#FFFFFF"),
+            item_stroke,
+            Qt.PenStyle.SolidLine,
+            Qt.PenCapStyle.RoundCap,
+            Qt.PenJoinStyle.RoundJoin,
+        )
+        if _bool_value(data.get('text_gradient_enabled'), False):
+            self.brush_fill = _gradient_brush(
+                path.boundingRect(),
+                data.get('text_gradient_color1') or item_text_color,
+                data.get('text_gradient_color2') or "#FFFFFF",
+                data.get('text_gradient_angle', 0),
+                data.get('text_gradient_ratio', 50),
+            )
+            self._fill_fallback_color = _qcolor(data.get('text_gradient_color1') or item_text_color, "#000000")
+        else:
+            self.brush_fill = QBrush(_qcolor(item_text_color, "#000000"))
+            self._fill_fallback_color = self.brush_fill.color()
+
+        rect = data.get('rect', [0, 0, 1, 1])
+        while len(rect) < 4:
+            rect.append(1)
+        final_x = float(rect[0]) + float(data.get('x_off', 0) or 0)
+        final_y = float(rect[1]) + float(data.get('y_off', 0) or 0)
+        rect_w = max(1.0, float(rect[2]))
+        rect_h = max(1.0, float(rect[3]))
+        path_rect = path.boundingRect()
+        if path_rect.isNull() or path_rect.width() <= 0 or path_rect.height() <= 0:
+            path_rect = QRectF(0, 0, 1, max(1, item_font_size))
+
+        if item_align == 'left':
+            anchor_x = final_x
+            pos_x = anchor_x - path_rect.left()
+        elif item_align == 'right':
+            anchor_x = final_x + rect_w
+            pos_x = anchor_x - path_rect.right()
+        else:
+            anchor_x = final_x + rect_w / 2.0
+            pos_x = anchor_x - path_rect.center().x()
+        anchor_y = final_y + rect_h / 2.0
+        pos_y = anchor_y - path_rect.center().y()
+        self.setPos(pos_x, pos_y)
+
+        self._text_path_rect = QRectF(path_rect)
+        text_anchor_mode = str(data.get('text_anchor_mode') or '').lower() == 'text'
+        manual_rect = bool(data.get('manual_text_rect')) or text_anchor_mode
+        if manual_rect:
+            self._local_text_area_rect = QRectF(self._text_path_rect)
+        else:
+            scene_rect = QRectF(final_x, final_y, rect_w, rect_h)
+            self._local_text_area_rect = self.mapFromScene(scene_rect).boundingRect()
+
+        try:
+            self.setTransformOriginPoint(self.transform_rect().center())
+            self.setRotation(float(data.get('rotation', 0) or 0))
+        except Exception:
+            pass
+        self.update()
 
     def _init_rasterized_text_item(self):
         self._is_rasterized_text = True
@@ -717,11 +1469,11 @@ class TypesettingItem(QGraphicsPathItem):
 
     def rotate_handle_pos(self):
         rect = self.transform_rect()
-        return QPointF(rect.center().x(), rect.top() - 34)
+        return QPointF(rect.center().x(), rect.top() - self._guide_size(34.0, minimum=24.0))
 
     def transform_handle_rects(self):
         rect = self.transform_rect()
-        s = 14.0
+        s = self._guide_size(14.0)
         half = s / 2.0
 
         def box(pt):
@@ -730,7 +1482,7 @@ class TypesettingItem(QGraphicsPathItem):
         # rotate_handle_pos()는 다시 transform_rect()를 부르므로,
         # shape()/boundingRect() 안에서 반복 호출되면 최종화면 전환 시 불필요한 재계산이 커진다.
         # 같은 rect에서 직접 계산해 가볍게 처리한다.
-        rotate_pos = QPointF(rect.center().x(), rect.top() - 34)
+        rotate_pos = QPointF(rect.center().x(), rect.top() - self._guide_size(34.0, minimum=24.0))
 
         pts = {
             'rotate': rotate_pos,
@@ -747,7 +1499,7 @@ class TypesettingItem(QGraphicsPathItem):
 
     def skew_handle_rects(self):
         rect = self.transform_rect()
-        s = 16.0
+        s = self._guide_size(16.0)
         half = s / 2.0
 
         def box(pt):
@@ -767,7 +1519,8 @@ class TypesettingItem(QGraphicsPathItem):
         rects = self.skew_handle_rects()
         for name in ('left', 'right', 'top', 'bottom'):
             r = rects.get(name)
-            if r and r.adjusted(-6, -6, 6, 6).contains(pos):
+            hit_pad = self._guide_pad(6.0)
+            if r and r.adjusted(-hit_pad, -hit_pad, hit_pad, hit_pad).contains(pos):
                 return name
         return None
 
@@ -776,7 +1529,7 @@ class TypesettingItem(QGraphicsPathItem):
             self.data['skew_x'] = max(-100, min(100, int(round(float(skew_x)))))
         if skew_y is not None:
             self.data['skew_y'] = max(-100, min(100, int(round(float(skew_y)))))
-        self.update()
+        self.rebuild_text_render_for_live_preview()
 
     def set_text_skew_angle(self, action, angle):
         try:
@@ -793,11 +1546,12 @@ class TypesettingItem(QGraphicsPathItem):
         if not self.data.get('_skew_mode', False) or not action:
             return False
         main = getattr(self, "main_window", None)
-        if main is not None and hasattr(main, 'push_page_text_undo'):
+        if main is not None and not (hasattr(main, 'push_text_transform_command') or hasattr(main, 'push_text_geometry_command')) and hasattr(main, 'undo_text_checkpoint'):
             try:
-                main.push_page_text_undo('텍스트 기울이기 조정')
+                main.undo_text_checkpoint('텍스트 기울이기 조정')
             except Exception:
                 pass
+        self._skew_press_transform_values = self._snapshot_text_transform_fields(['skew_x', 'skew_y'])
         self._skew_action = action
         self._skew_press_pos = QPointF(local_pos)
         self._skew_press_scene_pos = QPointF(scene_pos)
@@ -832,14 +1586,16 @@ class TypesettingItem(QGraphicsPathItem):
         main = getattr(self, "main_window", None)
         selected_id = self.data.get('id')
         if main is not None:
+            self._commit_transform_stable(selected_id)
             try:
-                main.auto_save_project()
-                if main.cb_mode.currentIndex() == 4:
-                    main.mode_chg(4)
-                    if selected_id is not None:
-                        main.reselect_text_items([selected_id])
+                self._push_text_transform_command(
+                    getattr(self, '_skew_press_transform_values', None),
+                    ['skew_x', 'skew_y'],
+                    reason='텍스트 기울이기 조정',
+                )
             except Exception:
                 pass
+            self._skew_press_transform_values = None
             try:
                 main.log(f"🔷 텍스트 기울이기 적용: 가로 {self.data.get('skew_x', 0)}%, 세로 {self.data.get('skew_y', 0)}%")
             except Exception:
@@ -855,7 +1611,7 @@ class TypesettingItem(QGraphicsPathItem):
             self.data.get('trap_bottom', 0),
         )
         names = ('top_left', 'top_right', 'bottom_right', 'bottom_left')
-        s = 16.0
+        s = self._guide_size(16.0)
         half = s / 2.0
         out = {}
         for name, pt in zip(names, pts):
@@ -873,7 +1629,8 @@ class TypesettingItem(QGraphicsPathItem):
         order = ('top_left', 'top_right', 'bottom_right', 'bottom_left', 'top', 'bottom', 'left', 'right')
         for name in order:
             r = self.trapezoid_handle_rects().get(name)
-            if r and r.adjusted(-6, -6, 6, 6).contains(pos):
+            hit_pad = self._guide_pad(6.0)
+            if r and r.adjusted(-hit_pad, -hit_pad, hit_pad, hit_pad).contains(pos):
                 return name
         return None
 
@@ -886,17 +1643,18 @@ class TypesettingItem(QGraphicsPathItem):
             self.data['trap_top'] = max(-95, min(95, int(round(float(top_pct)))))
         if bottom_pct is not None:
             self.data['trap_bottom'] = max(-95, min(95, int(round(float(bottom_pct)))))
-        self.update()
+        self.rebuild_text_render_for_live_preview()
 
     def begin_trapezoid_action(self, action, local_pos, scene_pos):
         if not self.data.get('_trapezoid_mode', False) or not action:
             return False
         main = getattr(self, 'main_window', None)
-        if main is not None and hasattr(main, 'push_page_text_undo'):
+        if main is not None and not (hasattr(main, 'push_text_transform_command') or hasattr(main, 'push_text_geometry_command')) and hasattr(main, 'undo_text_checkpoint'):
             try:
-                main.push_page_text_undo('사다리꼴 변형 조정')
+                main.undo_text_checkpoint('사다리꼴 변형 조정')
             except Exception:
                 pass
+        self._trapezoid_press_transform_values = self._snapshot_text_transform_fields(['trap_left', 'trap_right', 'trap_top', 'trap_bottom'])
         self._trapezoid_action = action
         self._trapezoid_press_pos = QPointF(local_pos)
         self._trapezoid_press_scene_pos = QPointF(scene_pos)
@@ -942,14 +1700,16 @@ class TypesettingItem(QGraphicsPathItem):
         main = getattr(self, 'main_window', None)
         selected_id = self.data.get('id')
         if main is not None:
+            self._commit_transform_stable(selected_id)
             try:
-                main.auto_save_project()
-                if main.cb_mode.currentIndex() == 4:
-                    main.mode_chg(4)
-                    if selected_id is not None:
-                        main.reselect_text_items([selected_id])
+                self._push_text_transform_command(
+                    getattr(self, '_trapezoid_press_transform_values', None),
+                    ['trap_left', 'trap_right', 'trap_top', 'trap_bottom'],
+                    reason='사다리꼴 변형 조정',
+                )
             except Exception:
                 pass
+            self._trapezoid_press_transform_values = None
             try:
                 main.log(f"🔷 사다리꼴 변형 적용: 왼쪽 {self.data.get('trap_left', 0)}%, 오른쪽 {self.data.get('trap_right', 0)}%, 위쪽 {self.data.get('trap_top', 0)}%, 아래쪽 {self.data.get('trap_bottom', 0)}%")
             except Exception:
@@ -1007,7 +1767,7 @@ class TypesettingItem(QGraphicsPathItem):
 
     def arc_handle_rects(self):
         handles = self._arc_handles()
-        s = 16.0
+        s = self._guide_size(16.0)
         half = s / 2.0
         out = {}
         for idx, handle in enumerate(handles):
@@ -1041,19 +1801,29 @@ class TypesettingItem(QGraphicsPathItem):
         side, t = self._arc_side_and_t_from_pos(pos)
         if not side:
             return None
+        fields = ['arc_handles', 'arc_active_index', 'arc_top', 'arc_bottom', 'arc_left', 'arc_right']
+        before_values = self._snapshot_text_transform_fields(fields)
         handles = self._arc_handles()
         handles.append({'side': side, 't': int(round(t)), 'value': 0})
         self._save_arc_handles(handles)
         idx = len(handles) - 1
         self.data['arc_active_index'] = idx
         self.update()
+        # Stage 9: 새 부채꼴 제어점도 별도 앞단 예외가 아니라 single timeline의
+        # text_transform command로 기록한다.  바로 이어지는 드래그 조정은 release 시
+        # 별도 transform command가 되므로 Ctrl+Z 순서가 사용자의 실제 동선과 맞는다.
+        try:
+            self._push_text_transform_command(before_values, fields, reason='부채꼴 제어점 추가')
+        except Exception:
+            pass
         return f'arc_{idx}'
 
     def arc_action_at(self, pos):
         if not self.data.get('_arc_mode', False):
             return None
         for name, r in self.arc_handle_rects().items():
-            if r.adjusted(-6, -6, 6, 6).contains(pos):
+            hit_pad = self._guide_pad(6.0)
+            if r.adjusted(-hit_pad, -hit_pad, hit_pad, hit_pad).contains(pos):
                 return name
         return None
 
@@ -1087,7 +1857,7 @@ class TypesettingItem(QGraphicsPathItem):
             if not found:
                 handles.append({'side': side, 't': 50, 'value': max(-100, min(100, int(round(float(value)))))} )
         self._save_arc_handles(handles)
-        self.update()
+        self.rebuild_text_render_for_live_preview()
 
     def set_text_arc_handle_value(self, index, value):
         handles = self._arc_handles()
@@ -1100,7 +1870,7 @@ class TypesettingItem(QGraphicsPathItem):
         handles[idx]['value'] = max(-100, min(100, int(round(float(value)))))
         self._save_arc_handles(handles)
         self.data['arc_active_index'] = idx
-        self.update()
+        self.rebuild_text_render_for_live_preview()
         return True
 
     def begin_arc_action(self, action, local_pos, scene_pos):
@@ -1111,11 +1881,12 @@ class TypesettingItem(QGraphicsPathItem):
         if idx < 0 or idx >= len(handles):
             return False
         main = getattr(self, 'main_window', None)
-        if main is not None and hasattr(main, 'push_page_text_undo'):
+        if main is not None and not (hasattr(main, 'push_text_transform_command') or hasattr(main, 'push_text_geometry_command')) and hasattr(main, 'undo_text_checkpoint'):
             try:
-                main.push_page_text_undo('부채꼴 변형 조정')
+                main.undo_text_checkpoint('부채꼴 변형 조정')
             except Exception:
                 pass
+        self._arc_press_transform_values = self._snapshot_text_transform_fields(['arc_handles', 'arc_active_index', 'arc_top', 'arc_bottom', 'arc_left', 'arc_right'])
         self._arc_action = f'arc_{idx}'
         self._arc_active_index = idx
         self._arc_press_pos = QPointF(local_pos)
@@ -1157,14 +1928,16 @@ class TypesettingItem(QGraphicsPathItem):
         main = getattr(self, 'main_window', None)
         selected_id = self.data.get('id')
         if main is not None:
+            self._commit_transform_stable(selected_id)
             try:
-                main.auto_save_project()
-                if main.cb_mode.currentIndex() == 4:
-                    main.mode_chg(4)
-                    if selected_id is not None:
-                        main.reselect_text_items([selected_id])
+                self._push_text_transform_command(
+                    getattr(self, '_arc_press_transform_values', None),
+                    ['arc_handles', 'arc_active_index', 'arc_top', 'arc_bottom', 'arc_left', 'arc_right'],
+                    reason='부채꼴 변형 조정',
+                )
             except Exception:
                 pass
+            self._arc_press_transform_values = None
             try:
                 main.log(f"🔷 부채꼴 변형 적용: 제어점 {len(self._arc_handles())}개")
             except Exception:
@@ -1272,7 +2045,7 @@ class TypesettingItem(QGraphicsPathItem):
         base[2] = max(1, int(round(base[2] * (new_rect.width() / press_rect.width()))))
         base[3] = max(1, int(round(base[3] * (new_rect.height() / press_rect.height()))))
         self.data['rect'] = base
-        self.update()
+        self.rebuild_text_render_for_live_preview()
 
     def text_area_rect(self):
         """최종 화면에서 표시할 작업용 텍스트 영역. 실제 출력에는 포함되지 않는다."""
@@ -1328,8 +2101,9 @@ class TypesettingItem(QGraphicsPathItem):
             tr = self.transform_rect()
             for r in self.transform_handle_rects().values():
                 out = out.united(r)
-            hp = QPointF(tr.center().x(), tr.top() - 34)
-            out = out.united(QRectF(hp.x() - 24, hp.y() - 24, 48, 48))
+            hp = QPointF(tr.center().x(), tr.top() - self._guide_size(34.0, minimum=24.0))
+            hp_pad = self._guide_size(24.0, minimum=16.0)
+            out = out.united(QRectF(hp.x() - hp_pad, hp.y() - hp_pad, hp_pad * 2.0, hp_pad * 2.0))
         if self.data.get('_skew_mode', False):
             out = out.united(self.transform_rect())
             for r in self.skew_handle_rects().values():
@@ -1342,7 +2116,37 @@ class TypesettingItem(QGraphicsPathItem):
             out = out.united(self.transform_rect())
             for r in self.arc_handle_rects().values():
                 out = out.united(r)
-        return out.adjusted(-12, -12, 12, 12)
+        pad = self._guide_pad(12.0)
+        try:
+            pad = max(pad, float(getattr(self, '_synthetic_bold_width', 0.0) or 0.0) + 10.0)
+        except Exception:
+            pass
+        try:
+            pen = getattr(self, 'pen_stroke', None)
+            if pen is not None:
+                pad = max(pad, float(pen.widthF() or 0.0) + float(getattr(self, '_synthetic_bold_width', 0.0) or 0.0) + 10.0)
+        except Exception:
+            pass
+        try:
+            if _bool_value(self.data.get('double_stroke_enabled'), False):
+                pad = max(pad, float(self.data.get('double_stroke_width', 0) or 0) * 2.0 + float(getattr(self, '_synthetic_bold_width', 0.0) or 0.0) + 10.0)
+        except Exception:
+            pass
+        try:
+            if _bool_value(self.data.get('text_shadow_enabled'), False):
+                shadow_pad = max(abs(float(self.data.get('text_shadow_offset_x', 0) or 0.0)), abs(float(self.data.get('text_shadow_offset_y', 0) or 0.0)))
+                shadow_pad += max(0.0, float(self.data.get('text_shadow_blur', 0) or 0.0)) + 12.0
+                pad = max(pad, shadow_pad)
+        except Exception:
+            pass
+        try:
+            if _bool_value(self.data.get('text_glow_enabled'), False):
+                glow_pad = max(abs(float(self.data.get('text_glow_offset_x', 0) or 0.0)), abs(float(self.data.get('text_glow_offset_y', 0) or 0.0)))
+                glow_pad += max(0.0, float(self.data.get('text_glow_size', 0) or 0.0)) + max(0.0, float(self.data.get('text_glow_blur', 0) or 0.0)) + 12.0
+                pad = max(pad, glow_pad)
+        except Exception:
+            pass
+        return out.adjusted(-pad, -pad, pad, pad)
 
     def shape(self):
         # 클릭 판정은 실제 글자 선이 아니라 작업용 텍스트 영역 전체로 잡는다.
@@ -1356,34 +2160,134 @@ class TypesettingItem(QGraphicsPathItem):
             s.addPath(text_path)
         if self.data.get('_transform_mode', False):
             tr = self.transform_rect()
-            s.addRect(tr.adjusted(-10, -10, 10, 10))
+            box_pad = self._guide_pad(10.0)
+            handle_pad = self._guide_pad(6.0)
+            s.addRect(tr.adjusted(-box_pad, -box_pad, box_pad, box_pad))
             for r in self.transform_handle_rects().values():
-                s.addRect(r.adjusted(-6, -6, 6, 6))
-            hp = QPointF(tr.center().x(), tr.top() - 34)
-            s.addEllipse(QRectF(hp.x() - 22, hp.y() - 22, 44, 44))
+                s.addRect(r.adjusted(-handle_pad, -handle_pad, handle_pad, handle_pad))
+            hp = QPointF(tr.center().x(), tr.top() - self._guide_size(34.0, minimum=24.0))
+            hp_pad = self._guide_size(22.0, minimum=14.0)
+            s.addEllipse(QRectF(hp.x() - hp_pad, hp.y() - hp_pad, hp_pad * 2.0, hp_pad * 2.0))
         if self.data.get('_skew_mode', False):
             tr = self.transform_rect()
-            s.addRect(tr.adjusted(-10, -10, 10, 10))
+            box_pad = self._guide_pad(10.0)
+            handle_pad = self._guide_pad(8.0)
+            s.addRect(tr.adjusted(-box_pad, -box_pad, box_pad, box_pad))
             for r in self.skew_handle_rects().values():
-                s.addRect(r.adjusted(-8, -8, 8, 8))
+                s.addRect(r.adjusted(-handle_pad, -handle_pad, handle_pad, handle_pad))
         if self.data.get('_trapezoid_mode', False):
             tr = self.transform_rect()
+            handle_pad = self._guide_pad(8.0)
             s.addPolygon(QPolygonF(_trapezoid_quad_from_rect(tr, self.data.get('trap_left', 0), self.data.get('trap_right', 0), self.data.get('trap_top', 0), self.data.get('trap_bottom', 0))))
             for r in self.trapezoid_handle_rects().values():
-                s.addRect(r.adjusted(-8, -8, 8, 8))
+                s.addRect(r.adjusted(-handle_pad, -handle_pad, handle_pad, handle_pad))
         if self.data.get('_arc_mode', False):
             tr = self.transform_rect()
-            s.addRect(tr.adjusted(-10, -10, 10, 10))
+            box_pad = self._guide_pad(10.0)
+            handle_pad = self._guide_pad(8.0)
+            s.addRect(tr.adjusted(-box_pad, -box_pad, box_pad, box_pad))
             for r in self.arc_handle_rects().values():
-                s.addRect(r.adjusted(-8, -8, 8, 8))
+                s.addRect(r.adjusted(-handle_pad, -handle_pad, handle_pad, handle_pad))
         return s
+
+    def _view_fast_text_paint_active(self, widget=None):
+        """Return True while the owning view is in zoom/scroll fast path.
+
+        This is a display-only shortcut for editor navigation.  Export/offscreen
+        rendering sets suppress_guides=True and must keep full text effects.
+        """
+        try:
+            if bool(getattr(self, "suppress_guides", False)):
+                return False
+            if bool(getattr(self, "_disable_view_fast_text_paint", False)):
+                return False
+        except Exception:
+            pass
+        try:
+            w = widget
+            seen = 0
+            while w is not None and seen < 8:
+                if hasattr(w, "_view_interaction_fast_path_active"):
+                    return bool(getattr(w, "_view_interaction_fast_path_active", False))
+                parent = w.parent() if hasattr(w, "parent") else None
+                if parent is w:
+                    break
+                w = parent
+                seen += 1
+        except Exception:
+            pass
+        try:
+            scene = self.scene()
+            if scene is not None:
+                for view in scene.views():
+                    if bool(getattr(view, "_view_interaction_fast_path_active", False)):
+                        return True
+        except Exception:
+            pass
+        return False
+
+    def _text_effect_preview_enabled(self, widget=None):
+        """Return True when heavy text effects should be drawn in the editor preview.
+
+        This is controlled by the top-right "텍스트 이펙트 미리보기" checkbox.
+        Export/offscreen rendering must always keep effects, so suppress_guides=True
+        bypasses the preview toggle.
+        """
+        try:
+            if bool(getattr(self, "suppress_guides", False)):
+                return True
+        except Exception:
+            pass
+        try:
+            main = getattr(self, "main_window", None)
+            if main is not None:
+                getter = getattr(main, "get_page_text_effect_preview_enabled", None)
+                if callable(getter):
+                    return bool(getter())
+                return bool(getattr(main, "text_effect_preview_enabled", True))
+        except Exception:
+            pass
+        try:
+            w = widget
+            seen = 0
+            while w is not None and seen < 8:
+                main = getattr(w, "main", None)
+                if main is not None:
+                    getter = getattr(main, "get_page_text_effect_preview_enabled", None)
+                    if callable(getter):
+                        return bool(getter())
+                    return bool(getattr(main, "text_effect_preview_enabled", True))
+                parent = w.parent() if hasattr(w, "parent") else None
+                if parent is w:
+                    break
+                w = parent
+                seen += 1
+        except Exception:
+            pass
+        try:
+            scene = self.scene()
+            if scene is not None:
+                for view in scene.views():
+                    main = getattr(view, "main", None)
+                    if main is not None:
+                        getter = getattr(main, "get_page_text_effect_preview_enabled", None)
+                        if callable(getter):
+                            return bool(getter())
+                        return bool(getattr(main, "text_effect_preview_enabled", True))
+        except Exception:
+            pass
+        return True
 
     def paint(self, painter, option, widget=None):
         # 최종 화면 작업용 영역 표시.
         # 선택 전에는 옅은 회색, 선택 후에는 붉은 점선.
         # 변형 모드에서는 실제 글자 영역을 파란 실선 + 핸들로 표시한다.
         # 단, 파일 출력용 오프스크린 렌더에서는 보조 박스/핸들이 이미지에 찍히면 안 되므로 숨길 수 있게 한다.
+        effect_preview_enabled = self._text_effect_preview_enabled(widget)
         suppress_guides = bool(getattr(self, "suppress_guides", False))
+        # Heavy Photoshop-like mask stroke is export/preview-only.  Keeping the
+        # editor on the lighter path-based stroke avoids severe drag/scroll lag.
+        export_mask_stroke = bool(getattr(self, "_export_mask_stroke", False)) or bool(getattr(self, "_force_export_mask_stroke", False))
         area_rect = self.text_area_rect()
         try:
             _text_opacity = max(0, min(100, int(self.data.get('opacity', 100) or 100))) / 100.0
@@ -1394,9 +2298,9 @@ class TypesettingItem(QGraphicsPathItem):
         if getattr(self, '_is_rasterized_text', False):
             if not suppress_guides:
                 if self.isSelected():
-                    area_pen = QPen(QColor(255, 0, 0), 2, Qt.PenStyle.DashLine)
+                    area_pen = QPen(QColor(255, 0, 0), self._guide_width(2), Qt.PenStyle.DashLine)
                 else:
-                    area_pen = QPen(QColor(180, 180, 180, 150), 1, Qt.PenStyle.DotLine)
+                    area_pen = QPen(QColor(180, 180, 180, 150), self._guide_width(1), Qt.PenStyle.DotLine)
                 painter.setPen(area_pen)
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawRect(area_rect)
@@ -1409,22 +2313,23 @@ class TypesettingItem(QGraphicsPathItem):
         if not suppress_guides:
             if self.data.get('_transform_mode', False):
                 tr = self.transform_rect()
-                area_pen = QPen(QColor(60, 150, 255), 2, Qt.PenStyle.SolidLine)
+                area_pen = QPen(QColor(60, 150, 255), self._guide_width(2), Qt.PenStyle.SolidLine)
                 painter.setPen(area_pen)
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawRect(tr)
 
                 handle_pos = self.rotate_handle_pos()
-                painter.setPen(QPen(QColor(60, 150, 255), 2))
+                painter.setPen(QPen(QColor(60, 150, 255), self._guide_width(2)))
                 painter.drawLine(QPointF(tr.center().x(), tr.top()), handle_pos)
 
                 handle_rects = self.transform_handle_rects()
                 painter.setBrush(QBrush(QColor(60, 150, 255)))
-                painter.setPen(QPen(QColor(230, 245, 255), 1))
+                painter.setPen(QPen(QColor(230, 245, 255), self._guide_width(1)))
                 for name, r in handle_rects.items():
                     if name == 'rotate':
                         painter.drawEllipse(r)
-                        inner = r.adjusted(4, 4, -4, -4)
+                        inner_pad = self._guide_pad(4.0, minimum=3.0)
+                        inner = r.adjusted(inner_pad, inner_pad, -inner_pad, -inner_pad)
                         painter.setBrush(QBrush(QColor(230, 245, 255)))
                         painter.drawEllipse(inner)
                         painter.setBrush(QBrush(QColor(60, 150, 255)))
@@ -1432,36 +2337,36 @@ class TypesettingItem(QGraphicsPathItem):
                         painter.drawRect(r)
             elif self.data.get('_skew_mode', False):
                 tr = self.transform_rect()
-                painter.setPen(QPen(QColor(60, 150, 255), 2, Qt.PenStyle.SolidLine))
+                painter.setPen(QPen(QColor(60, 150, 255), self._guide_width(2), Qt.PenStyle.SolidLine))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawRect(tr)
                 painter.setBrush(QBrush(QColor(60, 150, 255)))
-                painter.setPen(QPen(QColor(230, 245, 255), 1))
+                painter.setPen(QPen(QColor(230, 245, 255), self._guide_width(1)))
                 for name, r in self.skew_handle_rects().items():
                     painter.drawRect(r)
             elif self.data.get('_trapezoid_mode', False):
                 quad = _trapezoid_quad_from_rect(self.transform_rect(), self.data.get('trap_left', 0), self.data.get('trap_right', 0), self.data.get('trap_top', 0), self.data.get('trap_bottom', 0))
-                painter.setPen(QPen(QColor(60, 150, 255), 2, Qt.PenStyle.SolidLine))
+                painter.setPen(QPen(QColor(60, 150, 255), self._guide_width(2), Qt.PenStyle.SolidLine))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawPolygon(QPolygonF(quad))
                 painter.setBrush(QBrush(QColor(60, 150, 255)))
-                painter.setPen(QPen(QColor(230, 245, 255), 1))
+                painter.setPen(QPen(QColor(230, 245, 255), self._guide_width(1)))
                 for name, r in self.trapezoid_handle_rects().items():
                     painter.drawRect(r)
             elif self.data.get('_arc_mode', False):
                 tr = self.transform_rect()
-                painter.setPen(QPen(QColor(60, 150, 255), 2, Qt.PenStyle.SolidLine))
+                painter.setPen(QPen(QColor(60, 150, 255), self._guide_width(2), Qt.PenStyle.SolidLine))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawRect(tr)
                 painter.setBrush(QBrush(QColor(60, 150, 255)))
-                painter.setPen(QPen(QColor(230, 245, 255), 1))
+                painter.setPen(QPen(QColor(230, 245, 255), self._guide_width(1)))
                 for name, r in self.arc_handle_rects().items():
                     painter.drawRect(r)
             else:
                 if self.isSelected():
-                    area_pen = QPen(QColor(255, 0, 0), 2, Qt.PenStyle.DashLine)
+                    area_pen = QPen(QColor(255, 0, 0), self._guide_width(2), Qt.PenStyle.DashLine)
                 else:
-                    area_pen = QPen(QColor(180, 180, 180, 150), 1, Qt.PenStyle.DotLine)
+                    area_pen = QPen(QColor(180, 180, 180, 150), self._guide_width(1), Qt.PenStyle.DotLine)
                 painter.setPen(area_pen)
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawRect(area_rect)
@@ -1469,18 +2374,84 @@ class TypesettingItem(QGraphicsPathItem):
         synthetic_bold_width = float(getattr(self, '_synthetic_bold_width', 0.0) or 0.0)
         text_path = self.path()
 
+        effect_silhouette_width = 0.0
+        try:
+            effect_silhouette_width = max(effect_silhouette_width, float(self.pen_stroke.widthF() or 0.0))
+        except Exception:
+            pass
+        try:
+            if _bool_value(self.data.get('double_stroke_enabled'), False):
+                effect_silhouette_width = max(effect_silhouette_width, float(self.pen_stroke.widthF() or 0.0) + float(self.data.get('double_stroke_width', 0) or 0) * 2.0)
+        except Exception:
+            pass
+        try:
+            effect_silhouette_width += float(getattr(self, '_synthetic_bold_width', 0.0) or 0.0)
+        except Exception:
+            pass
+
+        try:
+            if effect_preview_enabled and _bool_value(self.data.get('text_shadow_enabled'), False):
+                shadow_color = _soft_effect_color(self.data.get('text_shadow_color') or '#000000', '#000000', self.data.get('text_shadow_opacity', 45) or 45)
+                _draw_shadow_path(
+                    painter,
+                    text_path,
+                    shadow_color,
+                    self.data.get('text_shadow_offset_x', 3) or 3,
+                    self.data.get('text_shadow_offset_y', 3) or 3,
+                    self.data.get('text_shadow_blur', 4) or 4,
+                    effect_silhouette_width,
+                    use_mask=export_mask_stroke,
+                )
+        except Exception:
+            pass
+
+        try:
+            if effect_preview_enabled and _bool_value(self.data.get('text_glow_enabled'), False):
+                glow_color = _soft_effect_color(self.data.get('text_glow_color') or '#FFFFFF', '#FFFFFF', self.data.get('text_glow_opacity', 35) or 35)
+                _draw_glow_path(
+                    painter,
+                    text_path,
+                    glow_color,
+                    self.data.get('text_glow_size', 3) or 3,
+                    self.data.get('text_glow_blur', 8) or 8,
+                    self.data.get('text_glow_offset_x', 0) or 0,
+                    self.data.get('text_glow_offset_y', 0) or 0,
+                    effect_silhouette_width,
+                    use_mask=export_mask_stroke,
+                )
+        except Exception:
+            pass
+
         if synthetic_bold_width > 0:
             # 합성 볼드는 글자 내부를 두껍게 만드는 용도다. 획보다 나중에 그리면
             # 문자 그라데이션의 첫 색이 획 바깥으로 번져 보일 수 있으므로 먼저 깔고,
             # 실제 획을 그 위에 다시 올린 뒤 fill을 마지막에 정리한다.
-            bold_pen = QPen()
-            bold_pen.setBrush(self.brush_fill)
-            bold_pen.setWidthF(synthetic_bold_width)
-            bold_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-            bold_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-            painter.setPen(bold_pen)
-            painter.setBrush(self.brush_fill)
-            painter.drawPath(text_path)
+            if not _fill_path_outline(painter, text_path, self.brush_fill, synthetic_bold_width, use_mask=export_mask_stroke):
+                bold_pen = QPen()
+                bold_pen.setBrush(self.brush_fill)
+                bold_pen.setWidthF(synthetic_bold_width)
+                bold_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+                bold_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+                painter.setPen(bold_pen)
+                painter.setBrush(self.brush_fill)
+                painter.drawPath(text_path)
+
+        if effect_preview_enabled and _bool_value(self.data.get('double_stroke_enabled'), False):
+            try:
+                double_width = max(0.0, float(self.data.get('double_stroke_width', 0) or 0))
+            except Exception:
+                double_width = 0.0
+            if double_width > 0:
+                outer_width = max(0.0, float(self.pen_stroke.widthF())) + double_width * 2.0
+                if synthetic_bold_width > 0:
+                    outer_width += synthetic_bold_width
+                outer_pen = QPen(_qcolor(self.data.get('double_stroke_color') or '#000000', '#000000'), outer_width)
+                outer_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+                outer_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+                if not _fill_path_outline(painter, text_path, outer_pen.brush(), outer_width, use_mask=export_mask_stroke):
+                    painter.setPen(outer_pen)
+                    painter.setBrush(Qt.BrushStyle.NoBrush)
+                    painter.drawPath(text_path)
 
         if self.pen_stroke.widthF() > 0:
             stroke_pen = QPen(self.pen_stroke)
@@ -1494,9 +2465,10 @@ class TypesettingItem(QGraphicsPathItem):
                 ))
             if synthetic_bold_width > 0:
                 stroke_pen.setWidthF(float(stroke_pen.widthF()) + synthetic_bold_width)
-            painter.setPen(stroke_pen)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawPath(text_path)
+            if not _fill_path_outline(painter, text_path, stroke_pen.brush(), stroke_pen.widthF(), use_mask=export_mask_stroke):
+                painter.setPen(stroke_pen)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawPath(text_path)
 
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(self.brush_fill)
@@ -1519,6 +2491,12 @@ class TypesettingItem(QGraphicsPathItem):
             for x1, y1, x2, y2 in self._strike_lines:
                 painter.drawLine(QPointF(x1, y1), QPointF(x2, y2))
 
+        # VIEW_NAV_FAST_TEXT_PAINT: this item calls painter.save() above.  The
+        # view uses DontSavePainterState for speed, so an unmatched save leaks
+        # painter state across items and becomes catastrophic during zoom/scroll
+        # repaints.  Always balance it on the normal text path.
+        painter.restore()
+
     def transform_cursor_for_action(self, action):
         if action == 'rotate':
             return Qt.CursorShape.CrossCursor
@@ -1540,14 +2518,17 @@ class TypesettingItem(QGraphicsPathItem):
             return False
 
         main = getattr(self, "main_window", None)
-        if main is not None and hasattr(main, 'push_page_text_undo'):
-            if action == 'rotate':
-                reason = '텍스트 회전'
-            elif action == 'move':
-                reason = '텍스트 이동'
-            else:
-                reason = '텍스트 영역/비율 조정'
-            main.push_page_text_undo(reason)
+        if action == 'rotate':
+            reason = '텍스트 회전'
+            transform_fields = ['rotation']
+        elif action == 'move':
+            reason = '텍스트 이동'
+            transform_fields = ['rect', 'x_off', 'y_off']
+        else:
+            reason = '텍스트 영역/비율 조정'
+            transform_fields = ['rect', 'char_width', 'char_height']
+        if main is not None and not (hasattr(main, 'push_text_transform_command') or hasattr(main, 'push_text_geometry_command')) and hasattr(main, 'undo_text_checkpoint'):
+            main.undo_text_checkpoint(reason)
 
         self._transform_action = action
         self._transform_press_pos = QPointF(local_pos)
@@ -1559,6 +2540,12 @@ class TypesettingItem(QGraphicsPathItem):
         self._transform_press_scene_pos = QPointF(scene_pos)
         self._transform_press_item_pos = QPointF(self.pos())
         self._transform_press_rect_data = list(self.data.get('rect', [0, 0, 0, 0]))
+        try:
+            self._transform_command_fields = list(transform_fields)
+            self._transform_press_geometry_values = self._snapshot_text_transform_fields(transform_fields)
+        except Exception:
+            self._transform_command_fields = list(transform_fields)
+            self._transform_press_geometry_values = None
         center = self.transform_rect().center()
         self._transform_press_angle = math.degrees(math.atan2(local_pos.y() - center.y(), local_pos.x() - center.x()))
         self.setSelected(True)
@@ -1597,14 +2584,27 @@ class TypesettingItem(QGraphicsPathItem):
         main = getattr(self, "main_window", None)
         selected_id = self.data.get('id')
         if main is not None:
+            self._commit_transform_stable(selected_id)
             try:
-                main.auto_save_project()
-                if main.cb_mode.currentIndex() == 4:
-                    main.mode_chg(4)
-                    if selected_id is not None:
-                        main.reselect_text_items([selected_id])
+                before_geometry = getattr(self, '_transform_press_geometry_values', None)
+                fields = list(getattr(self, '_transform_command_fields', None) or [])
+                if action == 'move' and hasattr(main, 'push_text_geometry_command'):
+                    main.push_text_geometry_command(
+                        self.data,
+                        before_values=before_geometry,
+                        after_values=self._snapshot_text_transform_fields(fields or ['rect', 'x_off', 'y_off']),
+                        reason='텍스트 이동',
+                        fields=fields or ['rect', 'x_off', 'y_off'],
+                        component_type='text_geometry',
+                    )
+                elif action == 'rotate':
+                    self._push_text_transform_command(before_geometry, fields or ['rotation'], reason='텍스트 회전')
+                else:
+                    self._push_text_transform_command(before_geometry, fields or ['rect', 'char_width', 'char_height'], reason='텍스트 영역/비율 조정')
             except Exception:
                 pass
+            self._transform_press_geometry_values = None
+            self._transform_command_fields = None
             try:
                 if action == 'move':
                     main.log("🔷 텍스트 이동 적용")
@@ -1619,10 +2619,12 @@ class TypesettingItem(QGraphicsPathItem):
             action = self.transform_action_at(event.pos())
             if action:
                 self.setCursor(self.transform_cursor_for_action(action))
-            elif self.transform_rect().adjusted(-10, -10, 10, 10).contains(event.pos()):
-                self.setCursor(Qt.CursorShape.SizeAllCursor)
             else:
-                self.setCursor(Qt.CursorShape.ArrowCursor)
+                hit_pad = self._guide_pad(10.0)
+                if self.transform_rect().adjusted(-hit_pad, -hit_pad, hit_pad, hit_pad).contains(event.pos()):
+                    self.setCursor(Qt.CursorShape.SizeAllCursor)
+                else:
+                    self.setCursor(Qt.CursorShape.ArrowCursor)
             event.accept()
             return
         if self.data.get('_skew_mode', False):
@@ -1655,11 +2657,180 @@ class TypesettingItem(QGraphicsPathItem):
         self.unsetCursor()
         super().hoverLeaveEvent(event)
 
+    def _begin_text_move_fast_path(self):
+        """High-zoom drag fast path: move the existing rendered item, do not repaint the full viewport."""
+        if getattr(self, '_text_move_fast_path_active', False):
+            return
+        self._text_move_fast_path_active = True
+        self._text_move_fast_path_view = None
+        self._text_move_fast_path_viewport_mode = None
+        self._text_move_fast_path_cache_mode = None
+        main = getattr(self, "main_window", None)
+        view = getattr(main, "view", None) if main is not None else None
+        # Dragging a live QGraphicsItem is a small native-Qt critical section.
+        # Style undo timers, source-compare sync, and workspace checkpoints can all
+        # fire from the event loop while Qt still owns mouse grab/selection state.
+        # Mark the main window so those background timers defer until release.
+        if main is not None:
+            try:
+                count = int(getattr(main, '_text_item_drag_active_count', 0) or 0) + 1
+            except Exception:
+                count = 1
+            try:
+                main._text_item_drag_active_count = count
+                main._text_item_drag_active = True
+                main._text_item_drag_active_id = str(self.data.get('id'))
+                if hasattr(main, 'note_ui_interaction_activity'):
+                    main.note_ui_interaction_activity(1800)
+            except Exception:
+                pass
+        try:
+            self._text_move_fast_path_cache_mode = self.cacheMode()
+            # Moving text should behave like a sticker: reuse the already rendered path while dragging.
+            self.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
+        except Exception:
+            pass
+        try:
+            if view is not None and hasattr(view, 'viewportUpdateMode'):
+                self._text_move_fast_path_view = view
+                self._text_move_fast_path_viewport_mode = view.viewportUpdateMode()
+                # FullViewportUpdate repaints the whole high-resolution viewport on every mouse move.
+                # During a plain text move only the old/new item bounds need repainting.
+                view.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.BoundingRectViewportUpdate)
+        except Exception:
+            pass
+        try:
+            if main is not None and hasattr(main, 'audit_boundary_event'):
+                main.audit_boundary_event(
+                    'TEXT_MOVE_FAST_PATH_BEGIN',
+                    text_id=str(self.data.get('id')),
+                    cache='DeviceCoordinateCache',
+                    viewport='BoundingRectViewportUpdate',
+                )
+        except Exception:
+            pass
+
+    def _finish_text_move_fast_path(self):
+        if not getattr(self, '_text_move_fast_path_active', False):
+            return
+        main = getattr(self, "main_window", None)
+        try:
+            old_cache = getattr(self, '_text_move_fast_path_cache_mode', None)
+            if old_cache is not None:
+                self.setCacheMode(old_cache)
+            else:
+                self.setCacheMode(QGraphicsItem.CacheMode.NoCache)
+        except Exception:
+            pass
+        try:
+            view = getattr(self, '_text_move_fast_path_view', None)
+            old_mode = getattr(self, '_text_move_fast_path_viewport_mode', None)
+            if view is not None and old_mode is not None:
+                view.setViewportUpdateMode(old_mode)
+                try:
+                    view.viewport().update()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        self._text_move_fast_path_active = False
+        self._text_move_fast_path_view = None
+        self._text_move_fast_path_viewport_mode = None
+        self._text_move_fast_path_cache_mode = None
+        if main is not None:
+            try:
+                count = max(0, int(getattr(main, '_text_item_drag_active_count', 0) or 0) - 1)
+            except Exception:
+                count = 0
+            try:
+                main._text_item_drag_active_count = count
+                if count <= 0:
+                    main._text_item_drag_active = False
+                    main._text_item_drag_active_id = None
+                    def _resume_after_text_drag():
+                        try:
+                            if getattr(main, '_text_item_drag_active', False):
+                                return
+                            if hasattr(main, 'flush_pending_live_text_style_undo_session'):
+                                main.flush_pending_live_text_style_undo_session()
+                            if hasattr(main, 'schedule_deferred_auto_save_project'):
+                                main.schedule_deferred_auto_save_project(1200)
+                            if hasattr(main, 'schedule_source_compare_sync'):
+                                main.schedule_source_compare_sync(80)
+                        except Exception:
+                            pass
+                    try:
+                        QTimer.singleShot(80, _resume_after_text_drag)
+                    except Exception:
+                        _resume_after_text_drag()
+            except Exception:
+                pass
+        try:
+            if main is not None and hasattr(main, 'audit_boundary_event'):
+                main.audit_boundary_event('TEXT_MOVE_FAST_PATH_END', text_id=str(self.data.get('id')))
+        except Exception:
+            pass
+
+    def current_text_offsets_from_item_pos(self, item_pos=None):
+        """Return x_off/y_off that correspond to the current QGraphicsItem position.
+
+        Used by mouse release, keyboard nudging, and Ctrl-drag duplication so all
+        movement routes store the same canonical page-data coordinates.
+        """
+        pos = QPointF(self.pos() if item_pos is None else item_pos)
+        rect = self.data.get('rect', [0, 0, 1, 1])
+        try:
+            rect = list(rect)
+        except Exception:
+            rect = [0, 0, 1, 1]
+        while len(rect) < 4:
+            rect.append(1)
+        align = (self.data.get('align') or 'center').lower()
+        path_rect = getattr(self, '_text_path_rect', QGraphicsPathItem.boundingRect(self))
+        try:
+            rect_x = float(rect[0])
+            rect_y = float(rect[1])
+            rect_w = max(1.0, float(rect[2]))
+            rect_h = max(1.0, float(rect[3]))
+            if getattr(self, '_is_rasterized_text', False) or self.data.get('rasterized_text'):
+                new_x_off = int(round(float(pos.x()) - rect_x))
+                new_y_off = int(round(float(pos.y()) - rect_y))
+            elif align == 'left':
+                new_x_off = int(round(float(pos.x()) + float(path_rect.left()) - rect_x))
+                new_y_off = int(round(float(pos.y()) + float(path_rect.center().y()) - (rect_y + rect_h / 2.0)))
+            elif align == 'right':
+                new_x_off = int(round(float(pos.x()) + float(path_rect.right()) - (rect_x + rect_w)))
+                new_y_off = int(round(float(pos.y()) + float(path_rect.center().y()) - (rect_y + rect_h / 2.0)))
+            else:
+                new_x_off = int(round(float(pos.x()) + float(path_rect.center().x()) - (rect_x + rect_w / 2.0)))
+                new_y_off = int(round(float(pos.y()) + float(path_rect.center().y()) - (rect_y + rect_h / 2.0)))
+        except Exception:
+            try:
+                new_x_off = int(round(float(pos.x()) - float(rect[0])))
+            except Exception:
+                new_x_off = int(self.data.get('x_off', 0) or 0)
+            new_y_off = int(self.data.get('y_off', 0) or 0)
+        return int(new_x_off), int(new_y_off)
+
+    def _axis_locked_delta_for_shift_drag(self, delta):
+        """Shift+drag locks movement to the dominant axis, not vertical only."""
+        try:
+            d = QPointF(delta)
+            if abs(float(d.x())) >= abs(float(d.y())):
+                d.setY(0.0)
+            else:
+                d.setX(0.0)
+            return d
+        except Exception:
+            return delta
+
     def mousePressEvent(self, event):
         main = getattr(self, "main_window", None)
         # 이동 모드가 아닐 때는 텍스트 선택/이동을 막는다.
-        # 브러시/지우개/텍스트 도구 사용 중에는 캔버스 도구가 우선이다.
-        if main is not None and getattr(getattr(main, "view", None), "draw_mode", None) is not None:
+        # 단, 최종 텍스트 도구(final_text)는 "새 텍스트 만들기"와
+        # "기존 텍스트 선택/이동"을 같이 해야 실제 식질 동선이 자연스럽다.
+        draw_mode = getattr(getattr(main, "view", None), "draw_mode", None) if main is not None else None
+        if main is not None and draw_mode is not None and draw_mode != 'final_text':
             event.ignore()
             return
 
@@ -1671,11 +2842,48 @@ class TypesettingItem(QGraphicsPathItem):
         except Exception:
             self._normal_move_press_xoff = 0
             self._normal_move_press_yoff = 0
+        try:
+            # 이동 Undo의 before는 release 시점의 data가 아니라 press 시점의
+            # 안정 geometry여야 한다. 새 텍스트 생성 직후에는 release 전에
+            # scene/data sync가 끼어들 수 있으므로 여기서 고정한다.
+            self._normal_move_press_geometry = {
+                "rect": {"exists": 'rect' in self.data, "value": copy.deepcopy(self.data.get('rect'))},
+                "x_off": {"exists": 'x_off' in self.data, "value": self._normal_move_press_xoff},
+                "y_off": {"exists": 'y_off' in self.data, "value": self._normal_move_press_yoff},
+                "manual_text_rect": {"exists": 'manual_text_rect' in self.data, "value": copy.deepcopy(self.data.get('manual_text_rect'))},
+                "text_anchor_mode": {"exists": 'text_anchor_mode' in self.data, "value": copy.deepcopy(self.data.get('text_anchor_mode'))},
+            }
+        except Exception:
+            self._normal_move_press_geometry = {
+                "x_off": {"exists": True, "value": self._normal_move_press_xoff},
+                "y_off": {"exists": True, "value": self._normal_move_press_yoff},
+            }
         self._ctrl_select_press = False
+        self._ctrl_drag_duplicate_pending = False
+        self._ctrl_drag_duplicate_active = False
+        self._ctrl_drag_scene_press = None
+        self._manual_text_drag_scene_press = None
+        self._manual_text_drag_item_press = None
+        self._shift_vertical_drag_active = False
 
         active_transform = main.current_transform_data_item() if main is not None and hasattr(main, 'current_transform_data_item') else None
         if active_transform is not None and active_transform is not self.data:
             self.setSelected(False)
+            event.accept()
+            return
+
+        # Ctrl+드래그는 선택 누적이 아니라 복제 이동으로 승격될 수 있다.
+        # 단순 Ctrl+클릭은 기존처럼 선택만 누적한다.
+        if event.button() == Qt.MouseButton.LeftButton and (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            self._ctrl_select_press = True
+            self._ctrl_drag_duplicate_pending = True
+            self._ctrl_drag_duplicate_active = False
+            self._ctrl_drag_scene_press = QPointF(event.scenePos())
+            try:
+                if self.scene() is not None and not self.isSelected():
+                    self.setSelected(True)
+            except Exception:
+                pass
             event.accept()
             return
 
@@ -1691,12 +2899,16 @@ class TypesettingItem(QGraphicsPathItem):
             self.setSelected(True)
             self._raster_drag_scene_press = QPointF(event.scenePos())
             self._raster_drag_item_press = QPointF(self.pos())
+            self._manual_text_drag_scene_press = QPointF(event.scenePos())
+            self._manual_text_drag_item_press = QPointF(self.pos())
+            self._begin_text_move_fast_path()
             event.accept()
             return
 
         if self.data.get('_transform_mode', False) and event.button() == Qt.MouseButton.LeftButton:
             if event.modifiers() & Qt.KeyboardModifier.AltModifier:
-                if self.transform_rect().adjusted(-10, -10, 10, 10).contains(event.pos()):
+                hit_pad = self._guide_pad(10.0)
+                if self.transform_rect().adjusted(-hit_pad, -hit_pad, hit_pad, hit_pad).contains(event.pos()):
                     if self.begin_transform_action('move', event.pos(), event.scenePos()):
                         event.accept()
                         return
@@ -1759,6 +2971,13 @@ class TypesettingItem(QGraphicsPathItem):
                         item.setSelected(False)
                 self.setSelected(True)
 
+            self._manual_text_drag_scene_press = QPointF(event.scenePos())
+            self._manual_text_drag_item_press = QPointF(self.pos())
+            self._shift_vertical_drag_active = False
+
+            # High zoom + high resolution images are expensive when the whole viewport is repainted.
+            # Start a temporary fast path; if the click was not a move it is restored on release.
+            self._begin_text_move_fast_path()
             event.accept()
             return
 
@@ -1767,9 +2986,14 @@ class TypesettingItem(QGraphicsPathItem):
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             main = getattr(self, "main_window", None)
-            if main is not None and getattr(getattr(main, "view", None), "draw_mode", None) is not None:
-                event.ignore()
-                return
+            if main is not None:
+                draw_mode = getattr(getattr(main, "view", None), "draw_mode", None)
+                # 최종 텍스트 도구(final_text)에서는 기존 텍스트 영역 더블클릭도
+                # "새 텍스트 생성"이 아니라 "기존 텍스트 직접 수정"으로 들어가야 한다.
+                # 브러시/마스크/요술봉 같은 다른 도구 모드에서는 기존처럼 아이템 더블클릭을 넘기지 않는다.
+                if draw_mode is not None and draw_mode != 'final_text':
+                    event.ignore()
+                    return
 
             if getattr(self, '_is_rasterized_text', False) or self.data.get('rasterized_text'):
                 # 객체화된 텍스트는 일반 이미지 객체로 취급한다.
@@ -1782,19 +3006,26 @@ class TypesettingItem(QGraphicsPathItem):
                 if action:
                     current_pct = float(self.data.get('skew_x' if action in ('top', 'bottom') else 'skew_y', 0) or 0)
                     current_angle = math.degrees(math.atan(current_pct / 100.0))
-                    angle, ok = QInputDialog.getDouble(None, "평행사변형 변형", "기울임 각도(도):", current_angle, -45.0, 45.0, 1)
+                    angle, ok = QInputDialog.getDouble(main, "평행사변형 변형", "기울임 각도(도):", current_angle, -45.0, 45.0, 1)
                     if ok:
+                        before_values = self._snapshot_text_transform_fields(['skew_x', 'skew_y'])
                         try:
-                            if main is not None and hasattr(main, 'push_page_text_undo'):
-                                main.push_page_text_undo('평행사변형 변형 각도 지정')
+                            if main is not None and not (hasattr(main, 'push_text_transform_command') or hasattr(main, 'push_text_geometry_command')) and hasattr(main, 'undo_text_checkpoint'):
+                                main.undo_text_checkpoint('평행사변형 변형 각도 지정')
                         except Exception:
                             pass
                         self.set_text_skew_angle(action, angle)
                         try:
+                            self._push_text_transform_command(before_values, ['skew_x', 'skew_y'], reason='평행사변형 변형 각도 지정')
+                        except Exception:
+                            pass
+                        try:
                             if main is not None:
-                                main.auto_save_project()
-                                main.mode_chg(4)
-                                main.reselect_text_items([self.data.get('id')])
+                                (main.schedule_deferred_auto_save_project(500) if hasattr(main, 'schedule_deferred_auto_save_project') else main.auto_save_project())
+                                if main.cb_mode.currentIndex() == 4:
+                                    if hasattr(main, 'refresh_final_text_items_by_ids'):
+                                        main.refresh_final_text_items_by_ids([self.data.get('id')])
+                                    main.reselect_text_items([self.data.get('id')])
                                 main.log(f"🔷 평행사변형 변형 각도 지정: {angle}°")
                         except Exception:
                             pass
@@ -1819,11 +3050,12 @@ class TypesettingItem(QGraphicsPathItem):
                         side_key = 'trap_bottom'
                         side_name = '아래쪽'
                     current_pct = float(self.data.get(side_key, 0) or 0)
-                    value, ok = QInputDialog.getInt(None, '사다리꼴 변형', f'{side_name} 크기(%)', int(round(current_pct)), -95, 95, 1)
+                    value, ok = QInputDialog.getInt(main, '사다리꼴 변형', f'{side_name} 크기(%)', int(round(current_pct)), -95, 95, 1)
                     if ok:
+                        before_values = self._snapshot_text_transform_fields([side_key])
                         try:
-                            if main is not None and hasattr(main, 'push_page_text_undo'):
-                                main.push_page_text_undo('사다리꼴 변형 수치 지정')
+                            if main is not None and not (hasattr(main, 'push_text_transform_command') or hasattr(main, 'push_text_geometry_command')) and hasattr(main, 'undo_text_checkpoint'):
+                                main.undo_text_checkpoint('사다리꼴 변형 수치 지정')
                         except Exception:
                             pass
                         if side_key == 'trap_left':
@@ -1835,10 +3067,16 @@ class TypesettingItem(QGraphicsPathItem):
                         else:
                             self.set_text_trapezoid_values(bottom_pct=value)
                         try:
+                            self._push_text_transform_command(before_values, [side_key], reason='사다리꼴 변형 수치 지정')
+                        except Exception:
+                            pass
+                        try:
                             if main is not None:
-                                main.auto_save_project()
-                                main.mode_chg(4)
-                                main.reselect_text_items([self.data.get('id')])
+                                (main.schedule_deferred_auto_save_project(500) if hasattr(main, 'schedule_deferred_auto_save_project') else main.auto_save_project())
+                                if main.cb_mode.currentIndex() == 4:
+                                    if hasattr(main, 'refresh_final_text_items_by_ids'):
+                                        main.refresh_final_text_items_by_ids([self.data.get('id')])
+                                    main.reselect_text_items([self.data.get('id')])
                                 main.log(f"🔷 사다리꼴 변형 수치 지정: {side_name} {value}%")
                         except Exception:
                             pass
@@ -1857,18 +3095,27 @@ class TypesettingItem(QGraphicsPathItem):
                         side = str(handle.get('side') or '')
                         side_name = {'top':'위쪽','bottom':'아래쪽','left':'왼쪽','right':'오른쪽'}.get(side, side)
                         current_pct = float(handle.get('value', 0) or 0)
-                        value, ok = QInputDialog.getInt(None, '부채꼴 변형', f'{side_name} 제어점 휘어짐(%)', int(round(current_pct)), -100, 100, 1)
+                        value, ok = QInputDialog.getInt(main, '부채꼴 변형', f'{side_name} 제어점 휘어짐(%)', int(round(current_pct)), -100, 100, 1)
                         if ok:
+                            before_values = self._snapshot_text_transform_fields(['arc_handles', 'arc_active_index', 'arc_top', 'arc_bottom', 'arc_left', 'arc_right'])
                             try:
-                                if main is not None and hasattr(main, 'push_page_text_undo'):
-                                    main.push_page_text_undo('부채꼴 변형 수치 지정')
+                                if main is not None and not (hasattr(main, 'push_text_transform_command') or hasattr(main, 'push_text_geometry_command')) and hasattr(main, 'undo_text_checkpoint'):
+                                    main.undo_text_checkpoint('부채꼴 변형 수치 지정')
                             except Exception:
                                 pass
                             self.set_text_arc_handle_value(idx, value)
                             try:
+                                self._push_text_transform_command(before_values, ['arc_handles', 'arc_active_index', 'arc_top', 'arc_bottom', 'arc_left', 'arc_right'], reason='부채꼴 변형 수치 지정')
+                            except Exception:
+                                pass
+                            try:
                                 if main is not None:
-                                    main.auto_save_project()
-                                    main.mode_chg(4)
+                                    if hasattr(main, 'schedule_deferred_auto_save_project'):
+                                        main.schedule_deferred_auto_save_project(500)
+                                    else:
+                                        main.auto_save_project()
+                                    if hasattr(main, 'refresh_final_text_items_by_ids'):
+                                        main.refresh_final_text_items_by_ids([self.data.get('id')])
                                     main.reselect_text_items([self.data.get('id')])
                                     main.log(f"🔷 부채꼴 변형 수치 지정: {side_name} 제어점 {value}%")
                             except Exception:
@@ -1882,17 +3129,26 @@ class TypesettingItem(QGraphicsPathItem):
                 action = self.transform_action_at(event.pos())
                 if action == 'rotate':
                     current = float(self.data.get('rotation', 0) or 0)
-                    angle, ok = QInputDialog.getDouble(None, "텍스트 회전", "회전 각도(도):", current, -360.0, 360.0, 1)
+                    angle, ok = QInputDialog.getDouble(main, "텍스트 회전", "회전 각도(도):", current, -360.0, 360.0, 1)
                     if ok:
+                        before_values = self._snapshot_text_transform_fields(['rotation'])
                         try:
-                            if main is not None and hasattr(main, 'push_page_text_undo'):
-                                main.push_page_text_undo('텍스트 회전 각도 지정')
+                            if main is not None and not (hasattr(main, 'push_text_transform_command') or hasattr(main, 'push_text_geometry_command')) and hasattr(main, 'undo_text_checkpoint'):
+                                main.undo_text_checkpoint('텍스트 회전 각도 지정')
                         except Exception:
                             pass
                         self.set_transform_rotation(angle)
                         try:
+                            self._push_text_transform_command(before_values, ['rotation'], reason='텍스트 회전 각도 지정')
+                        except Exception:
+                            pass
+                        try:
                             if main is not None:
-                                main.auto_save_project()
+                                (main.schedule_deferred_auto_save_project(500) if hasattr(main, 'schedule_deferred_auto_save_project') else main.auto_save_project())
+                                if main.cb_mode.currentIndex() == 4:
+                                    if hasattr(main, 'refresh_final_text_items_by_ids'):
+                                        main.refresh_final_text_items_by_ids([self.data.get('id')])
+                                    main.reselect_text_items([self.data.get('id')])
                                 main.log(f"🔷 텍스트 회전 각도 지정: {angle}°")
                         except Exception:
                             pass
@@ -1909,6 +3165,44 @@ class TypesettingItem(QGraphicsPathItem):
         super().mouseDoubleClickEvent(event)
 
     def mouseMoveEvent(self, event):
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            main = getattr(self, "main_window", None)
+            if getattr(self, '_ctrl_drag_duplicate_active', False):
+                try:
+                    if main is not None and hasattr(main, 'update_text_ctrl_drag_duplicate'):
+                        main.update_text_ctrl_drag_duplicate(
+                            event.scenePos(),
+                            axis_lock=bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier),
+                        )
+                    event.accept()
+                    return
+                except Exception:
+                    pass
+            if getattr(self, '_ctrl_drag_duplicate_pending', False):
+                try:
+                    press = QPointF(getattr(self, '_ctrl_drag_scene_press', event.scenePos()))
+                    delta = QPointF(event.scenePos()) - press
+                    threshold = 4
+                    try:
+                        threshold = QApplication.startDragDistance()
+                    except Exception:
+                        threshold = 4
+                    if abs(delta.x()) + abs(delta.y()) >= max(1, int(threshold)):
+                        if main is not None and hasattr(main, 'begin_text_ctrl_drag_duplicate'):
+                            if main.begin_text_ctrl_drag_duplicate(self, press):
+                                self._ctrl_drag_duplicate_active = True
+                                self._ctrl_drag_duplicate_pending = False
+                                main.update_text_ctrl_drag_duplicate(
+                                    event.scenePos(),
+                                    axis_lock=bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier),
+                                )
+                                event.accept()
+                                return
+                except Exception:
+                    pass
+                event.accept()
+                return
+
         if (
             getattr(self, '_is_rasterized_text', False)
             and getattr(self, '_raster_drag_scene_press', None) is not None
@@ -1916,7 +3210,33 @@ class TypesettingItem(QGraphicsPathItem):
         ):
             try:
                 delta = QPointF(event.scenePos()) - QPointF(self._raster_drag_scene_press)
+                if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                    delta = self._axis_locked_delta_for_shift_drag(delta)
+                    self._shift_vertical_drag_active = True
                 self.setPos(QPointF(self._raster_drag_item_press) + delta)
+                self.update()
+                event.accept()
+                return
+            except Exception:
+                pass
+
+        if (
+            event.buttons() & Qt.MouseButton.LeftButton
+            and (event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            and getattr(self, '_manual_text_drag_scene_press', None) is not None
+            and not getattr(self, '_is_rasterized_text', False)
+            and not self._transform_action
+            and not self._skew_action
+            and not self._trapezoid_action
+            and not self._arc_action
+        ):
+            try:
+                press_scene = QPointF(self._manual_text_drag_scene_press)
+                press_item = QPointF(self._manual_text_drag_item_press)
+                delta = QPointF(event.scenePos()) - press_scene
+                delta = self._axis_locked_delta_for_shift_drag(delta)
+                self.setPos(QPointF(press_item) + delta)
+                self._shift_vertical_drag_active = True
                 self.update()
                 event.accept()
                 return
@@ -1959,6 +3279,20 @@ class TypesettingItem(QGraphicsPathItem):
             event.accept()
             return
 
+        if getattr(self, '_ctrl_drag_duplicate_active', False) or getattr(self, '_ctrl_drag_duplicate_pending', False):
+            main = getattr(self, "main_window", None)
+            try:
+                if getattr(self, '_ctrl_drag_duplicate_active', False) and main is not None and hasattr(main, 'finish_text_ctrl_drag_duplicate'):
+                    main.finish_text_ctrl_drag_duplicate(commit=True)
+            except Exception:
+                pass
+            self._ctrl_select_press = False
+            self._ctrl_drag_duplicate_pending = False
+            self._ctrl_drag_duplicate_active = False
+            self._ctrl_drag_scene_press = None
+            event.accept()
+            return
+
         if getattr(self, '_ctrl_select_press', False):
             self._ctrl_select_press = False
             event.accept()
@@ -1968,47 +3302,47 @@ class TypesettingItem(QGraphicsPathItem):
         self._raster_drag_scene_press = None
         self._raster_drag_item_press = None
 
-        # rasterized_text는 위에서 직접 이동했으므로 base mouseRelease가 없어도 된다.
+        manual_vertical_drag_active = bool(getattr(self, '_shift_vertical_drag_active', False))
+
+        # rasterized_text/Shift 수직 잠금은 위에서 직접 이동했으므로 base mouseRelease가 없어도 된다.
         # 일반 텍스트는 기존 흐름을 유지한다.
-        if not raster_drag_active:
+        if not raster_drag_active and not manual_vertical_drag_active:
             super().mouseReleaseEvent(event)
         new_pos = self.pos()
-        rect = self.data['rect']
-        align = (self.data.get('align') or 'center').lower()
-        path_rect = getattr(self, '_text_path_rect', QGraphicsPathItem.boundingRect(self))
+        new_x_off, new_y_off = self.current_text_offsets_from_item_pos(new_pos)
+        press_geometry = getattr(self, '_normal_move_press_geometry', None)
+        old_x_off = getattr(self, '_normal_move_press_xoff', None)
+        old_y_off = getattr(self, '_normal_move_press_yoff', None)
         try:
-            rect_x = float(rect[0])
-            rect_y = float(rect[1])
-            rect_w = max(1.0, float(rect[2]))
-            rect_h = max(1.0, float(rect[3]))
-            if getattr(self, '_is_rasterized_text', False) or self.data.get('rasterized_text'):
-                # 객체화 텍스트는 rect 자체가 래스터 이미지의 좌상단 기준이다.
-                # align/글자 bounds 보정 없이 위치 차이만 저장해야 이동 후 다시 박혀 보이지 않는다.
-                new_x_off = int(round(float(new_pos.x()) - rect_x))
-                new_y_off = int(round(float(new_pos.y()) - rect_y))
-            elif align == 'left':
-                new_x_off = int(round(float(new_pos.x()) + float(path_rect.left()) - rect_x))
-                new_y_off = int(round(float(new_pos.y()) + float(path_rect.center().y()) - (rect_y + rect_h / 2.0)))
-            elif align == 'right':
-                new_x_off = int(round(float(new_pos.x()) + float(path_rect.right()) - (rect_x + rect_w)))
-                new_y_off = int(round(float(new_pos.y()) + float(path_rect.center().y()) - (rect_y + rect_h / 2.0)))
-            else:
-                new_x_off = int(round(float(new_pos.x()) + float(path_rect.center().x()) - (rect_x + rect_w / 2.0)))
-                new_y_off = int(round(float(new_pos.y()) + float(path_rect.center().y()) - (rect_y + rect_h / 2.0)))
+            old_x_off = int(old_x_off)
+            old_y_off = int(old_y_off)
         except Exception:
-            new_x_off = int(round(float(new_pos.x()) - float(rect[0])))
-            new_y_off = int(self.data.get('y_off', 0) or 0)
-        old_x_off = int(self.data.get('x_off', 0) or 0)
-        old_y_off = int(self.data.get('y_off', 0) or 0)
+            old_x_off = int(self.data.get('x_off', 0) or 0)
+            old_y_off = int(self.data.get('y_off', 0) or 0)
 
         # A plain click should not create an undo record or a "moved" log.
         if new_x_off == old_x_off and new_y_off == old_y_off:
+            self._manual_text_drag_scene_press = None
+            self._manual_text_drag_item_press = None
+            self._shift_vertical_drag_active = False
+            self._finish_text_move_fast_path()
             return
 
         main = getattr(self, "main_window", None)
-        if main is not None and hasattr(main, 'push_page_text_undo'):
+        if isinstance(press_geometry, dict):
+            before_geometry = {
+                "x_off": press_geometry.get("x_off", {"exists": 'x_off' in self.data, "value": old_x_off}),
+                "y_off": press_geometry.get("y_off", {"exists": 'y_off' in self.data, "value": old_y_off}),
+            }
+        else:
+            before_geometry = {
+                "x_off": {"exists": 'x_off' in self.data, "value": old_x_off},
+                "y_off": {"exists": 'y_off' in self.data, "value": old_y_off},
+            }
+        use_command_undo = bool(main is not None and hasattr(main, 'push_text_geometry_command'))
+        if not use_command_undo and main is not None and hasattr(main, 'undo_text_checkpoint'):
             try:
-                main.push_page_text_undo('텍스트 이동')
+                main.undo_text_checkpoint('텍스트 이동')
             except Exception:
                 pass
 
@@ -2021,14 +3355,47 @@ class TypesettingItem(QGraphicsPathItem):
         self.data['y_off'] = new_y_off
         self.update()
 
-        # 이동 직후에는 화면 좌표 -> data 좌표를 먼저 확정한 뒤 자동저장한다.
-        # update_cb가 자동저장을 호출하지만, callback 누락/예외 상황에서도 좌표 저장이 빠지지 않게 보강한다.
-        if main is not None:
+        if use_command_undo:
             try:
-                if hasattr(main, 'sync_final_text_scene_to_data'):
-                    main.sync_final_text_scene_to_data()
+                main.push_text_geometry_command(
+                    self.data,
+                    before_values=before_geometry,
+                    after_values={
+                        "x_off": {"exists": True, "value": new_x_off},
+                        "y_off": {"exists": True, "value": new_y_off},
+                    },
+                    reason='텍스트 이동',
+                    fields=['x_off', 'y_off'],
+                    component_type='text_position',
+                )
             except Exception:
                 pass
+        try:
+            self._normal_move_press_geometry = None
+        except Exception:
+            pass
+
+        # x_off/y_off는 위에서 page data dict에 직접 확정됐다.
+        # release 직후 scene->data 전체 flush를 다시 돌리면 고해상도 확대 상태에서 멈칫하므로 생략한다.
+        if main is not None:
+            try:
+                main._text_move_direct_data_flushed = True
+                main._text_move_direct_data_flushed_ids = {str(self.data.get('id'))}
+                if hasattr(main, 'audit_boundary_event'):
+                    main.audit_boundary_event(
+                        'TEXT_MOVE_SYNC_SKIPPED_ALREADY_FLUSHED',
+                        text_id=str(self.data.get('id')),
+                        x_off=int(new_x_off),
+                        y_off=int(new_y_off),
+                    )
+            except Exception:
+                pass
+
+        self._manual_text_drag_scene_press = None
+        self._manual_text_drag_item_press = None
+        self._shift_vertical_drag_active = False
+
+        self._finish_text_move_fast_path()
 
         if self.update_cb:
             self.update_cb(f"📍 텍스트 이동됨 (ID: {self.data.get('id')})")
@@ -2092,6 +3459,18 @@ class ToggleBoxItem(QGraphicsRectItem):
     def hoverEnterEvent(self, event):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         super().hoverEnterEvent(event)
+
+    def _axis_locked_delta_for_shift_drag(self, delta):
+        """Shift+drag locks movement to the dominant axis, not vertical only."""
+        try:
+            d = QPointF(delta)
+            if abs(float(d.x())) >= abs(float(d.y())):
+                d.setY(0.0)
+            else:
+                d.setX(0.0)
+            return d
+        except Exception:
+            return delta
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:

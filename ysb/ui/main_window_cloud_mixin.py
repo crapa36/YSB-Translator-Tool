@@ -285,6 +285,10 @@ class MainWindowCloudMixin:
         progress.setWindowModality(Qt.WindowModality.ApplicationModal)
         progress.setAutoClose(False)
         progress.setAutoReset(False)
+        try:
+            apply_progress_dialog_theme(progress, self.is_light_theme())
+        except Exception:
+            pass
         progress.show()
 
         try:
@@ -542,14 +546,9 @@ class MainWindowCloudMixin:
             self.sync_translation_option_cache_to_config()
             self.sync_analysis_mask_options_to_config()
 
-            self.auto_save_enabled = bool(self.app_options.get("auto_save_enabled", False))
-            try:
-                if hasattr(self, "act_auto_save_mode"):
-                    self.act_auto_save_mode.blockSignals(True)
-                    self.act_auto_save_mode.setChecked(self.auto_save_enabled)
-                    self.act_auto_save_mode.blockSignals(False)
-            except Exception:
-                pass
+            # v2.4 QA6: 자동저장 모드는 폐지. 클라우드에서 예전 캐시가 복원되어도 강제로 OFF 유지.
+            self.auto_save_enabled = False
+            self.app_options["auto_save_enabled"] = False
 
             self.ui_theme = str(self.app_options.get(UI_THEME_KEY, self.ui_theme) or THEME_DARK).lower()
             if self.ui_theme not in (THEME_DARK, THEME_LIGHT):

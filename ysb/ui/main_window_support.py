@@ -4,6 +4,7 @@ import math
 import shutil
 import uuid
 from pathlib import Path
+from collections import OrderedDict
 
 # Source tree root. main_window.py lives at ysb/ui/main_window.py.
 APP_ROOT = Path(__file__).resolve().parents[2]
@@ -35,9 +36,26 @@ from PyQt6.QtCore import *
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 
 from ysb.engine.manga_engine import MangaProcessEngine, Config
-from ysb.core.project_store import ProjectStore, PROJECT_FILENAME, YSB_EXTENSION, package_project, extract_ysb_package, read_ysb_manifest, safe_project_name, clean_workspace_name, unique_dir, unique_dir_with_code_suffix
+from ysb.core.project_store import ProjectStore, PROJECT_FILENAME, YSB_EXTENSION, package_project, append_project_json_to_package, extract_ysb_package, read_ysb_manifest, safe_project_name, clean_workspace_name, unique_dir, unique_dir_with_code_suffix
 from ysb.settings.api_settings import ApiSettingsStore, ApiSettingsDialog, apply_settings_to_config
-from ysb.settings.shortcut_settings import ShortcutSettingsStore, ShortcutSettingsDialog, MacroSettingsDialog, TEXT_SYMBOLS, shortcut_label_map, ConfirmingKeySequenceEdit, sequence_without_confirm_keys, key_sequence_from_text, key_sequence_to_portable
+
+
+def ysb_combo_diag_log(source, message):
+    """Compatibility no-op. Combo popup diagnostics are disabled in normal builds."""
+    return
+
+
+class StableComboBox(QComboBox):
+    """Plain combo box used by the compact right panel.
+
+    Diagnostics and popup event filters were removed because they can make the native
+    popup redraw path look like a double-open flash on Windows/Qt.
+    """
+
+    pass
+
+
+from ysb.settings.shortcut_settings import ShortcutSettingsStore, ShortcutSettingsDialog, MacroSettingsDialog, TEXT_SYMBOLS, shortcut_label_map, ConfirmingKeySequenceEdit, sequence_without_confirm_keys, key_sequence_from_text, key_sequence_to_portable, key_event_matches_sequence
 from ysb.ui.viewer import MuleImageViewer
 from ysb.engine.graphics_items import TypesettingItem, build_typesetting_text_path
 from ysb.ui.delegates import MultilineDelegate
@@ -62,6 +80,10 @@ def resource_path(relative_path):
     aliases = {
         "ysb_icon.ico": ["assets/YSB_icon.ico", "assets/ysb_icon.ico", "YSB_icon.ico", "ysb_icon.ico"],
         "YSB_icon.ico": ["assets/YSB_icon.ico", "assets/ysb_icon.ico", "YSB_icon.ico", "ysb_icon.ico"],
+        "ysbt_file_icon.ico": ["assets/ysbt_file_icon.ico", "ysbt_file_icon.ico"],
+        "YSBT_file_icon.ico": ["assets/ysbt_file_icon.ico", "ysbt_file_icon.ico"],
+        "ysb_launcher_icon.ico": ["assets/ysb_launcher_icon.ico", "ysb_launcher_icon.ico"],
+        "YSB_launcher_icon.ico": ["assets/ysb_launcher_icon.ico", "ysb_launcher_icon.ico"],
         "ysb_splash.png": ["assets/ysb_splash.png", "ysb_splash.png"],
         "ysb_splash_boot.png": ["assets/ysb_splash_boot.png", "ysb_splash_boot.png"],
         "ysb_logo.png": ["assets/ysb_logo.png", "ysb_logo.png"],
@@ -161,6 +183,16 @@ PAGE_DISPLAY_MODE_OPTIONS = (
 )
 PAGE_TAB_DISPLAY_MODE_KEY = "page_tab_display_name_mode"
 OUTPUT_DISPLAY_MODE_KEY = "output_display_name_mode"
+OUTPUT_IMAGE_FORMAT_KEY = "output_image_format"
+CLEAN_IMAGE_FORMAT_KEY = "clean_image_format"
+OUTPUT_IMAGE_QUALITY_KEY = "output_image_quality"
+CLEAN_IMAGE_QUALITY_KEY = "clean_image_quality"
+OUTPUT_TEXT_RENDER_QUALITY_KEY = "output_text_render_quality"
+OUTPUT_IMAGE_FORMAT_OPTIONS = ("png", "jpg", "webp")
+OUTPUT_TEXT_RENDER_QUALITY_OPTIONS = ("normal", "2x", "3x", "4x")
+DEFAULT_OUTPUT_IMAGE_FORMAT = "png"
+DEFAULT_OUTPUT_IMAGE_QUALITY = 95
+DEFAULT_OUTPUT_TEXT_RENDER_QUALITY = "2x"
 LAST_PROJECT_CREATE_DIR_KEY = "last_project_create_dir"
 DEFAULT_PAGE_DISPLAY_MODE = PAGE_DISPLAY_MODE_PAGE_ORIGINAL
 IMAGE_DROP_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff")
@@ -171,6 +203,85 @@ def normalize_page_display_mode(value):
     if value in PAGE_DISPLAY_MODE_OPTIONS:
         return value
     return DEFAULT_PAGE_DISPLAY_MODE
+
+
+def normalize_output_image_format(value):
+    value = str(value or DEFAULT_OUTPUT_IMAGE_FORMAT).strip().lower().lstrip(".")
+    aliases = {
+        "jpeg": "jpg",
+        "jpe": "jpg",
+        "wep": "webp",
+        "wbp": "webp",
+    }
+    value = aliases.get(value, value)
+    if value in OUTPUT_IMAGE_FORMAT_OPTIONS:
+        return value
+    return DEFAULT_OUTPUT_IMAGE_FORMAT
+
+
+def normalize_output_image_quality(value, default_value=DEFAULT_OUTPUT_IMAGE_QUALITY):
+    try:
+        v = int(value)
+    except Exception:
+        v = int(default_value)
+    return max(1, min(100, v))
+
+def normalize_output_text_render_quality(value):
+    value = str(value or DEFAULT_OUTPUT_TEXT_RENDER_QUALITY).strip().lower()
+    aliases = {
+        "default": "normal",
+        "basic": "normal",
+        "1x": "normal",
+        "standard": "normal",
+        "high": "2x",
+        "best": "3x",
+        "ultra": "4x",
+        "ssaa2": "2x",
+        "ssaa3": "3x",
+        "ssaa4": "4x",
+    }
+    value = aliases.get(value, value)
+    if value in OUTPUT_TEXT_RENDER_QUALITY_OPTIONS:
+        return value
+    return DEFAULT_OUTPUT_TEXT_RENDER_QUALITY
+
+
+def output_text_render_scale(value):
+    value = normalize_output_text_render_quality(value)
+    if value == "4x":
+        return 4.0
+    if value == "3x":
+        return 3.0
+    if value == "2x":
+        return 2.0
+    return 1.0
+
+
+def output_image_extension(fmt):
+    fmt = normalize_output_image_format(fmt)
+    if fmt == "jpg":
+        return ".jpg"
+    if fmt == "webp":
+        return ".webp"
+    return ".png"
+
+
+def qt_image_format_name(fmt):
+    fmt = normalize_output_image_format(fmt)
+    if fmt == "jpg":
+        return "JPG"
+    if fmt == "webp":
+        return "WEBP"
+    return "PNG"
+
+
+def pil_image_format_name(fmt):
+    fmt = normalize_output_image_format(fmt)
+    if fmt == "jpg":
+        return "JPEG"
+    if fmt == "webp":
+        return "WEBP"
+    return "PNG"
 
 
 def safe_page_file_stem(value, fallback="page"):
@@ -566,12 +677,12 @@ LEGACY_YSB_PROG_ID = "YSBTranslator.Project"
 DARK_MESSAGEBOX_QSS = """
 QMessageBox,
 QMessageBox QWidget {
-    background-color:#24272d;
-    color:#f2f4f8;
+    background-color:#252328;
+    color:#F4EEF2;
 }
 QMessageBox QLabel {
-    background-color:#24272d;
-    color:#f2f4f8;
+    background-color:#252328;
+    color:#F4EEF2;
     line-height:1.35em;
 }
 QMessageBox QLabel,
@@ -581,26 +692,157 @@ QMessageBox QFrame {
 QMessageBox QTextEdit,
 QMessageBox QPlainTextEdit,
 QMessageBox QScrollArea {
-    background-color:#1f232a;
-    color:#f2f4f8;
-    border:1px solid #3b414c;
-    selection-background-color:#3d587d;
+    background-color:#211F23;
+    color:#F4EEF2;
+    border:1px solid #3A363B;
+    selection-background-color:#5B3136;
     selection-color:#ffffff;
 }
 QMessageBox QPushButton {
-    background-color:#30343d;
-    color:#f2f4f8;
-    border:1px solid #586173;
+    background-color:#322E34;
+    color:#F4EEF2;
+    border:1px solid #615A60;
     border-radius:0px;
     padding:4px 10px;
     min-width:56px;
     min-height:22px;
 }
-QMessageBox QPushButton:hover { background-color:#3a404b; border-color:#74839a; }
-QMessageBox QPushButton:pressed { background-color:#2b3038; }
-QMessageBox QPushButton:disabled { background-color:#252932; color:#7b8494; border-color:#343a45; }
-QMessageBox QToolTip { background-color:#1f2430; color:#ffffff; border:1px solid #4b5563; border-radius:0px; padding:5px; }
+QMessageBox QPushButton:hover { background-color:#3a404b; border-color:#7B7078; }
+QMessageBox QPushButton:pressed { background-color:#302C31; }
+QMessageBox QPushButton:disabled { background-color:#252932; color:#827A80; border-color:#343a45; }
+QMessageBox QToolTip { background-color:#242329; color:#ffffff; border:1px solid #555056; border-radius:0px; padding:5px; }
 """
+
+LIGHT_MESSAGEBOX_QSS = """
+QMessageBox,
+QMessageBox QWidget {
+    background-color:#F5EFF3;
+    color:#111827;
+}
+QMessageBox QLabel {
+    background-color:#F5EFF3;
+    color:#111827;
+    line-height:1.35em;
+}
+QMessageBox QLabel,
+QMessageBox QFrame {
+    border:0px;
+}
+QMessageBox QTextEdit,
+QMessageBox QPlainTextEdit,
+QMessageBox QScrollArea {
+    background-color:#ffffff;
+    color:#111827;
+    border:1px solid #D1C9CE;
+    selection-background-color:#F5E8EA;
+    selection-color:#111827;
+}
+QMessageBox QPushButton {
+    background-color:#ffffff;
+    color:#111827;
+    border:1px solid #D1C9CE;
+    border-radius:0px;
+    padding:4px 10px;
+    min-width:56px;
+    min-height:22px;
+}
+QMessageBox QPushButton:hover { background-color:#FBF5F6; border-color:#D7A3A9; }
+QMessageBox QPushButton:pressed { background-color:#F5E8EA; }
+QMessageBox QPushButton:disabled { background-color:#F0EAED; color:#A29A9F; border-color:#E0DADF; }
+QMessageBox QToolTip { background-color:#ffffff; color:#111827; border:1px solid #D1C9CE; border-radius:0px; padding:5px; }
+"""
+
+
+def _parent_prefers_light_theme(parent=None):
+    try:
+        if parent is not None and hasattr(parent, "is_light_theme"):
+            return bool(parent.is_light_theme())
+    except Exception:
+        pass
+    try:
+        theme = getattr(parent, "ui_theme", "") if parent is not None else ""
+        return str(theme or "").lower() == "light"
+    except Exception:
+        return False
+
+
+def dialog_palette(light=False):
+    pal = QPalette()
+    if light:
+        pal.setColor(QPalette.ColorRole.Window, QColor("#F5EFF3"))
+        pal.setColor(QPalette.ColorRole.WindowText, QColor("#111827"))
+        pal.setColor(QPalette.ColorRole.Base, QColor("#ffffff"))
+        pal.setColor(QPalette.ColorRole.AlternateBase, QColor("#F8F3F5"))
+        pal.setColor(QPalette.ColorRole.Text, QColor("#111827"))
+        pal.setColor(QPalette.ColorRole.Button, QColor("#ffffff"))
+        pal.setColor(QPalette.ColorRole.ButtonText, QColor("#111827"))
+        pal.setColor(QPalette.ColorRole.Highlight, QColor("#F5E8EA"))
+        pal.setColor(QPalette.ColorRole.HighlightedText, QColor("#111827"))
+    else:
+        pal.setColor(QPalette.ColorRole.Window, QColor("#252328"))
+        pal.setColor(QPalette.ColorRole.WindowText, QColor("#F4EEF2"))
+        pal.setColor(QPalette.ColorRole.Base, QColor("#211F23"))
+        pal.setColor(QPalette.ColorRole.AlternateBase, QColor("#252328"))
+        pal.setColor(QPalette.ColorRole.Text, QColor("#F4EEF2"))
+        pal.setColor(QPalette.ColorRole.Button, QColor("#322E34"))
+        pal.setColor(QPalette.ColorRole.ButtonText, QColor("#F4EEF2"))
+        pal.setColor(QPalette.ColorRole.Highlight, QColor("#5B3136"))
+        pal.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
+    return pal
+
+
+def apply_message_box_palette(msg, light=False):
+    """현재 테마에 맞춰 QMessageBox의 글자/배경 대비를 고정한다."""
+    try:
+        msg.setStyleSheet(LIGHT_MESSAGEBOX_QSS if light else DARK_MESSAGEBOX_QSS)
+    except Exception:
+        pass
+    try:
+        pal = dialog_palette(light)
+        msg.setPalette(pal)
+        for child in msg.findChildren(QWidget):
+            child.setAutoFillBackground(True)
+            child.setPalette(pal)
+    except Exception:
+        pass
+
+
+def progress_dialog_qss(light=False):
+    if light:
+        return """
+            QProgressDialog, QProgressDialog QWidget { background:#F5EFF3; color:#111827; }
+            QProgressDialog QLabel { background:#F5EFF3; color:#111827; line-height:1.35em; }
+            QProgressBar { background:#E7E2E5; color:#111827; border:1px solid #D1C9CE; border-radius:0px; height:16px; text-align:center; }
+            QProgressBar::chunk { background:#8A4A52; border-radius:0px; }
+            QPushButton { background:#ffffff; color:#111827; border:1px solid #D1C9CE; border-radius:0px; padding:5px 14px; min-width:72px; }
+            QPushButton:hover { background:#FBF5F6; border-color:#D7A3A9; }
+            QPushButton:pressed { background:#F5E8EA; }
+        """
+    return """
+        QProgressDialog, QProgressDialog QWidget { background:#252328; color:#F4EEF2; }
+        QProgressDialog QLabel { background:#252328; color:#F4EEF2; line-height:1.35em; }
+        QProgressBar { background:#111827; color:#ffffff; border:1px solid #555056; border-radius:0px; height:16px; text-align:center; }
+        QProgressBar::chunk { background:#8A4A52; border-radius:0px; }
+        QPushButton { background:#373136; color:#F4EEF2; border:1px solid #615A60; border-radius:0px; padding:5px 14px; min-width:72px; }
+        QPushButton:hover { background:#443A40; border-color:#7B7078; }
+        QPushButton:pressed { background:#302C31; }
+    """
+
+
+def apply_progress_dialog_theme(dlg, light=False):
+    """QProgressDialog도 현재 테마의 대비를 따르게 한다."""
+    try:
+        dlg.setStyleSheet(progress_dialog_qss(light))
+    except Exception:
+        pass
+    try:
+        pal = dialog_palette(light)
+        dlg.setPalette(pal)
+        for child in dlg.findChildren(QWidget):
+            child.setAutoFillBackground(True)
+            child.setPalette(pal)
+    except Exception:
+        pass
 
 
 def _messagebox_ui_language(parent=None):
@@ -629,7 +871,7 @@ def styled_question(parent, title, text, buttons=None, defaultButton=None, defau
             msg.setDefaultButton(QMessageBox.StandardButton.Yes if default_yes and (buttons & QMessageBox.StandardButton.Yes) else defaultButton)
         except Exception:
             pass
-        apply_message_box_dark_palette(msg)
+        apply_message_box_palette(msg, _parent_prefers_light_theme(parent))
         force_message_box_front(msg)
         return msg.exec()
 
@@ -643,7 +885,7 @@ def styled_question(parent, title, text, buttons=None, defaultButton=None, defau
     msg.setIcon(QMessageBox.Icon.Question)
     msg.setWindowTitle(title)
     msg.setText(text)
-    apply_message_box_dark_palette(msg)
+    apply_message_box_palette(msg, _parent_prefers_light_theme(parent))
 
     yes_button = msg.addButton(confirm_text, QMessageBox.ButtonRole.YesRole)
     no_button = msg.addButton(cancel_text, QMessageBox.ButtonRole.NoRole)
@@ -671,31 +913,8 @@ def styled_question(parent, title, text, buttons=None, defaultButton=None, defau
 
 
 def apply_message_box_dark_palette(msg):
-    """치명적 오류창처럼 메인 윈도우 밖에서 뜨는 QMessageBox도 배경/글자색이 깨지지 않게 강제한다."""
-    try:
-        msg.setStyleSheet(DARK_MESSAGEBOX_QSS)
-    except Exception:
-        pass
-    try:
-        pal = msg.palette()
-        pal.setColor(QPalette.ColorRole.Window, QColor("#24272d"))
-        pal.setColor(QPalette.ColorRole.WindowText, QColor("#f2f4f8"))
-        pal.setColor(QPalette.ColorRole.Base, QColor("#1f232a"))
-        pal.setColor(QPalette.ColorRole.AlternateBase, QColor("#24272d"))
-        pal.setColor(QPalette.ColorRole.Text, QColor("#f2f4f8"))
-        pal.setColor(QPalette.ColorRole.Button, QColor("#30343d"))
-        pal.setColor(QPalette.ColorRole.ButtonText, QColor("#f2f4f8"))
-        pal.setColor(QPalette.ColorRole.Highlight, QColor("#3d587d"))
-        pal.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
-        msg.setPalette(pal)
-    except Exception:
-        pass
-    try:
-        for child in msg.findChildren(QWidget):
-            child.setAutoFillBackground(True)
-            child.setPalette(msg.palette())
-    except Exception:
-        pass
+    """호환용: 기존 호출은 다크 팔레트로 처리한다."""
+    apply_message_box_palette(msg, light=False)
 
 
 def force_message_box_front(msg):
@@ -898,10 +1117,50 @@ def get_association_command() -> str:
     return f'"{sys.executable}" "{script}" "%1"'
 
 
+def _stable_ysbt_icon_path() -> str | None:
+    """Windows 파일 연결용 .ysbt 아이콘을 안정적인 로컬 경로에 준비한다.
+
+    PyInstaller onefile의 _MEIPASS 경로는 실행 종료 후 사라질 수 있으므로
+    DefaultIcon에는 캐시 폴더로 복사한 .ico를 우선 등록한다.
+    """
+    try:
+        src = resource_path("ysbt_file_icon.ico")
+        if not os.path.exists(src):
+            return None
+        dst_dir = get_cache_dir() / "assets"
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        dst = dst_dir / "ysbt_file_icon.ico"
+        try:
+            if (
+                (not dst.exists())
+                or os.path.getsize(src) != os.path.getsize(dst)
+                or int(os.path.getmtime(src)) > int(os.path.getmtime(dst))
+            ):
+                shutil.copy2(src, dst)
+        except Exception:
+            if not dst.exists():
+                return None
+        return str(dst)
+    except Exception:
+        return None
+
+
 def get_association_icon() -> str:
-    """파일 탐색기에 표시할 아이콘 위치."""
+    """파일 탐색기에 표시할 .ysbt 전용 아이콘 위치."""
+    ico = _stable_ysbt_icon_path()
+    if ico and os.path.exists(ico):
+        return f'"{ico}",0'
+
+    ico = resource_path("ysbt_file_icon.ico")
+    if os.path.exists(ico):
+        return f'"{ico}",0'
+
+    opener = get_file_opener_path()
     if getattr(sys, "frozen", False):
+        if opener and os.path.exists(opener):
+            return f'"{opener}",0'
         return f'"{sys.executable}",0'
+
     ico = resource_path("ysb_icon.ico")
     if os.path.exists(ico):
         return f'"{ico}",0'
@@ -949,6 +1208,31 @@ def get_registered_ysbt_file_association_command() -> str | None:
         return None
 
 
+def get_registered_ysbt_file_association_icon() -> str | None:
+    """레지스트리에 등록된 .ysbt DefaultIcon 값을 가져온다."""
+    if not is_windows():
+        return None
+    try:
+        import winreg
+        if not is_ysbt_file_association_ours():
+            return None
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, rf"Software\Classes\{YSBT_PROG_ID}\DefaultIcon") as k:
+            icon, _ = winreg.QueryValueEx(k, "")
+        return str(icon)
+    except Exception:
+        return None
+
+
+def _normalize_registry_value(value: str | None) -> str:
+    return str(value or "").strip().strip('"').replace("/", "\\").lower()
+
+
+def is_ysbt_file_association_icon_current() -> bool:
+    registered = _normalize_registry_value(get_registered_ysbt_file_association_icon())
+    current = _normalize_registry_value(get_association_icon())
+    return bool(registered and current and registered == current)
+
+
 def is_ysbt_file_association_registered_to_other_ysb() -> bool:
     """.ysbt가 역식붕이 툴 계열이지만 현재 실행 프로그램과 다른 명령을 가리키는지 확인한다.
 
@@ -959,7 +1243,9 @@ def is_ysbt_file_association_registered_to_other_ysb() -> bool:
         return False
     registered = (get_registered_ysbt_file_association_command() or "").strip().lower()
     current = get_association_command().strip().lower()
-    return bool(registered and registered != current)
+    if bool(registered and registered != current):
+        return True
+    return not is_ysbt_file_association_icon_current()
 
 
 def is_ysbt_file_association_registered() -> bool:
@@ -967,7 +1253,7 @@ def is_ysbt_file_association_registered() -> bool:
     registered = get_registered_ysbt_file_association_command()
     if not registered:
         return False
-    return registered.strip().lower() == get_association_command().strip().lower()
+    return registered.strip().lower() == get_association_command().strip().lower() and is_ysbt_file_association_icon_current()
 
 
 def register_ysbt_file_association_raw():
@@ -988,6 +1274,7 @@ def register_ysbt_file_association_raw():
         winreg.SetValueEx(k, "", 0, winreg.REG_SZ, command)
     try:
         ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x0000, None, None)
+        ctypes.windll.shell32.SHChangeNotify(0x00002000, 0x0000, None, None)
     except Exception:
         pass
 
@@ -1091,7 +1378,7 @@ class WorkspaceSetupDialog(QDialog):
         self.setStyleSheet("""
             QDialog, QWidget { background-color: #1f1f22; color: #f2f2f2; }
             QLabel { color: #f2f2f2; }
-            QLineEdit { background-color: #2a2d33; color: #f2f2f2; border: 1px solid #555b66; padding: 4px; }
+            QLineEdit { background-color: #2A282D; color: #f2f2f2; border: 1px solid #555b66; padding: 4px; }
             QPushButton { background-color: #343841; color: #f2f2f2; border: 1px solid #555b66; padding: 5px 12px; }
             QPushButton:hover { background-color: #434957; }
             QCheckBox { color: #f2f2f2; }
@@ -1998,14 +2285,34 @@ class InlineTextEditItem(QGraphicsTextItem):
         self.document().setDocumentMargin(0)
         self.setZValue(5000)
 
+        self.letter_spacing = self._style_int(d.get('letter_spacing', 0), 0, -500, 500)
+        self.line_spacing_pct = self._style_int(d.get('line_spacing', 100), 100, 50, 300)
+        self.char_width_pct = self._style_int(d.get('char_width', 100), 100, 10, 300)
+        self.char_height_pct = self._style_int(d.get('char_height', 100), 100, 10, 300)
+
         font = QFont(d.get('font_family') or main_window.cb_font.currentFont().family())
         font.setPixelSize(int(d.get('font_size', main_window.sb_font_size.value()) or main_window.sb_font_size.value()))
+        font.setBold(bool(d.get('bold', False)))
+        font.setItalic(bool(d.get('italic', False)))
+        self._base_font = QFont(font)
+        self._apply_inline_font_metrics(font)
         self.setFont(font)
+        try:
+            self.document().setDefaultFont(font)
+        except Exception:
+            pass
+        self._apply_inline_height_transform()
 
         color = QColor(str(d.get('text_color') or '#000000'))
         if not color.isValid():
             color = QColor('#000000')
         self.setDefaultTextColor(color)
+
+        # 더블클릭 직접 편집 배경은 글자색의 보색을 기본으로 잡는다.
+        # 흰 글자 + 흰 반투명 배경처럼 글자가 묻히는 경우를 막기 위해,
+        # 보색 대비가 약한 회색 계열은 명도 기준으로 검정/흰색 쪽으로 보정한다.
+        self.inline_edit_bg_color = self._make_inline_edit_background_color(color)
+        self.inline_edit_border_color = self._make_inline_edit_border_color(self.inline_edit_bg_color)
 
         # 자동 줄내림으로 들어간 명시적 개행을 그대로 보존한다.
         self.setPlainText(self.original_text)
@@ -2016,7 +2323,75 @@ class InlineTextEditItem(QGraphicsTextItem):
 
         self.setTextInteractionFlags(Qt.TextInteractionFlag.TextEditorInteraction)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsFocusable, True)
+
+        # QTextDocument 기본 Undo는 alignment/auto-resize 보정과 섞일 때
+        # Ctrl+Z가 글자 복원이 아니라 커서 이동/서식 undo처럼 보일 수 있다.
+        # 인라인 편집 중에는 YSB 전역 Undo와도 분리해야 하므로,
+        # 별도의 가벼운 텍스트 스냅샷 Undo/Redo를 사용한다.
+        self._inline_undo_stack = []
+        self._inline_redo_stack = []
+        self._inline_snapshot_lock = False
+        try:
+            self.document().setUndoRedoEnabled(False)
+        except Exception:
+            pass
+
         self.setFocus(Qt.FocusReason.MouseFocusReason)
+
+    @staticmethod
+    def _style_int(value, default, min_value=None, max_value=None):
+        try:
+            out = int(value if value is not None else default)
+        except Exception:
+            out = int(default)
+        if min_value is not None:
+            out = max(int(min_value), out)
+        if max_value is not None:
+            out = min(int(max_value), out)
+        return out
+
+    def _apply_inline_font_metrics(self, font):
+        """최종 렌더 텍스트의 자간/가로 비율을 인라인 편집기에도 최대한 반영한다."""
+        try:
+            spacing_type = QFont.SpacingType.AbsoluteSpacing
+        except AttributeError:
+            spacing_type = getattr(QFont, 'AbsoluteSpacing', None)
+        try:
+            if spacing_type is not None:
+                font.setLetterSpacing(spacing_type, float(getattr(self, 'letter_spacing', 0)))
+        except Exception:
+            pass
+        try:
+            font.setStretch(int(getattr(self, 'char_width_pct', 100) or 100))
+        except Exception:
+            pass
+
+    def _apply_inline_height_transform(self):
+        """QTextDocument에는 문자 세로 비율이 없어 편집기 아이템을 세로 스케일링한다."""
+        try:
+            sy = max(0.1, min(3.0, float(getattr(self, 'char_height_pct', 100) or 100) / 100.0))
+            tr = QTransform()
+            tr.scale(1.0, sy)
+            self.setTransform(tr, False)
+        except Exception:
+            pass
+
+    def _apply_inline_block_format(self, block_format):
+        try:
+            line_height_type = QTextBlockFormat.LineHeightTypes.ProportionalHeight
+        except AttributeError:
+            line_height_type = getattr(QTextBlockFormat, 'ProportionalHeight', None)
+        if line_height_type is None:
+            return
+        try:
+            block_format.setLineHeight(float(getattr(self, 'line_spacing_pct', 100) or 100), line_height_type)
+        except TypeError:
+            try:
+                block_format.setLineHeight(float(getattr(self, 'line_spacing_pct', 100) or 100), int(line_height_type.value))
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     def apply_text_alignment(self):
         try:
@@ -2029,6 +2404,7 @@ class InlineTextEditItem(QGraphicsTextItem):
                 block_format.setAlignment(Qt.AlignmentFlag.AlignCenter)
             else:
                 block_format.setAlignment(Qt.AlignmentFlag.AlignLeft)
+            self._apply_inline_block_format(block_format)
             cursor.mergeBlockFormat(block_format)
         except Exception:
             pass
@@ -2046,10 +2422,17 @@ class InlineTextEditItem(QGraphicsTextItem):
         if not lines:
             lines = ['']
 
-        font = QFont(self.font())
+        font = QFont(getattr(self, '_base_font', self.font()))
         try:
             font.setBold(bool(d.get('bold', False)))
             font.setItalic(bool(d.get('italic', False)))
+            # 편집기 표시용 QFont에는 가로 비율/stretch를 적용하지만,
+            # 최종 rect 계산은 TypesettingItem처럼 기본 font + char_width 스케일로 계산해야
+            # 너비가 두 번 적용되지 않는다.
+            try:
+                font.setStretch(100)
+            except Exception:
+                pass
             letter_spacing = int(d.get('letter_spacing', 0) or 0)
         except Exception:
             pass
@@ -2131,14 +2514,354 @@ class InlineTextEditItem(QGraphicsTextItem):
         finally:
             self._adjusting = False
 
+    @staticmethod
+    def _color_luma(color):
+        try:
+            return (0.299 * color.red()) + (0.587 * color.green()) + (0.114 * color.blue())
+        except Exception:
+            return 0.0
+
+    @classmethod
+    def _make_inline_edit_background_color(cls, text_color):
+        """텍스트 직접 편집용 반투명 배경색을 글자색 기준으로 계산한다.
+
+        기본값은 글자색의 보색이다. 다만 회색/무채색 계열은 보색을 내도
+        거의 같은 회색이 되어 글자가 묻힐 수 있으므로, 명도 차가 부족하면
+        밝은 글자에는 어두운 배경, 어두운 글자에는 밝은 배경으로 보정한다.
+        """
+        try:
+            color = QColor(text_color)
+            if not color.isValid():
+                color = QColor('#000000')
+        except Exception:
+            color = QColor('#000000')
+
+        complement = QColor(255 - color.red(), 255 - color.green(), 255 - color.blue(), 190)
+        text_luma = cls._color_luma(color)
+        bg_luma = cls._color_luma(complement)
+
+        # 중간 회색처럼 보색만으로 대비가 약한 경우는 명도 기준 배경으로 보정한다.
+        if abs(text_luma - bg_luma) < 95:
+            if text_luma >= 128:
+                return QColor(18, 18, 18, 190)
+            return QColor(255, 255, 255, 190)
+
+        complement.setAlpha(190)
+        return complement
+
+    @classmethod
+    def _make_inline_edit_border_color(cls, bg_color):
+        try:
+            color = QColor(bg_color)
+            if not color.isValid():
+                color = QColor(80, 80, 80)
+        except Exception:
+            color = QColor(80, 80, 80)
+
+        # 배경과 같은 계열의 테두리로 맞추되, 너무 희미하지 않게 명도만 살짝 반대로 민다.
+        if cls._color_luma(color) >= 128:
+            border = color.darker(145)
+        else:
+            border = color.lighter(170)
+        border.setAlpha(230)
+        return border
+
     def paint(self, painter, option, widget=None):
+        bg_rect = self.boundingRect().adjusted(-4, -3, 4, 3)
+        painter.save()
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(getattr(self, 'inline_edit_bg_color', QColor(255, 255, 255, 190)))
+        painter.drawRoundedRect(bg_rect, 4, 4)
+        painter.restore()
         super().paint(painter, option, widget)
-        pen = QPen(QColor(80, 160, 255), 1, Qt.PenStyle.DashLine)
+        pen = QPen(getattr(self, 'inline_edit_border_color', QColor(80, 160, 255)), 1, Qt.PenStyle.DashLine)
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRect(self.boundingRect())
 
+    def _event_to_keysequence(self, event):
+        key = event.key()
+        if key in (Qt.Key.Key_Control, Qt.Key.Key_Shift, Qt.Key.Key_Alt, Qt.Key.Key_Meta):
+            return QKeySequence()
+        try:
+            mods_value = event.modifiers().value
+        except AttributeError:
+            mods_value = int(event.modifiers())
+        return QKeySequence(mods_value | key)
+
+    def _is_alt_modifier_guard_event(self, event):
+        # Ctrl+Shift를 누른 상태에서 Alt만 추가로 들어오는 순간은
+        # Windows 입력기/언어 전환(Alt+Shift) 및 AltGr(Ctrl+Alt) 처리와
+        # QTextDocument 기본 키 처리 순서가 엉켜 커서/선택 상태가 흔들릴 수 있다.
+        # 인라인 텍스트 편집 중에는 modifier-only Alt 이벤트를 먹어서
+        # 실제 특수문자 키가 눌린 순간에만 단축키가 처리되게 한다.
+        try:
+            if event.key() != Qt.Key.Key_Alt:
+                return False
+            mods = event.modifiers()
+            return bool(mods & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier))
+        except Exception:
+            return False
+
+    def _shortcut_matches(self, event, key_name):
+        try:
+            settings = getattr(self.main_window, 'shortcut_settings', None)
+            if settings is None:
+                return False
+            seq = settings.seq(key_name)
+            return key_event_matches_sequence(event, seq)
+        except Exception:
+            return False
+
+    def _insert_inline_symbol(self, symbol):
+        self._record_inline_undo_snapshot(reason='symbol')
+        cursor = self.textCursor()
+        selected = cursor.selectedText()
+        pair_map = {
+            "「」": ("「", "」"),
+            "『』": ("『", "』"),
+        }
+        if symbol in pair_map:
+            left, right = pair_map[symbol]
+            if selected:
+                cursor.insertText(left + selected + right)
+            else:
+                cursor.insertText(left + right)
+                cursor.movePosition(QTextCursor.MoveOperation.Left, QTextCursor.MoveMode.MoveAnchor, 1)
+            self.setTextCursor(cursor)
+            return
+        cursor.insertText(symbol)
+        self.setTextCursor(cursor)
+
+    def _handle_inline_text_input_shortcut(self, event):
+        # 텍스트 목록 입력창에서 쓰던 특수문자 단축키를 최종결과 더블클릭 직접 편집창에서도 공유한다.
+        # QGraphicsTextItem은 QWidget이 아니므로 QShortcut 대신 keyPressEvent에서 직접 매칭한다.
+        for key, (_label, symbol) in TEXT_SYMBOLS.items():
+            if self._shortcut_matches(event, "text_" + key):
+                self._insert_inline_symbol(symbol)
+                event.accept()
+                return True
+        return False
+
+    def _inline_text_snapshot(self):
+        try:
+            text = str(self.toPlainText() or '')
+        except Exception:
+            text = ''
+        try:
+            cursor = self.textCursor()
+            pos = int(cursor.position())
+            anchor = int(cursor.anchor())
+        except Exception:
+            pos = len(text)
+            anchor = pos
+        pos = max(0, min(len(text), pos))
+        anchor = max(0, min(len(text), anchor))
+        return (text, pos, anchor)
+
+    def _record_inline_undo_snapshot(self, reason='edit'):
+        if getattr(self, '_inline_snapshot_lock', False):
+            return False
+        snap = self._inline_text_snapshot()
+        stack = getattr(self, '_inline_undo_stack', None)
+        if stack is None:
+            self._inline_undo_stack = []
+            stack = self._inline_undo_stack
+        if stack and stack[-1] == snap:
+            return False
+        stack.append(snap)
+        # 무한히 쌓이지 않도록 최근 편집만 보관한다. 일반 텍스트 수정 중 Ctrl+Z 용도라 200단계면 충분하다.
+        if len(stack) > 200:
+            del stack[:-200]
+        try:
+            self._inline_redo_stack.clear()
+        except Exception:
+            self._inline_redo_stack = []
+        try:
+            if hasattr(self.main_window, 'audit_boundary_event'):
+                self.main_window.audit_boundary_event(
+                    'INLINE_TEXT_EDITOR_SNAPSHOT_PUSH',
+                    page_idx=getattr(self.main_window, 'idx', None),
+                    text_id=getattr(getattr(self, 'target_item', None), 'data', {}).get('id') if getattr(self, 'target_item', None) is not None else '',
+                    reason=reason,
+                    undo_depth=len(stack),
+                    throttle_ms=120,
+                )
+        except Exception:
+            pass
+        return True
+
+    def _restore_inline_text_snapshot(self, snap, reason='undo'):
+        if not isinstance(snap, tuple) or len(snap) < 3:
+            return False
+        text, pos, anchor = snap[0], snap[1], snap[2]
+        text = str(text or '')
+        try:
+            pos = max(0, min(len(text), int(pos)))
+        except Exception:
+            pos = len(text)
+        try:
+            anchor = max(0, min(len(text), int(anchor)))
+        except Exception:
+            anchor = pos
+        self._inline_snapshot_lock = True
+        try:
+            self.setPlainText(text)
+            try:
+                self.apply_text_alignment()
+            except Exception:
+                pass
+            try:
+                self.adjust_to_contents()
+            except Exception:
+                pass
+            try:
+                cursor = self.textCursor()
+                cursor.setPosition(anchor)
+                if pos != anchor:
+                    cursor.setPosition(pos, QTextCursor.MoveMode.KeepAnchor)
+                else:
+                    cursor.setPosition(pos)
+                self.setTextCursor(cursor)
+            except Exception:
+                pass
+            try:
+                self.setFocus(Qt.FocusReason.ShortcutFocusReason)
+            except Exception:
+                pass
+            return True
+        finally:
+            self._inline_snapshot_lock = False
+
+    def perform_inline_local_undo(self):
+        stack = getattr(self, '_inline_undo_stack', [])
+        if not stack:
+            try:
+                if hasattr(self.main_window, 'audit_boundary_event'):
+                    self.main_window.audit_boundary_event(
+                        'INLINE_TEXT_EDITOR_LOCAL_UNDO_EMPTY',
+                        page_idx=getattr(self.main_window, 'idx', None),
+                        text_id=getattr(getattr(self, 'target_item', None), 'data', {}).get('id') if getattr(self, 'target_item', None) is not None else '',
+                        throttle_ms=80,
+                    )
+            except Exception:
+                pass
+            return True
+        current = self._inline_text_snapshot()
+        snap = stack.pop()
+        redo_stack = getattr(self, '_inline_redo_stack', None)
+        if redo_stack is None:
+            self._inline_redo_stack = []
+            redo_stack = self._inline_redo_stack
+        if current != snap:
+            redo_stack.append(current)
+        ok = self._restore_inline_text_snapshot(snap, reason='undo')
+        try:
+            if hasattr(self.main_window, 'audit_boundary_event'):
+                self.main_window.audit_boundary_event(
+                    'INLINE_TEXT_EDITOR_LOCAL_UNDO',
+                    page_idx=getattr(self.main_window, 'idx', None),
+                    text_id=getattr(getattr(self, 'target_item', None), 'data', {}).get('id') if getattr(self, 'target_item', None) is not None else '',
+                    ok=bool(ok),
+                    undo_depth=len(stack),
+                    redo_depth=len(redo_stack),
+                    throttle_ms=80,
+                )
+        except Exception:
+            pass
+        return True
+
+    def perform_inline_local_redo(self):
+        redo_stack = getattr(self, '_inline_redo_stack', [])
+        if not redo_stack:
+            try:
+                if hasattr(self.main_window, 'audit_boundary_event'):
+                    self.main_window.audit_boundary_event(
+                        'INLINE_TEXT_EDITOR_LOCAL_REDO_EMPTY',
+                        page_idx=getattr(self.main_window, 'idx', None),
+                        text_id=getattr(getattr(self, 'target_item', None), 'data', {}).get('id') if getattr(self, 'target_item', None) is not None else '',
+                        throttle_ms=80,
+                    )
+            except Exception:
+                pass
+            return True
+        current = self._inline_text_snapshot()
+        snap = redo_stack.pop()
+        undo_stack = getattr(self, '_inline_undo_stack', None)
+        if undo_stack is None:
+            self._inline_undo_stack = []
+            undo_stack = self._inline_undo_stack
+        if current != snap:
+            undo_stack.append(current)
+        ok = self._restore_inline_text_snapshot(snap, reason='redo')
+        try:
+            if hasattr(self.main_window, 'audit_boundary_event'):
+                self.main_window.audit_boundary_event(
+                    'INLINE_TEXT_EDITOR_LOCAL_REDO',
+                    page_idx=getattr(self.main_window, 'idx', None),
+                    text_id=getattr(getattr(self, 'target_item', None), 'data', {}).get('id') if getattr(self, 'target_item', None) is not None else '',
+                    ok=bool(ok),
+                    undo_depth=len(undo_stack),
+                    redo_depth=len(redo_stack),
+                    throttle_ms=80,
+                )
+        except Exception:
+            pass
+        return True
+
+    def _is_inline_text_mutating_key(self, event):
+        try:
+            key = event.key()
+            mods = event.modifiers()
+        except Exception:
+            return False
+        if key in (
+            Qt.Key.Key_Control, Qt.Key.Key_Shift, Qt.Key.Key_Alt, Qt.Key.Key_Meta,
+            Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down,
+            Qt.Key.Key_Home, Qt.Key.Key_End, Qt.Key.Key_PageUp, Qt.Key.Key_PageDown,
+            Qt.Key.Key_Escape, Qt.Key.Key_Return, Qt.Key.Key_Enter,
+        ):
+            return False
+        if key in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete):
+            return True
+        if mods & Qt.KeyboardModifier.ControlModifier:
+            # Paste/Cut은 문서를 바꾼다. Copy/SelectAll/Undo/Redo는 여기서 snapshot을 만들지 않는다.
+            return key in (Qt.Key.Key_V, Qt.Key.Key_X)
+        try:
+            return bool(event.text())
+        except Exception:
+            return False
+
+    def inputMethodEvent(self, event):
+        try:
+            if not getattr(self, '_inline_snapshot_lock', False):
+                commit = str(event.commitString() or '')
+                if commit:
+                    self._record_inline_undo_snapshot(reason='ime')
+        except Exception:
+            pass
+        super().inputMethodEvent(event)
+
     def keyPressEvent(self, event):
+        if self._is_alt_modifier_guard_event(event):
+            event.accept()
+            return
+        mods = event.modifiers()
+        if mods & Qt.KeyboardModifier.ControlModifier:
+            # 인라인 텍스트 수정 중 Ctrl+Z/Y는 YSB 전역 Undo가 아니라
+            # 이 임시 편집기 내부 스냅샷 Undo/Redo가 처리한다.
+            if event.key() == Qt.Key.Key_Z and (mods & Qt.KeyboardModifier.ShiftModifier):
+                self.perform_inline_local_redo()
+                event.accept()
+                return
+            if event.key() == Qt.Key.Key_Z:
+                self.perform_inline_local_undo()
+                event.accept()
+                return
+            if event.key() == Qt.Key.Key_Y:
+                self.perform_inline_local_redo()
+                event.accept()
+                return
         if event.key() == Qt.Key.Key_Escape:
             self.main_window.finish_inline_text_edit(commit=False)
             event.accept()
@@ -2150,7 +2873,17 @@ class InlineTextEditItem(QGraphicsTextItem):
             self.main_window.finish_inline_text_edit(commit=True)
             event.accept()
             return
+        if self._handle_inline_text_input_shortcut(event):
+            return
+        if self._is_inline_text_mutating_key(event):
+            self._record_inline_undo_snapshot(reason='key')
         super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        if self._is_alt_modifier_guard_event(event):
+            event.accept()
+            return
+        super().keyReleaseEvent(event)
 
     def focusOutEvent(self, event):
         super().focusOutEvent(event)
@@ -2170,15 +2903,83 @@ class TextTableWidget(QTableWidget):
 
 
 
+def ysb_focus_color_dialog_hex_field(dialog):
+    """색상 선택 창을 열면 HEX 입력칸을 우선 포커싱하고 전체 선택한다."""
+    try:
+        edits = list(dialog.findChildren(QLineEdit))
+    except Exception:
+        edits = []
+    if not edits:
+        return
+    target = None
+    # Qt 비네이티브 QColorDialog의 HTML/HEX 입력칸은 보통 #RRGGBB 또는 6자리 HEX 값을 가진다.
+    for edit in edits:
+        try:
+            text = str(edit.text() or '').strip()
+        except Exception:
+            text = ''
+        if re.fullmatch(r'#?[0-9A-Fa-f]{6,8}', text):
+            target = edit
+            break
+    if target is None:
+        # 마지막 QLineEdit이 HTML/HEX 입력칸인 경우가 많다.
+        target = edits[-1]
+    try:
+        target.setFocus(Qt.FocusReason.OtherFocusReason)
+        target.selectAll()
+    except Exception:
+        pass
+
+
+def ysb_get_color_with_hex_focus(current, parent=None, title="색상 선택"):
+    """QColorDialog.getColor 대신 쓰는 헬퍼.
+
+    네이티브 색상창은 내부 HEX 칸에 접근하기 어려우므로 비네이티브 창을 사용하고,
+    창이 뜨자마자 색상 코드 입력칸에 포커스/전체선택을 준다.
+    """
+    try:
+        cur = current if isinstance(current, QColor) else QColor(str(current or '#000000'))
+    except Exception:
+        cur = QColor('#000000')
+    dlg = QColorDialog(cur, parent)
+    try:
+        dlg.setWindowTitle(str(title or "색상 선택"))
+    except Exception:
+        pass
+    try:
+        dlg.setOption(QColorDialog.ColorDialogOption.DontUseNativeDialog, True)
+        dlg.setOption(QColorDialog.ColorDialogOption.ShowAlphaChannel, False)
+    except Exception:
+        pass
+    try:
+        if parent is not None and hasattr(parent, 'settings_dialog_style'):
+            dlg.setStyleSheet(parent.settings_dialog_style())
+    except Exception:
+        pass
+    try:
+        QTimer.singleShot(0, lambda d=dlg: ysb_focus_color_dialog_hex_field(d))
+        QTimer.singleShot(80, lambda d=dlg: ysb_focus_color_dialog_hex_field(d))
+    except Exception:
+        pass
+    if dlg.exec() == QDialog.DialogCode.Accepted:
+        color = dlg.selectedColor()
+        if color.isValid():
+            return color
+    return QColor()
+
+
 class TextAdvancedEffectDialog(QDialog):
-    """텍스트 그라데이션/기울임 설정 창."""
+    """고급 텍스트/획 옵션 설정 창."""
+
+    previewChanged = pyqtSignal(dict)
 
     def __init__(self, data_item=None, parent=None):
         super().__init__(parent)
         self.data_item = data_item or {}
         self._ui_language = getattr(parent, "ui_language", LANG_KO) if parent is not None else LANG_KO
-        self.setWindowTitle(translate_ui_text("텍스트 고급 효과", self._ui_language))
-        self.resize(520, 520)
+        self.setWindowTitle(translate_ui_text("고급 텍스트/획 옵션", self._ui_language))
+        self.resize(620, 660)
+        self.setMinimumSize(520, 500)
         try:
             if parent is not None and hasattr(parent, "settings_dialog_style"):
                 self.setStyleSheet(parent.settings_dialog_style())
@@ -2186,32 +2987,52 @@ class TextAdvancedEffectDialog(QDialog):
             pass
 
         self._color_buttons = {}
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.timeout.connect(self._emit_preview_changed)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(10)
 
-        info = QLabel(translate_ui_text("선택한 텍스트 라인에 문자/획 그라데이션을 적용합니다. 평행사변형 변형/사다리꼴 변형/부채꼴 변형은 우클릭 메뉴에서 직접 조정합니다.", self._ui_language))
+        info = QLabel(translate_ui_text("선택한 텍스트 라인에 문자/획 그라데이션과 2중 획을 적용합니다. 평행사변형/사다리꼴/부채꼴 변형은 우클릭 메뉴에서 직접 조정합니다.", self._ui_language))
         info.setWordWrap(True)
         layout.addWidget(info)
 
-        layout.addWidget(self._make_gradient_group(
-            key="text",
-            title=translate_ui_text("문자 그라데이션", self._ui_language),
-            default1=str(self.data_item.get("text_gradient_color1") or self.data_item.get("text_color") or "#000000"),
-            default2=str(self.data_item.get("text_gradient_color2") or "#FFFFFF"),
-            enabled=bool(self.data_item.get("text_gradient_enabled", False)),
-            angle=int(self.data_item.get("text_gradient_angle", 0) or 0),
-            ratio=int(self.data_item.get("text_gradient_ratio", 50) or 50),
-        ))
-        layout.addWidget(self._make_gradient_group(
-            key="stroke",
-            title=translate_ui_text("획 그라데이션", self._ui_language),
-            default1=str(self.data_item.get("stroke_gradient_color1") or self.data_item.get("stroke_color") or "#FFFFFF"),
-            default2=str(self.data_item.get("stroke_gradient_color2") or "#000000"),
-            enabled=bool(self.data_item.get("stroke_gradient_enabled", False)),
-            angle=int(self.data_item.get("stroke_gradient_angle", 0) or 0),
-            ratio=int(self.data_item.get("stroke_gradient_ratio", 50) or 50),
-        ))
+        tabs = QTabWidget(self)
+        tabs.setDocumentMode(True)
+
+        text_tab = self._make_effect_tab([
+            self._make_gradient_group(
+                key="text",
+                title=translate_ui_text("문자 그라데이션", self._ui_language),
+                default1=str(self.data_item.get("text_gradient_color1") or self.data_item.get("text_color") or "#000000"),
+                default2=str(self.data_item.get("text_gradient_color2") or "#FFFFFF"),
+                enabled=bool(self.data_item.get("text_gradient_enabled", False)),
+                angle=int(self.data_item.get("text_gradient_angle", 0) or 0),
+                ratio=int(self.data_item.get("text_gradient_ratio", 50) or 50),
+            ),
+        ])
+        stroke_tab = self._make_effect_tab([
+            self._make_gradient_group(
+                key="stroke",
+                title=translate_ui_text("획 그라데이션", self._ui_language),
+                default1=str(self.data_item.get("stroke_gradient_color1") or self.data_item.get("stroke_color") or "#FFFFFF"),
+                default2=str(self.data_item.get("stroke_gradient_color2") or "#000000"),
+                enabled=bool(self.data_item.get("stroke_gradient_enabled", False)),
+                angle=int(self.data_item.get("stroke_gradient_angle", 0) or 0),
+                ratio=int(self.data_item.get("stroke_gradient_ratio", 50) or 50),
+            ),
+            self._make_double_stroke_group(),
+        ])
+        effect_tab = self._make_effect_tab([
+            self._make_shadow_group(),
+            self._make_glow_group(),
+        ])
+
+        tabs.addTab(text_tab, translate_ui_text("텍스트", self._ui_language))
+        tabs.addTab(stroke_tab, translate_ui_text("획", self._ui_language))
+        tabs.addTab(effect_tab, translate_ui_text("효과", self._ui_language))
+        layout.addWidget(tabs, 1)
 
         buttons = QDialogButtonBox()
         buttons.addButton(translate_ui_text("적용", self._ui_language), QDialogButtonBox.ButtonRole.AcceptRole)
@@ -2219,6 +3040,24 @@ class TextAdvancedEffectDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _make_effect_tab(self, widgets):
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        try:
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        except Exception:
+            pass
+        content = QWidget(scroll)
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 6, 0)
+        content_layout.setSpacing(10)
+        for widget in widgets:
+            content_layout.addWidget(widget)
+        content_layout.addStretch(1)
+        scroll.setWidget(content)
+        return scroll
 
     def _make_color_button(self, key, color):
         btn = QPushButton(str(color or "#000000"))
@@ -2239,10 +3078,26 @@ class TextAdvancedEffectDialog(QDialog):
 
     def _pick_color(self, btn):
         cur = QColor(str(btn.property("color_value") or "#000000"))
-        color = QColorDialog.getColor(cur, self, translate_ui_text("색상 선택", self._ui_language))
+        color = ysb_get_color_with_hex_focus(cur, self, translate_ui_text("색상 선택", self._ui_language))
         if not color.isValid():
             return
         self._set_color_button(btn, color.name(QColor.NameFormat.HexRgb).upper())
+        self._queue_preview_changed()
+
+    def _queue_preview_changed(self, *_args):
+        try:
+            self._preview_timer.start(90)
+        except Exception:
+            try:
+                self._emit_preview_changed()
+            except Exception:
+                pass
+
+    def _emit_preview_changed(self):
+        try:
+            self.previewChanged.emit(self.values())
+        except Exception:
+            pass
 
     def _make_gradient_group(self, key, title, default1, default2, enabled=False, angle=0, ratio=50):
         group = QGroupBox(title)
@@ -2277,6 +3132,153 @@ class TextAdvancedEffectDialog(QDialog):
         form.addRow(translate_ui_text("색상", self._ui_language), color_line)
         form.addRow(translate_ui_text("각도", self._ui_language), angle_spin)
         form.addRow(translate_ui_text("비율", self._ui_language), ratio_spin)
+
+        for _w in (chk, angle_spin, ratio_spin):
+            try:
+                if hasattr(_w, "stateChanged"):
+                    _w.stateChanged.connect(self._queue_preview_changed)
+                elif hasattr(_w, "valueChanged"):
+                    _w.valueChanged.connect(self._queue_preview_changed)
+            except Exception:
+                pass
+        return group
+
+    def _make_double_stroke_group(self):
+        group = QGroupBox(translate_ui_text("2중 획", self._ui_language))
+        form = QFormLayout(group)
+        chk = QCheckBox(translate_ui_text("사용", self._ui_language))
+        chk.setChecked(bool(self.data_item.get("double_stroke_enabled", False)))
+        self.double_stroke_enabled = chk
+
+        color = self._make_color_button("double_stroke_color", str(self.data_item.get("double_stroke_color") or "#000000"))
+        width_spin = QSpinBox()
+        width_spin.setRange(0, 80)
+        width_spin.setSuffix(" px")
+        try:
+            width_spin.setValue(max(0, min(80, int(self.data_item.get("double_stroke_width", 0) or 0))))
+        except Exception:
+            width_spin.setValue(0)
+        self.double_stroke_width = width_spin
+
+        form.addRow(chk)
+        form.addRow(translate_ui_text("색상", self._ui_language), color)
+        form.addRow(translate_ui_text("두께", self._ui_language), width_spin)
+
+        for _w in (chk, width_spin):
+            try:
+                if hasattr(_w, "stateChanged"):
+                    _w.stateChanged.connect(self._queue_preview_changed)
+                elif hasattr(_w, "valueChanged"):
+                    _w.valueChanged.connect(self._queue_preview_changed)
+            except Exception:
+                pass
+        return group
+
+    def _make_shadow_group(self):
+        group = QGroupBox(translate_ui_text("문자 그림자", self._ui_language))
+        form = QFormLayout(group)
+        chk = QCheckBox(translate_ui_text("사용", self._ui_language))
+        chk.setChecked(bool(self.data_item.get("text_shadow_enabled", False)))
+        self.text_shadow_enabled = chk
+
+        color = self._make_color_button("text_shadow_color", str(self.data_item.get("text_shadow_color") or "#000000"))
+
+        opacity_spin = QSpinBox()
+        opacity_spin.setRange(0, 100)
+        opacity_spin.setSuffix(" %")
+        opacity_spin.setValue(max(0, min(100, int(self.data_item.get("text_shadow_opacity", 45) or 45))))
+        self.text_shadow_opacity = opacity_spin
+
+        offset_x_spin = QSpinBox()
+        offset_x_spin.setRange(-300, 300)
+        offset_x_spin.setSuffix(" px")
+        offset_x_spin.setValue(int(self.data_item.get("text_shadow_offset_x", 3) or 3))
+        self.text_shadow_offset_x = offset_x_spin
+
+        offset_y_spin = QSpinBox()
+        offset_y_spin.setRange(-300, 300)
+        offset_y_spin.setSuffix(" px")
+        offset_y_spin.setValue(int(self.data_item.get("text_shadow_offset_y", 3) or 3))
+        self.text_shadow_offset_y = offset_y_spin
+
+        blur_spin = QSpinBox()
+        blur_spin.setRange(0, 200)
+        blur_spin.setSuffix(" px")
+        blur_spin.setValue(max(0, min(200, int(self.data_item.get("text_shadow_blur", 4) or 4))))
+        self.text_shadow_blur = blur_spin
+
+        form.addRow(chk)
+        form.addRow(translate_ui_text("색상", self._ui_language), color)
+        form.addRow(translate_ui_text("불투명도", self._ui_language), opacity_spin)
+        form.addRow(translate_ui_text("X 이동", self._ui_language), offset_x_spin)
+        form.addRow(translate_ui_text("Y 이동", self._ui_language), offset_y_spin)
+        form.addRow(translate_ui_text("흐림", self._ui_language), blur_spin)
+
+        for _w in (chk, opacity_spin, offset_x_spin, offset_y_spin, blur_spin):
+            try:
+                if hasattr(_w, "stateChanged"):
+                    _w.stateChanged.connect(self._queue_preview_changed)
+                elif hasattr(_w, "valueChanged"):
+                    _w.valueChanged.connect(self._queue_preview_changed)
+            except Exception:
+                pass
+        return group
+
+    def _make_glow_group(self):
+        group = QGroupBox(translate_ui_text("문자 후광", self._ui_language))
+        form = QFormLayout(group)
+        chk = QCheckBox(translate_ui_text("사용", self._ui_language))
+        chk.setChecked(bool(self.data_item.get("text_glow_enabled", False)))
+        self.text_glow_enabled = chk
+
+        color = self._make_color_button("text_glow_color", str(self.data_item.get("text_glow_color") or "#FFFFFF"))
+
+        opacity_spin = QSpinBox()
+        opacity_spin.setRange(0, 100)
+        opacity_spin.setSuffix(" %")
+        opacity_spin.setValue(max(0, min(100, int(self.data_item.get("text_glow_opacity", 35) or 35))))
+        self.text_glow_opacity = opacity_spin
+
+        offset_x_spin = QSpinBox()
+        offset_x_spin.setRange(-300, 300)
+        offset_x_spin.setSuffix(" px")
+        offset_x_spin.setValue(int(self.data_item.get("text_glow_offset_x", 0) or 0))
+        self.text_glow_offset_x = offset_x_spin
+
+        offset_y_spin = QSpinBox()
+        offset_y_spin.setRange(-300, 300)
+        offset_y_spin.setSuffix(" px")
+        offset_y_spin.setValue(int(self.data_item.get("text_glow_offset_y", 0) or 0))
+        self.text_glow_offset_y = offset_y_spin
+
+        size_spin = QSpinBox()
+        size_spin.setRange(0, 200)
+        size_spin.setSuffix(" px")
+        size_spin.setValue(max(0, min(200, int(self.data_item.get("text_glow_size", 3) or 3))))
+        self.text_glow_size = size_spin
+
+        blur_spin = QSpinBox()
+        blur_spin.setRange(0, 200)
+        blur_spin.setSuffix(" px")
+        blur_spin.setValue(max(0, min(200, int(self.data_item.get("text_glow_blur", 8) or 8))))
+        self.text_glow_blur = blur_spin
+
+        form.addRow(chk)
+        form.addRow(translate_ui_text("색상", self._ui_language), color)
+        form.addRow(translate_ui_text("불투명도", self._ui_language), opacity_spin)
+        form.addRow(translate_ui_text("X 이동", self._ui_language), offset_x_spin)
+        form.addRow(translate_ui_text("Y 이동", self._ui_language), offset_y_spin)
+        form.addRow(translate_ui_text("크기", self._ui_language), size_spin)
+        form.addRow(translate_ui_text("흐림", self._ui_language), blur_spin)
+
+        for _w in (chk, opacity_spin, offset_x_spin, offset_y_spin, size_spin, blur_spin):
+            try:
+                if hasattr(_w, "stateChanged"):
+                    _w.stateChanged.connect(self._queue_preview_changed)
+                elif hasattr(_w, "valueChanged"):
+                    _w.valueChanged.connect(self._queue_preview_changed)
+            except Exception:
+                pass
         return group
 
     def values(self):
@@ -2287,6 +3289,22 @@ class TextAdvancedEffectDialog(QDialog):
             out[f"{key}_gradient_color2"] = str(self._color_buttons[f"{key}_gradient_color2"].property("color_value") or "#FFFFFF")
             out[f"{key}_gradient_angle"] = int(getattr(self, f"{key}_gradient_angle").value())
             out[f"{key}_gradient_ratio"] = int(getattr(self, f"{key}_gradient_ratio").value())
+        out["double_stroke_enabled"] = bool(getattr(self, "double_stroke_enabled").isChecked())
+        out["double_stroke_color"] = str(self._color_buttons["double_stroke_color"].property("color_value") or "#000000")
+        out["double_stroke_width"] = int(getattr(self, "double_stroke_width").value())
+        out["text_shadow_enabled"] = bool(getattr(self, "text_shadow_enabled").isChecked())
+        out["text_shadow_color"] = str(self._color_buttons["text_shadow_color"].property("color_value") or "#000000")
+        out["text_shadow_opacity"] = int(getattr(self, "text_shadow_opacity").value())
+        out["text_shadow_offset_x"] = int(getattr(self, "text_shadow_offset_x").value())
+        out["text_shadow_offset_y"] = int(getattr(self, "text_shadow_offset_y").value())
+        out["text_shadow_blur"] = int(getattr(self, "text_shadow_blur").value())
+        out["text_glow_enabled"] = bool(getattr(self, "text_glow_enabled").isChecked())
+        out["text_glow_color"] = str(self._color_buttons["text_glow_color"].property("color_value") or "#FFFFFF")
+        out["text_glow_opacity"] = int(getattr(self, "text_glow_opacity").value())
+        out["text_glow_offset_x"] = int(getattr(self, "text_glow_offset_x").value())
+        out["text_glow_offset_y"] = int(getattr(self, "text_glow_offset_y").value())
+        out["text_glow_size"] = int(getattr(self, "text_glow_size").value())
+        out["text_glow_blur"] = int(getattr(self, "text_glow_blur").value())
         return out
 
 
@@ -3765,18 +4783,7 @@ class CenterTaskProgressOverlay(QFrame):
         self.setObjectName("CenterTaskProgressOverlay")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setWindowFlags(Qt.WindowType.Widget)
-        self.setStyleSheet("""
-            QFrame#CenterTaskProgressOverlay { background: rgba(0, 0, 0, 90); }
-            QFrame#CenterTaskProgressPanel { background:#1f232b; border:1px solid #5b6680; border-radius:8px; }
-            QLabel#CenterTaskTitle { color:#ffffff; font-size:17px; font-weight:700; }
-            QLabel#CenterTaskDetail { color:#d7deea; font-size:12px; }
-            QLabel#CenterTaskNote { color:#fbbf24; font-size:11px; }
-            QProgressBar { background:#111827; border:1px solid #4b5563; border-radius:4px; height:16px; color:#ffffff; text-align:center; }
-            QProgressBar::chunk { background:#4f7db8; border-radius:3px; }
-            QPushButton { background:#334155; color:#ffffff; border:1px solid #64748b; border-radius:4px; padding:5px 14px; }
-            QPushButton:hover { background:#475569; }
-            QPushButton:disabled { background:#2b3038; color:#7b8494; }
-        """)
+        self.apply_theme(False)
         self.setVisible(False)
 
         outer = QVBoxLayout(self)
@@ -3787,7 +4794,10 @@ class CenterTaskProgressOverlay(QFrame):
 
         panel = QFrame(self)
         panel.setObjectName("CenterTaskProgressPanel")
-        panel.setFixedWidth(460)
+        self.panel = panel
+        # 진행창은 작업 중에 새로 만들어지거나 리사이즈되면 깜빡임처럼 보인다.
+        # 가장 큰 상세 문구 기준으로 고정 크기를 잡고, 이후에는 텍스트/진행률만 바꾼다.
+        panel.setFixedSize(560, 264)
         panel_layout = QVBoxLayout(panel)
         panel_layout.setContentsMargins(18, 16, 18, 14)
         panel_layout.setSpacing(8)
@@ -3799,16 +4809,21 @@ class CenterTaskProgressOverlay(QFrame):
         self.detail_label = QLabel("", panel)
         self.detail_label.setObjectName("CenterTaskDetail")
         self.detail_label.setWordWrap(True)
+        self.detail_label.setMinimumHeight(104)
+        self.detail_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         panel_layout.addWidget(self.detail_label)
 
         self.progress = QProgressBar(panel)
         self.progress.setRange(0, 0)
         self.progress.setValue(0)
+        self.progress.setFixedHeight(18)
         panel_layout.addWidget(self.progress)
 
-        self.note_label = QLabel("취소할 시 현재 진행중인 과정이 완료 된 후 종료됩니다.", panel)
+        self.note_label = QLabel("취소 시 현재 페이지 작업이 끝난 뒤 중단됩니다.", panel)
         self.note_label.setObjectName("CenterTaskNote")
         self.note_label.setWordWrap(True)
+        self.note_label.setMinimumHeight(34)
+        self.note_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         panel_layout.addWidget(self.note_label)
 
         btn_row = QHBoxLayout()
@@ -3823,34 +4838,79 @@ class CenterTaskProgressOverlay(QFrame):
         outer.addLayout(row)
         outer.addStretch(1)
 
+    def apply_theme(self, light=False):
+        self._light_theme = bool(light)
+        if light:
+            self.setStyleSheet("""
+                QFrame#CenterTaskProgressOverlay { background: rgba(244, 246, 250, 92); }
+                QFrame#CenterTaskProgressPanel { background:#ffffff; border:1px solid #D1C9CE; border-radius:8px; }
+                QLabel#CenterTaskTitle { color:#111827; font-size:17px; font-weight:700; }
+                QLabel#CenterTaskDetail { color:#28262B; font-size:12px; }
+                QLabel#CenterTaskNote { color:#d97706; font-size:11px; font-weight:600; }
+                QProgressBar { background:#E7E2E5; border:1px solid #D1C9CE; border-radius:4px; height:16px; color:#111827; text-align:center; }
+                QProgressBar::chunk { background:#8A4A52; border-radius:3px; }
+                QPushButton { background:#FAF5F7; color:#111827; border:1px solid #D1C9CE; border-radius:4px; padding:5px 14px; }
+                QPushButton:hover { background:#FBF5F6; border-color:#D7A3A9; }
+                QPushButton:disabled { background:#F0EAED; color:#A29A9F; border-color:#E0DADF; }
+            """)
+        else:
+            self.setStyleSheet("""
+                QFrame#CenterTaskProgressOverlay { background: rgba(0, 0, 0, 90); }
+                QFrame#CenterTaskProgressPanel { background:#211F23; border:1px solid #626977; border-radius:8px; }
+                QLabel#CenterTaskTitle { color:#ffffff; font-size:17px; font-weight:700; }
+                QLabel#CenterTaskDetail { color:#D7D2D5; font-size:12px; }
+                QLabel#CenterTaskNote { color:#fbbf24; font-size:11px; }
+                QProgressBar { background:#111827; border:1px solid #555056; border-radius:4px; height:16px; color:#ffffff; text-align:center; }
+                QProgressBar::chunk { background:#8A4A52; border-radius:3px; }
+                QPushButton { background:#3D383E; color:#ffffff; border:1px solid #746B72; border-radius:4px; padding:5px 14px; }
+                QPushButton:hover { background:#5C555B; }
+                QPushButton:disabled { background:#302C31; color:#827A80; }
+            """)
+
     def _emit_cancel(self):
         self.cancel_btn.setEnabled(False)
-        self.note_label.setText("취소 요청됨. 현재 진행중인 과정이 완료 된 후 종료됩니다.")
+        self.note_label.setText("취소 요청됨. 현재 페이지 작업이 끝난 뒤 중단됩니다.")
         self.cancelRequested.emit()
 
     def show_task(self, title, detail="", total=0, cancellable=True):
+        """작업 진행창을 1회 표시한다.
+
+        진행 중에는 이 위젯 인스턴스를 계속 재사용하고, 상태 변경은
+        update_task()로 라벨/진행률만 바꾼다. show_task()가 다시 호출되더라도
+        이미 보이는 중이면 창을 새로 띄우거나 크기를 다시 잡지 않는다.
+        """
         parent = self.parentWidget()
         if parent is not None:
+            try:
+                self.apply_theme(_parent_prefers_light_theme(parent))
+            except Exception:
+                pass
             self.setGeometry(parent.rect())
         self.title_label.setText(str(title or "작업 중"))
         self.detail_label.setText(str(detail or ""))
         self.cancel_btn.setVisible(bool(cancellable))
         self.cancel_btn.setEnabled(bool(cancellable))
         self.note_label.setVisible(bool(cancellable))
-        self.note_label.setText("취소할 시 현재 진행중인 과정이 완료 된 후 종료됩니다.")
+        self.note_label.setText("취소 시 현재 페이지 작업이 끝난 뒤 중단됩니다.")
         if total and int(total) > 0:
             self.progress.setRange(0, int(total))
             self.progress.setValue(0)
         else:
             self.progress.setRange(0, 0)
+        self._ysb_task_title = str(title or "작업 중")
+        self._ysb_task_total = int(total or 0) if str(total or "").strip() else 0
         self.show()
         self.raise_()
 
     def update_task(self, current=None, total=None, detail=None):
+        # 업데이트는 같은 창에서 텍스트/진행률만 바꾼다.
         if detail is not None:
             self.detail_label.setText(str(detail))
         if total is not None and int(total) > 0:
-            self.progress.setRange(0, int(total))
+            new_total = int(total)
+            if self.progress.maximum() != new_total:
+                self.progress.setRange(0, new_total)
+            self._ysb_task_total = new_total
         if current is not None and self.progress.maximum() > 0:
             self.progress.setValue(max(0, min(int(current), self.progress.maximum())))
 
@@ -3887,14 +4947,7 @@ class CenterTaskAlertOverlay(QFrame):
         self.setObjectName("CenterTaskAlertOverlay")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setWindowFlags(Qt.WindowType.Widget)
-        self.setStyleSheet("""
-            QFrame#CenterTaskAlertOverlay { background: transparent; }
-            QFrame#CenterTaskAlertPanel { background:#2b2224; border:1px solid #ef4444; border-radius:8px; }
-            QLabel#CenterTaskAlertTitle { color:#ffffff; font-size:16px; font-weight:800; }
-            QLabel#CenterTaskAlertDetail { color:#ffe4e6; font-size:12px; }
-            QPushButton { background:#4b1f24; color:#ffffff; border:1px solid #f87171; border-radius:4px; padding:5px 14px; }
-            QPushButton:hover { background:#7f1d1d; }
-        """)
+        self.apply_theme(False)
         self.setVisible(False)
 
         outer = QVBoxLayout(self)
@@ -3933,6 +4986,27 @@ class CenterTaskAlertOverlay(QFrame):
         outer.addSpacing(190)
         outer.addStretch(1)
 
+    def apply_theme(self, light=False):
+        self._light_theme = bool(light)
+        if light:
+            self.setStyleSheet("""
+                QFrame#CenterTaskAlertOverlay { background: transparent; }
+                QFrame#CenterTaskAlertPanel { background:#ffffff; border:1px solid #C78A90; border-radius:8px; }
+                QLabel#CenterTaskAlertTitle { color:#6F3940; font-size:16px; font-weight:800; }
+                QLabel#CenterTaskAlertDetail { color:#5B3136; font-size:12px; }
+                QPushButton { background:#fff7f7; color:#6F3940; border:1px solid #D7A3A9; border-radius:4px; padding:5px 14px; }
+                QPushButton:hover { background:#F5E8EA; }
+            """)
+        else:
+            self.setStyleSheet("""
+                QFrame#CenterTaskAlertOverlay { background: transparent; }
+                QFrame#CenterTaskAlertPanel { background:#2b2224; border:1px solid #C78A90; border-radius:8px; }
+                QLabel#CenterTaskAlertTitle { color:#ffffff; font-size:16px; font-weight:800; }
+                QLabel#CenterTaskAlertDetail { color:#ffe4e6; font-size:12px; }
+                QPushButton { background:#4b1f24; color:#ffffff; border:1px solid #f87171; border-radius:4px; padding:5px 14px; }
+                QPushButton:hover { background:#5B3136; }
+            """)
+
     def _close_clicked(self):
         self.hide()
         self.dismissed.emit()
@@ -3940,6 +5014,10 @@ class CenterTaskAlertOverlay(QFrame):
     def show_alert(self, title, detail):
         parent = self.parentWidget()
         if parent is not None:
+            try:
+                self.apply_theme(_parent_prefers_light_theme(parent))
+            except Exception:
+                pass
             self.setGeometry(parent.rect())
         self.title_label.setText(str(title or "작업 알림"))
         self.detail_label.setText(str(detail or ""))
@@ -3973,6 +5051,11 @@ class PageTabButton(QFrame):
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setMouseTracking(True)
+        # Page tabs intentionally do not show hover tooltips.
+        # The full page name can be checked by double-click rename or the page list shortcut.
+        self.setAttribute(Qt.WidgetAttribute.WA_AlwaysShowToolTips, False)
+        self.setToolTip("")
 
         self._full_text = str(text or "")
         self._min_tab_width = 98
@@ -4027,7 +5110,8 @@ class PageTabButton(QFrame):
         desired_tab_w = int(self._pad_left) + text_w + int(self._pad_right) + chrome_w
         target_w = max(int(self._min_tab_width), min(int(self._max_tab_width), int(desired_tab_w)))
         self.setFixedWidth(target_w)
-        self.setToolTip(full)
+        # Keep native/custom tooltips disabled for page tabs.
+        self.setToolTip("")
 
     def set_text(self, text):
         self._full_text = str(text or "")
@@ -4044,13 +5128,33 @@ class PageTabButton(QFrame):
 
     def enterEvent(self, event):
         self._hover = True
+        # Page tab hover should only change visual state, not show a tooltip.
+        try:
+            QToolTip.hideText()
+        except Exception:
+            pass
         self.update()
         super().enterEvent(event)
 
     def leaveEvent(self, event):
         self._hover = False
+        try:
+            QToolTip.hideText()
+        except Exception:
+            pass
         self.update()
         super().leaveEvent(event)
+
+    def event(self, event):
+        # Block native tooltip events completely for page tabs.
+        try:
+            if event.type() == QEvent.Type.ToolTip:
+                QToolTip.hideText()
+                event.ignore()
+                return True
+        except Exception:
+            pass
+        return super().event(event)
 
     def paintEvent(self, event):
         tokens = dict(getattr(self, "_tokens", {}) or {})
@@ -4059,11 +5163,11 @@ class PageTabButton(QFrame):
         selected = bool(getattr(self, "_selected", False))
         hover = bool(getattr(self, "_hover", False))
 
-        bg = tokens.get("selected_bg" if selected else "normal_bg", "#2a2e36")
+        bg = tokens.get("selected_bg" if selected else "normal_bg", "#2B282D")
         if hover:
             bg = tokens.get("hover_bg", bg)
         fg = tokens.get("selected_fg" if selected else "normal_fg", "#ffffff")
-        border = tokens.get("selected_border" if selected else "normal_border", "#3b414c")
+        border = tokens.get("selected_border" if selected else "normal_border", "#3A363B")
         close_fg = tokens.get("close_fg", fg)
 
         painter = QPainter(self)
@@ -4141,7 +5245,10 @@ class PageTabButton(QFrame):
                 event.accept()
                 return
             self.setFocus(Qt.FocusReason.MouseFocusReason)
-            self.tab_bar.setCurrentIndex(self.index)
+            try:
+                self.tab_bar.activate_tab_from_mouse(self.index, event.modifiers())
+            except Exception:
+                self.tab_bar.setCurrentIndex(self.index)
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -4187,6 +5294,8 @@ class ScrollablePageTabBar(QWidget):
         self._current = -1
         self._tabs_closable = True
         self._movable = True
+        self._selected_indices = set()
+        self._selection_anchor = -1
         self._light_theme = False
         self._style_tokens = {}
         self._drag_scroll_direction = 0
@@ -4273,10 +5382,18 @@ class ScrollablePageTabBar(QWidget):
         tab = self._tabs.pop(index)
         self.content_layout.removeWidget(tab)
         tab.deleteLater()
+        self._selected_indices = {i - 1 if i > index else i for i in self._selected_indices if i != index}
+        self._selected_indices = {i for i in self._selected_indices if 0 <= i < len(self._tabs)}
+        if self._selection_anchor == index:
+            self._selection_anchor = self._current
+        elif self._selection_anchor > index:
+            self._selection_anchor -= 1
         if self._current == index:
             self._current = min(index, len(self._tabs) - 1)
         elif self._current > index:
             self._current -= 1
+        if self._current >= 0 and not self._selected_indices:
+            self._selected_indices = {self._current}
         self._update_indices()
         self.apply_theme(self._light_theme)
         self._update_content_width()
@@ -4287,8 +5404,12 @@ class ScrollablePageTabBar(QWidget):
             self._update_content_width()
 
     def setTabToolTip(self, index, text):
+        # Page tabs should not show tooltips. Ignore all tooltip text requests.
         if 0 <= int(index) < len(self._tabs):
-            self._tabs[int(index)].setToolTip(str(text or ""))
+            try:
+                self._tabs[int(index)].setToolTip("")
+            except Exception:
+                pass
 
     def tabRect(self, index):
         if 0 <= int(index) < len(self._tabs):
@@ -4300,25 +5421,92 @@ class ScrollablePageTabBar(QWidget):
     def currentIndex(self):
         return self._current
 
-    def setCurrentIndex(self, index):
+    def selectedIndices(self):
+        return sorted(i for i in self._selected_indices if 0 <= int(i) < len(self._tabs))
+
+    def setSelectedIndices(self, indices):
+        old = set(getattr(self, "_selected_indices", set()))
+        clean = set()
+        for raw in indices or []:
+            try:
+                i = int(raw)
+            except Exception:
+                continue
+            if 0 <= i < len(self._tabs):
+                clean.add(i)
+        if not clean and 0 <= self._current < len(self._tabs):
+            clean.add(self._current)
+        self._selected_indices = clean
+        if clean:
+            self._selection_anchor = sorted(clean)[-1]
+        for i in sorted(old | clean):
+            self._apply_tab_style(i, force=True)
+
+    def clearSelection(self, keep_current=True):
+        old = set(getattr(self, "_selected_indices", set()))
+        if keep_current and 0 <= self._current < len(self._tabs):
+            self._selected_indices = {self._current}
+            self._selection_anchor = self._current
+        else:
+            self._selected_indices = set()
+            self._selection_anchor = -1
+        for i in sorted(old | self._selected_indices):
+            self._apply_tab_style(i, force=True)
+
+    def activate_tab_from_mouse(self, index, modifiers=None):
+        try:
+            index = int(index)
+        except Exception:
+            return
+        if index < 0 or index >= len(self._tabs):
+            return
+        mods = modifiers or Qt.KeyboardModifier.NoModifier
+        old_selected = set(getattr(self, "_selected_indices", set()))
+        ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
+        shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
+        if shift:
+            anchor = self._selection_anchor if 0 <= self._selection_anchor < len(self._tabs) else (self._current if 0 <= self._current < len(self._tabs) else index)
+            start, end = sorted((anchor, index))
+            rng = set(range(start, end + 1))
+            if ctrl:
+                self._selected_indices = set(self._selected_indices) | rng
+            else:
+                self._selected_indices = rng
+        elif ctrl:
+            self._selection_anchor = index
+            if index in self._selected_indices and len(self._selected_indices) > 1:
+                self._selected_indices.remove(index)
+            else:
+                self._selected_indices.add(index)
+        else:
+            self._selection_anchor = index
+            self._selected_indices = {index}
+        self.setCurrentIndex(index, preserve_selection=True)
+        for i in sorted(old_selected | self._selected_indices | {index}):
+            self._apply_tab_style(i, force=True)
+
+    def setCurrentIndex(self, index, preserve_selection=False):
         try:
             index = int(index)
         except Exception:
             return
         if index < 0 or index >= len(self._tabs):
             self._current = -1 if not self._tabs else max(0, min(index, len(self._tabs)-1))
+            self._selected_indices = set() if self._current < 0 else {self._current}
+            self._selection_anchor = self._current
             self.apply_theme(self._light_theme)
             return
-        if index == self._current:
-            return
         old = self._current
+        old_selected = set(getattr(self, "_selected_indices", set()))
         self._current = index
-        # 탭 전환 최적화: 전체 탭 재도색 금지. 이전/현재 탭만 갱신한다.
-        if 0 <= old < len(self._tabs):
-            self._apply_tab_style(old, force=True)
-        if 0 <= index < len(self._tabs):
-            self._apply_tab_style(index, force=True)
-        if not self.signalsBlocked():
+        if not preserve_selection:
+            self._selected_indices = {index}
+            self._selection_anchor = index
+        # 탭 전환 최적화: 전체 탭 재도색 금지. 이전/현재/선택 탭만 갱신한다.
+        for i in sorted({old, index} | old_selected | set(self._selected_indices)):
+            if 0 <= i < len(self._tabs):
+                self._apply_tab_style(i, force=True)
+        if index != old and not self.signalsBlocked():
             self.currentChanged.emit(index)
 
     def request_close(self, index):
@@ -4348,10 +5536,19 @@ class ScrollablePageTabBar(QWidget):
         sb = self.scroll.horizontalScrollBar()
         drop_scroll = sb.value()
 
+        selected_before = set(getattr(self, "_selected_indices", set()))
+        anchor_before = getattr(self, "_selection_anchor", -1)
+        order = list(range(len(self._tabs)))
+        moved_value = order.pop(from_index)
+        order.insert(to_index, moved_value)
+        old_to_new = {old_i: new_i for new_i, old_i in enumerate(order)}
+
         tab = self._tabs.pop(from_index)
         self._tabs.insert(to_index, tab)
         self.content_layout.removeWidget(tab)
         self.content_layout.insertWidget(to_index, tab)
+        self._selected_indices = {old_to_new.get(i, i) for i in selected_before if i in old_to_new}
+        self._selection_anchor = old_to_new.get(anchor_before, anchor_before)
 
         if self._current == from_index:
             self._current = to_index
@@ -4406,33 +5603,33 @@ class ScrollablePageTabBar(QWidget):
     def _theme_tokens(self):
         if self._light_theme:
             return {
-                "bar_bg": "#eef2f8",
+                "bar_bg": "#F1ECEF",
                 "normal_bg": "#ffffff",
-                "normal_fg": "#4b5563",
-                "normal_border": "#cfd7e5",
-                "selected_bg": "#dbeafe",
+                "normal_fg": "#555056",
+                "normal_border": "#D1C9CE",
+                "selected_bg": "#F5E8EA",
                 "selected_fg": "#111827",
-                "selected_border": "#8fb4e8",
-                "hover_bg": "#edf4ff",
-                "close_fg": "#4b5563",
+                "selected_border": "#C78A90",
+                "hover_bg": "#FBF5F6",
+                "close_fg": "#555056",
             }
         return {
-            "bar_bg": "#20242b",
-            "normal_bg": "#2a2e36",
-            "normal_fg": "#b5bfce",
-            "normal_border": "#3b414c",
-            "selected_bg": "#3d587d",
+            "bar_bg": "#211F23",
+            "normal_bg": "#2B282D",
+            "normal_fg": "#BDB6BB",
+            "normal_border": "#3A363B",
+            "selected_bg": "#5B3136",
             "selected_fg": "#ffffff",
-            "selected_border": "#7ea2d6",
-            "hover_bg": "#38404c",
-            "close_fg": "#d7deea",
+            "selected_border": "#C78A90",
+            "hover_bg": "#3A343A",
+            "close_fg": "#D7D2D5",
         }
 
     def _apply_tab_style(self, index, force=False):
         if not (0 <= int(index) < len(self._tabs)):
             return
         tab = self._tabs[int(index)]
-        selected = int(index) == int(self._current)
+        selected = int(index) == int(self._current) or int(index) in getattr(self, "_selected_indices", set())
         tokens = self._theme_tokens()
         key = (
             bool(self._light_theme),
@@ -4475,11 +5672,11 @@ class ScrollablePageTabBar(QWidget):
         try:
             if self._light_theme:
                 self.drop_indicator.setStyleSheet(
-                    "QFrame#PageTabDropIndicator { background:#9bbce8; border:1px solid #6fa8ff; border-radius:0px; }"
+                    "QFrame#PageTabDropIndicator { background:#9bbce8; border:1px solid #A85D66; border-radius:0px; }"
                 )
             else:
                 self.drop_indicator.setStyleSheet(
-                    "QFrame#PageTabDropIndicator { background:#7ea2d6; border:1px solid #9cc2ff; border-radius:0px; }"
+                    "QFrame#PageTabDropIndicator { background:#C78A90; border:1px solid #C78A90; border-radius:0px; }"
                 )
         except Exception:
             pass
@@ -4909,12 +6106,16 @@ class OutputCleanupDialog(QDialog):
 class EditorSplitterHandle(QSplitterHandle):
     """좌우 작업 영역 splitter handle.
 
-    더블클릭하면 오른쪽 작업 패널이 기본 폭으로 돌아간다.
+    더블클릭하면 오른쪽 작업 패널 폭을 기본/숨김 2단 상태로 순환한다.
     오른쪽/왼쪽 패널 자체는 사용자가 거의 끝까지 접을 수 있게 둔다.
     """
 
     def mouseDoubleClickEvent(self, event):
         splitter = self.splitter()
+        if hasattr(splitter, "cycle_right_panel_snap_width"):
+            splitter.cycle_right_panel_snap_width()
+            event.accept()
+            return
         if hasattr(splitter, "reset_to_default_right_panel_width"):
             splitter.reset_to_default_right_panel_width()
             event.accept()
@@ -4925,26 +6126,89 @@ class EditorSplitterHandle(QSplitterHandle):
 class EditorSplitter(QSplitter):
     """메인 이미지 뷰어와 우측 작업 패널을 나누는 splitter."""
 
+    SNAP_DEFAULT = 0
+    SNAP_ORIGINAL_ONLY = 1
+    SNAP_HIDDEN = 2
+    SNAP_CUSTOM = -1
+
     def __init__(self, orientation, parent=None, default_right_width=700):
         super().__init__(orientation, parent)
         self.default_right_width = int(default_right_width)
+        # 더블클릭 순환 상태. 사용자가 직접 드래그하면 custom으로 돌리고,
+        # custom 상태에서 다시 더블클릭하면 기본 정위치부터 시작한다.
+        self._right_panel_snap_state = self.SNAP_CUSTOM
+        self._right_panel_snap_applying = False
+        try:
+            self.splitterMoved.connect(self._mark_right_panel_snap_custom)
+        except Exception:
+            pass
 
     def createHandle(self):
         return EditorSplitterHandle(self.orientation(), self)
 
-    def reset_to_default_right_panel_width(self):
-        """오른쪽 패널이 사용자지정 콤보박스까지 보이는 기본 폭으로 복귀한다."""
-        if self.count() < 2:
+    def _mark_right_panel_snap_custom(self, *_args):
+        if getattr(self, "_right_panel_snap_applying", False):
             return
+        self._right_panel_snap_state = self.SNAP_CUSTOM
+
+    def _available_splitter_width(self):
         sizes = self.sizes()
         total = sum(max(0, int(v)) for v in sizes)
         if total <= 0:
             total = max(0, int(self.width()) - max(0, (self.count() - 1) * int(self.handleWidth())))
+        return max(0, int(total))
+
+    def _apply_right_panel_width(self, right_width, state=None):
+        if self.count() < 2:
+            return
+        total = self._available_splitter_width()
         if total <= 0:
             return
-        right = min(max(0, int(self.default_right_width)), total)
+        right = max(0, min(int(right_width), total))
         left = max(0, total - right)
-        self.setSizes([left, right])
+        self._right_panel_snap_applying = True
+        try:
+            self.setSizes([left, right])
+        finally:
+            self._right_panel_snap_applying = False
+        if state is not None:
+            self._right_panel_snap_state = int(state)
+
+    def _right_panel_width_for_snap_state(self, state):
+        total = self._available_splitter_width()
+        if total <= 0:
+            return 0
+        if state == self.SNAP_ORIGINAL_ONLY:
+            # 원문만 보기 좋은 폭. 너무 과하게 잘리지 않도록 기존보다 더 넓게 잡아,
+            # 원문 리스트와 상단 기본 조작 영역이 답답하지 않게 보이게 한다.
+            return min(max(380, int(self.default_right_width * 0.62)), total)
+        if state == self.SNAP_HIDDEN:
+            # 완전 숨김에 가까운 상태. splitter handle은 남겨 다시 열 수 있게 한다.
+            return 0
+        # 기본 정위치.
+        return min(max(0, int(self.default_right_width)), total)
+
+    def cycle_right_panel_snap_width(self):
+        """오른쪽 작업 패널 폭을 기본 ↔ 숨김 2단으로 순환한다."""
+        current = getattr(self, "_right_panel_snap_state", self.SNAP_CUSTOM)
+        if current == self.SNAP_DEFAULT:
+            next_state = self.SNAP_HIDDEN
+        else:
+            # 사용자 드래그(custom), 구형 원문만 보기 상태, 숨김 상태에서는 기본 폭으로 복귀한다.
+            next_state = self.SNAP_DEFAULT
+        self._apply_right_panel_width(self._right_panel_width_for_snap_state(next_state), state=next_state)
+
+    def reset_to_default_right_panel_width(self):
+        """오른쪽 패널이 사용자지정 콤보박스까지 보이는 기본 폭으로 복귀한다."""
+        self._apply_right_panel_width(self._right_panel_width_for_snap_state(self.SNAP_DEFAULT), state=self.SNAP_DEFAULT)
+
+    def set_right_panel_original_only_width(self):
+        """오른쪽 패널을 원문만 보기 좋은 폭으로 맞춘다."""
+        self._apply_right_panel_width(self._right_panel_width_for_snap_state(self.SNAP_ORIGINAL_ONLY), state=self.SNAP_ORIGINAL_ONLY)
+
+    def hide_right_panel_width(self):
+        """오른쪽 패널을 splitter handle만 남기는 수준으로 접는다."""
+        self._apply_right_panel_width(self._right_panel_width_for_snap_state(self.SNAP_HIDDEN), state=self.SNAP_HIDDEN)
 
 
 # Export all support names, including private-style helpers used by mixin methods.

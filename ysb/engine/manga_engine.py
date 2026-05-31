@@ -16,7 +16,7 @@ import shutil
 from pathlib import Path
 from openai import OpenAI
 try:
-    from PIL import Image, ImageDraw, ImageFont
+    from PIL import Image, ImageDraw, ImageFont, ImageFilter
     _PIL_IMPORT_ERROR = None
 except Exception as _e:
     # PyInstaller onefile 빌드에서 PIL._imaging 같은 네이티브 모듈이 누락되면
@@ -31,12 +31,13 @@ def _ensure_pillow():
     EXE 빌드에 PIL._imaging이 누락되어도 앱 시작 자체는 막지 않고,
     이미지 출력 기능을 사용할 때 명확한 오류로 넘긴다.
     """
-    global Image, ImageDraw, ImageFont, _PIL_IMPORT_ERROR
+    global Image, ImageDraw, ImageFont, ImageFilter, _PIL_IMPORT_ERROR
     if Image is not None and ImageDraw is not None and ImageFont is not None:
         return
     try:
-        from PIL import Image as _Image, ImageDraw as _ImageDraw, ImageFont as _ImageFont
+        from PIL import Image as _Image, ImageDraw as _ImageDraw, ImageFont as _ImageFont, ImageFilter as _ImageFilter
         Image, ImageDraw, ImageFont = _Image, _ImageDraw, _ImageFont
+        globals()["ImageFilter"] = _ImageFilter
         _PIL_IMPORT_ERROR = None
     except Exception as e:
         _PIL_IMPORT_ERROR = e
@@ -99,8 +100,11 @@ class Config:
     INPAINT_PROVIDER = "replicate_lama"
     INPAINT_MODEL = ""
     REPAINT_MODEL = ""  # 구버전 설정 호환용
+    REPLICATE_LAMA_WAIT_SECONDS = 3
     STABLE_INPAINT_MODEL = "stability-ai/stable-diffusion-inpainting:95b7223104132402a9ae91cc677285bc5eb997834bd2349fa486f53910fd68b3"
     STABLE_INPAINT_PROMPT = "remove text and restore the original background"
+    STABLE_INPAINT_WAIT_SECONDS = 3
+    LOCAL_LAMA_WAIT_SECONDS = 0
     GEMINI_INPAINT_MODEL = "gemini-2.5-flash-image"
     GEMINI_INPAINT_PROMPT = (
         "Remove the text only inside the white mask area and reconstruct the original manga background. "
@@ -3581,13 +3585,26 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
     # ---------------------------------------------------------
     def execute_inpainting(self, image_path, analyzed_data, mask_1st):
         import replicate
-        if mask_1st is not None: final_mask = mask_1st.copy()
-        else: final_mask = self._create_ratio_mask(analyzed_data, *cv2.imread(image_path).shape[:2][::-1])
+        if mask_1st is not None:
+            final_mask = mask_1st.copy()
+        else:
+            img_array = np.fromfile(image_path, np.uint8)
+            base_img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+            if base_img is None:
+                raise ValueError(f"이미지 파일을 읽을 수 없습니다: {image_path}")
+            final_mask = self._create_ratio_mask(analyzed_data, *base_img.shape[:2][::-1])
         for d in analyzed_data:
             if not d.get('use_inpaint', True):
                 rx, ry, rw, rh = d['rect']
                 cv2.rectangle(final_mask, (rx, ry), (rx+rw, ry+rh), 0, -1)
         _, bin_mask = cv2.threshold(final_mask, 10, 255, cv2.THRESH_BINARY)
+        try:
+            if int(cv2.countNonZero(bin_mask)) <= 0:
+                raise ValueError("인페인팅 마스크가 최종 처리 후 비어 있습니다. 체크박스/마스크 겹침을 확인해 주세요.")
+        except ValueError:
+            raise
+        except Exception:
+            pass
         provider = str(getattr(Config, "INPAINT_PROVIDER", "replicate_lama") or "replicate_lama").lower()
         if provider == "replicate_stable":
             return self._call_stable_inpaint(image_path, bin_mask)
@@ -3979,7 +3996,6 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
                     pass
 
     def _call_lama(self, image_path, mask_img):
-        import replicate
         import time
         import re
 
@@ -3987,40 +4003,124 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
         if not model_name:
             raise ValueError("인페인팅 모델명이 비어있습니다. 옵션 > API 관리에서 모델명을 입력해 주세요.")
 
-        temp_mask = f"temp_mask_lama_{uuid.uuid4().hex}.png"
-        cv2.imwrite(temp_mask, mask_img)
+        if mask_img is None:
+            raise ValueError("LaMa 인페인팅 마스크가 없습니다.")
+        try:
+            if int(cv2.countNonZero(mask_img)) <= 0:
+                raise ValueError("LaMa 인페인팅 마스크가 비어 있습니다.")
+        except ValueError:
+            raise
+        except Exception:
+            pass
+
+        def _write_temp_mask(mask_arr):
+            temp_mask_path = os.path.join(tempfile.gettempdir(), f"temp_mask_lama_{uuid.uuid4().hex}.png")
+            ok = cv2.imwrite(temp_mask_path, mask_arr)
+            if not ok or not os.path.exists(temp_mask_path):
+                raise ValueError("LaMa 임시 마스크 파일을 저장하지 못했습니다.")
+            return temp_mask_path
+
+        def _write_oom_resized_request(src_path, src_mask, *, max_side, max_pixels):
+            img_arr = cv2.imdecode(np.fromfile(str(src_path), np.uint8), cv2.IMREAD_COLOR)
+            if img_arr is None:
+                return None, None, None
+            h, w = img_arr.shape[:2]
+            total_pixels = int(w) * int(h)
+            scale = 1.0
+            if max_side and max(w, h) > int(max_side):
+                scale = min(scale, float(max_side) / float(max(w, h)))
+            if max_pixels and total_pixels > int(max_pixels):
+                scale = min(scale, float(int(max_pixels) / float(total_pixels)) ** 0.5)
+            if scale >= 0.999:
+                return None, None, None
+
+            tw = max(1, int(round(w * scale)))
+            th = max(1, int(round(h * scale)))
+            resized = cv2.resize(img_arr, (tw, th), interpolation=cv2.INTER_AREA)
+            out_path = os.path.join(tempfile.gettempdir(), f"ysb_lama_oom_retry_{uuid.uuid4().hex}_{tw}x{th}.jpg")
+            ok, buf = cv2.imencode(".jpg", resized, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+            if not ok:
+                return None, None, None
+            buf.tofile(out_path)
+
+            resized_mask = src_mask
+            if src_mask is not None:
+                try:
+                    resized_mask = cv2.resize(src_mask, (tw, th), interpolation=cv2.INTER_NEAREST)
+                except Exception:
+                    resized_mask = src_mask
+            return out_path, resized_mask, (w, h, tw, th)
 
         # Replicate 저크레딧/무료 상태에서는 burst=1 제한이 자주 걸린다.
         # 개별 인페인팅은 한 번만 보내서 괜찮지만, 일괄은 연속 호출이라 429가 나기 쉽다.
         max_retries = 6
         base_wait_seconds = 12
+        last_error = None
+        token = str(getattr(Config, "LAMA_REPLICATE_API_TOKEN", "") or getattr(Config, "REPLICATE_API_TOKEN", "") or "").strip()
+
+        current_image_path = str(image_path)
+        current_mask_img = mask_img
+        temp_request_paths = []
+        oom_retry_count = 0
 
         try:
-            for attempt in range(1, max_retries + 1):
+            attempt = 1
+            while attempt <= max_retries:
+                temp_mask = None
                 mask_file = None
                 img_file = None
 
                 try:
+                    temp_mask = _write_temp_mask(current_mask_img)
                     mask_file = open(temp_mask, "rb")
-                    img_file = open(image_path, "rb")
+                    img_file = open(current_image_path, "rb")
 
                     lama_input = {
                         "image": img_file,
                         "mask": mask_file,
                     }
-                    token = str(getattr(Config, "LAMA_REPLICATE_API_TOKEN", "") or getattr(Config, "REPLICATE_API_TOKEN", "") or "").strip()
                     output = self._replicate_run_isolated(model_name, lama_input, token)
+                    if not output:
+                        raise ValueError("Replicate LaMa가 빈 결과를 반환했습니다.")
                     return output
 
                 except Exception as e:
+                    last_error = e
                     err_text = str(e)
+                    err_lower = err_text.lower()
                     print(f"LaMa Error attempt {attempt}/{max_retries}: {err_text}")
 
                     is_rate_limit = (
                         "429" in err_text
-                        or "throttled" in err_text.lower()
-                        or "rate limit" in err_text.lower()
+                        or "throttled" in err_lower
+                        or "rate limit" in err_lower
                     )
+                    is_cuda_oom = (
+                        "cuda out of memory" in err_lower
+                        or "outofmemoryerror" in err_lower
+                        or ("out of memory" in err_lower and "cuda" in err_lower)
+                    )
+
+                    if is_cuda_oom and oom_retry_count < 2:
+                        # Replicate T4 공유 GPU에서 2k~3k 입력도 OOM이 날 수 있다.
+                        # 원본 프로젝트는 건드리지 않고, LaMa 요청용 파일만 한 번 더 줄여 재시도한다.
+                        oom_retry_count += 1
+                        target_side = 2200 if oom_retry_count == 1 else 1800
+                        target_pixels = 4_000_000 if oom_retry_count == 1 else 2_800_000
+                        resized_path, resized_mask, shape_info = _write_oom_resized_request(
+                            current_image_path,
+                            current_mask_img,
+                            max_side=target_side,
+                            max_pixels=target_pixels,
+                        )
+                        if resized_path and resized_mask is not None and shape_info:
+                            temp_request_paths.append(resized_path)
+                            current_image_path = resized_path
+                            current_mask_img = resized_mask
+                            ow, oh, nw, nh = shape_info
+                            print(f"LaMa CUDA OOM fallback resize: {ow}x{oh} -> {nw}x{nh}")
+                            attempt += 1
+                            continue
 
                     if is_rate_limit and attempt < max_retries:
                         # Replicate 메시지에 "resets in ~5s" 같은 값이 있으면 그보다 조금 더 기다린다.
@@ -4031,35 +4131,44 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
 
                         print(f"LaMa Rate Limit: {wait_seconds}s 대기 후 재시도")
                         time.sleep(wait_seconds)
+                        attempt += 1
                         continue
 
-                    return None
+                    raise ValueError(f"Replicate LaMa 인페인팅 실패: {err_text}") from e
 
                 finally:
                     if mask_file:
                         try:
                             mask_file.close()
-                        except:
+                        except Exception:
                             pass
                     if img_file:
                         try:
                             img_file.close()
-                        except:
+                        except Exception:
+                            pass
+                    if temp_mask and os.path.exists(temp_mask):
+                        try:
+                            os.remove(temp_mask)
+                        except Exception:
                             pass
 
-            return None
+            if last_error is not None:
+                raise ValueError(f"Replicate LaMa 인페인팅 실패: {last_error}") from last_error
+            raise ValueError("Replicate LaMa 인페인팅 실패: 알 수 없는 오류")
 
         finally:
-            if os.path.exists(temp_mask):
+            for path in temp_request_paths:
                 try:
-                    os.remove(temp_mask)
-                except:
+                    if path and os.path.exists(path):
+                        os.remove(path)
+                except Exception:
                     pass
 
     # ---------------------------------------------------------
     # [CORE] 출력
     # ---------------------------------------------------------
-    def export_project_result(self, data, img_path, bg_data, font_name, stroke_size, fixed_font_size, output_root=None, output_name_stem=None):
+    def export_project_result(self, data, img_path, bg_data, font_name, stroke_size, fixed_font_size, output_root=None, output_name_stem=None, clean_name_stem=None, output_image_format=None, clean_image_format=None, output_image_quality=95, clean_image_quality=95):
         """
         결과 출력:
         - project_dir/clean/Clean_XXXX.png: 인페인팅된 배경
@@ -4244,23 +4353,111 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
         os.makedirs(result_dir, exist_ok=True)
         os.makedirs(scripts_dir, exist_ok=True)
 
-        # img_path는 실제 존재하는 원본 이미지 경로로 쓰고,
-        # 출력 파일명은 호출자가 별도로 넘긴 output_name_stem을 우선 사용한다.
-        # 이렇게 해야 원본 파일명 변경/표시명 변경 후에도 가상 경로를 실제 이미지처럼 읽는 문제가 없다.
-        name_no_ext = str(output_name_stem or "").strip()
-        if not name_no_ext:
-            name_no_ext = os.path.splitext(os.path.basename(img_path))[0]
-        name_no_ext = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", name_no_ext).strip(" .") or "output"
-        clean_img_name = f"Clean_{name_no_ext}.png"
-        result_img_name = f"Result_{name_no_ext}.png"
+        def _norm_fmt(v):
+            v = str(v or "png").strip().lower().lstrip(".")
+            if v in ("jpeg", "jpe"):
+                v = "jpg"
+            if v in ("wep", "wbp"):
+                v = "webp"
+            return v if v in ("png", "jpg", "webp") else "png"
+
+        def _ext_for_fmt(v):
+            v = _norm_fmt(v)
+            if v == "jpg":
+                return ".jpg"
+            if v == "webp":
+                return ".webp"
+            return ".png"
+
+        def _pil_fmt(v):
+            v = _norm_fmt(v)
+            if v == "jpg":
+                return "JPEG"
+            if v == "webp":
+                return "WEBP"
+            return "PNG"
+
+        def _quality(v):
+            try:
+                q = int(v)
+            except Exception:
+                q = 95
+            return max(1, min(100, q))
+
+        def _remove_same_stem_variants(folder, stem, prefix=""):
+            try:
+                for ext in (".png", ".jpg", ".jpeg", ".webp"):
+                    p = os.path.join(folder, f"{prefix}{stem}{ext}")
+                    if os.path.exists(p):
+                        try:
+                            os.remove(p)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+        def _save_pil_for_output(img, path, fmt, quality):
+            fmt = _norm_fmt(fmt)
+            q = _quality(quality)
+            out = img
+            params = {}
+            if fmt == "jpg":
+                if out.mode in ("RGBA", "LA") or (out.mode == "P" and "transparency" in getattr(out, "info", {})):
+                    bg = Image.new("RGB", out.size, (255, 255, 255))
+                    try:
+                        bg.paste(out, mask=out.getchannel("A"))
+                    except Exception:
+                        bg.paste(out.convert("RGB"))
+                    out = bg
+                else:
+                    out = out.convert("RGB")
+                params.update({"quality": q, "subsampling": 0, "optimize": True})
+            elif fmt == "webp":
+                if out.mode == "P":
+                    out = out.convert("RGBA")
+                params.update({"quality": q, "method": 6})
+            else:
+                params.update({"optimize": True})
+            out.save(path, _pil_fmt(fmt), **params)
+
+        output_fmt = _norm_fmt(output_image_format)
+        clean_fmt = _norm_fmt(clean_image_format)
+        output_quality = _quality(output_image_quality)
+        clean_quality = _quality(clean_image_quality)
+
+        # img_path는 실제 존재하는 원본 이미지 경로로 쓴다.
+        # Result 파일명은 사용자가 정한 출력 표시명(output_name_stem)을 따른다.
+        # Clean 파일명은 반드시 원본 페이지 파일명 stem을 따르되, 클린본임을 알 수 있게 clean_ 접두사를 붙인다.
+        # 예: 원본 001.png + 클린 형식 webp => clean/clean_001.webp
+        result_stem = str(output_name_stem or "").strip()
+        if not result_stem:
+            result_stem = os.path.splitext(os.path.basename(img_path))[0]
+        result_stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", result_stem).strip(" .") or "output"
+
+        clean_source_stem = str(clean_name_stem or "").strip()
+        if not clean_source_stem:
+            clean_source_stem = os.path.splitext(os.path.basename(img_path))[0]
+        clean_source_stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", clean_source_stem).strip(" .") or "clean"
+        clean_stem = clean_source_stem if clean_source_stem.lower().startswith("clean_") else f"clean_{clean_source_stem}"
+
+        clean_img_name = f"{clean_stem}{_ext_for_fmt(clean_fmt)}"
+        result_img_name = f"Result_{result_stem}{_ext_for_fmt(output_fmt)}"
         clean_img_path = os.path.join(clean_dir, clean_img_name)
         result_img_path = os.path.join(result_dir, result_img_name)
+
+        # 출력 형식을 바꿔 다시 출력하면 같은 stem의 기존 PNG/JPG/WebP는 중복 보관하지 않고
+        # 새 형식 파일 하나로 갈아탄다.
+        _remove_same_stem_variants(clean_dir, clean_stem, "")
+        _remove_same_stem_variants(result_dir, result_stem, "Result_")
+        # 직전 버전에서 잘못 생성된 접두사 없는 원본명 클린본과 Clean_출력명 클린본도 같이 정리한다.
+        _remove_same_stem_variants(clean_dir, clean_source_stem, "")
+        _remove_same_stem_variants(clean_dir, result_stem, "Clean_")
 
         bg_img = _load_pil_image(bg_data)
         if bg_img is None:
             bg_img = _load_pil_image(img_path)
         if bg_img is not None:
-            bg_img.save(clean_img_path)
+            _save_pil_for_output(bg_img, clean_img_path, clean_fmt, clean_quality)
 
         def _font_candidates_for_js(name):
             raw = str(name or '').strip()
@@ -4351,6 +4548,19 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
                 "italic": bool(d.get('italic', False)),
                 "strike": bool(d.get('strike', False)),
                 "rotation": float(d.get('rotation', 0) or 0),
+                "shadowEnabled": bool(d.get('text_shadow_enabled', False)),
+                "shadowColor": d.get('text_shadow_color') or '#000000',
+                "shadowOpacity": int(d.get('text_shadow_opacity', 45) or 45),
+                "shadowOffsetX": int(d.get('text_shadow_offset_x', 3) or 3),
+                "shadowOffsetY": int(d.get('text_shadow_offset_y', 3) or 3),
+                "shadowBlur": int(d.get('text_shadow_blur', 4) or 4),
+                "glowEnabled": bool(d.get('text_glow_enabled', False)),
+                "glowColor": d.get('text_glow_color') or '#FFFFFF',
+                "glowOpacity": int(d.get('text_glow_opacity', 35) or 35),
+                "glowOffsetX": int(d.get('text_glow_offset_x', 0) or 0),
+                "glowOffsetY": int(d.get('text_glow_offset_y', 0) or 0),
+                "glowSize": int(d.get('text_glow_size', 3) or 3),
+                "glowBlur": int(d.get('text_glow_blur', 8) or 8),
             })
 
         # Result 폴더용 최종 이미지 렌더링. 포토샵 레이어만큼 정교하진 않아도 검수용 이미지로 바로 쓸 수 있게 저장한다.
@@ -4361,12 +4571,34 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
                 w, h = draw_obj.textsize(text_value, font=font_obj)
                 return (0, 0, w, h)
 
+        def _synthetic_bold_offsets_for_font(font_obj, bold=False):
+            if not bold:
+                return [(0, 0)]
+            try:
+                size = int(getattr(font_obj, 'size', 24) or 24)
+            except Exception:
+                size = 24
+            # G단계: 출력 이미지에서도 B 버튼이 켜지면 확실히 두꺼워지도록
+            # 원형에 가까운 대칭 오프셋을 사용한다.
+            radius = max(1, min(10, int(round(size * 0.095))))
+            offsets = [(0, 0)]
+            for r in range(1, radius + 1):
+                offsets.extend([(r, 0), (-r, 0), (0, r), (0, -r)])
+                if r <= max(1, radius // 2):
+                    offsets.extend([(r, r), (-r, r), (r, -r), (-r, -r)])
+            seen = set()
+            unique = []
+            for item in offsets:
+                if item in seen:
+                    continue
+                seen.add(item)
+                unique.append(item)
+            return unique
+
         def _draw_text_line(draw_obj, pos, line_text, font_obj, fill, stroke_w, stroke_fill, letter_spacing=0, bold=False):
             x0, y0 = pos
+            offsets = _synthetic_bold_offsets_for_font(font_obj, bold)
             if not letter_spacing:
-                offsets = [(0, 0)]
-                if bold:
-                    offsets += [(1, 0), (0, 1), (1, 1)]
                 for ox, oy in offsets:
                     draw_obj.text((x0 + ox, y0 + oy), line_text, font=font_obj, fill=fill,
                                   stroke_width=stroke_w, stroke_fill=stroke_fill)
@@ -4378,9 +4610,6 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
 
             cursor_x = x0
             for ch in line_text:
-                offsets = [(0, 0)]
-                if bold:
-                    offsets += [(1, 0), (0, 1), (1, 1)]
                 for ox, oy in offsets:
                     draw_obj.text((cursor_x + ox, y0 + oy), ch, font=font_obj, fill=fill,
                                   stroke_width=stroke_w, stroke_fill=stroke_fill)
@@ -4411,6 +4640,71 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
                 if i < len(line_text) - 1:
                     total += int(letter_spacing)
             return total
+
+        def _rgba_from_hex(value, opacity_pct=100, fallback=(255, 255, 255)):
+            rgb = _hex_to_rgb(value, fallback)
+            try:
+                alpha = max(0, min(255, int(round(float(opacity_pct or 0) * 255.0 / 100.0))))
+            except Exception:
+                alpha = 255
+            return rgb + (alpha,)
+
+        def _apply_text_post_effects(base_layer, shadow_spec=None, glow_spec=None):
+            shadow_spec = shadow_spec or {}
+            glow_spec = glow_spec or {}
+            base_w, base_h = base_layer.size
+            pad_left = pad_top = pad_right = pad_bottom = 0
+
+            if bool(glow_spec.get('enabled', False)):
+                glow_dx = int(glow_spec.get('dx', 0) or 0)
+                glow_dy = int(glow_spec.get('dy', 0) or 0)
+                glow_size = max(0, int(glow_spec.get('size', 0) or 0))
+                glow_blur = max(0, int(glow_spec.get('blur', 0) or 0))
+                extra = glow_size + glow_blur * 2 + 4
+                pad_left = max(pad_left, max(0, -glow_dx) + extra)
+                pad_top = max(pad_top, max(0, -glow_dy) + extra)
+                pad_right = max(pad_right, max(0, glow_dx) + extra)
+                pad_bottom = max(pad_bottom, max(0, glow_dy) + extra)
+
+            if bool(shadow_spec.get('enabled', False)):
+                dx = int(shadow_spec.get('dx', 0) or 0)
+                dy = int(shadow_spec.get('dy', 0) or 0)
+                blur = max(0, int(shadow_spec.get('blur', 0) or 0))
+                pad_left = max(pad_left, max(0, -dx) + blur * 2 + 4)
+                pad_top = max(pad_top, max(0, -dy) + blur * 2 + 4)
+                pad_right = max(pad_right, max(0, dx) + blur * 2 + 4)
+                pad_bottom = max(pad_bottom, max(0, dy) + blur * 2 + 4)
+
+            if pad_left <= 0 and pad_top <= 0 and pad_right <= 0 and pad_bottom <= 0:
+                return base_layer, 0, 0, base_w, base_h
+
+            canvas = Image.new('RGBA', (base_w + pad_left + pad_right, base_h + pad_top + pad_bottom), (0, 0, 0, 0))
+            alpha = base_layer.getchannel('A')
+
+            if bool(glow_spec.get('enabled', False)):
+                blur_radius = max(0.0, float(glow_spec.get('blur', 0) or 0) + float(glow_spec.get('size', 0) or 0) * 0.6)
+                glow_alpha = alpha
+                if blur_radius > 0:
+                    glow_alpha = glow_alpha.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+                glow_img = Image.new('RGBA', base_layer.size, _rgba_from_hex(glow_spec.get('color'), glow_spec.get('opacity', 35), (255, 255, 255)))
+                glow_img.putalpha(glow_alpha.point(lambda a, s=max(0, min(255, _rgba_from_hex(glow_spec.get('color'), glow_spec.get('opacity', 35))[3])): int(a * s / 255)))
+                glow_dx = int(glow_spec.get('dx', 0) or 0)
+                glow_dy = int(glow_spec.get('dy', 0) or 0)
+                canvas.alpha_composite(glow_img, (pad_left + glow_dx, pad_top + glow_dy))
+
+            if bool(shadow_spec.get('enabled', False)):
+                dx = int(shadow_spec.get('dx', 0) or 0)
+                dy = int(shadow_spec.get('dy', 0) or 0)
+                blur_radius = max(0.0, float(shadow_spec.get('blur', 0) or 0))
+                shadow_alpha = alpha
+                if blur_radius > 0:
+                    shadow_alpha = shadow_alpha.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+                shadow_img = Image.new('RGBA', base_layer.size, _rgba_from_hex(shadow_spec.get('color'), shadow_spec.get('opacity', 45), (0, 0, 0)))
+                shadow_img.putalpha(shadow_alpha.point(lambda a, s=max(0, min(255, _rgba_from_hex(shadow_spec.get('color'), shadow_spec.get('opacity', 45), (0,0,0))[3])): int(a * s / 255)))
+                canvas.alpha_composite(shadow_img, (pad_left + dx, pad_top + dy))
+
+            canvas.alpha_composite(base_layer, (pad_left, pad_top))
+            return canvas, pad_left, pad_top, base_w, base_h
 
         if bg_img is not None:
             result_img = bg_img.copy().convert('RGB')
@@ -4488,25 +4782,48 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
                     resample = getattr(Image, "Resampling", Image).BICUBIC
                     layer = layer.rotate(-rotation, expand=True, resample=resample)
 
+                content_w = layer.width
+                content_h = layer.height
+                layer, effect_pad_left, effect_pad_top, content_w, content_h = _apply_text_post_effects(
+                    layer,
+                    shadow_spec={
+                        'enabled': bool(d.get('shadowEnabled', False)),
+                        'color': d.get('shadowColor') or '#000000',
+                        'opacity': int(d.get('shadowOpacity', 45) or 45),
+                        'dx': int(d.get('shadowOffsetX', 3) or 3),
+                        'dy': int(d.get('shadowOffsetY', 3) or 3),
+                        'blur': int(d.get('shadowBlur', 4) or 4),
+                    },
+                    glow_spec={
+                        'enabled': bool(d.get('glowEnabled', False)),
+                        'color': d.get('glowColor') or '#FFFFFF',
+                        'opacity': int(d.get('glowOpacity', 35) or 35),
+                        'dx': int(d.get('glowOffsetX', 0) or 0),
+                        'dy': int(d.get('glowOffsetY', 0) or 0),
+                        'size': int(d.get('glowSize', 3) or 3),
+                        'blur': int(d.get('glowBlur', 8) or 8),
+                    },
+                )
+
                 if align == 'left':
-                    tx = x
+                    tx = x - effect_pad_left
                 elif align == 'right':
-                    tx = x + w - layer.width
+                    tx = x + w - content_w - effect_pad_left
                 else:
-                    tx = x + (w - layer.width) / 2
-                ty = y
+                    tx = x + (w - content_w) / 2 - effect_pad_left
+                ty = y - effect_pad_top
 
                 result_img = result_img.convert("RGBA")
                 result_img.alpha_composite(layer, (int(round(tx)), int(round(ty))))
                 result_img = result_img.convert("RGB")
 
-            result_img.save(result_img_path)
+            _save_pil_for_output(result_img, result_img_path, output_fmt, output_quality)
 
 
         json_str = json.dumps(layers_list, ensure_ascii=False)
         font_name_json = json.dumps(font_name, ensure_ascii=False)
 
-        # scripts/Script_XXXX.jsx에서 project_dir/clean/Clean_XXXX.png를 상대경로로 찾음
+        # scripts/Script_XXXX.jsx에서 project_dir/clean/{원본파일명}.png를 상대경로로 찾음
         jsx_content = f"""
 #target photoshop
 app.bringToFront();
@@ -4706,7 +5023,7 @@ function applyStroke(size, colorHex) {{
     executeAction(charIDToTypeID("setd"), desc1, DialogModes.NO);
 }}
 """
-        script_path = os.path.join(scripts_dir, f"Script_{name_no_ext}.jsx")
+        script_path = os.path.join(scripts_dir, f"Script_{result_stem}.jsx")
         with open(script_path, "w", encoding="utf-8") as f:
             f.write(jsx_content)
         return script_path
