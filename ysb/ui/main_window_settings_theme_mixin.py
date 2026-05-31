@@ -499,6 +499,7 @@ QCheckBox, QRadioButton { color:#E0DADF; spacing:9px; }
         old_show_paths_in_log = bool(getattr(self, "show_paths_in_log", False))
         old_show_cache_paths_in_settings = bool(getattr(self, "show_cache_paths_in_settings", False))
         old_interface_tooltips_enabled = bool(getattr(self, "interface_tooltips_enabled", True))
+        old_use_light_file_dialog = bool(getattr(self, "use_light_file_dialog", True))
 
         dlg = QDialog(self)
         dlg.setProperty("dialog_timing_log_key", "settings_overview")
