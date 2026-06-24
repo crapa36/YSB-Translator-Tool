@@ -76,7 +76,7 @@ def _download_replicate_output(output):
 
 def _inpaint_resize_limits(provider):
     provider = str(provider or "replicate_lama").strip().lower()
-    if provider == "local_lama":
+    if provider in ("local_lama", "local_sdxl_lightning"):
         return {
             "warn_max_side": 3000,
             "warn_max_pixels": 9_000_000,
@@ -1062,6 +1062,8 @@ class InpaintWorker(QThread):
                     provider_name = "Gemini"
                 elif provider == "local_lama":
                     provider_name = "LOCAL LaMa"
+                elif provider == "local_sdxl_lightning":
+                    provider_name = "LOCAL SDXL Lightning"
                 else:
                     provider_name = "LaMa"
             except Exception:

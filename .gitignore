@@ -1,0 +1,39 @@
+# Original ignores
+/ysb/services
+__pycache__
+sb/engine/__pycache__
+/ysb/settings/__pycache__
+/ysb/ui/__pycache__
+/ysb/core/__pycache__
+/ysb/editions/__pycache__
+/ysb/i18n/__pycache__
+/ysb/services/__pycache__
+
+# Virtual environment
+.venv/
+venv/
+ENV/
+
+# Local translation models
+models/
+/models/
+
+# Logs & temp files
+_LOGS_/
+*.log
+*.tmp
+*.bak
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+/third_party
+/local_models
+/ysb/engines/text_detection/__pycache__
+/ysb/engines/ocr/__pycache__
+/.agents

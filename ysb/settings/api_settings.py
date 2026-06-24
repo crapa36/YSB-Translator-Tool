@@ -1,4 +1,5 @@
 import json
+import os
 from dataclasses import dataclass, asdict
 
 from PyQt6.QtWidgets import (
@@ -180,6 +181,7 @@ class ApiSettings:
     selected_ocr_provider: str = "clova"
     selected_inpaint_provider: str = "replicate_lama"
     selected_translation_provider: str = "openai"
+    local_translation_model: str = ""
 
     # OCR API
     clova_api_url: str = ""
@@ -258,6 +260,8 @@ class ApiSettingsStore:
             legacy_provider = str(base.get("selected_translation_provider", "") or "").lower()
             if legacy_provider in ("local_argos", "local_hf_jako", "local_hf_enko", "local_nllb"):
                 base["selected_translation_provider"] = "openai"
+            elif legacy_provider == "local" and not local_enabled:
+                base["selected_translation_provider"] = "openai"
 
             local_enabled = _is_local_edition_runtime()
 
@@ -272,7 +276,10 @@ class ApiSettingsStore:
 
             legacy_inpaint_provider = str(base.get("selected_inpaint_provider", "") or "").lower()
             if legacy_inpaint_provider.startswith("local_"):
-                base["selected_inpaint_provider"] = "local_lama" if local_enabled else "replicate_lama"
+                if local_enabled and legacy_inpaint_provider in ("local_lama", "local_sdxl_lightning"):
+                    base["selected_inpaint_provider"] = legacy_inpaint_provider
+                else:
+                    base["selected_inpaint_provider"] = "local_lama" if local_enabled else "replicate_lama"
 
             # v1.6 이전 캐시는 replicate_api_token 하나를 LaMa/Stable이 공유했다.
             # 새 구조에서는 두 토큰을 분리하되, 기존 사용자가 바로 깨지지 않도록 최초 로드 시 양쪽에 복사한다.
@@ -297,6 +304,11 @@ class ApiSettingsStore:
     @staticmethod
     def cache_path() -> str:
         return str(cache_file())
+
+
+def get_api_settings() -> ApiSettings:
+    return ApiSettingsStore.load()
+
 
 
 def apply_settings_to_config(settings: ApiSettings):
@@ -345,7 +357,10 @@ def apply_settings_to_config(settings: ApiSettings):
         # Inpainting
         Config.INPAINT_PROVIDER = (settings.selected_inpaint_provider or "replicate_lama").strip() or "replicate_lama"
         if Config.INPAINT_PROVIDER.startswith("local_"):
-            Config.INPAINT_PROVIDER = "local_lama" if local_enabled else "replicate_lama"
+            if local_enabled and Config.INPAINT_PROVIDER in ("local_lama", "local_sdxl_lightning"):
+                Config.INPAINT_PROVIDER = Config.INPAINT_PROVIDER
+            else:
+                Config.INPAINT_PROVIDER = "local_lama" if local_enabled else "replicate_lama"
 
         legacy_token = settings.replicate_api_token.strip()
         Config.LAMA_REPLICATE_API_TOKEN = (settings.lama_replicate_api_token.strip() or legacy_token)
@@ -538,10 +553,16 @@ class ApiSettingsDialog(QDialog):
                         ("대기 시간(초)", "local_lama_wait_seconds", False, 0, "spin", (0, 120), " sec" if self._ui_language == LANG_EN else "초"),
                     ],
                 },
+                {
+                    "provider": "local_sdxl_lightning",
+                    "title": "LOCAL SDXL Lightning",
+                    "description": "Local판 전용 SDXL Lightning 4-Step 고속 디퓨전 인페인팅입니다. API Key를 사용하지 않습니다.",
+                    "fields": [],
+                },
             ])
         self._add_api_section(inpaint_content_layout, tr_api("인페인팅", self._ui_language), inpaint_cards, "selected_inpaint_provider")
 
-        self._add_api_section(trans_content_layout, tr_api("번역", self._ui_language), [
+        translation_cards = [
             {"_category": True, "title": "API 기반 모델", "description": "외부 API를 사용하는 번역 모델입니다. API 키가 필요합니다."},
             {
                 "provider": "openai",
@@ -591,7 +612,28 @@ class ApiSettingsDialog(QDialog):
                     ("API Key", "custom_translation_api_key", True, "OpenAI-compatible API Key"),
                 ],
             },
-        ], "selected_translation_provider")
+        ]
+        if _is_local_edition_runtime():
+            local_models = []
+            try:
+                base_path = os.path.abspath("./local_models/translate_models/")
+                if os.path.exists(base_path):
+                    local_models = [d for d in os.listdir(base_path) if os.path.isdir(os.path.join(base_path, d))]
+            except Exception:
+                pass
+            model_choices = [(m, m) for m in local_models] if local_models else [("모델 없음 (No Models)", "")]
+            translation_cards.extend([
+                {"_category": True, "title": "LOCAL 모델", "description": "Local판에서만 사용하는 오프라인 번역 모델입니다. API 키가 필요하지 않습니다."},
+                {
+                    "provider": "local",
+                    "title": "LOCAL NLLB Translator",
+                    "description": "Hugging Face NLLB-200 기반 로컬 인프로세스 번역을 실행합니다. local_models/translate_models 경로를 스캔합니다.",
+                    "fields": [
+                        ("Model Name / Path", "local_translation_model", False, "", "combo", model_choices),
+                    ],
+                },
+            ])
+        self._add_api_section(trans_content_layout, tr_api("번역", self._ui_language), translation_cards, "selected_translation_provider")
 
         ocr_content_layout.addStretch(1)
         inpaint_content_layout.addStretch(1)
@@ -851,6 +893,7 @@ class ApiSettingsDialog(QDialog):
             selected_ocr_provider=self._selected_provider_for("selected_ocr_provider", "clova"),
             selected_inpaint_provider=self._selected_provider_for("selected_inpaint_provider", "replicate_lama"),
             selected_translation_provider=self._selected_provider_for("selected_translation_provider", "openai"),
+            local_translation_model=self._first_edit_text("local_translation_model"),
             clova_api_url=self._first_edit_text("clova_api_url"),
             clova_secret_key=self._first_edit_text("clova_secret_key"),
             clova_model=self._first_edit_text("clova_model") or "clova_ocr_v2",

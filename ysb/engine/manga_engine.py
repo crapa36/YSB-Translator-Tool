@@ -3241,8 +3241,10 @@ class MangaProcessEngine:
     def translate_text_batch(self, texts, provider="openai", chunk_size=None):
         if not texts:
             return []
-
         provider = (provider or "openai").lower()
+        if provider == "local":
+            from ysb.core.text_engine import translate_bubble_text
+            return [translate_bubble_text(t) for t in texts]
 
         # API 키가 없으면 청크 실패 -> 단일 재시도 -> 원문 반환으로 흘러가면 안 된다.
         # 이 경우는 즉시 상위 UI로 올려서 경고창을 띄우게 한다.
@@ -3612,6 +3614,8 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
             return self._call_gemini_inpaint(image_path, bin_mask)
         if provider == "local_lama":
             return self._call_local_lama(image_path, bin_mask)
+        if provider == "local_sdxl_lightning":
+            return self._call_local_sdxl_lightning(image_path, bin_mask)
         return self._call_lama(image_path, bin_mask)
 
 
@@ -3728,6 +3732,47 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
 
         print(f">>> [Local Inpaint] WARN: failed to stage LaMa model to ASCII path: {last_error}")
         return str(src)
+
+    def _call_local_sdxl_lightning(self, image_path, mask_img):
+        """Run local SDXL Lightning inpainting on CUDA.
+
+        Returns PNG bytes so the existing inpainting workers can reuse the same
+        result pipeline.
+        """
+        import numpy as np
+        from PIL import Image
+        import cv2
+        from io import BytesIO
+
+        if not image_path or not os.path.exists(str(image_path)):
+            raise ValueError("LOCAL SDXL Lightning 입력 이미지 파일을 찾을 수 없습니다.")
+
+        image = Image.open(image_path).convert("RGB")
+        mask_arr = np.asarray(mask_img)
+        if mask_arr.ndim == 3:
+            mask_arr = cv2.cvtColor(mask_arr, cv2.COLOR_BGR2GRAY)
+        mask_arr = np.where(mask_arr > 10, 255, 0).astype("uint8")
+        if mask_arr.shape[:2] != (image.height, image.width):
+            mask_arr = cv2.resize(mask_arr, (image.width, image.height), interpolation=cv2.INTER_NEAREST)
+        if int(np.count_nonzero(mask_arr)) <= 0:
+            raise ValueError("LOCAL SDXL Lightning 인페인팅 마스크가 비어 있습니다.")
+
+        image_np = np.array(image)
+
+        model = getattr(self, "_local_sdxl_lightning_model", None)
+        if model is None:
+            print(">>> [Local Inpaint] Loading SDXL Lightning model...")
+            from ysb.core.inpainting_engine import SDXLLightningInpaintEngine
+            model = SDXLLightningInpaintEngine("./local_models/sdxl_lightning")
+            self._local_sdxl_lightning_model = model
+
+        print(">>> [Local Inpaint] Running LOCAL SDXL Lightning Inpaint...")
+        result_np = model.inpaint(image_np, mask_arr)
+
+        out_img = Image.fromarray(result_np).convert("RGB")
+        bio = BytesIO()
+        out_img.save(bio, format="PNG")
+        return bio.getvalue()
 
     def _call_local_lama(self, image_path, mask_img):
         """Run local LaMa inpainting using simple-lama-inpainting.

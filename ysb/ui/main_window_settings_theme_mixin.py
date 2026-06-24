@@ -2384,6 +2384,12 @@ QCheckBox, QRadioButton { color:#E0DADF; spacing:9px; }
         self.cb_trans_provider.addItem("Google", "google")
         self.cb_trans_provider.addItem("Gemini", "gemini")
         self.cb_trans_provider.addItem("Custom", "custom")
+        try:
+            from ysb.editions.current import is_local_edition
+            if is_local_edition():
+                self.cb_trans_provider.addItem("LOCAL", "local")
+        except Exception:
+            pass
         self.set_combo_current_data(self.cb_trans_provider, getattr(self.api_settings, "selected_translation_provider", "openai"))
         self.cb_trans_provider.currentIndexChanged.connect(self.on_translation_provider_changed)
 

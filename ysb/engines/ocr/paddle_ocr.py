@@ -298,11 +298,11 @@ def _normalize_lang(language: str) -> str:
 
 def _normalize_device(device: str) -> str:
     dev = str(device or "auto").strip().lower()
-    if dev in ("cuda", "gpu", "nvidia"):
+    if dev in ("cuda", "gpu", "nvidia", "auto"):
         return "gpu"
     if dev in ("cpu",):
         return "cpu"
-    return "auto"
+    return "gpu"
 
 
 def _is_model_dir(path: Path) -> bool:
@@ -357,7 +357,7 @@ def _local_model_roots() -> list[Path]:
     roots: list[Path] = []
     seen: set[str] = set()
     for base in candidates:
-        for root in (base / "local_models" / "paddleocr", base / "local_models"):
+        for root in (base / "local_models" / "paddleocr_vl", base / "local_models" / "paddleocr", base / "local_models"):
             try:
                 key = str(root.resolve()).lower()
             except Exception:
@@ -570,6 +570,8 @@ class PaddleOcrEngine:
         self.device = device
 
     def _build_engine(self):
+        # RTX 4080 성능 활용을 위한 전용 가속 옵션 추가
+        os.environ["FLAGS_allocator_strategy"] = "auto_growth"
         # PaddlePaddle 3.3.x CPU may hit a oneDNN/PIR runtime error on some
         # PP-OCRv5 models.  Keep oneDNN/MKLDNN disabled for Local OCR unless
         # the user explicitly changes the environment before launch.
@@ -578,7 +580,8 @@ class PaddleOcrEngine:
         from paddleocr import PaddleOCR  # Local-only heavy import
 
         lang = _normalize_lang(self.language)
-        device = _normalize_device(self.device)
+        # GPU 가속 강제 적용
+        device = "gpu"
         model_dirs_all = _discover_paddle_model_dirs()
         # Cache by model path too, so changing local_models after launch does not
         # accidentally reuse an engine initialized with another path.
@@ -678,6 +681,10 @@ class PaddleOcrEngine:
         last_err: Exception | None = None
         for kwargs in attempts:
             try:
+                # PaddleOCR-VL 최적화를 위한 가속/용량 제한 옵션 주입
+                kwargs["use_gpu"] = True
+                kwargs["gpu_mem"] = 2000
+                kwargs["use_fp16"] = True
                 engine = PaddleOCR(**kwargs)
                 _ENGINE_CACHE[cache_key] = engine
                 return engine

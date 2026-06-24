@@ -3,8 +3,8 @@
 # Lite build excludes these heavy Local modules.
 
 # comic_text_detector runtime
-torch
-torchvision
+torch>=2.1.0
+torchvision>=0.16.0
 tqdm
 pyclipper
 shapely
@@ -15,7 +15,7 @@ networkx
 # PaddleOCR package does not always install the Paddle runtime by itself.
 # Keep PaddlePaddle pinned here so Local build venv can be created from scratch.
 # 3.3.x CPU는 oneDNN/PIR OCR 오류가 날 수 있으므로 3.2.2로 고정합니다.
-paddlepaddle==3.2.2
+paddlepaddle-gpu>=2.5.0
 paddleocr
 # PaddleX/PaddleOCR imports pandas dynamically at runtime. Keep it explicit so
 # the Local frozen package does not lose OCR text recognition.
@@ -27,6 +27,14 @@ numpy==1.26.4
 setuptools==81.0.0
 simple-lama-inpainting
 
+# SDXL Lightning & 디퓨전 생태계
+diffusers>=0.26.0
+accelerate>=0.27.0
+peft>=0.8.0
+safetensors>=0.4.0
+
 # Local Manga OCR runtime (dev/source mode)
 manga-ocr==0.1.14
-transformers>=4.25,<5
+transformers>=4.40.0,<5.0.0
+sentencepiece>=0.2.0
+protobuf>=4.25.0

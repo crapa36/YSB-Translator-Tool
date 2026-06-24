@@ -229,3 +229,15 @@ class YSBTextEngine:
             "selected_ids": ids,
             "_undo_scope": "page",
         }
+
+
+from ysb.core.local_translator import LocalTranslator
+
+def translate_bubble_text(text: str) -> str:
+    """기존 YSB 텍스트 엔진 내 번역 API 연동 루틴 대체"""
+    if not text.strip():
+        return ""
+    translator = LocalTranslator.get_instance()
+    # 일어(jpn_Jpan)에서 한국어(kor_Hang)로 로컬 추론 번역 실행
+    return translator.translate(text, src_lang="jpn_Jpan", tgt_lang="kor_Hang")
+

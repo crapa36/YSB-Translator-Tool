@@ -4396,6 +4396,7 @@ class MainWindowOperationsMixin:
             "replicate_stable": "Replicate Stable Diffusion Inpainting",
             "gemini_inpaint": "Gemini Image Inpainting",
             "local_lama": "LOCAL LaMa",
+            "local_sdxl_lightning": "LOCAL SDXL Lightning",
             "replicate_lama": "Replicate LaMa",
         }
         provider_name = provider_name_map.get(provider, "Replicate LaMa")
@@ -4424,6 +4425,33 @@ class MainWindowOperationsMixin:
                     provider_name,
                     f"LOCAL LaMa 준비 확인 중 오류가 발생했습니다: {e}",
                     f"LOCAL LaMa readiness check failed: {e}",
+                )
+            return True
+
+        if provider == "local_sdxl_lightning":
+            try:
+                from ysb.editions.current import is_local_edition
+                if not is_local_edition():
+                    return self._show_api_missing_and_open_settings(
+                        "inpaint",
+                        provider_name,
+                        "LOCAL SDXL Lightning은 Local판 전용입니다.",
+                        "LOCAL SDXL Lightning is only available in the Local edition.",
+                    )
+                import diffusers  # noqa: F401
+            except ImportError as e:
+                return self._show_api_missing_and_open_settings(
+                    "inpaint",
+                    provider_name,
+                    "LOCAL SDXL Lightning 패키지(diffusers 등)가 설치되어 있지 않습니다. 의존성 설치를 완료해 주세요.",
+                    "LOCAL SDXL Lightning package (diffusers, etc.) is not installed. Please install dependencies.",
+                )
+            except Exception as e:
+                return self._show_api_missing_and_open_settings(
+                    "inpaint",
+                    provider_name,
+                    f"LOCAL SDXL Lightning 준비 확인 중 오류가 발생했습니다: {e}",
+                    f"LOCAL SDXL Lightning readiness check failed: {e}",
                 )
             return True
 
@@ -4480,6 +4508,9 @@ class MainWindowOperationsMixin:
         """번역 API 키가 없을 때 원문 반환으로 조용히 넘어가지 않게 UI에서 먼저 막는다."""
         settings = getattr(self, "api_settings", None) or ApiSettingsStore.load()
         provider = (provider or getattr(settings, "selected_translation_provider", "openai") or self.cb_trans_provider.currentData() or "openai").lower()
+
+        if provider == "local":
+            return True
 
         def _provider_display_name(code: str) -> str:
             mapping = {
@@ -4752,10 +4783,10 @@ class MainWindowOperationsMixin:
 
     def _get_inpaint_resize_limits(self, provider=None):
         provider = str(provider or "replicate_lama").strip().lower()
-        if provider == "local_lama":
+        if provider in ("local_lama", "local_sdxl_lightning"):
             return {
                 "provider": provider,
-                "provider_label": "LOCAL LaMa",
+                "provider_label": "LOCAL LaMa" if provider == "local_lama" else "LOCAL SDXL Lightning",
                 "warn_max_side": 3000,
                 "warn_max_pixels": 9_000_000,
                 "target_max_side": 2800,
