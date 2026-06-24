@@ -16,7 +16,7 @@ networkx
 # Keep PaddlePaddle pinned here so Local build venv can be created from scratch.
 # 3.3.x CPU는 oneDNN/PIR OCR 오류가 날 수 있으므로 3.2.2로 고정합니다.
 paddlepaddle-gpu>=2.5.0
-paddleocr
+paddleocr[doc-parser]>=2.9.0
 # PaddleX/PaddleOCR imports pandas dynamically at runtime. Keep it explicit so
 # the Local frozen package does not lose OCR text recognition.
 pandas

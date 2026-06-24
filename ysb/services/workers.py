@@ -687,9 +687,13 @@ class UniversalBatchWorker(QThread):
                         file_path=path,
                         memory=memory_text(),
                     )
+                    def progress_cb(step_num, total_steps, message):
+                        self.progress.emit(f"{prefix} 분석 {step_num}/{total_steps}: {message}")
+
                     o, d, mm, mi = self.engine.analyze_image(
                         path,
                         analysis_regions=regions,
+                        progress_fn=progress_cb,
                     )
                     append_log(
                         self.batch_log_path,
@@ -975,15 +979,18 @@ class AnalysisWorker(QThread):
             except Exception:
                 provider_name = "OCR"
 
+            def progress_cb(step_num, total_steps, message):
+                self.log.emit(f"🔄 {provider_name} 분석 {step_num}/{total_steps}: {message}")
+
             if self.mask is not None:
                 self.log.emit(f"🔄 {provider_name} OCR로 영역 재분석 중...")
-                o, d, mm, mi = self.engine.reanalyze_from_manual_mask(self.path, self.mask, self.data)
+                o, d, mm, mi = self.engine.reanalyze_from_manual_mask(self.path, self.mask, self.data, progress_fn=progress_cb)
             else:
                 if self.analysis_regions:
                     self.log.emit(f"🚀 {provider_name} 지정 범위 분석 시작... ({len(self.analysis_regions)}개 영역)")
                 else:
                     self.log.emit(f"🚀 {provider_name} 전체 분석 시작...")
-                o, d, mm, mi = self.engine.analyze_image(self.path, analysis_regions=self.analysis_regions)
+                o, d, mm, mi = self.engine.analyze_image(self.path, analysis_regions=self.analysis_regions, progress_fn=progress_cb)
             append_log(self.analysis_log_path, "SINGLE ANALYZE DONE", boxes=len(d or []), ori=numpy_shape_text(o), mask_merge=numpy_shape_text(mm), mask_inpaint=numpy_shape_text(mi), memory=memory_text())
             self.log.emit(f"✅ 완료 ({len(d)}개)")
             self.finished.emit(o, d, _copy_mask(mm), _copy_mask(mi))

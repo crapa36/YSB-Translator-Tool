@@ -25,6 +25,12 @@ os.environ.setdefault("FLAGS_use_onednn", "0")
 os.environ.setdefault("PYTHONUTF8", "1")
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
+# Import torch before importing paddle/paddlex/paddleocr to avoid WinError 127 DLL loading conflicts on Windows
+try:
+    import torch
+except ImportError:
+    pass
+
 import numpy as np
 
 _ENGINE_CACHE: dict[tuple[Any, ...], Any] = {}
@@ -273,52 +279,88 @@ def _safe_get_seq(value: Any, index: int, default: Any = None) -> Any:
     return default
 
 
-def _build_engine(language: str, device: str):
-    from paddleocr import PaddleOCR
+def _app_root() -> Path:
+    try:
+        p = Path(__file__).resolve()
+        if p.parent.name == "paddle":
+            return p.parents[2]
+        return p.parents[1]
+    except Exception:
+        return Path.cwd()
 
+
+def _find_paddleocr_paths() -> tuple[str, str]:
+    app_root = _app_root()
+    candidates = [
+        app_root / "local_models",
+        Path.cwd() / "local_models"
+    ]
+    local_models_dir = None
+    for c in candidates:
+        if c.exists() and c.is_dir():
+            local_models_dir = c
+            break
+    if local_models_dir is None:
+        local_models_dir = Path("local_models")
+
+    paddle_dir = None
+    if local_models_dir.exists():
+        for item in local_models_dir.iterdir():
+            if item.is_dir() and item.name.lower() == "paddleocr-vl":
+                paddle_dir = item
+                break
+
+    if paddle_dir is None:
+        paddle_dir = local_models_dir / "PaddleOCR-VL"
+
+    layout_dir = None
+    if paddle_dir.exists():
+        doc_layout = paddle_dir / "PP-DocLayoutV2"
+        if doc_layout.exists() and doc_layout.is_dir():
+            layout_dir = doc_layout
+        else:
+            for item in paddle_dir.iterdir():
+                if item.is_dir():
+                    if item.name.lower() == "layout":
+                        layout_dir = item
+                        break
+                    try:
+                        if any(f.suffix == ".pdmodel" for f in item.iterdir() if f.is_file()):
+                            layout_dir = item
+                            break
+                    except Exception:
+                        pass
+
+    if layout_dir is None:
+        layout_dir = paddle_dir / "PP-DocLayoutV2"
+
+    return str(layout_dir.resolve()), str(paddle_dir.resolve())
+
+
+def _build_engine(language: str, device: str):
     lang = _normalize_lang(language)
     dev = _normalize_device(device)
     device_arg = "gpu" if dev == "gpu" else "cpu"
-    use_gpu = dev == "gpu"
-    model_dirs_all = _discover_paddle_model_dirs()
-    cache_key = (
-        lang,
-        device_arg,
-        model_dirs_all.get("text_detection_model_dir", ""),
-        model_dirs_all.get("text_recognition_model_dir", ""),
-        model_dirs_all.get("textline_orientation_model_dir", ""),
-    )
+    
+    cache_key = (lang, device_arg)
     if cache_key in _ENGINE_CACHE:
         return _ENGINE_CACHE[cache_key]
 
-    model_dirs_v3 = {k: v for k, v in model_dirs_all.items() if k in (
-        "text_detection_model_dir", "text_recognition_model_dir", "textline_orientation_model_dir",
-    )}
-    model_dirs_v2 = {k: v for k, v in model_dirs_all.items() if k in ("det_model_dir", "rec_model_dir", "cls_model_dir")}
+    from paddleocr import PaddleOCRVL
 
-    attempts: list[dict[str, Any]] = [
-        {"lang": lang, "use_doc_orientation_classify": False, "use_doc_unwarping": False, "use_textline_orientation": True, "device": device_arg, "enable_mkldnn": False, "cpu_threads": 1, **model_dirs_v3},
-        {"lang": lang, "use_doc_orientation_classify": False, "use_doc_unwarping": False, "use_textline_orientation": True, "device": device_arg, "enable_mkldnn": False, "cpu_threads": 1, **{k: v for k, v in model_dirs_v3.items() if k != "textline_orientation_model_dir"}},
-        {"lang": lang, "use_doc_orientation_classify": False, "use_doc_unwarping": False, "use_textline_orientation": False, "device": device_arg, "enable_mkldnn": False, "cpu_threads": 1, **{k: v for k, v in model_dirs_v3.items() if k != "textline_orientation_model_dir"}},
-        {"lang": lang, "use_doc_orientation_classify": False, "use_doc_unwarping": False, "use_textline_orientation": True, "device": device_arg, "enable_mkldnn": False, "cpu_threads": 1},
-        {"lang": lang, "use_doc_orientation_classify": False, "use_doc_unwarping": False, "use_textline_orientation": False, "device": device_arg, "enable_mkldnn": False, "cpu_threads": 1},
-        {"lang": lang, "use_angle_cls": True, "use_gpu": use_gpu, "show_log": False, "enable_mkldnn": False, **model_dirs_v2},
-        {"lang": lang, "use_angle_cls": True, "use_gpu": use_gpu, "show_log": False, "enable_mkldnn": False},
-        {"lang": lang},
-    ]
-    last_err: Exception | None = None
-    for kwargs in attempts:
-        try:
-            engine = PaddleOCR(**kwargs)
-            _ENGINE_CACHE[cache_key] = engine
-            return engine
-        except TypeError as e:
-            last_err = e
-            continue
-        except Exception as e:
-            last_err = e
-            continue
-    raise RuntimeError(f"PaddleOCR initialization failed: {last_err}")
+    layout_dir, rec_dir = _find_paddleocr_paths()
+
+    try:
+        engine = PaddleOCRVL(
+            pipeline_version="v1",
+            device=device_arg,
+            layout_detection_model_dir=layout_dir,
+            vl_rec_model_dir=rec_dir
+        )
+        _ENGINE_CACHE[cache_key] = engine
+        return engine
+    except Exception as e:
+        raise RuntimeError(f"PaddleOCR-VL initialization failed: {e}")
 
 
 def _parse_old_ocr_result(result: Any) -> list[dict[str, Any]]:
@@ -360,6 +402,35 @@ def _parse_predict_result(result: Any) -> list[dict[str, Any]]:
         data = _result_obj_to_dict(obj)
         if not data:
             continue
+        
+        # VLM 파싱 결과 지원
+        parsing_res_list = data.get("parsing_res_list")
+        if isinstance(parsing_res_list, list):
+            for block in parsing_res_list:
+                if block is None:
+                    continue
+                if not isinstance(block, dict):
+                    text = str(getattr(block, "content", "") or "").strip()
+                    if not text:
+                        text = str(getattr(block, "block_content", "") or "").strip()
+                    if not text:
+                        continue
+                    score = float(getattr(block, "confidence", 1.0) or 1.0)
+                    bbox = getattr(block, "bbox", None)
+                    if bbox is None:
+                        bbox = getattr(block, "block_bbox", None)
+                else:
+                    text = str(block.get("block_content") or block.get("content") or "").strip()
+                    if not text:
+                        continue
+                    score = float(block.get("confidence", 1.0) or 1.0)
+                    bbox = block.get("block_bbox") or block.get("bbox")
+                
+                pts = _as_points(bbox)
+                if text and pts:
+                    lines.append({"text": text, "confidence": score, "points": pts})
+            continue
+
         texts = _first_present(data, "rec_texts", "texts", default=[])
         scores = _first_present(data, "rec_scores", "scores", default=[])
         polys = _first_present(data, "rec_polys", "dt_polys", "polys", default=[])
@@ -397,13 +468,14 @@ def run_ocr_request(req: dict[str, Any]) -> dict[str, Any]:
             return {"ok": False, "engine": "paddleocr_external", "error": "image_path is empty", "lines": []}
         language = str(req.get("language") or "ja")
         device = str(req.get("device") or "auto")
+        use_layout_detection = bool(req.get("use_layout_detection", True))
         engine = _build_engine(language, device)
         lines: list[dict[str, Any]] = []
         if hasattr(engine, "predict"):
             try:
-                result = engine.predict(input=image_path)
+                result = engine.predict(input=image_path, use_layout_detection=use_layout_detection)
             except TypeError:
-                result = engine.predict(image_path)
+                result = engine.predict(image_path, use_layout_detection=use_layout_detection)
             lines = _parse_predict_result(result)
         if not lines and hasattr(engine, "ocr"):
             try:

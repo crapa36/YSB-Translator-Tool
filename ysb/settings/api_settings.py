@@ -616,7 +616,9 @@ class ApiSettingsDialog(QDialog):
         if _is_local_edition_runtime():
             local_models = []
             try:
-                base_path = os.path.abspath("./local_models/translate_models/")
+                from pathlib import Path
+                app_root = Path(__file__).resolve().parents[2]
+                base_path = os.path.abspath(os.path.join(app_root, "local_models", "translate_models"))
                 if os.path.exists(base_path):
                     local_models = [d for d in os.listdir(base_path) if os.path.isdir(os.path.join(base_path, d))]
             except Exception:

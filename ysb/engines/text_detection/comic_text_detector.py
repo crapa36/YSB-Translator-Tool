@@ -138,7 +138,7 @@ class ComicTextDetectorEngine:
         # Release default: do not auto-touch CUDA.  Many user PCs have no CUDA
         # runtime, partially installed drivers, or CPU-only Torch.  CPU mode is
         # slower but portable.
-        os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
+        # os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 
         with self._vendor_import_path():
             _install_numpy_compat_aliases()

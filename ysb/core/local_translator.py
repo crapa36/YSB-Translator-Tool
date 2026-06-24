@@ -1,11 +1,23 @@
 import os
+import sys
+from pathlib import Path
 import torch
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+
+def _app_root() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    try:
+        return Path(__file__).resolve().parents[2]
+    except Exception:
+        return Path.cwd()
 
 class LocalTranslator:
     _instance = None
 
-    def __init__(self, base_path="./local_models/translate_models/"):
+    def __init__(self, base_path=None):
+        if base_path is None:
+            base_path = os.path.join(_app_root(), "local_models", "translate_models")
         self.base_path = os.path.abspath(base_path)
         os.makedirs(self.base_path, exist_ok=True)
         self.device = "cuda" if torch.cuda.is_available() else "cpu"

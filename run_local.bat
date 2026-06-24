@@ -38,7 +38,8 @@ set "VENV_ACT=%VENV_DIR%\Scripts\activate.bat"
 set "PYTHONUTF8=1"
 set "FLAGS_use_mkldnn=0"
 set "FLAGS_use_onednn=0"
-set "OMP_NUM_THREADS=1"
+REM set "OMP_NUM_THREADS=1"
+set "PADDLE_DISABLE_CCACHE_WARNING=1"
 set "PYTHONPATH=%APP_ROOT%;%PYTHONPATH%"
 set "YSB_TOOL_EDITION=local"
 set "PIP_DISABLE_PIP_VERSION_CHECK=1"
@@ -90,12 +91,14 @@ python -c "import torch; print('torch OK')"
 if errorlevel 1 goto LOCAL_IMPORT_FAIL
 
 python -c "import paddle; print('paddle', paddle.__version__)"
+if errorlevel 1 goto PADDLE_IMPORT_FAIL
+
 python -c "import paddle, sys; sys.exit(1 if paddle.__version__.startswith('3.3.') else 0)" >nul 2>nul
-if not errorlevel 1 (
+if errorlevel 1 (
     echo.
     echo [WARNING] PaddlePaddle 3.3.x detected. If OCR text recognition fails with oneDNN/PIR, run fix_paddle_runtime_v2.1.0.bat.
+    ver >nul
 )
-if errorlevel 1 goto PADDLE_IMPORT_FAIL
 
 python -c "import paddleocr; print('paddleocr OK')"
 if errorlevel 1 goto PADDLEOCR_IMPORT_FAIL

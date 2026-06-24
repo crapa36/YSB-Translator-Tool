@@ -199,10 +199,11 @@ class _ExternalPaddleWorkerClient:
         if not ready.get("ready"):
             raise RuntimeError(f"External PaddleOCR worker did not become ready: {ready_line}")
 
-    def run_image(self, image_path: str) -> OcrResult:
+    def run_image(self, image_path: str, options: dict[str, Any] | None = None) -> OcrResult:
         self._start()
         assert self.proc is not None and self.proc.stdin is not None and self.proc.stdout is not None
         img_size = image_size(image_path)
+        use_layout_detection = (options or {}).get("use_layout_detection", True) if options else True
         append_log(
             self.log_path,
             "PADDLE OCR REQUEST",
@@ -211,12 +212,14 @@ class _ExternalPaddleWorkerClient:
             image_size=(f"{img_size[0]}x{img_size[1]}" if img_size else "unknown"),
             language=self.language,
             device=self.device,
+            use_layout_detection=use_layout_detection,
             memory=memory_text(),
         )
         req = {
             "image_path": image_path,
             "language": self.language,
             "device": self.device,
+            "use_layout_detection": use_layout_detection,
         }
         try:
             self.proc.stdin.write(json.dumps(req, ensure_ascii=False) + "\n")
@@ -562,6 +565,55 @@ def _safe_get_seq(value: Any, index: int, default: Any = None) -> Any:
     return default
 
 
+def _find_paddleocr_paths() -> tuple[str, str]:
+    from pathlib import Path
+    app_root = _app_root()
+    candidates = [
+        app_root / "local_models",
+        Path.cwd() / "local_models"
+    ]
+    local_models_dir = None
+    for c in candidates:
+        if c.exists() and c.is_dir():
+            local_models_dir = c
+            break
+    if local_models_dir is None:
+        local_models_dir = Path("local_models")
+
+    paddle_dir = None
+    if local_models_dir.exists():
+        for item in local_models_dir.iterdir():
+            if item.is_dir() and item.name.lower() == "paddleocr-vl":
+                paddle_dir = item
+                break
+
+    if paddle_dir is None:
+        paddle_dir = local_models_dir / "PaddleOCR-VL"
+
+    layout_dir = None
+    if paddle_dir.exists():
+        doc_layout = paddle_dir / "PP-DocLayoutV2"
+        if doc_layout.exists() and doc_layout.is_dir():
+            layout_dir = doc_layout
+        else:
+            for item in paddle_dir.iterdir():
+                if item.is_dir():
+                    if item.name.lower() == "layout":
+                        layout_dir = item
+                        break
+                    try:
+                        if any(f.suffix == ".pdmodel" for f in item.iterdir() if f.is_file()):
+                            layout_dir = item
+                            break
+                    except Exception:
+                        pass
+
+    if layout_dir is None:
+        layout_dir = paddle_dir / "PP-DocLayoutV2"
+
+    return str(layout_dir.resolve()), str(paddle_dir.resolve())
+
+
 class PaddleOcrEngine:
     name = "paddleocr"
 
@@ -572,129 +624,36 @@ class PaddleOcrEngine:
     def _build_engine(self):
         # RTX 4080 성능 활용을 위한 전용 가속 옵션 추가
         os.environ["FLAGS_allocator_strategy"] = "auto_growth"
-        # PaddlePaddle 3.3.x CPU may hit a oneDNN/PIR runtime error on some
-        # PP-OCRv5 models.  Keep oneDNN/MKLDNN disabled for Local OCR unless
-        # the user explicitly changes the environment before launch.
         os.environ.setdefault("FLAGS_use_mkldnn", "0")
         os.environ.setdefault("FLAGS_use_onednn", "0")
-        from paddleocr import PaddleOCR  # Local-only heavy import
 
         lang = _normalize_lang(self.language)
-        # GPU 가속 강제 적용
-        device = "gpu"
-        model_dirs_all = _discover_paddle_model_dirs()
-        # Cache by model path too, so changing local_models after launch does not
-        # accidentally reuse an engine initialized with another path.
-        cache_key = (lang, device, model_dirs_all.get("text_detection_model_dir", ""), model_dirs_all.get("text_recognition_model_dir", ""), model_dirs_all.get("textline_orientation_model_dir", ""))
+        device = _normalize_device(self.device)
+
+        cache_key = (lang, device)
         if cache_key in _ENGINE_CACHE:
             return _ENGINE_CACHE[cache_key]
 
-        _log_local_model_dirs(model_dirs_all)
+        try:
+            import torch
+        except ImportError:
+            pass
 
-        use_gpu = device == "gpu"
-        device_arg = "gpu" if use_gpu else "cpu"
+        from paddleocr import PaddleOCRVL
 
-        model_dirs_v3 = {k: v for k, v in model_dirs_all.items() if k in (
-            "text_detection_model_dir",
-            "text_recognition_model_dir",
-            "textline_orientation_model_dir",
-        )}
-        model_dirs_v2 = {k: v for k, v in model_dirs_all.items() if k in (
-            "det_model_dir",
-            "rec_model_dir",
-            "cls_model_dir",
-        )}
+        layout_dir, rec_dir = _find_paddleocr_paths()
 
-        attempts: list[dict[str, Any]] = [
-            # PaddleOCR 3.x style with project-managed local model dirs.
-            {
-                "lang": lang,
-                "use_doc_orientation_classify": False,
-                "use_doc_unwarping": False,
-                "use_textline_orientation": True,
-                "device": device_arg,
-                "enable_mkldnn": False,
-                "cpu_threads": 1,
-                **model_dirs_v3,
-            },
-            # Some PaddleOCR 3.x builds do not accept textline_orientation_model_dir.
-            {
-                "lang": lang,
-                "use_doc_orientation_classify": False,
-                "use_doc_unwarping": False,
-                "use_textline_orientation": True,
-                "device": device_arg,
-                "enable_mkldnn": False,
-                "cpu_threads": 1,
-                **{k: v for k, v in model_dirs_v3.items() if k != "textline_orientation_model_dir"},
-            },
-            {
-                "lang": lang,
-                "use_doc_orientation_classify": False,
-                "use_doc_unwarping": False,
-                "use_textline_orientation": False,
-                "device": device_arg,
-                "enable_mkldnn": False,
-                "cpu_threads": 1,
-                **{k: v for k, v in model_dirs_v3.items() if k != "textline_orientation_model_dir"},
-            },
-            # PaddleOCR 3.x auto-cache fallback.
-            {
-                "lang": lang,
-                "use_doc_orientation_classify": False,
-                "use_doc_unwarping": False,
-                "use_textline_orientation": True,
-                "device": device_arg,
-                "enable_mkldnn": False,
-                "cpu_threads": 1,
-            },
-            {
-                "lang": lang,
-                "use_doc_orientation_classify": False,
-                "use_doc_unwarping": False,
-                "use_textline_orientation": False,
-                "device": device_arg,
-                "enable_mkldnn": False,
-                "cpu_threads": 1,
-            },
-            # PaddleOCR 2.x style with local model dirs.
-            {
-                "lang": lang,
-                "use_angle_cls": True,
-                "use_gpu": use_gpu,
-                "show_log": False,
-                "enable_mkldnn": False,
-                **model_dirs_v2,
-            },
-            {
-                "lang": lang,
-                "use_angle_cls": True,
-                "use_gpu": use_gpu,
-                "show_log": False,
-                "enable_mkldnn": False,
-            },
-            {
-                "lang": lang,
-            },
-        ]
-
-        last_err: Exception | None = None
-        for kwargs in attempts:
-            try:
-                # PaddleOCR-VL 최적화를 위한 가속/용량 제한 옵션 주입
-                kwargs["use_gpu"] = True
-                kwargs["gpu_mem"] = 2000
-                kwargs["use_fp16"] = True
-                engine = PaddleOCR(**kwargs)
-                _ENGINE_CACHE[cache_key] = engine
-                return engine
-            except TypeError as e:
-                last_err = e
-                continue
-            except Exception as e:
-                last_err = e
-                continue
-        raise RuntimeError(f"PaddleOCR 초기화 실패: {last_err}")
+        try:
+            engine = PaddleOCRVL(
+                pipeline_version="v1",
+                device=device,
+                layout_detection_model_dir=layout_dir,
+                vl_rec_model_dir=rec_dir
+            )
+            _ENGINE_CACHE[cache_key] = engine
+            return engine
+        except Exception as e:
+            raise RuntimeError(f"PaddleOCR-VL 초기화 실패: {e}")
 
     def _write_temp_image(self, image_bgr: np.ndarray | None, image_path: str | None) -> tuple[str, bool]:
         if image_bgr is None:
@@ -756,6 +715,35 @@ class PaddleOcrEngine:
             data = _result_obj_to_dict(obj)
             if not data:
                 continue
+            
+            # VLM 파싱 결과 지원
+            parsing_res_list = data.get("parsing_res_list")
+            if isinstance(parsing_res_list, list):
+                for block in parsing_res_list:
+                    if block is None:
+                        continue
+                    if not isinstance(block, dict):
+                        text = str(getattr(block, "content", "") or "").strip()
+                        if not text:
+                            text = str(getattr(block, "block_content", "") or "").strip()
+                        if not text:
+                            continue
+                        score = float(getattr(block, "confidence", 1.0) or 1.0)
+                        bbox = getattr(block, "bbox", None)
+                        if bbox is None:
+                            bbox = getattr(block, "block_bbox", None)
+                    else:
+                        text = str(block.get("block_content") or block.get("content") or "").strip()
+                        if not text:
+                            continue
+                        score = float(block.get("confidence", 1.0) or 1.0)
+                        bbox = block.get("block_bbox") or block.get("bbox")
+                    
+                    pts = _as_points(bbox)
+                    if text and pts:
+                        lines.append({"text": text, "confidence": score, "points": pts})
+                continue
+
             # Do not use ``a or b`` here. PaddleOCR 3.x stores many values as
             # numpy arrays, and boolean-testing an array raises an ambiguity error.
             texts = _first_present(data, "rec_texts", "texts", default=[])
@@ -797,8 +785,9 @@ class PaddleOcrEngine:
 
             temp_path, should_delete = self._write_temp_image(img_for_ocr, image_path)
             try:
+                use_layout_detection = bool((request.options or {}).get("use_layout_detection", True))
                 if _should_use_external_worker():
-                    res = _get_external_worker_client(lang, device).run_image(temp_path)
+                    res = _get_external_worker_client(lang, device).run_image(temp_path, options=request.options)
                     if scale > 1.01 and res.lines:
                         inv = 1.0 / scale
                         for line in res.lines:
@@ -810,9 +799,9 @@ class PaddleOcrEngine:
                 # PaddleOCR 3.x
                 if hasattr(engine, "predict"):
                     try:
-                        result = engine.predict(input=temp_path)
+                        result = engine.predict(input=temp_path, use_layout_detection=use_layout_detection)
                     except TypeError:
-                        result = engine.predict(temp_path)
+                        result = engine.predict(temp_path, use_layout_detection=use_layout_detection)
                     lines = self._parse_predict_result(result)
                 # PaddleOCR 2.x fallback
                 if not lines and hasattr(engine, "ocr"):

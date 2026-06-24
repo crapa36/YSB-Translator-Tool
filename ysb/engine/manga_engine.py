@@ -146,9 +146,12 @@ class MangaProcessEngine:
         self.custom_translation_client = None
         custom_base_url = str(getattr(Config, "CUSTOM_TRANSLATION_BASE_URL", "") or "").strip()
         custom_api_key = str(getattr(Config, "CUSTOM_TRANSLATION_API_KEY", "") or "").strip()
-        if custom_api_key and custom_base_url:
+        if custom_base_url:
+            # Local endpoints like LM Studio/Ollama might not require a real API key,
+            # but the OpenAI client library requires a non-empty api_key.
+            key_to_use = custom_api_key if custom_api_key else "dummy-key"
             self.custom_translation_client = OpenAI(
-                api_key=custom_api_key,
+                api_key=key_to_use,
                 base_url=custom_base_url.rstrip("/")
             )
 
@@ -1054,7 +1057,7 @@ class MangaProcessEngine:
                 continue
         return out
 
-    def analyze_image(self, image_path, analysis_regions=None):
+    def analyze_image(self, image_path, analysis_regions=None, progress_fn=None):
         print(f">>> [Analysis] 전체 분석: {os.path.basename(image_path)}")
 
         img_array = np.fromfile(image_path, np.uint8)
@@ -1069,7 +1072,7 @@ class MangaProcessEngine:
         analysis_mask = self._ocr_regions_to_mask(analysis_regions, w, h)
 
         if provider in ("local_paddle_ocr", "local_manga_ocr"):
-            return self.analyze_image_local_paddle_mask(image_path, ori_img=ori_img, analysis_mask=analysis_mask)
+            return self.analyze_image_local_paddle_mask(image_path, ori_img=ori_img, analysis_mask=analysis_mask, progress_fn=progress_fn)
 
         # 짧은 이미지든 긴 웹툰 이미지든 여기서 자동 처리
         # h <= OCR_TILE_HEIGHT면 단일 OCR
@@ -1896,6 +1899,7 @@ class MangaProcessEngine:
                     'image_bgr': ori_img,
                     'device': device,
                     'scale': 1.5,
+                    'use_layout_detection': True,
                 },
             ))
             if not res.ok:
@@ -1962,7 +1966,7 @@ class MangaProcessEngine:
         except Exception as e:
             return grouped_data, 0, str(e)
 
-    def _apply_local_paddle_ocr_to_groups(self, ori_img, grouped_data):
+    def _apply_local_paddle_ocr_to_groups(self, ori_img, grouped_data, progress_fn=None):
         """Local detector가 만든 영역을 PaddleOCR로 읽어 text/ocr_items를 채운다.
 
         마스크와 박스 기준은 comic_text_detector 결과를 유지하고, PaddleOCR은 문자 인식만 담당한다.
@@ -1986,7 +1990,10 @@ class MangaProcessEngine:
         ok_count = 0
         err_count = 0
         sample_errors = []
-        for group in grouped_data or []:
+        total_groups = len(grouped_data or [])
+        for idx, group in enumerate(grouped_data or []):
+            if progress_fn:
+                progress_fn(3, 3, f"PaddleOCR 문자 인식 중 ({idx + 1}/{total_groups})")
             item = copy.deepcopy(group)
             crop, ox, oy = self._crop_group_for_paddle_ocr(ori_img, item, w, h)
             if crop is None:
@@ -2001,6 +2008,7 @@ class MangaProcessEngine:
                         'device': device,
                         # 만화 작은 글자/세로문은 2배 확대가 초반 안정성이 좋다.
                         'scale': 2.0,
+                        'use_layout_detection': False,
                     },
                 ))
                 if not res.ok:
@@ -2097,7 +2105,7 @@ class MangaProcessEngine:
                 continue
         return self._dedupe_ocr_items(raw_items)
 
-    def _apply_local_manga_ocr_to_groups(self, ori_img, grouped_data):
+    def _apply_local_manga_ocr_to_groups(self, ori_img, grouped_data, progress_fn=None):
         """comic_text_detector 영역/마스크를 유지하고 Manga OCR로 crop 원문만 읽는다."""
         if ori_img is None or not grouped_data:
             return grouped_data or []
@@ -2114,7 +2122,10 @@ class MangaProcessEngine:
         ok_count = 0
         err_count = 0
         sample_errors = []
-        for group in grouped_data or []:
+        total_groups = len(grouped_data or [])
+        for idx, group in enumerate(grouped_data or []):
+            if progress_fn:
+                progress_fn(3, 3, f"Manga OCR 문자 인식 중 ({idx + 1}/{total_groups})")
             item = copy.deepcopy(group)
             crop, ox, oy = self._crop_group_for_paddle_ocr(ori_img, item, w, h)
             if crop is None:
@@ -2167,7 +2178,7 @@ class MangaProcessEngine:
             print(f">>> [Local OCR] Manga OCR sample errors: {' | '.join(sample_errors)}")
         return updated
 
-    def _apply_current_local_ocr_engine_to_groups(self, ori_img, grouped_data):
+    def _apply_current_local_ocr_engine_to_groups(self, ori_img, grouped_data, progress_fn=None):
         """Apply the single supported Local OCR reader.
 
         v2.1.0 Local OCR keeps only the stable path:
@@ -2177,10 +2188,10 @@ class MangaProcessEngine:
         """
         provider = str(getattr(Config, "OCR_PROVIDER", "local_paddle_ocr") or "local_paddle_ocr").strip().lower()
         if provider == "local_manga_ocr":
-            return self._apply_local_manga_ocr_to_groups(ori_img, grouped_data)
-        return self._apply_local_paddle_ocr_to_groups(ori_img, grouped_data)
+            return self._apply_local_manga_ocr_to_groups(ori_img, grouped_data, progress_fn=progress_fn)
+        return self._apply_local_paddle_ocr_to_groups(ori_img, grouped_data, progress_fn=progress_fn)
 
-    def analyze_image_local_paddle_mask(self, image_path, ori_img=None, analysis_mask=None):
+    def analyze_image_local_paddle_mask(self, image_path, ori_img=None, analysis_mask=None, progress_fn=None):
         """LOCAL Paddle OCR 선택 시 실행되는 Local 분석 경로.
 
         comic_text_detector로 텍스트 영역/마스크를 만들고, PaddleOCR로
@@ -2201,6 +2212,9 @@ class MangaProcessEngine:
         input_size = self._local_detector_auto_input_size(w, h)
         device = str(getattr(Config, "LOCAL_PADDLE_MASK_DEVICE", "auto") or "auto")
 
+        if progress_fn:
+            progress_fn(1, 3, "comic_text_detector 영역 분석 중...")
+
         result = detect_with_default_engine(TextDetectionRequest(
             image_path=image_path,
             options={
@@ -2212,6 +2226,9 @@ class MangaProcessEngine:
         ))
         if not result.ok:
             raise ValueError(f"comic_text_detector 마스크 분석 실패: {result.error}")
+
+        if progress_fn:
+            progress_fn(2, 3, "텍스트 마스크 생성 및 레이아웃 정리 중...")
 
         # 1순위 개선: detector의 raw/refined segmentation mask를 직접 쓰지 않는다.
         # raw mask는 머리카락·옷 주름·배경선까지 과하게 잡을 수 있으므로,
@@ -2279,7 +2296,7 @@ class MangaProcessEngine:
             source_mask=source_mask,
         )
         grouped_data = self._align_local_groups_to_text_mask(grouped_data, mask_merge, w, h)
-        grouped_data = self._apply_current_local_ocr_engine_to_groups(ori_img, grouped_data)
+        grouped_data = self._apply_current_local_ocr_engine_to_groups(ori_img, grouped_data, progress_fn=progress_fn)
 
         merge_pixels = int(cv2.countNonZero(mask_merge)) if mask_merge is not None else 0
         inpaint_pixels = int(cv2.countNonZero(mask_inpaint)) if mask_inpaint is not None else 0
@@ -2507,6 +2524,7 @@ class MangaProcessEngine:
                             'image_bgr': crop,
                             'device': device,
                             'scale': 1.5,
+                            'use_layout_detection': False,
                         },
                     ))
                     if not res.ok:
@@ -3068,7 +3086,7 @@ class MangaProcessEngine:
             out = cv2.bitwise_or(out, component)
         return out
 
-    def _reanalyze_local_detector_from_manual_mask(self, image_path, ori_img, user_mask_bin, existing_data):
+    def _reanalyze_local_detector_from_manual_mask(self, image_path, ori_img, user_mask_bin, existing_data, progress_fn=None):
         """LOCAL Paddle OCR용 재분석.
 
         재분석은 '현재 텍스트 마스크를 detector로 다시 따는 작업'이 아니라,
@@ -3088,6 +3106,9 @@ class MangaProcessEngine:
                 min_px=getattr(Config, 'MIN_STROKE_PX', 1),
             )
             return ori_img, final_data, mask_merge, mask_inpaint
+
+        if progress_fn:
+            progress_fn(1, 2, "마스크 영역 재구성 및 인페인트 마스크 준비 중...")
 
         try:
             if user_mask_bin.ndim == 3:
@@ -3111,7 +3132,7 @@ class MangaProcessEngine:
             image_path, user_mask_bin, w, h,
             existing_data=existing_data,
         )
-        final_data = self._apply_current_local_ocr_engine_to_groups(ori_img, final_data)
+        final_data = self._apply_current_local_ocr_engine_to_groups(ori_img, final_data, progress_fn=progress_fn)
 
         print(
             f">>> [Re-Scan][Local OCR] manual_mask_components={len(final_data)}, "
@@ -3128,7 +3149,7 @@ class MangaProcessEngine:
     # - Best Fit 독점 배정
     # - 면적 기반(Overlap) 기존 데이터 삭제
     # ---------------------------------------------------------
-    def reanalyze_from_manual_mask(self, image_path, user_mask_rgb, existing_data):
+    def reanalyze_from_manual_mask(self, image_path, user_mask_rgb, existing_data, progress_fn=None):
         print(">>> [Re-Scan] 재분석: 완전체 V3 (면적 삭제 + Best Fit + 가위질)")
         
         img_array = np.fromfile(image_path, np.uint8)
@@ -3146,7 +3167,7 @@ class MangaProcessEngine:
             # Local detector는 마스크/영역 기준 재분석을 사용한다.
             # 기존 API OCR 재분석 경로로 보내면 빈 OCR 결과 때문에 분석도가 날아갈 수 있다.
             return self._reanalyze_local_detector_from_manual_mask(
-                image_path, ori_img, user_mask_bin, existing_data
+                image_path, ori_img, user_mask_bin, existing_data, progress_fn=progress_fn
             )
 
         kernel = np.ones((3,3), np.uint8)
@@ -3523,16 +3544,30 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
                 "text": text
             })
 
-        r = client.chat.completions.create(
-            model=model,
-            messages=[
+        kwargs = {
+            "model": model,
+            "messages": [
                 {"role": "system", "content": prompt.strip()},
                 {"role": "user", "content": json.dumps(input_items, ensure_ascii=False)}
             ],
-            temperature=0.2
-        )
+            "temperature": 0.2
+        }
 
-        content = r.choices[0].message.content.strip()
+
+        r = client.chat.completions.create(**kwargs)
+
+        msg = r.choices[0].message
+        raw_content = msg.content or ""
+        # Thinking 모드 응답의 <think>...</think> 블록 제거
+        raw_content = re.sub(r"<think>.*?</think>", "", raw_content, flags=re.DOTALL)
+        raw_content = raw_content.strip()
+        if not raw_content:
+            raise ValueError(
+                f"번역 응답 content가 비어있습니다. "
+                f"finish_reason={r.choices[0].finish_reason}, "
+                f"model={model}"
+            )
+        content = raw_content
 
         if content.startswith("```json"):
             content = content[7:]
@@ -3763,7 +3798,7 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
         if model is None:
             print(">>> [Local Inpaint] Loading SDXL Lightning model...")
             from ysb.core.inpainting_engine import SDXLLightningInpaintEngine
-            model = SDXLLightningInpaintEngine("./local_models/sdxl_lightning")
+            model = SDXLLightningInpaintEngine("local_models/stable-diffusion-xl-1.0-inpainting-0.1")
             self._local_sdxl_lightning_model = model
 
         print(">>> [Local Inpaint] Running LOCAL SDXL Lightning Inpaint...")
