@@ -3,10 +3,28 @@ from ysb.ui.main_window_support import *
 
 class MainWindowInteractionMixin:
 
+    def _is_local_edition_for_ui(self):
+        """Return True only for the Local edition UI.
+
+        LOCAL CUDA diagnosis installs/checks the program-managed GPU runtime.
+        Lite/API builds must not expose this action through menus, shortcuts,
+        macros, or stale cached commands.  Fail closed when the edition cannot
+        be resolved.
+        """
+        try:
+            from ysb.editions.current import is_local_edition
+            return bool(is_local_edition())
+        except Exception:
+            return False
+
     def setup_actions(self):
         def make_action(key, text, slot):
             action = QAction(text, self)
-            action.triggered.connect(lambda *args, _slot=slot: _slot())
+            def _guarded_slot(*args, _slot=slot, _key=key):
+                if self._block_global_action_during_inline_text_edit(_key):
+                    return
+                _slot()
+            action.triggered.connect(_guarded_slot)
             self.actions[key] = action
             self.addAction(action)
             return action
@@ -34,6 +52,14 @@ class MainWindowInteractionMixin:
         make_action("work_page_delete_all", "일괄 페이지탭 삭제", self.delete_all_pages_shortcut)
         make_action("work_open_current_project_folder", "현재 프로젝트의 작업 폴더로 이동하기", self.open_current_project_work_folder)
         make_action("work_analyze", "분석", self.anal)
+        make_action("paint_auto_clean_detection_mask", "감지 마스크 자동 정리", self.auto_clean_detection_mask_current)
+        try:
+            _auto_clean_tip = "현재 OCR 병합 영역 안의 OCR 조각을 군체 단위로 묶고, 군체별 보호 영역을 만든 뒤 우선순위가 낮은 겹침 마스크를 커팅합니다. 정리 후 재분석을 실행하세요."
+            self.actions["paint_auto_clean_detection_mask"].setToolTip(self.tr_msg(_auto_clean_tip))
+            self.actions["paint_auto_clean_detection_mask"].setStatusTip(self.tr_msg(_auto_clean_tip))
+            self.actions["paint_auto_clean_detection_mask"].setWhatsThis(self.tr_msg(_auto_clean_tip))
+        except Exception:
+            pass
         make_action("paint_reanalyze", "재분석", self.reanalyze_mask)
         try:
             _reanalyze_tip = "현재 텍스트 마스크를 기준으로 OCR 분석 영역을 다시 만들고, 기존 마스크는 재사용합니다."
@@ -42,7 +68,7 @@ class MainWindowInteractionMixin:
             self.actions["paint_reanalyze"].setWhatsThis(self.tr_msg(_reanalyze_tip))
         except Exception:
             pass
-        make_action("work_quick_ocr", "빠른 OCR 설정", self.open_quick_ocr_dialog)
+        make_action("work_quick_ocr", "빠른 OCR 설정", self.request_open_quick_ocr_dialog)
         make_action("quick_ocr_execute", "빠른 OCR 실행", self.start_quick_ocr_selection)
         # 빠른 OCR 설정은 프로그램 바탕/포커스 외부에 툴팁이 뜨면 거슬리므로
         # 단축키만 유지하고 일반 툴팁은 비워 둔다.
@@ -71,15 +97,41 @@ class MainWindowInteractionMixin:
         make_action("work_import_translation", "번역문 불러오기", self.import_translation_current)
         make_action("work_clear_translation", "번역문 내용 지우기", self.clear_translation_current)
         make_action("work_clean_text", "텍스트 정리", self.clean_text_current)
+        try:
+            _text_clean_tip = "체크 해제한 OCR/텍스트 항목을 삭제하고 번호를 재정렬합니다. 활성 OCR 영역 밖의 자동 마스크도 함께 정리하며, 사용자 수정 마스크는 유지합니다."
+            self.actions["work_clean_text"].setToolTip(self.tr_msg(_text_clean_tip))
+            self.actions["work_clean_text"].setStatusTip(self.tr_msg(_text_clean_tip))
+            self.actions["work_clean_text"].setWhatsThis(self.tr_msg(_text_clean_tip))
+        except Exception:
+            pass
+        make_action("work_clean_mask", "마스크 정리", self.clean_mask_current)
+        try:
+            _mask_clean_tip = "현재 페이지에서 활성 OCR 영역 밖의 자동 마스크만 제거합니다. 사용자 수정 마스크는 유지합니다."
+            self.actions["work_clean_mask"].setToolTip(self.tr_msg(_mask_clean_tip))
+            self.actions["work_clean_mask"].setStatusTip(self.tr_msg(_mask_clean_tip))
+            self.actions["work_clean_mask"].setWhatsThis(self.tr_msg(_mask_clean_tip))
+        except Exception:
+            pass
         make_action("work_reset_text_rects", "현재 텍스트 기준으로 영역 재설정", self.reset_text_rects_current)
         make_action("work_export", "출력", self.export_result)
         make_action("work_output_preview", "출력 미리보기", self.show_output_preview)
 
         # 자동화 작업
-        make_action("auto_text_size_current", "자동 텍스트 크기 조정", self.auto_text_size_current)
-        make_action("auto_text_size_batch", "일괄 자동 텍스트 크기 조정", self.auto_text_size_batch)
-        make_action("auto_linebreak_current", "자동 줄 내림", self.auto_linebreak_current)
-        make_action("auto_linebreak_batch", "일괄 자동 줄 내림", self.auto_linebreak_batch)
+        make_action("auto_text_size_current", "텍스트 자동 조정", self.auto_text_size_current)
+        make_action("auto_text_size_batch", "일괄 텍스트 자동 조정", self.auto_text_size_batch)
+        make_action("auto_text_adjust_options", "자동 텍스트 조정 옵션", self.open_auto_text_adjust_options_dialog)
+        make_action("auto_linebreak_current", "텍스트 자동 조정(줄내림 호환)", self.auto_linebreak_current)
+        make_action("auto_linebreak_batch", "일괄 텍스트 자동 조정(줄내림 호환)", self.auto_linebreak_batch)
+        try:
+            _auto_adjust_tip = "번역문을 OCR 영역 안에 자동 배치하고, 한국어 줄내림과 텍스트 크기를 점수 기반으로 함께 조정합니다."
+            _auto_adjust_batch_tip = "선택한 페이지의 번역문을 OCR 영역 안에 자동 배치하고, 한국어 줄내림과 텍스트 크기를 점수 기반으로 함께 조정합니다."
+            _auto_adjust_options_tip = "자동 텍스트 조정에서 세로쓰기 자동 적용과 비정상적으로 작은 글자 보정 기준을 조정합니다."
+            for _key, _tip in (("auto_text_size_current", _auto_adjust_tip), ("auto_linebreak_current", _auto_adjust_tip), ("auto_text_size_batch", _auto_adjust_batch_tip), ("auto_linebreak_batch", _auto_adjust_batch_tip), ("auto_text_adjust_options", _auto_adjust_options_tip)):
+                self.actions[_key].setToolTip(self.tr_msg(_tip))
+                self.actions[_key].setStatusTip(self.tr_msg(_tip))
+                self.actions[_key].setWhatsThis(self.tr_msg(_tip))
+        except Exception:
+            pass
 
         # 일괄 작업
         make_action("batch_analyze", "일괄 분석", lambda: self.run_batch('analyze'))
@@ -96,11 +148,19 @@ class MainWindowInteractionMixin:
         make_action("batch_extract_text", "일괄 지문 추출", self.extract_text_batch)
         make_action("batch_clear_translation", "일괄 번역문 내용 지우기", self.clear_translation_batch)
         make_action("batch_clean_text", "일괄 텍스트 정리", self.clean_text_batch)
+        make_action("batch_clean_mask", "일괄 마스크 정리", self.clean_mask_batch)
+        try:
+            _batch_mask_clean_tip = "선택한 페이지들에서 활성 OCR 영역 밖의 자동 마스크만 일괄 제거합니다. 사용자 수정 마스크는 유지합니다."
+            self.actions["batch_clean_mask"].setToolTip(self.tr_msg(_batch_mask_clean_tip))
+            self.actions["batch_clean_mask"].setStatusTip(self.tr_msg(_batch_mask_clean_tip))
+            self.actions["batch_clean_mask"].setWhatsThis(self.tr_msg(_batch_mask_clean_tip))
+        except Exception:
+            pass
         make_action("batch_reset_text_rects", "일괄 현재 텍스트 기준으로 영역 재설정", self.reset_text_rects_batch)
         make_action("batch_export", "일괄 출력", lambda: self.run_batch('export'))
 
         # 설정 / 옵션
-        make_action("option_settings_overview", "설정 / 옵션", self.open_settings_overview_dialog)
+        make_action("option_settings_overview", "설정 / 옵션", self.request_open_settings_overview_dialog)
         # v2.4 QA6: 자동저장 모드는 폐지.
         # 예전 단축키/매크로 캐시가 참조해도 오류가 나지 않도록 비활성 액션만 보존한다.
         self.act_auto_save_mode = make_action("option_auto_save_mode", "자동저장 모드(폐지됨)", self.toggle_auto_save_mode)
@@ -108,9 +168,32 @@ class MainWindowInteractionMixin:
         self.act_auto_save_mode.setVisible(False)
         make_action("option_theme_settings", "테마 설정", self.open_theme_settings_dialog)
         make_action("option_language_settings", "언어 설정", self.open_language_settings_dialog)
+        make_action("setting_operation_mode", "조작 방식", self.open_operation_mode_dialog)
         make_action("setting_page_tab_display_name", "페이지 탭 표시명 설정", self.open_page_tab_display_name_dialog)
         make_action("setting_output_display_name", "출력 표시명 설정", self.open_output_display_name_dialog)
         make_action("setting_output_options", "출력 옵션", self.open_output_options_dialog)
+        make_action("setting_log_options", "로그 출력 설정", self.open_log_options_dialog)
+        try:
+            _log_options_tip = "엔진/자동 조정/렌더링 진단 로그 중 어떤 이벤트를 파일에 출력할지 선택합니다. 설정은 별도 캐시 JSON에 저장됩니다."
+            self.actions["setting_log_options"].setToolTip(self.tr_msg(_log_options_tip))
+            self.actions["setting_log_options"].setStatusTip(self.tr_msg(_log_options_tip))
+            self.actions["setting_log_options"].setWhatsThis(self.tr_msg(_log_options_tip))
+        except Exception:
+            pass
+        act_hide_bg = make_action("option_hide_background", "배경 가리기", self.toggle_hide_background_enabled)
+        try:
+            act_hide_bg.setCheckable(True)
+            act_hide_bg.setChecked(self.is_hide_background_enabled())
+            _hide_bg_tip = "작업 화면의 이미지 배경을 짙은 회색으로 가리고, 이미지 바깥쪽에 밝은 페이드 테두리를 표시합니다. 텍스트, 박스, 마스크는 보이고 원본 비교창에는 적용되지 않습니다."
+            act_hide_bg.setToolTip(self.tr_msg(_hide_bg_tip))
+            act_hide_bg.setStatusTip(self.tr_msg(_hide_bg_tip))
+            act_hide_bg.setWhatsThis(self.tr_msg(_hide_bg_tip))
+            self.sync_hide_background_action_state()
+        except Exception:
+            pass
+        # 텍스트 넘침 검사 토글은 새 자동조정 엔진 본선에서 사용하지 않으므로
+        # 옵션 메뉴/단축키 항목으로 만들지 않는다.
+        # 관련 getter/setter는 구버전 프로젝트 옵션 호환용으로만 남긴다.
         act_tooltips = make_action("setting_interface_tooltips", "인터페이스 툴팁 표시", self.toggle_interface_tooltips_enabled)
         try:
             act_tooltips.setCheckable(True)
@@ -122,7 +205,10 @@ class MainWindowInteractionMixin:
         make_action("option_translation_prompt", "번역 프롬프트 입력", self.open_translation_prompt_dialog)
         make_action("option_glossary", "단어장", self.open_glossary_dialog)
         make_action("option_analysis_mask_settings", "분석 마스크 확장 비율", self.open_analysis_mask_settings_dialog)
+        make_action("option_mask_color_settings", "마스크 색상 지정", self.open_mask_color_settings_dialog)
         make_action("option_ocr_analysis_regions", "OCR 분석 범위 지정", self.open_ocr_analysis_region_dialog)
+        if self._is_local_edition_for_ui():
+            make_action("option_cuda_runtime_diagnosis", "로컬 CUDA 진단", self.open_cuda_runtime_diagnosis_dialog)
         make_action("option_cleanup_outputs", "출력물 삭제", self.open_output_cleanup_dialog)
         make_action("option_workspace_location", "작업 폴더 위치 변경", self.change_workspace_location)
         make_action("option_workspace_reset_default", "작업 폴더 위치 기본값으로 변경", self.reset_workspace_location_to_default)
@@ -154,14 +240,36 @@ class MainWindowInteractionMixin:
         make_action("paint_magic_fill", "마스킹 칠하기", self.fill_magic_wand_mask)
         make_action("paint_area_fill", "영역 페인팅", lambda *args: self.set_tool("area_paint"))
         make_action("paint_mask_cut", "마스크 커팅", lambda *args: self.set_tool("mask_cut"))
+        make_action("paint_color_outline_mask", "색상/테두리 마스크", lambda *args: self.set_tool("color_outline_mask"))
+        make_action("paint_original_restore", "영역 원본 복구", lambda *args: self.set_tool("original_restore"))
         make_action("paint_mask_toggle", "마스크 ON/OFF", self.toggle_mask_toggle)
         make_action("view_text_toggle", "텍스트 표시 ON/OFF", self.toggle_show_final_text)
         make_action("final_paint_color", "최종 페인팅 색상", lambda *args: self.pick_color("final_paint"))
         make_action("final_paint_to_background", "배경을 원본으로 쓰기", self.use_final_background_as_source)
         make_action("final_text_tool", "최종 텍스트 도구", lambda *args: self.set_tool("final_text"))
+        make_action("final_style_clone", "스타일 복제", lambda *args: self.set_tool("text_style_clone"))
         make_action("final_paint_above_toggle", "텍스트 위 페인팅 ON/OFF", self.toggle_final_paint_above_text)
         make_action("final_paint_opacity_inc", "브러시 불투명도 증가", lambda *args: self.adjust_final_paint_opacity(+5))
         make_action("final_paint_opacity_dec", "브러시 불투명도 감소", lambda *args: self.adjust_final_paint_opacity(-5))
+
+    def open_cuda_runtime_diagnosis_dialog(self):
+        """Open the Local CUDA/runtime diagnosis dialog."""
+        if not self._is_local_edition_for_ui():
+            try:
+                self.log("ℹ️ 로컬 CUDA 진단은 Local판 전용이라 현재 에디션에서는 열지 않습니다.")
+            except Exception:
+                pass
+            return
+        try:
+            from ysb.ui.cuda_runtime_dialog import CudaRuntimeDiagnosisDialog
+            dlg = CudaRuntimeDiagnosisDialog(self)
+            dlg.exec()
+        except Exception as e:
+            QMessageBox.critical(self, self.tr_ui("로컬 CUDA 진단 실패"), str(e))
+            try:
+                self.log(f"❌ 로컬 CUDA 진단 실패: {e}")
+            except Exception:
+                pass
 
     def open_external_url(self, url):
         """도움말 메뉴에서 외부 웹페이지를 기본 브라우저로 연다."""
@@ -276,7 +384,7 @@ class MainWindowInteractionMixin:
             action = QAction(str(macro.get("name", "매크로")), self)
             action.setShortcut(QKeySequence(shortcut))
             action.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
-            action.triggered.connect(lambda checked=False, m=dict(macro): self.run_macro(m))
+            action.triggered.connect(lambda checked=False, m=dict(macro): None if self._block_global_action_during_inline_text_edit('macro') else self.run_macro(m))
             self.addAction(action)
             self.macro_actions.append(action)
 
@@ -297,12 +405,17 @@ class MainWindowInteractionMixin:
             action.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
             # 개별 글꼴 프리셋 "단축키" 적용은 Ctrl+Z 기록에서 제외한다.
             # 일반 텍스트 조정/콤보 적용은 기존처럼 Undo 대상이다.
-            action.triggered.connect(lambda checked=False, n=name: self.apply_item_text_preset_by_name(n, record_undo=True))
+            action.triggered.connect(lambda checked=False, n=name: None if self._block_global_action_during_inline_text_edit('item_text_preset') else self.apply_item_text_preset_by_name(n, record_undo=True))
             self.addAction(action)
             self.item_preset_actions.append(action)
 
         if hasattr(self, "cb_show_final_text"):
             self.configure_ui_tooltips()
+
+        try:
+            self.install_final_text_clipboard_canvas_shortcuts()
+        except Exception:
+            pass
 
         try:
             if hasattr(self, "btn_project_exit"):
@@ -339,6 +452,10 @@ class MainWindowInteractionMixin:
             self.act_mask_wrap.setVisible(mask_tabs)
         if hasattr(self, "act_mask_cut"):
             self.act_mask_cut.setVisible(mask_tabs)
+        if hasattr(self, "act_color_outline_mask"):
+            self.act_color_outline_mask.setVisible(mask_tabs)
+        if hasattr(self, "act_original_restore"):
+            self.act_original_restore.setVisible(final_tab)
         # 마스크 ON/OFF는 페인팅 마스크 탭 전용.
         if hasattr(self, "act_mask_toggle"):
             self.act_mask_toggle.setVisible(paint_only)
@@ -350,13 +467,18 @@ class MainWindowInteractionMixin:
             self.act_final_area_paint.setVisible(mask_tabs or final_tab)
 
         # 나머지 최종화면 전용 도구.
-        for attr in ("act_final_paint_color", "act_final_text_tool", "act_final_paint_to_bg", "act_final_paint_above_text"):
+        for attr in ("act_final_paint_color", "act_final_text_tool", "act_text_style_clone", "act_final_paint_to_bg", "act_final_paint_above_text"):
             if hasattr(self, attr):
                 getattr(self, attr).setVisible(final_tab)
 
-        # 텍스트 마스크 탭에서만 기존 텍스트 마스크를 기준으로 OCR 분석 영역을 다시 만든다.
-        if hasattr(self, "btn_reanalyze"):
-            self.btn_reanalyze.setVisible(mode == 2)
+        # 텍스트 마스크 자동 정리는 옵션 체크박스 기반 자동 처리로 이동했다.
+        # 수동 자동 정리 버튼은 더 이상 노출하지 않고, 텍스트 마스크 탭에는 재분석만 표시한다.
+        btn_auto_clean = getattr(self, "btn_auto_clean_detection_mask", None)
+        if btn_auto_clean is not None:
+            btn_auto_clean.setVisible(False)
+        btn_reanalyze = getattr(self, "btn_reanalyze", None)
+        if btn_reanalyze is not None:
+            btn_reanalyze.setVisible(mode == 2)
 
         if hasattr(self, "tb"):
             self.tb.setEnabled(drawing_tabs)
@@ -467,13 +589,55 @@ class MainWindowInteractionMixin:
             pass
 
     def _is_own_window_object(self, obj):
+        """Return True for events that belong to this main window/canvas.
+
+        App-level key events for QGraphicsView may arrive with the viewport or
+        QGraphicsScene as ``obj`` instead of a QWidget.  The final-text clipboard
+        shortcut filter must still treat those as our canvas events; otherwise
+        Ctrl+C/Ctrl+V can be accepted or eaten elsewhere without running the YSB
+        text-object copy/paste command.
+        """
         try:
             if obj is self:
                 return True
-            w = obj if isinstance(obj, QWidget) else None
-            if w is None:
-                return False
-            return w.window() is self
+            view = getattr(self, 'view', None)
+            if view is not None:
+                try:
+                    if obj is view:
+                        return True
+                except Exception:
+                    pass
+                try:
+                    if obj is view.viewport():
+                        return True
+                except Exception:
+                    pass
+                try:
+                    scene = view.scene() if callable(getattr(view, 'scene', None)) else getattr(view, 'scene', None)
+                    if obj is scene:
+                        return True
+                except Exception:
+                    pass
+            if isinstance(obj, QWidget):
+                return obj.window() is self
+            # Some Qt objects report only a QObject parent chain.  Walk it back
+            # toward the owning widget/view so scene-level shortcut events are not
+            # rejected just because the first object is not a QWidget.
+            p = obj
+            for _ in range(12):
+                if p is None:
+                    break
+                if p is self:
+                    return True
+                if view is not None and p is view:
+                    return True
+                if isinstance(p, QWidget):
+                    return p.window() is self
+                try:
+                    p = p.parent()
+                except Exception:
+                    break
+            return False
         except Exception:
             return False
 
@@ -951,6 +1115,127 @@ class MainWindowInteractionMixin:
         except Exception:
             pass
 
+    def is_hide_background_enabled(self):
+        return bool(getattr(self, "hide_background_enabled", False))
+
+    def sync_hide_background_action_state(self):
+        try:
+            action = getattr(self, "actions", {}).get("option_hide_background")
+            if action is None:
+                return
+            enabled = self.is_hide_background_enabled()
+            action.setCheckable(True)
+            action.setChecked(enabled)
+            base_text = self.tr_ui("배경 가리기") if hasattr(self, "tr_ui") else "배경 가리기"
+            action.setText(f"{base_text} ✓" if enabled else base_text)
+            action.setStatusTip("ON" if enabled else "OFF")
+        except Exception:
+            pass
+
+    def apply_hide_background_to_work_view(self):
+        try:
+            view = getattr(self, "view", None)
+            if view is not None and hasattr(view, "apply_background_visibility"):
+                view.apply_background_visibility()
+        except Exception:
+            pass
+        try:
+            # 원본 비교/클론창은 예외다. 여기서는 갱신하지 않는다.
+            if hasattr(self, "audit_boundary_event"):
+                self.audit_boundary_event("HIDE_BACKGROUND_APPLIED", enabled=self.is_hide_background_enabled())
+        except Exception:
+            pass
+
+    def set_hide_background_enabled(self, enabled, *, persist=True, announce=True):
+        enabled = bool(enabled)
+        self.hide_background_enabled = enabled
+        try:
+            self.app_options["hide_background_enabled"] = enabled
+        except Exception:
+            pass
+        try:
+            self.sync_hide_background_action_state()
+        except Exception:
+            pass
+        try:
+            self.apply_hide_background_to_work_view()
+        except Exception:
+            pass
+        if persist:
+            try:
+                self.save_app_options_cache()
+            except Exception:
+                try:
+                    from ysb.core.cache_utils import save_app_options
+                    save_app_options(self.app_options)
+                except Exception:
+                    pass
+        if announce:
+            try:
+                self.log("🕶️ 배경 가리기: ON" if enabled else "🕶️ 배경 가리기: OFF")
+            except Exception:
+                pass
+        return enabled
+
+    def toggle_hide_background_enabled(self):
+        return self.set_hide_background_enabled(not self.is_hide_background_enabled(), persist=True, announce=True)
+
+    def is_text_image_overflow_check_enabled(self):
+        return bool(getattr(self, "text_image_overflow_check_enabled", True))
+
+    def sync_text_image_overflow_check_action_state(self):
+        try:
+            action = getattr(self, "actions", {}).get("option_text_image_overflow_check")
+            if action is None:
+                return
+            enabled = self.is_text_image_overflow_check_enabled()
+            action.setCheckable(True)
+            action.setChecked(enabled)
+            base_text = self.tr_ui("텍스트 넘침 검사") if hasattr(self, "tr_ui") else "텍스트 넘침 검사"
+            action.setText(f"{base_text} ✓" if enabled else base_text)
+            action.setStatusTip("ON" if enabled else "OFF")
+        except Exception:
+            pass
+
+    def set_text_image_overflow_check_enabled(self, enabled, *, persist=True, announce=True):
+        enabled = bool(enabled)
+        self.text_image_overflow_check_enabled = enabled
+        try:
+            self.app_options["text_image_overflow_check_enabled"] = enabled
+        except Exception:
+            pass
+        try:
+            self.sync_text_image_overflow_check_action_state()
+        except Exception:
+            pass
+        if persist:
+            try:
+                self.save_app_options_cache()
+            except Exception:
+                try:
+                    from ysb.core.cache_utils import save_app_options
+                    save_app_options(self.app_options)
+                except Exception:
+                    pass
+        try:
+            if hasattr(self, 'audit_boundary_event'):
+                self.audit_boundary_event(
+                    'TEXT_AUTO_ADJUST_IMAGE_OVERFLOW_CHECK_TOGGLE',
+                    enabled=bool(enabled),
+                    policy='text_image_overflow_check_blocks_growth_and_final_boundary_when_enabled',
+                )
+        except Exception:
+            pass
+        if announce:
+            try:
+                self.log(self.tr_msg("📐 텍스트 넘침 검사: ON") if enabled else self.tr_msg("📐 텍스트 넘침 검사: OFF"))
+            except Exception:
+                pass
+        return enabled
+
+    def toggle_text_image_overflow_check_enabled(self):
+        return self.set_text_image_overflow_check_enabled(not self.is_text_image_overflow_check_enabled(), persist=True, announce=True)
+
     def is_interface_tooltips_enabled(self):
         return bool(getattr(self, "interface_tooltips_enabled", True))
 
@@ -1310,9 +1595,436 @@ class MainWindowInteractionMixin:
             pass
 
 
+    def _inline_text_editor_is_active(self):
+        try:
+            editor = getattr(self, "inline_text_editor", None)
+            return editor is not None and not bool(getattr(editor, "_closing", False))
+        except Exception:
+            return False
+
+    def _block_global_action_during_inline_text_edit(self, key=None):
+        """Block application/toolbox shortcuts while the inline text editor is active.
+
+        The inline editor owns text-input shortcuts (symbols, copy/paste, undo/redo,
+        Ctrl+Enter, Esc, IME, etc.).  QAction shortcuts such as tools, style changes,
+        page movement, macro actions, and item presets must not fire while the user is
+        typing inside a text object.
+        """
+        if not self._inline_text_editor_is_active():
+            return False
+        try:
+            self.audit_boundary_event(
+                "INLINE_EDITOR_GLOBAL_ACTION_BLOCKED",
+                action_key=str(key or ""),
+                throttle_ms=80,
+            )
+        except Exception:
+            pass
+        return True
+
+    def _inline_text_edit_event_filter(self, obj, event):
+        if not self._inline_text_editor_is_active():
+            return False
+        et = event.type()
+        if et not in (QEvent.Type.ShortcutOverride, QEvent.Type.KeyPress):
+            return False
+        editor = getattr(self, "inline_text_editor", None)
+        if editor is None:
+            return False
+
+        # Consume ShortcutOverride so WindowShortcut QAction/global tool shortcuts do
+        # not activate.  Return False for widget-based fallback editors so their own
+        # normal key handling still receives the subsequent KeyPress.
+        if et == QEvent.Type.ShortcutOverride:
+            try:
+                event.accept()
+            except Exception:
+                pass
+            try:
+                self.audit_boundary_event("INLINE_EDITOR_SHORTCUT_OVERRIDE_BLOCKED", key=int(event.key()), mods=int(event.modifiers().value), throttle_ms=80)
+            except Exception:
+                pass
+            return False
+
+        # If the legacy QWidget fallback editor is active, let that QTextEdit handle
+        # actual KeyPress events.  The ShortcutOverride above already blocked global
+        # actions.
+        try:
+            edit_widget = getattr(editor, "_edit", None)
+            if edit_widget is not None:
+                w = obj
+                while w is not None:
+                    if w is edit_widget:
+                        return False
+                    try:
+                        w = w.parent()
+                    except Exception:
+                        break
+        except Exception:
+            pass
+
+        # Direct YSB editor lives as a QGraphicsObject, so key events can reach the
+        # QGraphicsView/viewport instead of the item.  Forward the KeyPress to the
+        # editor and stop the event here so no toolbox shortcut or view key handler
+        # can also run.
+        try:
+            editor.keyPressEvent(event)
+        except Exception:
+            pass
+        try:
+            event.accept()
+        except Exception:
+            pass
+        return True
+
+    def _is_focus_text_input_for_plain_editing(self, obj=None):
+        """Do not steal Ctrl+C/V from real text inputs, spinboxes, or shortcut editors."""
+        try:
+            target = self.current_single_line_input_widget(obj)
+            if target is not None:
+                return True
+        except Exception:
+            pass
+        try:
+            fw = QApplication.focusWidget()
+        except Exception:
+            fw = None
+        for target in (obj, fw):
+            try:
+                if target is not None and self.is_text_input_widget(target):
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def _focused_plain_input_has_user_selection(self, obj=None):
+        """Return True only when a focused text-like editor is actively selecting text.
+
+        A stale focus on a spinbox/line-edit can remain after the user clicks a
+        final text object.  In that stale-focus case Ctrl+C/V must belong to the
+        selected YSB text object, not to the abandoned editor.  We preserve the
+        editor only when it has an actual text selection, which is the clearest
+        signal that the user is editing/copying that field right now.
+        """
+        try:
+            if self._inline_text_editor_is_active():
+                return True
+        except Exception:
+            pass
+        candidates = []
+        try:
+            fw = QApplication.focusWidget()
+        except Exception:
+            fw = None
+        for target in (obj, fw):
+            if target is None:
+                continue
+            try:
+                line = self.current_single_line_input_widget(target)
+                if line is not None:
+                    candidates.append(line)
+            except Exception:
+                pass
+            candidates.append(target)
+        seen = set()
+        for target in candidates:
+            try:
+                ident = id(target)
+                if ident in seen:
+                    continue
+                seen.add(ident)
+            except Exception:
+                pass
+            try:
+                if isinstance(target, QLineEdit):
+                    if target.hasSelectedText():
+                        return True
+                    continue
+            except Exception:
+                pass
+            try:
+                if isinstance(target, (QTextEdit, QPlainTextEdit)):
+                    cur = target.textCursor()
+                    if cur is not None and cur.hasSelection():
+                        return True
+                    continue
+            except Exception:
+                pass
+            try:
+                if isinstance(target, QAbstractSpinBox):
+                    line = target.lineEdit()
+                    if line is not None and line.hasSelectedText():
+                        return True
+                    continue
+            except Exception:
+                pass
+            try:
+                if isinstance(target, QComboBox):
+                    line = target.lineEdit()
+                    if line is not None and line.hasSelectedText():
+                        return True
+                    continue
+            except Exception:
+                pass
+            try:
+                if isinstance(target, QKeySequenceEdit):
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def _final_text_clipboard_should_ignore_stale_input_focus(self, action, obj=None):
+        """Decide whether final-text Ctrl+C/V should override stale widget focus."""
+        try:
+            if self._inline_text_editor_is_active():
+                return False
+        except Exception:
+            pass
+        try:
+            selected_count = len(self.selected_text_data_items())
+        except Exception:
+            selected_count = 0
+        try:
+            paste_source = bool(self.has_available_text_paste_source()) if hasattr(self, 'has_available_text_paste_source') else bool(getattr(self, 'text_clipboard', None))
+        except Exception:
+            paste_source = False
+        if action == 'copy':
+            return selected_count > 0
+        if action in ('paste_mode', 'paste_same_position'):
+            # If a text object is selected, the user's visible context is the final canvas.
+            # If nothing is selected, only override when the focus does not have an
+            # explicit user text selection; this lets normal line-edit paste keep working.
+            return paste_source and (selected_count > 0 or not self._focused_plain_input_has_user_selection(obj))
+        return False
+
+    def focus_final_text_canvas_for_shortcut(self, reason=''):
+        """Return keyboard ownership to the final canvas after object selection.
+
+        Selecting a QGraphicsItem does not always move QWidget focus away from the
+        last option editor/spinbox.  Then Ctrl+C/V is handled as normal widget
+        copy/paste and never reaches the YSB text-object clipboard route.
+        """
+        try:
+            if getattr(self, 'cb_mode', None) is None or self.cb_mode.currentIndex() != 4:
+                return False
+            view = getattr(self, 'view', None)
+            if view is None:
+                return False
+            try:
+                view.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            except Exception:
+                pass
+            try:
+                vp = view.viewport()
+                if vp is not None:
+                    vp.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            except Exception:
+                vp = None
+            try:
+                view.setFocus(Qt.FocusReason.MouseFocusReason)
+            except Exception:
+                try:
+                    view.setFocus()
+                except Exception:
+                    pass
+            try:
+                if vp is not None:
+                    vp.setFocus(Qt.FocusReason.MouseFocusReason)
+            except Exception:
+                pass
+            try:
+                self._final_text_canvas_focus_token = time.time()
+            except Exception:
+                pass
+            try:
+                if not getattr(self, '_final_text_clipboard_canvas_shortcuts', None):
+                    self.install_final_text_clipboard_canvas_shortcuts()
+            except Exception:
+                pass
+            try:
+                self.audit_boundary_event('FINAL_TEXT_CANVAS_FOCUS_RESTORED', reason=str(reason or ''), throttle_ms=100)
+            except Exception:
+                pass
+            return True
+        except Exception:
+            return False
+
+    def _final_text_clipboard_shortcut_guard_active(self, action, window_ms=220):
+        try:
+            guard = getattr(self, '_final_text_clipboard_shortcut_guard', {}) or {}
+            last = float(guard.get(str(action), 0.0) or 0.0)
+            return (time.time() - last) * 1000.0 <= float(window_ms)
+        except Exception:
+            return False
+
+    def _mark_final_text_clipboard_shortcut_guard(self, action):
+        try:
+            guard = getattr(self, '_final_text_clipboard_shortcut_guard', None)
+            if not isinstance(guard, dict):
+                guard = {}
+                self._final_text_clipboard_shortcut_guard = guard
+            guard[str(action)] = time.time()
+        except Exception:
+            pass
+
+    def _handle_final_text_clipboard_shortcut_event(self, obj, event):
+        """Route final-text copy/paste shortcuts before QGraphicsView eats them.
+
+        Qt first emits ShortcutOverride and then may deliver KeyPress to the canvas
+        view/scene/item.  The previous guard accepted ShortcutOverride but executed
+        the command only on KeyPress, so the command was lost when QGraphicsView ate
+        that KeyPress.  Execute the text-object clipboard command on whichever event
+        reaches this filter first, then suppress the immediately following duplicate.
+        """
+        try:
+            et = event.type()
+            if et not in (QEvent.Type.ShortcutOverride, QEvent.Type.KeyPress):
+                return False
+            if not self._is_own_window_object(obj):
+                return False
+            if getattr(self, 'cb_mode', None) is None or self.cb_mode.currentIndex() != 4:
+                return False
+        except Exception:
+            return False
+
+        def _accept_only():
+            try:
+                event.accept()
+            except Exception:
+                pass
+            return True
+
+        def _event_phase():
+            try:
+                return 'ShortcutOverride' if et == QEvent.Type.ShortcutOverride else 'KeyPress'
+            except Exception:
+                return str(et)
+
+        def _matched_action():
+            try:
+                # More specific shortcut first: Ctrl+Shift+V must not be consumed
+                # by the plain Ctrl+V paste mode check.
+                if self._event_matches_final_text_clipboard_action(event, "paste_same_position"):
+                    return 'paste_same_position'
+            except Exception:
+                pass
+            try:
+                if self._event_matches_final_text_clipboard_action(event, "copy"):
+                    return 'copy'
+            except Exception:
+                pass
+            try:
+                if self._event_matches_final_text_clipboard_action(event, "paste_mode"):
+                    return 'paste_mode'
+            except Exception:
+                pass
+            return None
+
+        action = _matched_action()
+        if not action:
+            return False
+
+        try:
+            if self._is_focus_text_input_for_plain_editing(obj):
+                if not self._final_text_clipboard_should_ignore_stale_input_focus(action, obj):
+                    try:
+                        self.audit_boundary_event(
+                            'TEXT_CLIPBOARD_SHORTCUT_REJECTED',
+                            action=action,
+                            reason='active_plain_input_focus',
+                            phase=_event_phase(),
+                            focus_widget=type(QApplication.focusWidget()).__name__ if QApplication.focusWidget() is not None else '',
+                            obj_type=type(obj).__name__ if obj is not None else '',
+                            throttle_ms=80,
+                        )
+                    except Exception:
+                        pass
+                    return False
+                try:
+                    self.audit_boundary_event(
+                        'TEXT_CLIPBOARD_SHORTCUT_STALE_INPUT_FOCUS_OVERRIDDEN',
+                        action=action,
+                        phase=_event_phase(),
+                        focus_widget=type(QApplication.focusWidget()).__name__ if QApplication.focusWidget() is not None else '',
+                        obj_type=type(obj).__name__ if obj is not None else '',
+                        throttle_ms=80,
+                    )
+                except Exception:
+                    pass
+                try:
+                    self.focus_final_text_canvas_for_shortcut(reason='clipboard_shortcut_override_stale_focus')
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        if et == QEvent.Type.KeyPress and self._final_text_clipboard_shortcut_guard_active(action):
+            try:
+                self.audit_boundary_event('TEXT_CLIPBOARD_SHORTCUT_DUPLICATE_SUPPRESSED', action=action, phase=_event_phase(), throttle_ms=80)
+            except Exception:
+                pass
+            return _accept_only()
+
+        try:
+            ok = bool(self.handle_final_text_clipboard_shortcut_command(action, phase=_event_phase()))
+        except Exception as e:
+            try:
+                self.audit_boundary_event('TEXT_CLIPBOARD_SHORTCUT_ERROR', action=str(action), phase=_event_phase(), error=repr(e), throttle_ms=80)
+            except Exception:
+                pass
+            return False
+
+        if ok:
+            if et == QEvent.Type.ShortcutOverride:
+                self._mark_final_text_clipboard_shortcut_guard(action)
+            try:
+                self.audit_boundary_event('TEXT_CLIPBOARD_SHORTCUT_HANDLED', action=action, phase=_event_phase(), throttle_ms=80)
+            except Exception:
+                pass
+            return _accept_only()
+
+        try:
+            self.audit_boundary_event('TEXT_CLIPBOARD_SHORTCUT_REJECTED', action=action, reason='command_returned_false', phase=_event_phase(), throttle_ms=80)
+        except Exception:
+            pass
+        return False
+
     def eventFilter(self, obj, event):
         """Delayed tooltip + source compare sync event filter."""
         et = event.type()
+
+        try:
+            if self._inline_text_edit_event_filter(obj, event):
+                return True
+        except Exception:
+            pass
+
+        try:
+            if self._handle_final_text_clipboard_shortcut_event(obj, event):
+                return True
+        except Exception:
+            pass
+
+        try:
+            if et in (QEvent.Type.ShortcutOverride, QEvent.Type.KeyPress) and self._event_matches_text_delete_shortcut(event):
+                # ShortcutOverride와 KeyPress가 연달아 들어오는데 ShortcutOverride에서
+                # 삭제 확인창을 띄우면 모달 종료 뒤 KeyPress가 다시 처리되어 확인창이 두 번 뜬다.
+                # ShortcutOverride는 "이 키는 우리가 쓴다"는 표시만 하고, 실제 삭제는 KeyPress/QShortcut에서 한 번만 실행한다.
+                if et == QEvent.Type.ShortcutOverride:
+                    event.accept()
+                    return True
+                if self.handle_final_text_delete_shortcut_command(phase='EventFilter'):
+                    event.accept()
+                    return True
+        except Exception:
+            pass
+
+        try:
+            if et == QEvent.Type.Wheel and hasattr(self, "handle_text_font_size_wheel_event"):
+                if self.handle_text_font_size_wheel_event(obj, event):
+                    return True
+        except Exception:
+            pass
 
         # 설정/프리셋 다이얼로그 흰색 깜빡임 분석용 로그.
         try:
@@ -1462,6 +2174,21 @@ class MainWindowInteractionMixin:
         # registered delayed-tooltip widgets use our internal overlay only.
         # Block Qt native tooltips so they do not cover buttons or create odd colored popups.
         if et == QEvent.Type.ToolTip:
+            # QMenu/QMenuBar native tooltip events are fragile on Windows when the
+            # menu is being closed and a modal dialog is opened immediately after
+            # an action click.  Do not call QToolTip.hideText() for menus; simply
+            # consume the tooltip event.  This prevents access-violation crashes
+            # observed when opening the Quick OCR settings from the Work menu.
+            try:
+                if isinstance(obj, (QMenu, QMenuBar)):
+                    try:
+                        if hasattr(event, "accept"):
+                            event.accept()
+                    except Exception:
+                        pass
+                    return True
+            except Exception:
+                pass
             try:
                 if bool(obj.property("allow_native_tooltip")):
                     if self.is_interface_tooltips_enabled():
@@ -1486,6 +2213,20 @@ class MainWindowInteractionMixin:
             except Exception:
                 pass
             return True
+
+        # 스타일 복제 도구는 ESC로 기준 선택/도구 상태를 해제한다.
+        try:
+            if et in (QEvent.Type.ShortcutOverride, QEvent.Type.KeyPress) and event.key() == Qt.Key.Key_Escape:
+                if getattr(getattr(self, "view", None), "draw_mode", None) == "text_style_clone":
+                    if et == QEvent.Type.KeyPress:
+                        if hasattr(self, "clear_text_style_clone_source"):
+                            self.clear_text_style_clone_source(keep_tool=False)
+                        else:
+                            self.set_tool(None)
+                    event.accept()
+                    return True
+        except Exception:
+            pass
 
         # Enter/Esc from right-side numeric/single-line inputs must commit/cancel the
         # edit and return focus to the image workspace.  Do this before global
@@ -1520,11 +2261,11 @@ class MainWindowInteractionMixin:
                 if et in (QEvent.Type.Wheel, QEvent.Type.MouseButtonRelease):
                     try:
                         if hasattr(self, "_begin_source_compare_clone_fast_path"):
-                            self._begin_source_compare_clone_fast_path("main_view_event", delay_ms=180)
+                            self._begin_source_compare_clone_fast_path("main_view_event", delay_ms=120)
                     except Exception:
                         pass
                     if hasattr(self, "schedule_source_compare_sync"):
-                        self.schedule_source_compare_sync(220 if et == QEvent.Type.Wheel else 80)
+                        self.schedule_source_compare_sync(16 if et == QEvent.Type.Wheel else 0)
         except Exception:
             pass
 
@@ -1573,7 +2314,7 @@ class MainWindowInteractionMixin:
                 if et == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
                     try:
                         if hasattr(self, "_begin_source_compare_clone_fast_path"):
-                            self._begin_source_compare_clone_fast_path("clone_mouse_press", delay_ms=220)
+                            self._begin_source_compare_clone_fast_path("clone_mouse_press", delay_ms=120)
                     except Exception:
                         pass
                     try:
@@ -1583,7 +2324,7 @@ class MainWindowInteractionMixin:
                 elif et == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
                     try:
                         if hasattr(self, "_begin_source_compare_clone_fast_path"):
-                            self._begin_source_compare_clone_fast_path("clone_mouse_release", delay_ms=180)
+                            self._begin_source_compare_clone_fast_path("clone_mouse_release", delay_ms=120)
                     except Exception:
                         pass
                     try:
@@ -1591,11 +2332,11 @@ class MainWindowInteractionMixin:
                     except Exception:
                         pass
                     if hasattr(self, "schedule_main_sync_from_source_compare"):
-                        self.schedule_main_sync_from_source_compare(60)
+                        self.schedule_main_sync_from_source_compare(16)
                 elif et == QEvent.Type.Wheel:
                     try:
                         if hasattr(self, "_begin_source_compare_clone_fast_path"):
-                            self._begin_source_compare_clone_fast_path("clone_wheel", delay_ms=180)
+                            self._begin_source_compare_clone_fast_path("clone_wheel", delay_ms=120)
                     except Exception:
                         pass
                     try:
@@ -1603,16 +2344,16 @@ class MainWindowInteractionMixin:
                     except Exception:
                         pass
                     if hasattr(self, "schedule_main_sync_from_source_compare"):
-                        self.schedule_main_sync_from_source_compare(220)
+                        self.schedule_main_sync_from_source_compare(16)
                     try:
-                        QTimer.singleShot(260, lambda: setattr(self, '_source_compare_user_driving', False))
+                        QTimer.singleShot(140, lambda: setattr(self, '_source_compare_user_driving', False))
                     except Exception:
                         pass
 
                 if et == QEvent.Type.MouseMove and getattr(self, "_source_compare_user_driving", False):
                     try:
                         if hasattr(self, "_begin_source_compare_clone_fast_path"):
-                            self._begin_source_compare_clone_fast_path("clone_mouse_move", delay_ms=180)
+                            self._begin_source_compare_clone_fast_path("clone_mouse_move", delay_ms=120)
                     except Exception:
                         pass
 
@@ -1756,8 +2497,11 @@ class MainWindowInteractionMixin:
             if hasattr(self, "act_magic"): action_info.append((self.act_magic, "요술봉", seq_text("paint_magic_select"), "마스크 탭에서는 마스크 선택/채우기, 최종결과 탭에서는 팔레트 색상으로 영역 칠하기에 사용합니다."))
             if hasattr(self, "act_mask_wrap"): action_info.append((self.act_mask_wrap, "마스크 랩핑", seq_text("paint_mask_wrap"), "영역 안의 떨어진 마스크들을 하나의 채움 영역으로 감싸줍니다."))
             if hasattr(self, "act_mask_cut"): action_info.append((self.act_mask_cut, "마스크 커팅", seq_text("paint_mask_cut"), "선택 영역 밖 경계를 지정 픽셀만큼 잘라 붙어 있는 마스크를 분리합니다."))
+            if hasattr(self, "act_color_outline_mask"): action_info.append((self.act_color_outline_mask, "색상/테두리 마스크", seq_text("paint_color_outline_mask"), "드래그한 영역 안에서 텍스트 색상 또는 닫힌 획 내부를 현재 마스크에 추가합니다. Alt+클릭으로 기준 색상을 찍습니다."))
+            if hasattr(self, "act_original_restore"): action_info.append((self.act_original_restore, "영역 원본 복구", seq_text("paint_original_restore"), "최종결과 탭에서 지정한 영역에 원본 이미지 조각을 다시 덧씌워 수선합니다."))
             if hasattr(self, "act_final_area_paint"): action_info.append((self.act_final_area_paint, "영역 페인팅/마스킹", seq_text("paint_area_fill"), "마스크 탭에서는 영역 마스킹, 최종결과 탭에서는 현재 페인팅 색상으로 영역을 칠합니다."))
             if hasattr(self, "act_final_text_tool"): action_info.append((self.act_final_text_tool, "최종 텍스트 도구", seq_text("final_text_tool"), "최종화면을 클릭하면 텍스트 영역을 만듭니다. 내용 작성 후 Ctrl+Return을 누르거나 다른 곳을 클릭하면 작성이 완료됩니다."))
+            if hasattr(self, "act_text_style_clone"): action_info.append((self.act_text_style_clone, "스타일 복제", seq_text("final_style_clone"), "기준 텍스트를 먼저 클릭하면 초록 점선으로 표시됩니다. 이후 다른 텍스트를 클릭하면 텍스트 스타일과 고급 옵션을 복제합니다. ESC로 해제합니다."))
             if hasattr(self, "act_final_paint_to_bg"): action_info.append((self.act_final_paint_to_bg, "배경을 원본으로 쓰기", seq_text("final_paint_to_background"), "최종결과 배경을 이후 분석/인페인팅 기준이 되는 작업용 원본으로 반영합니다."))
             if hasattr(self, "act_final_paint_above_text"): action_info.append((self.act_final_paint_above_text, "텍스트 위에 페인팅", seq_text("final_paint_above_toggle"), "ON이면 이후 새로 칠하는 브러시가 텍스트보다 위 레이어에 그려집니다."))
             for info in action_info:
@@ -1805,16 +2549,29 @@ class MainWindowInteractionMixin:
         if hasattr(self, "area_paint_bar"):
             self.register_delayed_tooltip(self.btn_area_paint_rect, "사각형 영역", seq_text("paint_mask_wrap_rect"), "마스크 탭에서는 영역 마스킹, 최종결과 탭에서는 현재 페인팅 색상으로 영역 칠하기를 수행합니다.")
             self.register_delayed_tooltip(self.btn_area_paint_free, "자유형 영역", seq_text("paint_mask_wrap_free"), "마스크 탭에서는 영역 마스킹, 최종결과 탭에서는 현재 페인팅 색상으로 영역 칠하기를 수행합니다.")
+            self.register_delayed_tooltip(self.btn_area_paint_polygon, "폴리곤 영역", seq_text("paint_mask_wrap_polygon"), "점을 하나씩 찍어 직선으로 닫힌 영역을 만든 뒤 영역 마스킹/페인팅을 수행합니다. 작성 중 Ctrl+Z/Backspace는 마지막 점만 취소합니다.")
         if hasattr(self, "mask_wrap_bar"):
             self.register_delayed_tooltip(self.btn_mask_wrap_rect, "사각형으로 영역 그리기", seq_text("paint_mask_wrap_rect"), "윈도우 캡처처럼 사각형 범위를 잡고 그 안의 마스크들을 하나로 감싸 채웁니다.")
             self.register_delayed_tooltip(self.btn_mask_wrap_free, "자유형으로 영역 그리기", seq_text("paint_mask_wrap_free"), "드래그한 자유형 범위 안에서만 마스크들을 하나로 감싸 채웁니다.")
+            self.register_delayed_tooltip(self.btn_mask_wrap_polygon, "폴리곤으로 영역 그리기", seq_text("paint_mask_wrap_polygon"), "점을 하나씩 찍어 만든 닫힌 다각형 안에서만 마스크들을 하나로 감싸 채웁니다.")
         if hasattr(self, "mask_cut_bar"):
             self.register_delayed_tooltip(self.btn_mask_cut_rect, "사각형으로 영역 그리기", seq_text("paint_mask_wrap_rect"), "사각형 보존 영역의 바깥 경계를 지정 픽셀만큼 잘라냅니다.")
             self.register_delayed_tooltip(self.btn_mask_cut_free, "자유형으로 영역 그리기", seq_text("paint_mask_wrap_free"), "자유형 보존 영역의 바깥 경계를 지정 픽셀만큼 잘라냅니다.")
+            self.register_delayed_tooltip(self.btn_mask_cut_polygon, "폴리곤으로 영역 그리기", seq_text("paint_mask_wrap_polygon"), "점을 하나씩 찍어 만든 닫힌 다각형 보존 영역의 바깥 경계를 지정 픽셀만큼 잘라냅니다.")
             self.register_delayed_tooltip(self.sb_mask_cut_px, "커팅 폭", "", "선택 영역 밖으로 잘라낼 마스크 폭입니다.")
+        if hasattr(self, "color_outline_mask_bar"):
+            self.register_delayed_tooltip(self.btn_color_outline_mask_rect, "사각형 영역 지정", "", "사각형으로 영역을 잡고, 그 안에서 조건에 맞는 부분만 마스크합니다.")
+            self.register_delayed_tooltip(self.btn_color_outline_mask_free, "자유형 영역 지정", "", "자유형으로 영역을 잡고, 그 안에서 조건에 맞는 부분만 마스크합니다.")
+            self.register_delayed_tooltip(self.btn_color_outline_mask_polygon, "폴리곤 영역 지정", seq_text("paint_mask_wrap_polygon"), "점을 하나씩 찍어 만든 닫힌 다각형 안에서 조건에 맞는 부분만 마스크합니다.")
+            self.register_delayed_tooltip(self.btn_color_outline_text_color, "텍스트", "Alt+클릭", "획 감지 OFF일 때 이 색상과 가까운 픽셀을 마스크합니다.")
+            self.register_delayed_tooltip(self.sb_color_outline_tolerance, "허용치", "", "텍스트 또는 획 색상을 얼마나 넓게 허용할지 정합니다.")
+            self.register_delayed_tooltip(self.cb_color_outline_detect_outline, "획 감지", "", "켜면 텍스트 색상은 무시하고, 옆 색상칩의 획 색으로 닫힌 윤곽 내부를 마스크합니다. 획이 그림이나 배경선과 이어진 경우에는 의도하지 않은 영역이 잡힐 수 있습니다.")
+            self.register_delayed_tooltip(self.btn_color_outline_outline_color, "획 감지", "Alt+클릭", "획 감지 ON일 때 닫힌 윤곽을 찾을 기준 색상입니다.")
+            self.register_delayed_tooltip(self.sb_color_outline_expand, "영역 확장", "", "최종 마스크를 지정 픽셀만큼 확장합니다.")
         if hasattr(self, "ocr_region_bar"):
             self.register_delayed_tooltip(self.btn_ocr_region_rect, "사각형 OCR 분석 영역", seq_text("paint_mask_wrap_rect"), "사각형으로 OCR이 읽을 영역을 지정합니다.")
             self.register_delayed_tooltip(self.btn_ocr_region_free, "자유형 OCR 분석 영역", seq_text("paint_mask_wrap_free"), "자유형으로 OCR이 읽을 영역을 지정합니다.")
+            self.register_delayed_tooltip(self.btn_ocr_region_polygon, "폴리곤 OCR 분석 영역", seq_text("paint_mask_wrap_polygon"), "점을 하나씩 찍어 만든 닫힌 다각형을 OCR 분석 영역으로 지정합니다.")
             self.register_delayed_tooltip(self.btn_ocr_region_finish, "OCR 분석 영역 지정 종료", "", "지정한 영역을 저장하거나 폐기하고 영역 지정 모드를 종료합니다.")
 
         # 툴팁 글자색은 테마 기본값을 따른다.
@@ -1841,7 +2598,15 @@ class MainWindowInteractionMixin:
             self.register_delayed_tooltip(self.btn_inpaint, "인페인팅", seq_text("work_inpaint"))
         if hasattr(self, "btn_text_cleanup"):
             tooltip_pos(self.btn_text_cleanup, "above")
-            self.register_delayed_tooltip(self.btn_text_cleanup, "텍스트 정리", seq_text("work_clean_text"))
+            self.register_delayed_tooltip(
+                self.btn_text_cleanup,
+                "텍스트 정리",
+                seq_text("work_clean_text"),
+                self.tr_msg("체크 해제한 OCR/텍스트 항목을 삭제하고 번호를 재정렬합니다. 활성 OCR 영역 밖의 자동 마스크도 함께 정리하며, 사용자 수정 마스크는 유지합니다.")
+            )
+        if hasattr(self, "btn_mask_cleanup"):
+            tooltip_pos(self.btn_mask_cleanup, "above")
+            self.register_delayed_tooltip(self.btn_mask_cleanup, "마스크 정리", seq_text("work_clean_mask"), "현재 페이지에서 활성 OCR 영역 밖의 자동 마스크만 제거합니다. 사용자 수정 마스크는 유지합니다.")
         if hasattr(self, "cb_show_final_text"):
             tooltip_pos(self.cb_show_final_text, "left", x=-6)
             self.register_delayed_tooltip(self.cb_show_final_text, "텍스트 표시 ON/OFF", seq_text("view_text_toggle"))
@@ -1858,7 +2623,12 @@ class MainWindowInteractionMixin:
                 "폰트 설정창을 엽니다.",
             )
         if hasattr(self, "sb_font_size"):
-            self.register_delayed_tooltip(self.sb_font_size, "글꼴 크기", seq_text("text_font_size"), "현재 선택한 텍스트의 글자 크기를 조절합니다.")
+            self.register_delayed_tooltip(
+                self.sb_font_size,
+                "글꼴 크기",
+                seq_text("text_font_size"),
+                "숫자 입력은 선택 텍스트 크기를 입력값으로 통일합니다. 마우스 휠, =/+ 확대, - 축소는 각 텍스트의 현재 크기를 기준으로 상대 조정합니다.",
+            )
         if hasattr(self, "sb_strk"):
             self.register_delayed_tooltip(self.sb_strk, "획 크기", seq_text("text_stroke_size"), "현재 선택한 텍스트의 외곽선 두께를 조절합니다.")
         if hasattr(self, "sb_line_spacing"):
@@ -1941,6 +2711,13 @@ class MainWindowInteractionMixin:
             except Exception:
                 pass
             self.register_delayed_tooltip(self.btn_stroke_color, "획 색상", seq_text("item_stroke_color"))
+        if hasattr(self, "final_item_size"):
+            self.register_delayed_tooltip(
+                self.final_item_size,
+                "선택 텍스트 크기",
+                "= 확대 / - 축소",
+                "숫자 입력은 선택 텍스트 크기를 입력값으로 통일합니다. 마우스 휠, =/+ 확대, - 축소는 각 텍스트의 현재 크기를 기준으로 상대 조정합니다.",
+            )
         if hasattr(self, "btn_item_text_color"):
             try:
                 self.btn_item_text_color.setProperty("force_outlined_tooltip_text", True)

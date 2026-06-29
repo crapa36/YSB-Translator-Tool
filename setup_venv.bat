@@ -1,4 +1,7 @@
 @echo off
+set PIP_DISABLE_PIP_VERSION_CHECK=1
+set PIP_NO_PYTHON_VERSION_WARNING=1
+set PIP_NO_INPUT=1
 setlocal EnableExtensions
 cd /d "%~dp0"
 
@@ -73,16 +76,16 @@ if errorlevel 1 goto FAIL
 
 echo.
 echo [3/9] Upgrade pip / wheel / base pins
-"%PY%" -m pip install --upgrade pip wheel
+"%PY%" -m pip --disable-pip-version-check install --upgrade pip wheel
 if errorlevel 1 goto FAIL
-"%PY%" -m pip install "setuptools==81.0.0" "numpy==1.26.4" --force-reinstall
+"%PY%" -m pip --disable-pip-version-check install "setuptools==81.0.0" "numpy==1.26.4" --force-reinstall
 if errorlevel 1 goto FAIL
 
 echo.
 echo [4/9] Install app requirements
 if exist "requirements\common.txt" (
     echo Installing requirements\common.txt
-    "%PY%" -m pip install -r "requirements\common.txt"
+    "%PY%" -m pip --disable-pip-version-check install -r "requirements\common.txt"
     if errorlevel 1 goto FAIL
 ) else (
     echo requirements\common.txt not found. Skipping.
@@ -90,7 +93,7 @@ if exist "requirements\common.txt" (
 
 if exist "requirements\lite.txt" (
     echo Installing requirements\lite.txt
-    "%PY%" -m pip install -r "requirements\lite.txt"
+    "%PY%" -m pip --disable-pip-version-check install -r "requirements\lite.txt"
     if errorlevel 1 goto FAIL
 ) else (
     echo requirements\lite.txt not found. Skipping.
@@ -98,29 +101,29 @@ if exist "requirements\lite.txt" (
 
 echo.
 echo [5/9] Install comic_text_detector runtime
-"%PY%" -m pip install "torch" "torchvision" "tqdm" "pyclipper" "shapely" "PyYAML" "networkx"
+"%PY%" -m pip --disable-pip-version-check install "torch" "torchvision" "tqdm" "pyclipper" "shapely" "PyYAML" "networkx"
 if errorlevel 1 goto FAIL
 
 echo.
 echo [6/9] Install PaddleOCR CPU
 echo Installing PaddlePaddle CPU 3.2.2
-"%PY%" -m pip install "paddlepaddle==3.2.2" -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
+"%PY%" -m pip --disable-pip-version-check install "paddlepaddle==3.2.2" -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
 if errorlevel 1 goto FAIL
 
 echo Installing PaddleOCR
-"%PY%" -m pip install "paddleocr"
+"%PY%" -m pip --disable-pip-version-check install "paddleocr"
 if errorlevel 1 goto FAIL
 
 echo.
 echo [7/9] Install LOCAL LaMa
-"%PY%" -m pip install "simple-lama-inpainting"
+"%PY%" -m pip --disable-pip-version-check install "simple-lama-inpainting"
 if errorlevel 1 goto FAIL
 
 echo.
 echo [8/9] Install Manga OCR source/test dependencies
 if exist "requirements\manga_ocr_worker.txt" (
     echo Installing requirements\manga_ocr_worker.txt
-    "%PY%" -m pip install -r "requirements\manga_ocr_worker.txt"
+    "%PY%" -m pip --disable-pip-version-check install -r "requirements\manga_ocr_worker.txt"
     if errorlevel 1 goto FAIL
 ) else (
     echo [ERROR] requirements\manga_ocr_worker.txt not found.
@@ -129,7 +132,7 @@ if exist "requirements\manga_ocr_worker.txt" (
 
 echo.
 echo Re-pin compatible base versions after installs
-"%PY%" -m pip install "setuptools==81.0.0" "numpy==1.26.4" --force-reinstall
+"%PY%" -m pip --disable-pip-version-check install "setuptools==81.0.0" "numpy==1.26.4" --force-reinstall
 if errorlevel 1 goto FAIL
 
 echo.

@@ -318,7 +318,19 @@ class YSBUndoRestoreEngine:
                 except Exception:
                     paint_stack = getattr(getattr(owner, "view", None), "history", [])
 
-                if paint_stack and getattr(owner, "view", None) is not None and owner.view.undo():
+                view = getattr(owner, "view", None)
+                paint_undo_ok = False
+                if paint_stack and view is not None:
+                    try:
+                        if hasattr(owner, "note_paint_undo_redo_activity"):
+                            owner.note_paint_undo_redo_activity(2200)
+                    except Exception:
+                        pass
+                    try:
+                        paint_undo_ok = bool(view.undo())
+                    except Exception:
+                        paint_undo_ok = False
+                if paint_stack and view is not None and paint_undo_ok:
                     redo_rec = {
                         "reason": rec.get("reason", "페인팅"),
                         "page_idx": page_idx,
@@ -327,13 +339,9 @@ class YSBUndoRestoreEngine:
                         "_undo_scope": "page",
                     }
                     owner.append_page_redo_record(redo_rec, page_idx=page_idx)
-                    try:
-                        owner.undo_commit_paint_layer(
-                            "mask" if int(getattr(owner, "last_mode", 0) or 0) in (2, 3) else "final_paint",
-                            delay_ms=1200,
-                        )
-                    except Exception:
-                        pass
+                    # view.undo() already schedules one debounced view-layer commit.
+                    # Do not schedule a second commit here; duplicate timers made
+                    # paint Undo feel sticky on large pages.
                     self._update_buttons()
                     return True
 
@@ -395,7 +403,19 @@ class YSBUndoRestoreEngine:
                 except Exception:
                     paint_redo_stack = getattr(getattr(owner, "view", None), "redo_history", [])
 
-                if paint_redo_stack and getattr(owner, "view", None) is not None and owner.view.redo():
+                view = getattr(owner, "view", None)
+                paint_redo_ok = False
+                if paint_redo_stack and view is not None:
+                    try:
+                        if hasattr(owner, "note_paint_undo_redo_activity"):
+                            owner.note_paint_undo_redo_activity(2200)
+                    except Exception:
+                        pass
+                    try:
+                        paint_redo_ok = bool(view.redo())
+                    except Exception:
+                        paint_redo_ok = False
+                if paint_redo_stack and view is not None and paint_redo_ok:
                     undo_rec = {
                         "reason": rec.get("reason", "페인팅"),
                         "page_idx": page_idx,
@@ -404,13 +424,9 @@ class YSBUndoRestoreEngine:
                         "_undo_scope": "page",
                     }
                     owner.append_page_undo_record(undo_rec, page_idx=page_idx, clear_redo=False)
-                    try:
-                        owner.undo_commit_paint_layer(
-                            "mask" if int(getattr(owner, "last_mode", 0) or 0) in (2, 3) else "final_paint",
-                            delay_ms=1200,
-                        )
-                    except Exception:
-                        pass
+                    # view.redo() already schedules one debounced view-layer commit.
+                    # Do not schedule a second commit here; duplicate timers made
+                    # paint Redo feel sticky on large pages.
                     self._update_buttons()
                     return True
 

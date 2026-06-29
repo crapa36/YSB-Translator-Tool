@@ -263,7 +263,9 @@ class PageBrushEngine:
                 self.preview_path.lineTo(now)
                 r = self._segment_rect(last, now)
                 self._add_dirty(r)
-                self._render_draw_live_to_target(force=True)
+                # Mouse-move 중 viewport.repaint()까지 강제하면 브러시가 한 박자씩 막힌다.
+                # 실시간 획은 update()로만 예약하고, 첫 점/명시 force 상황에서만 repaint를 허용한다.
+                self._render_draw_live_to_target(force=False)
             except Exception:
                 pass
         else:
@@ -390,7 +392,14 @@ class PageBrushEngine:
                     scene_dirty = dirty
                 self._view_update_scene_rect(scene_dirty, force=False)
             self.target_item = target
-            self._sync_cached_images()
+            try:
+                main = getattr(self.viewer, "main", None)
+                if bool(getattr(main, "_paint_history_apply_active", False)):
+                    setattr(self.viewer, "_paint_layer_cache_dirty", True)
+                else:
+                    self._sync_cached_images()
+            except Exception:
+                pass
             return str(record.get("kind") or self._kind() or "paint")
         except Exception:
             return None

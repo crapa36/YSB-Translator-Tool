@@ -908,7 +908,7 @@ class UndoCommandApplyMixin:
         except Exception:
             mask = mask_state
         try:
-            color = QColor(0, 0, 255, 150) if mode_i == 3 else QColor(168, 93, 102, 140)
+            color = self.current_mask_overlay_color(mode_i) if hasattr(self, "current_mask_overlay_color") else (QColor(0, 0, 255, 220) if mode_i == 3 else QColor(168, 93, 102, 220))
             if getattr(view, "user_mask_item", None) is None:
                 if hasattr(view, "set_mask_overlay_layer"):
                     view.set_mask_overlay_layer(mask, color)
@@ -917,7 +917,7 @@ class UndoCommandApplyMixin:
         except Exception:
             try:
                 if hasattr(view, "set_mask_overlay_layer"):
-                    view.set_mask_overlay_layer(mask, QColor(0, 0, 255, 150) if mode_i == 3 else QColor(168, 93, 102, 140))
+                    view.set_mask_overlay_layer(mask, self.current_mask_overlay_color(mode_i) if hasattr(self, "current_mask_overlay_color") else (QColor(0, 0, 255, 220) if mode_i == 3 else QColor(168, 93, 102, 220)))
             except Exception:
                 return False
         try:
@@ -1117,7 +1117,7 @@ class UndoCommandApplyMixin:
                     except Exception:
                         pass
                     try:
-                        color = QColor(0, 0, 255, 100) if mode == 3 else QColor(255, 0, 0, 100)
+                        color = self.current_mask_overlay_color(mode) if hasattr(self, "current_mask_overlay_color") else (QColor(0, 0, 255, 220) if mode == 3 else QColor(168, 93, 102, 220))
                         if hasattr(view, "set_mask_overlay_layer"):
                             view.set_mask_overlay_layer(self.get_active_mask(curr, mode), color)
                     except Exception:

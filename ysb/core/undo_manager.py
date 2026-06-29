@@ -1299,20 +1299,86 @@ class YSBUndoManager:
         )
 
     def push_paint_view_record(self, viewer: Any, record: Any, *, kind: str | None = None, reason: str | None = None, max_history: int = 80, page_idx: int | None = None, mode: int | None = None) -> bool:
-        """Push paint/mask edits through the legacy viewer patch history.
+        """Push paint/mask edits through the runtime viewer patch history.
 
-        Text/style/geometry commands stay on the Command-Diff timeline, but
-        paint and mask edits are pixel-patch operations.  Keeping the QPixmap
-        patch payload in viewer.history is faster and matches the visible layer
-        exactly, especially when erasing masks that already existed when the
-        page was loaded.  The global timeline only receives a lightweight
-        paint_history marker so Ctrl+Z order is still preserved.
+        Brush strokes can arrive many times per second when the user draws short
+        strokes.  Pushing one page-undo marker for every release makes the UI
+        stall in bursts.  Consecutive brush records on the same page/layer are
+        merged for a short window, while area/magic-paint records still create
+        their own undo boundary.
         """
         if viewer is None or record is None:
             return False
         try:
             self.bind_paint_viewer(viewer)
             history = self.paint_history
+            target_page = self._resolve_page_idx(page_idx=page_idx)
+            kind_s = str(kind or "")
+            reason_s = self._paint_reason(kind, reason)
+            is_brush_record = bool(isinstance(record, dict) and record.get("_brush_record"))
+            try:
+                target_item = record.get("target_item") if isinstance(record, dict) else None
+                layer_id = self._paint_layer_id_for_record(viewer, target_item=target_item, kind=kind)
+            except Exception:
+                layer_id = "paint_layer:final_paint" if str(kind_s).lower() == "final_paint" else "paint_layer:mask"
+
+            merged = False
+            if is_brush_record and history:
+                try:
+                    import time as _time
+                    now = _time.time()
+                except Exception:
+                    now = 0.0
+                try:
+                    merge_info = getattr(self, "_last_brush_paint_record_merge", None)
+                    merge_window_ms = max(250, min(int(getattr(self, "paint_brush_undo_merge_window_ms", 1100) or 1100), 2500))
+                    recent = bool(merge_info and (now - float(merge_info.get("time", 0.0) or 0.0)) * 1000.0 <= merge_window_ms)
+                    same = bool(
+                        recent
+                        and int(merge_info.get("page_idx", -999999)) == int(target_page)
+                        and str(merge_info.get("layer_id", "")) == str(layer_id)
+                        and str(merge_info.get("kind", "")) == str(kind_s)
+                        and str(merge_info.get("reason", "")) == str(reason_s)
+                    )
+                    idx = int(merge_info.get("history_index", -1)) if merge_info else -1
+                    if same and 0 <= idx < len(history):
+                        prev = history[idx]
+                        if isinstance(prev, dict) and prev.get("_brush_record"):
+                            prev_patches = prev.setdefault("patches", [])
+                            new_patches = list(record.get("patches") or [])
+                            if new_patches:
+                                prev_patches.extend(new_patches)
+                                # Keep the current runtime target/layer metadata up to date.
+                                prev["target_item"] = record.get("target_item", prev.get("target_item"))
+                                prev["kind"] = record.get("kind", prev.get("kind")) or kind
+                                merged = True
+                                try:
+                                    viewer.history = history
+                                except Exception:
+                                    pass
+                                self._last_brush_paint_record_merge = {
+                                    "time": now,
+                                    "page_idx": int(target_page),
+                                    "layer_id": str(layer_id),
+                                    "kind": str(kind_s),
+                                    "reason": str(reason_s),
+                                    "history_index": idx,
+                                }
+                                self._audit(
+                                    "UNDO_MANAGER_MERGE_BRUSH_PAINT_RECORD",
+                                    page_idx=int(target_page),
+                                    kind=str(kind_s),
+                                    layer_id=str(layer_id),
+                                    reason=str(reason_s),
+                                    merged_patch_count=len(prev_patches),
+                                    added_patch_count=len(new_patches),
+                                    merge_window_ms=int(merge_window_ms),
+                                    throttle_ms=100,
+                                )
+                                return True
+                except Exception:
+                    merged = False
+
             history.append(record)
             try:
                 limit = max(1, int(max_history or 80))
@@ -1329,13 +1395,30 @@ class YSBUndoManager:
             except Exception:
                 pass
             ok = self.push_paint_marker(kind=kind, reason=reason, page_idx=page_idx, mode=mode, clear_redo=True)
+            try:
+                if is_brush_record:
+                    import time as _time
+                    self._last_brush_paint_record_merge = {
+                        "time": _time.time(),
+                        "page_idx": int(target_page),
+                        "layer_id": str(layer_id),
+                        "kind": str(kind_s),
+                        "reason": str(reason_s),
+                        "history_index": len(history) - 1,
+                    }
+                else:
+                    self._last_brush_paint_record_merge = None
+            except Exception:
+                pass
             self._audit(
                 "UNDO_MANAGER_PUSH_PAINT_RECORD_LEGACY",
-                page_idx=self._resolve_page_idx(page_idx=page_idx),
+                page_idx=int(target_page),
                 kind=str(kind or ""),
-                reason=self._paint_reason(kind, reason),
+                layer_id=str(layer_id),
+                reason=reason_s,
                 marker_ok=bool(ok),
                 history_len=len(history),
+                brush_merge_ready=bool(is_brush_record),
                 throttle_ms=100,
             )
             return bool(ok)

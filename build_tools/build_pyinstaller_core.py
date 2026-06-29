@@ -72,6 +72,8 @@ COMIC_TEXT_DETECTOR_DIR = THIRD_PARTY_DIR / "comic_text_detector"
 LOCAL_RUNTIME_DIR = PROJECT_ROOT / "local_runtime"
 PADDLEOCR_WORKER_FILE = LOCAL_RUNTIME_DIR / "paddle_ocr_worker.py"
 MANGA_OCR_WORKER_FILE = LOCAL_RUNTIME_DIR / "manga_ocr_worker.py"
+GPU_PROBE_WORKER_FILE = LOCAL_RUNTIME_DIR / "gpu_probe_worker.py"
+LOCAL_LAMA_WORKER_FILE = LOCAL_RUNTIME_DIR / "local_lama_worker.py"
 OCR_WORKER_REQUIREMENTS = PROJECT_ROOT / "requirements" / "ocr_worker.txt"  # legacy compatibility
 PADDLE_OCR_WORKER_REQUIREMENTS = PROJECT_ROOT / "requirements" / "paddle_ocr_worker.txt"
 MANGA_OCR_WORKER_REQUIREMENTS = PROJECT_ROOT / "requirements" / "manga_ocr_worker.txt"
@@ -79,6 +81,7 @@ PORTABLE_PYTHON_VERSION = os.environ.get("YSB_PORTABLE_PYTHON_VERSION", "3.11.9"
 PORTABLE_PYTHON_ZIP_NAME = f"python-{PORTABLE_PYTHON_VERSION}-embed-amd64.zip"
 PORTABLE_PYTHON_URL = f"https://www.python.org/ftp/python/{PORTABLE_PYTHON_VERSION}/{PORTABLE_PYTHON_ZIP_NAME}"
 RUNTIME_CACHE_DIR = BUILD_TOOLS_DIR / "runtime_cache"
+PIP_BOOTSTRAP_PACKAGE = os.environ.get("YSB_PIP_BOOTSTRAP_PACKAGE", "pip<26").strip() or "pip<26"
 PADDLEOCR_MODELS_DIR = LOCAL_MODELS_DIR / "paddleocr"
 LAMA_MODELS_DIR = LOCAL_MODELS_DIR / "lama"
 MANGA_OCR_MODELS_DIR = LOCAL_MODELS_DIR / "manga_ocr"
@@ -93,6 +96,20 @@ LAUNCHER_NAME = "YSB_Launcher"
 
 DATA_SEP = ";" if os.name == "nt" else ":"
 VALID_EDITIONS = {"lite", "local"}
+
+# Development/test-only optional modules must never be frozen into release builds.
+# They may exist in the source tree for BAT/source-run diagnostics, but Lite/Local
+# packages must not contain them.
+DEV_TEST_EXCLUDE_MODULES = [
+    "ysb_devtools",
+    "ysb_devtools.simulation_courses",
+    "ysb_devtools.simulation_panel",
+    "ysb_devtools.simulation_report",
+    "ysb_devtools.simulation_runner",
+    "ysb_devtools.simulation_steps",
+    "ysb_test_addon",
+]
+DEV_TEST_PACKAGE_NAMES = {"ysb_devtools", "ysb_test_addon"}
 
 
 def log(line: str = "") -> None:
@@ -332,6 +349,9 @@ def run_command(args: list[str], label: str) -> None:
     env = os.environ.copy()
     env.setdefault("PYTHONUTF8", "1")
     env.setdefault("PYTHONIOENCODING", "utf-8")
+    env.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
+    env.setdefault("PIP_NO_PYTHON_VERSION_WARNING", "1")
+    env.setdefault("PIP_NO_INPUT", "1")
 
     proc = subprocess.Popen(
         args,
@@ -505,8 +525,13 @@ def common_heavy_excludes() -> list[str]:
     ]
 
 
+def dev_test_excludes() -> list[str]:
+    """Modules that are allowed in the source tree but forbidden in release builds."""
+    return list(DEV_TEST_EXCLUDE_MODULES)
+
+
 def lite_excludes() -> list[str]:
-    return common_heavy_excludes() + [
+    return common_heavy_excludes() + dev_test_excludes() + [
         "pandas",
         "tkinter",
         "_tkinter",
@@ -540,7 +565,7 @@ def lite_excludes() -> list[str]:
 
 
 def local_excludes() -> list[str]:
-    return common_heavy_excludes() + [
+    return common_heavy_excludes() + dev_test_excludes() + [
         "tkinter",
         "_tkinter",
         "tcl",
@@ -611,7 +636,7 @@ def launcher_hidden_imports() -> list[str]:
 
 
 def launcher_excludes() -> list[str]:
-    return [
+    return dev_test_excludes() + [
         "PyQt6",
         "cv2",
         "numpy",
@@ -826,13 +851,38 @@ def cleanup_runtime_leftovers(package_dir: Path) -> None:
     for pattern in ("ysb_startup_*.log", "ysb_runtime_debug*.log"):
         for path in package_dir.glob(pattern):
             remove_path(path)
-    local_runtime = package_dir / "local_runtime"
-    if local_runtime.exists():
-        for name in RUNTIME_LEFTOVER_NAMES:
-            remove_path(local_runtime / name)
-        for pattern in ("ysb_startup_*.log", "ysb_runtime_debug*.log", "ysb_paddle_ocr_worker*.log", "ysb_manga_ocr_worker*.log"):
-            for path in local_runtime.glob(pattern):
-                remove_path(path)
+    for local_runtime in (package_dir / "local_runtime", package_dir / "local_runtime_exe"):
+        if local_runtime.exists():
+            for name in RUNTIME_LEFTOVER_NAMES:
+                remove_path(local_runtime / name)
+            for pattern in ("ysb_startup_*.log", "ysb_runtime_debug*.log", "ysb_paddle_ocr_worker*.log", "ysb_manga_ocr_worker*.log"):
+                for path in local_runtime.glob(pattern):
+                    remove_path(path)
+
+
+def cleanup_dev_test_artifacts(package_dir: Path) -> None:
+    """Remove optional source-only dev/test packages from release folders.
+
+    PyInstaller is already told to exclude these modules.  This second pass is
+    a safety net for onedir builds or accidental data-copy rules.
+    """
+    if not package_dir.exists():
+        return
+    for path in list(package_dir.rglob("*")):
+        if path.name in DEV_TEST_PACKAGE_NAMES:
+            remove_path(path)
+
+
+def assert_no_dev_test_artifacts(package_dir: Path) -> None:
+    if not package_dir.exists():
+        return
+    leaked = []
+    for path in package_dir.rglob("*"):
+        if path.name in DEV_TEST_PACKAGE_NAMES:
+            leaked.append(path)
+    if leaked:
+        rels = ", ".join(str(p.relative_to(package_dir)) for p in leaked[:10])
+        raise RuntimeError(f"Development/test package leaked into release build: {rels}")
 
 
 def prepare_lite_package() -> None:
@@ -848,6 +898,8 @@ def prepare_lite_package() -> None:
     shutil.copy2(lite_exe, lite_stage / lite_exe.name)
     shutil.copy2(launcher_exe, lite_stage / launcher_exe.name)
     cleanup_runtime_leftovers(lite_stage)
+    cleanup_dev_test_artifacts(lite_stage)
+    assert_no_dev_test_artifacts(lite_stage)
 
     cleanup_intermediate_outputs()
 
@@ -935,9 +987,12 @@ def _install_worker_dependencies(requirements_file: Path, target_site_packages: 
         sys.executable,
         "-m",
         "pip",
+        "--disable-pip-version-check",
         "install",
         "--upgrade",
         "--no-warn-script-location",
+        "--no-warn-conflicts",
+        "--prefer-binary",
         "--target",
         str(target_site_packages),
         "-r",
@@ -945,6 +1000,37 @@ def _install_worker_dependencies(requirements_file: Path, target_site_packages: 
     ]
     run_command(args, f"Installing portable {label} dependencies")
 
+
+
+
+def _prepare_pip_bootstrap_wheels(runtime_stage: Path) -> None:
+    """Bundle a pip wheel for Python-free online runtime installs.
+
+    Local EXE portable worker Pythons intentionally do not need pip installed in
+    their site-packages.  CUDA runtime repair/install uses this wheel as a small
+    bootstrap tool and then downloads heavy packages online into --target
+    folders such as local_runtime_exe/torch_cuda_runtime.
+    """
+    wheel_dir = runtime_stage / "_bootstrap_wheels"
+    remove_path(wheel_dir)
+    wheel_dir.mkdir(parents=True, exist_ok=True)
+    args = [
+        sys.executable,
+        "-m",
+        "pip",
+        "--disable-pip-version-check",
+        "download",
+        "--only-binary=:all:",
+        "--no-deps",
+        "--dest",
+        str(wheel_dir),
+        PIP_BOOTSTRAP_PACKAGE,
+    ]
+    run_command(args, "Downloading bundled pip bootstrap wheel")
+    wheels = sorted(wheel_dir.glob("pip-*.whl"), key=lambda p: p.name.lower())
+    if not wheels:
+        raise RuntimeError(f"Bundled pip bootstrap wheel was not created in {wheel_dir}")
+    log(f"Bundled pip bootstrap wheel: {wheels[-1].name}")
 
 def _prepare_portable_worker_runtime(runtime_root: Path, worker_file: Path, requirements_file: Path, label: str) -> None:
     """Prepare one isolated portable Python runtime for a Local OCR worker.
@@ -989,15 +1075,26 @@ def copy_local_ocr_runtime(local_stage: Path) -> None:
     The main Local EXE keeps comic_text_detector and LaMa frozen, but OCR
     engines with large/dynamic dependency stacks run outside PyInstaller.
 
-    Final layout:
-    - local_runtime/paddle/paddle_ocr_worker.py
-    - local_runtime/paddle/python/python.exe
-    - local_runtime/manga_ocr/manga_ocr_worker.py
-    - local_runtime/manga_ocr/python/python.exe
+    Final Local EXE layout:
+    - local_runtime_exe/gpu_probe_worker.py
+    - local_runtime_exe/paddle/paddle_ocr_worker.py
+    - local_runtime_exe/paddle/python/python.exe
+    - local_runtime_exe/manga_ocr/manga_ocr_worker.py
+    - local_runtime_exe/manga_ocr/python/python.exe
+    
+    The legacy local_runtime folder is reserved for source/test runs.  Frozen
+    Local packages keep all managed install/probe targets in local_runtime_exe.
     """
-    runtime_stage = local_stage / "local_runtime"
+    runtime_stage = local_stage / "local_runtime_exe"
     remove_path(runtime_stage)
     runtime_stage.mkdir(parents=True, exist_ok=True)
+
+    _prepare_pip_bootstrap_wheels(runtime_stage)
+
+    if GPU_PROBE_WORKER_FILE.exists():
+        shutil.copy2(GPU_PROBE_WORKER_FILE, runtime_stage / GPU_PROBE_WORKER_FILE.name)
+    if LOCAL_LAMA_WORKER_FILE.exists():
+        shutil.copy2(LOCAL_LAMA_WORKER_FILE, runtime_stage / LOCAL_LAMA_WORKER_FILE.name)
 
     _prepare_portable_worker_runtime(
         runtime_stage / "paddle",
@@ -1034,7 +1131,7 @@ def copy_optional_local_model_folder(src: Path, local_stage: Path, relative_dest
 
 
 def copy_manga_ocr_model_cache_to_runtime(local_stage: Path) -> None:
-    """Copy Manga OCR model cache into local_runtime/manga_ocr/model_cache.
+    """Copy Manga OCR model cache into local_runtime_exe/manga_ocr/model_cache.
 
     The development/source tree keeps the downloaded model under
     local_models/manga_ocr, but the packaged Local build should not expose a
@@ -1042,7 +1139,7 @@ def copy_manga_ocr_model_cache_to_runtime(local_stage: Path) -> None:
     travel together.
     """
     src = MANGA_OCR_MODELS_DIR
-    runtime_root = local_stage / "local_runtime" / "manga_ocr"
+    runtime_root = local_stage / "local_runtime_exe" / "manga_ocr"
     dst = runtime_root / "model_cache"
     remove_path(dst)
 
@@ -1080,13 +1177,15 @@ def prepare_local_package() -> None:
 
     # Manga OCR is a default Local OCR engine. Keep its model cache inside the
     # Manga OCR runtime folder, just like an engine-private runtime asset:
-    #   local_runtime/manga_ocr/model_cache/huggingface/...
+    #   local_runtime_exe/manga_ocr/model_cache/huggingface/...
     # Do not create a separate local_models folder in the final package.
     # If the model cache is missing, fail the Local build instead of creating
     # a half-working package.
     copy_manga_ocr_model_cache_to_runtime(local_stage)
 
     cleanup_runtime_leftovers(local_stage)
+    cleanup_dev_test_artifacts(local_stage)
+    assert_no_dev_test_artifacts(local_stage)
 
     cleanup_intermediate_outputs()
 

@@ -1,4 +1,7 @@
 @echo off
+set PIP_DISABLE_PIP_VERSION_CHECK=1
+set PIP_NO_PYTHON_VERSION_WARNING=1
+set PIP_NO_INPUT=1
 setlocal EnableExtensions EnableDelayedExpansion
 
 REM ==========================================================
@@ -69,11 +72,11 @@ if not exist "%VENV_PY%" (
 call "%VENV_ACT%"
 if errorlevel 1 goto ACTIVATE_FAIL
 
-python -m pip install --upgrade pip
+python -m pip --disable-pip-version-check install --upgrade pip
 if errorlevel 1 goto INSTALL_FAIL
-if exist "requirements\common.txt" python -m pip install -r "requirements\common.txt"
+if exist "requirements\common.txt" python -m pip --disable-pip-version-check install -r "requirements\common.txt"
 if errorlevel 1 goto INSTALL_FAIL
-if exist "requirements\lite.txt" python -m pip install -r "requirements\lite.txt"
+if exist "requirements\lite.txt" python -m pip --disable-pip-version-check install -r "requirements\lite.txt"
 if errorlevel 1 goto INSTALL_FAIL
 
 python -c "import PyQt6; print('PyQt6 OK')"

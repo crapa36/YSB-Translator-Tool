@@ -26,6 +26,38 @@ from ysb.editions.local.comic_model_manager import (
 )
 
 
+_DLL_DIRECTORY_HANDLES: list[Any] = []
+
+
+def _activate_managed_torch_runtime_path() -> None:
+    """Let the frozen EXE import Torch packages installed by pip --target.
+
+    comic_text_detector runs inside the main process, unlike Paddle/Manga OCR
+    workers. In frozen EXE mode the managed Torch runtime lives outside the
+    PyInstaller bundle, so it must be added to sys.path before import torch.
+    """
+    try:
+        from ysb.editions.local.cuda_runtime_installer import runtime_env_folder
+        target = runtime_env_folder("torch")
+    except Exception:
+        return
+    try:
+        if target.exists():
+            target_text = str(target)
+            if target_text not in sys.path:
+                sys.path.insert(0, target_text)
+            if os.name == "nt" and hasattr(os, "add_dll_directory"):
+                for dll_dir in (target, target / "torch" / "lib"):
+                    try:
+                        if dll_dir.exists():
+                            handle = os.add_dll_directory(str(dll_dir))
+                            _DLL_DIRECTORY_HANDLES.append(handle)
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+
 def _install_numpy_compat_aliases() -> None:
     """Install tiny compatibility aliases for vendored comic_text_detector.
 
@@ -47,20 +79,110 @@ def _install_numpy_compat_aliases() -> None:
 
 
 def _normalize_torch_device(torch_module: Any, device: str) -> str:
-    """Return a safe device string for release builds.
+    """Return a safe device string and enforce explicit CUDA strictly.
 
-    The bundled comic_text_detector model can be saved from a CUDA machine.
-    On CPU-only PCs, torch.load() must map storages to CPU or loading fails with:
-    "Attempting to deserialize object on a CUDA device...".
-
-    For YSB release builds, CPU is the safe default.  CUDA is used only when the
-    caller explicitly asks for it and the current torch runtime reports it as
-    available.
+    Policy:
+    - CUDA: CUDA-only.  Fail if the visible Torch runtime cannot use CUDA.
+    - CPU: CPU-only.
+    - Auto: CPU-safe default, but use CUDA first when the active Torch runtime
+      actually recognizes a CUDA device.
     """
-    dev = str(device or "cpu").strip().lower()
-    if dev in ("cuda", "gpu") and bool(getattr(torch_module, "cuda", None)) and torch_module.cuda.is_available():
+    dev = str(device or "auto").strip().lower()
+    cuda_api = getattr(torch_module, "cuda", None)
+    available = bool(cuda_api is not None and cuda_api.is_available())
+    try:
+        count = int(cuda_api.device_count() or 0) if cuda_api is not None else 0
+    except Exception:
+        count = 0
+    if dev in ("cuda", "gpu", "nvidia"):
+        if available and count > 0:
+            return "cuda"
+        raise RuntimeError(
+            "comic_text_detector CUDA를 사용할 수 없습니다. "
+            f"Torch CUDA 상태: cuda_available={available}, device_count={count}. "
+            "설정 -> 로컬 CUDA 진단에서 런타임 설치/복구를 진행해 주세요."
+        )
+    if dev == "cpu":
+        return "cpu"
+    if available and count > 0:
         return "cuda"
     return "cpu"
+
+
+def _infer_torch_module_device(obj: Any, *, max_depth: int = 3) -> str:
+    """Best-effort model device inference for vendored detector objects."""
+    seen: set[int] = set()
+
+    def _walk(value: Any, depth: int) -> str:
+        if value is None or depth < 0:
+            return ""
+        ident = id(value)
+        if ident in seen:
+            return ""
+        seen.add(ident)
+        try:
+            params = getattr(value, "parameters", None)
+            if callable(params):
+                for param in params():
+                    try:
+                        return str(getattr(param, "device", "") or "")
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        for attr in ("model", "net", "detector", "module", "text_detector", "textdetector", "unet", "dbnet"):
+            try:
+                got = getattr(value, attr, None)
+            except Exception:
+                got = None
+            found = _walk(got, depth - 1)
+            if found:
+                return found
+        return ""
+
+    return _walk(obj, max_depth) or "unknown"
+
+
+def _torch_device_report(torch_module: Any, *, requested: str, resolved: str, detector: Any = None) -> dict[str, Any]:
+    cuda_api = getattr(torch_module, "cuda", None)
+    try:
+        cuda_available = bool(cuda_api is not None and cuda_api.is_available())
+    except Exception:
+        cuda_available = False
+    try:
+        cuda_device_count = int(cuda_api.device_count() or 0) if cuda_api is not None else 0
+    except Exception:
+        cuda_device_count = 0
+    cuda_device_name = ""
+    if cuda_available and cuda_device_count > 0:
+        try:
+            cuda_device_name = str(cuda_api.get_device_name(0) or "")
+        except Exception:
+            cuda_device_name = ""
+    try:
+        current_device = int(cuda_api.current_device()) if cuda_available and cuda_device_count > 0 else -1
+    except Exception:
+        current_device = -1
+    model_device = _infer_torch_module_device(detector) if detector is not None else "unknown"
+    if model_device == "unknown" and str(resolved).startswith("cuda"):
+        model_device = "cuda"
+    elif model_device == "unknown" and str(resolved) == "cpu":
+        model_device = "cpu"
+    return {
+        "engine": "comic_text_detector",
+        "requested_device": str(requested or "auto"),
+        "resolved_device": str(resolved or "unknown"),
+        "actual_device": "cuda" if str(resolved).startswith("cuda") else ("cpu" if str(resolved) == "cpu" else "unknown"),
+        "model_device": model_device,
+        "torch_cuda_available": cuda_available,
+        "torch_cuda_device_count": cuda_device_count,
+        "torch_cuda_device_name": cuda_device_name,
+        "torch_cuda_current_device": current_device,
+        "torch_version": str(getattr(torch_module, "__version__", "") or ""),
+        "torch_cuda_build": str(getattr(getattr(torch_module, "version", None), "cuda", "") or ""),
+        "pid": os.getpid(),
+        "python_executable": sys.executable,
+    }
 
 
 @contextmanager
@@ -97,6 +219,7 @@ class ComicTextDetectorEngine:
         self._detector: Any = None
         self._device: str | None = None
         self._input_size: int | None = None
+        self._last_device_report: dict[str, Any] = {}
 
     def available(self) -> tuple[bool, str]:
         if not is_local_edition():
@@ -106,6 +229,7 @@ class ComicTextDetectorEngine:
         if not self.model_path.exists():
             return False, f"comic_text_detector model not found: {self.model_path}"
         try:
+            _activate_managed_torch_runtime_path()
             import importlib.util
             for mod in ("torch", "cv2", "numpy", "pyclipper", "shapely"):
                 if importlib.util.find_spec(mod) is None:
@@ -135,18 +259,27 @@ class ComicTextDetectorEngine:
         if not ok:
             raise RuntimeError(reason)
 
-        # Release default: do not auto-touch CUDA.  Many user PCs have no CUDA
-        # runtime, partially installed drivers, or CPU-only Torch.  CPU mode is
-        # slower but portable.
-        os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
+        # Do not hide CUDA globally here.  Older builds used
+        # CUDA_VISIBLE_DEVICES="" as a safety switch, but that also made a
+        # correctly installed CUDA runtime report device_count()==0.  Device
+        # safety is handled below by _normalize_torch_device() and the temporary
+        # torch.load(map_location=...) shim instead.
 
+        _activate_managed_torch_runtime_path()
         with self._vendor_import_path():
             _install_numpy_compat_aliases()
             import torch
             from inference import TextDetector
 
-            resolved_device = _normalize_torch_device(torch, device)
+            requested_device = str(device or "auto").strip().lower() or "auto"
+            resolved_device = _normalize_torch_device(torch, requested_device)
             if self._detector is not None and self._device == resolved_device and self._input_size == input_size:
+                self._last_device_report = _torch_device_report(
+                    torch,
+                    requested=requested_device,
+                    resolved=resolved_device,
+                    detector=self._detector,
+                )
                 return self._detector
 
             with _torch_load_map_location(resolved_device):
@@ -158,6 +291,12 @@ class ComicTextDetectorEngine:
                 )
             self._device = resolved_device
             self._input_size = input_size
+            self._last_device_report = _torch_device_report(
+                torch,
+                requested=requested_device,
+                resolved=resolved_device,
+                detector=self._detector,
+            )
             return self._detector
 
     @staticmethod
@@ -198,6 +337,21 @@ class ComicTextDetectorEngine:
             keep_undetected_mask = bool(options.get("keep_undetected_mask", True))
 
             detector = self._load_detector(input_size=input_size, device=device)
+            device_report = dict(getattr(self, "_last_device_report", {}) or {})
+            try:
+                print(
+                    ">>> [Local OCR] comic_text_detector device: "
+                    f"requested={device_report.get('requested_device', device)}, "
+                    f"resolved={device_report.get('resolved_device', 'unknown')}, "
+                    f"actual={device_report.get('actual_device', 'unknown')}, "
+                    f"model={device_report.get('model_device', 'unknown')}, "
+                    f"cuda_available={device_report.get('torch_cuda_available', False)}, "
+                    f"cuda_count={device_report.get('torch_cuda_device_count', 0)}, "
+                    f"gpu={device_report.get('torch_cuda_device_name', '')}, "
+                    f"python={device_report.get('python_executable', sys.executable)}"
+                )
+            except Exception:
+                pass
 
             with self._vendor_import_path():
                 _install_numpy_compat_aliases()
@@ -232,7 +386,18 @@ class ComicTextDetectorEngine:
                     blocks=blocks,
                     mask_path=mask_path,
                     refined_mask_path=refined_mask_path,
-                    raw={"mask": mask, "mask_refined": mask_refined, "blocks": block_list},
+                    raw={
+                        "mask": mask,
+                        "mask_refined": mask_refined,
+                        "blocks": block_list,
+                        "device_report": device_report,
+                    },
                 )
         except Exception as exc:
-            return TextDetectionResult(ok=False, engine=self.name, error=str(exc))
+            msg = str(exc)
+            try:
+                if "deserialize object on CUDA device" in msg or "cuda.device_count() is 0" in msg:
+                    msg += " | YSB hint: comic_text_detector checkpoint is CUDA-saved but current Torch cannot see CUDA. Re-run in CPU/Auto mode or install/connect the Torch CUDA runtime. CPU-safe map_location should prevent this in current builds."
+            except Exception:
+                pass
+            return TextDetectionResult(ok=False, engine=self.name, error=msg)

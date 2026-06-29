@@ -68,48 +68,122 @@ def _app_root() -> Path:
         return Path.cwd()
 
 
+def _packaged_runtime_root() -> Path:
+    return _app_root() / ("local_runtime_exe" if getattr(sys, "frozen", False) else "local_runtime")
+
+
 def _external_worker_file() -> Path:
-    root = _app_root()
-    preferred = root / "local_runtime" / "paddle" / "paddle_ocr_worker.py"
+    base = _packaged_runtime_root()
+    preferred = base / "paddle" / "paddle_ocr_worker.py"
     if preferred.exists():
         return preferred
-    return root / "local_runtime" / "paddle_ocr_worker.py"
+    return base / "paddle_ocr_worker.py"
 
 
-def _external_worker_python() -> Path | None:
-    env_python = os.environ.get("YSB_PADDLEOCR_PYTHON")
-    if env_python:
-        candidate = Path(env_python).expanduser()
-        if candidate.exists():
-            return candidate
+def _is_explicit_cuda_device(value: Any) -> bool:
+    return _normalize_device(str(value or "auto")) == "gpu"
+
+
+def _canonical_worker_device(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text.startswith("gpu") or text.startswith("cuda"):
+        return "cuda"
+    if text.startswith("cpu"):
+        return "cpu"
+    if text in ("error", "unavailable"):
+        return text
+    return "unknown"
+
+
+def _resolved_from_device_info(info: dict[str, Any]) -> str:
+    for key in ("resolved_device", "actual_device", "paddle_current_device"):
+        value = info.get(key)
+        resolved = _canonical_worker_device(value)
+        if resolved not in ("unknown", ""):
+            return resolved
+    return "unknown"
+
+
+
+
+def _apply_managed_paddle_runtime_env(env: dict[str, str]) -> dict[str, str]:
+    try:
+        from ysb.editions.local.cuda_runtime_installer import runtime_subprocess_env
+        return runtime_subprocess_env("paddle", env)
+    except Exception:
+        env.setdefault("PYTHONUTF8", "1")
+        env.setdefault("PYTHONIOENCODING", "utf-8")
+        return env
+
+def _external_worker_python(device: str | None = None) -> Path | None:
     root = _app_root()
-    candidates = [
-        # Final Local distribution uses a self-contained embeddable Python
-        # runtime, not a copied venv.  This makes the package portable across
-        # other Windows PCs that do not have Python installed.
-        root / "local_runtime" / "paddle" / "python" / "python.exe",
+    norm_device = _normalize_device(str(device or "auto"))
+    strict_cuda = norm_device == "gpu"
+    explicit_cpu = norm_device == "cpu"
+    candidates: list[Path] = []
 
-        # Backward-compatible/dev fallbacks.
-        root / "local_runtime" / "python" / "python.exe",
-        root / "local_runtime" / "paddle_ocr_venv" / "Scripts" / "python.exe",
-        root / "local_runtime" / "paddle_ocr_venv" / "bin" / "python",
-        root / "local_runtime" / "ocr_venv" / "Scripts" / "python.exe",
-        root / "local_runtime" / "ocr_venv" / "bin" / "python",
-        root / ".venv" / "Scripts" / "python.exe",
-        root / ".venv" / "bin" / "python",
-    ]
-    if not getattr(sys, "frozen", False):
+    # Explicit Device=CUDA is strict: only the program-managed Paddle GPU
+    # runtime is allowed.  Never fall back to .venv/current Python, because
+    # Paddle may silently print "Switching to CPU instead" and still return a
+    # successful OCR result.
+    if strict_cuda or norm_device == "auto":
+        try:
+            from ysb.editions.local.cuda_runtime_installer import runtime_python_path
+            managed_gpu = runtime_python_path("paddle")
+            if managed_gpu.exists():
+                candidates.append(managed_gpu)
+        except Exception:
+            pass
+    if strict_cuda:
+        return candidates[0] if candidates else None
+
+    # Explicit Device=CPU must be a direct CPU path.  Do not probe or reuse the
+    # managed Paddle GPU venv, and do not honor the GPU-specific override.
+    # Auto is the only mode that may prefer the managed CUDA runtime above.
+    env_keys = ("YSB_PADDLEOCR_PYTHON",) if explicit_cpu else ("YSB_PADDLEOCR_PYTHON", "YSB_PADDLE_GPU_PYTHON")
+    for key_name in env_keys:
+        env_python = os.environ.get(key_name)
+        if env_python:
+            candidate = Path(env_python).expanduser()
+            if candidate.exists():
+                candidates.append(candidate)
+
+    base = _packaged_runtime_root()
+    if getattr(sys, "frozen", False):
+        candidates.extend([
+            base / "paddle" / "python" / "python.exe",
+            base / "python" / "python.exe",
+        ])
+    else:
+        candidates.extend([
+            base / "paddle" / "python" / "python.exe",
+            base / "python" / "python.exe",
+            base / "paddle_ocr_venv" / "Scripts" / "python.exe",
+            base / "paddle_ocr_venv" / "bin" / "python",
+            base / "ocr_venv" / "Scripts" / "python.exe",
+            base / "ocr_venv" / "bin" / "python",
+            root / ".venv" / "Scripts" / "python.exe",
+            root / ".venv" / "bin" / "python",
+        ])
         candidates.append(Path(sys.executable))
+    seen: set[str] = set()
     for candidate in candidates:
+        try:
+            key = str(candidate.resolve()).lower()
+        except Exception:
+            key = str(candidate).lower()
+        if key in seen:
+            continue
+        seen.add(key)
         if candidate.exists():
             return candidate
     return None
 
 
-def _should_use_external_worker() -> bool:
-    if os.environ.get("YSB_PADDLEOCR_INTERNAL", "").strip() in ("1", "true", "yes"):
+def _should_use_external_worker(device: str | None = None) -> bool:
+    if os.environ.get("YSB_PADDLEOCR_INTERNAL", "").strip().lower() in ("1", "true", "yes"):
         return False
-    return _external_worker_file().exists() and _external_worker_python() is not None
+    return _external_worker_file().exists() and _external_worker_python(device) is not None
 
 
 class _ExternalPaddleWorkerClient:
@@ -150,15 +224,18 @@ class _ExternalPaddleWorkerClient:
         if self.proc and self.proc.poll() is None:
             return
         worker = _external_worker_file()
-        python = _external_worker_python()
+        python = _external_worker_python(self.device)
         if not worker.exists():
             raise RuntimeError(f"External PaddleOCR worker not found: {worker}")
         if python is None:
-            raise RuntimeError("External PaddleOCR Python runtime not found. local_runtime/paddle/python/python.exe를 확인해 주세요.")
+            if _is_explicit_cuda_device(self.device):
+                raise RuntimeError("PaddleOCR CUDA 런타임을 찾을 수 없습니다. 설정 -> 로컬 CUDA 진단에서 Paddle GPU 런타임 설치/복구를 실행해 주세요.")
+            raise RuntimeError("External PaddleOCR Python runtime not found. local_runtime_exe/paddle/python/python.exe를 확인해 주세요.")
 
         env = os.environ.copy()
         env.setdefault("PYTHONUTF8", "1")
         env.setdefault("PYTHONIOENCODING", "utf-8")
+        env = _apply_managed_paddle_runtime_env(env)
         env.setdefault("FLAGS_use_mkldnn", "0")
         env.setdefault("FLAGS_use_onednn", "0")
         model_dir = _app_root() / "local_models" / "paddleocr"
@@ -225,19 +302,44 @@ class _ExternalPaddleWorkerClient:
             if not line:
                 raise RuntimeError("External PaddleOCR worker stopped without response.")
             data = json.loads(line)
+            device_info = dict(data.get("device_info") or {})
+            requested = str(device_info.get("requested_device") or _normalize_device(self.device))
+            resolved = _resolved_from_device_info(device_info)
+            err_text = str(data.get("error") or "")
+            if _is_explicit_cuda_device(self.device) and resolved != "cuda":
+                if resolved == "unknown":
+                    err_text = err_text or (
+                        "PaddleOCR CUDA 실행 장치 확인값이 비어 있습니다 "
+                        f"(worker_python={device_info.get('worker_python') or 'unknown'}, "
+                        f"paddle_current_device={device_info.get('paddle_current_device') or 'unknown'}). "
+                        "Paddle worker가 최신 패치인지 확인하고 프로그램을 완전히 재시작하세요."
+                    )
+                else:
+                    err_text = err_text or (
+                        "PaddleOCR CUDA를 요청했지만 실제 실행 장치가 CUDA가 아닙니다 "
+                        f"(resolved={resolved}). Paddle GPU 런타임 설치/복구가 필요합니다."
+                    )
+                data["ok"] = False
+                data["error"] = err_text
             append_log(
                 self.log_path,
                 "PADDLE OCR RESPONSE",
                 ok=bool(data.get("ok")),
                 line_count=len(data.get("lines") or []),
-                error=str(data.get("error") or ""),
+                error=err_text,
+                requested_device=requested,
+                resolved_device=resolved,
+                actual_device=str(device_info.get("actual_device") or ""),
+                paddle_current_device=str(device_info.get("paddle_current_device") or ""),
+                worker_python=str(device_info.get("worker_python") or ""),
+                fallback_reason=str(device_info.get("fallback_reason") or ""),
                 memory=memory_text(),
             )
             return OcrResult(
                 ok=bool(data.get("ok")),
                 engine="paddleocr_external",
                 lines=list(data.get("lines") or []),
-                error=str(data.get("error") or ""),
+                error=err_text,
                 raw=data,
             )
         except Exception as e:
@@ -790,13 +892,16 @@ class PaddleOcrEngine:
 
             temp_path, should_delete = self._write_temp_image(img_for_ocr, image_path)
             try:
-                if _should_use_external_worker():
+                if _should_use_external_worker(device):
                     res = _get_external_worker_client(lang, device).run_image(temp_path)
                     if scale > 1.01 and res.lines:
                         inv = 1.0 / scale
                         for line in res.lines:
                             line["points"] = [[int(round(x * inv)), int(round(y * inv))] for x, y in line.get("points", [])]
                     return res
+
+                if _is_explicit_cuda_device(device):
+                    raise RuntimeError("PaddleOCR CUDA 런타임을 찾을 수 없습니다. 설정 -> 로컬 CUDA 진단에서 Paddle GPU 런타임 설치/복구를 실행해 주세요.")
 
                 engine = PaddleOcrEngine(language=lang, device=device)._build_engine()
                 lines: list[dict[str, Any]] = []

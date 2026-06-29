@@ -199,7 +199,7 @@ class UndoCommandPushMixin:
                 pass
         return False
 
-    def _ensure_live_text_style_undo(self, items, fields=None, reason="텍스트 스타일 변경"):
+    def _ensure_live_text_style_undo(self, items, fields=None, reason="텍스트 스타일 변경", timeout_ms=None):
         """Start or extend one Command/Diff undo session per continuous style burst."""
         if (
             getattr(self, "_text_undo_restore_lock", False)
@@ -259,7 +259,11 @@ class UndoCommandPushMixin:
                 timer.setSingleShot(True)
                 timer.timeout.connect(self._finish_live_text_style_session)
                 self._live_text_style_timer = timer
-            timer.start(900)
+            try:
+                delay_ms = int(timeout_ms) if timeout_ms is not None else int(getattr(self, "live_text_style_undo_delay_ms", 900) or 900)
+            except Exception:
+                delay_ms = 900
+            timer.start(max(1, min(5000, delay_ms)))
         except Exception:
             pass
         return True

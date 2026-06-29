@@ -5,6 +5,7 @@ import shutil
 import uuid
 from pathlib import Path
 from collections import OrderedDict
+from ysb.core.text_style_limits import clamp_text_line_spacing, clamp_text_letter_spacing, clamp_text_char_scale, positive_scale_factor, qt_font_stretch_value, text_line_height_from_percent
 
 # Source tree root. main_window.py lives at ysb/ui/main_window.py.
 APP_ROOT = Path(__file__).resolve().parents[2]
@@ -38,6 +39,21 @@ from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from ysb.engine.manga_engine import MangaProcessEngine, Config
 from ysb.core.project_store import ProjectStore, PROJECT_FILENAME, YSB_EXTENSION, package_project, append_project_json_to_package, extract_ysb_package, read_ysb_manifest, safe_project_name, clean_workspace_name, unique_dir, unique_dir_with_code_suffix
 from ysb.settings.api_settings import ApiSettingsStore, ApiSettingsDialog, apply_settings_to_config
+
+
+def ysb_apply_readable_bold_to_font(font, enabled):
+    """Apply a moderate text bold weight used by the YSB canvas/editor."""
+    try:
+        if enabled:
+            font.setWeight(QFont.Weight.DemiBold)
+        else:
+            font.setWeight(QFont.Weight.Normal)
+    except Exception:
+        try:
+            font.setBold(bool(enabled))
+        except Exception:
+            pass
+    return font
 
 
 def ysb_combo_diag_log(source, message):
@@ -171,6 +187,38 @@ LOG_PANEL_COLLAPSED_KEY = "log_panel_collapsed"
 DEFAULT_LOG_PANEL_COLLAPSED = True
 SHOW_PATHS_IN_LOG_KEY = "show_paths_in_log"
 SHOW_CACHE_PATHS_IN_SETTINGS_KEY = "show_cache_paths_in_settings"
+OPERATION_MODE_KEY = "operation_mode"
+OPERATION_MODE_PAINT = "paint"
+OPERATION_MODE_CAD = "cad"
+DEFAULT_OPERATION_MODE = OPERATION_MODE_PAINT
+
+
+def normalize_operation_mode(value):
+    """Normalize the global canvas interaction preset.
+
+    paint: left-drag panning + Ctrl/Alt wheel zoom + hold-drag areas.
+    cad: middle-button panning + plain wheel zoom + click-click areas.
+    """
+    v = str(value or DEFAULT_OPERATION_MODE).strip().lower()
+    aliases = {
+        "paint": OPERATION_MODE_PAINT,
+        "painting": OPERATION_MODE_PAINT,
+        "painter": OPERATION_MODE_PAINT,
+        "그림판": OPERATION_MODE_PAINT,
+        "그림판 방식": OPERATION_MODE_PAINT,
+        "cad": OPERATION_MODE_CAD,
+        "캐드": OPERATION_MODE_CAD,
+        "cad 방식": OPERATION_MODE_CAD,
+        "캐드 방식": OPERATION_MODE_CAD,
+    }
+    return aliases.get(v, DEFAULT_OPERATION_MODE)
+
+
+def operation_mode_label(value, lang=None):
+    mode = normalize_operation_mode(value)
+    if str(lang or "").lower().startswith("en"):
+        return "CAD mode" if mode == OPERATION_MODE_CAD else "Paint mode"
+    return "CAD 방식" if mode == OPERATION_MODE_CAD else "그림판 방식"
 
 
 PAGE_DISPLAY_MODE_ORIGINAL = "original_name"
@@ -343,6 +391,22 @@ def translate_ui_text(text, lang=None):
     return UI_EN_KO.get(text, text)
 
 
+def _replace_dynamic_ui_piece(s, src, dst):
+    """Replace UI glossary fragments without corrupting technical words.
+
+    Dynamic message translation is intentionally partial, but short English UI
+    keys such as "To" must not rewrite words like "Torch" in error details.
+    For ASCII word-like keys, replace only whole tokens.  Longer Korean or
+    phrase keys keep the existing substring behavior.
+    """
+    src = str(src or "")
+    if not src:
+        return s
+    if re.fullmatch(r"[A-Za-z0-9_]+", src):
+        return re.sub(r"(?<![A-Za-z0-9_])" + re.escape(src) + r"(?![A-Za-z0-9_])", str(dst), s)
+    return s.replace(src, str(dst))
+
+
 def translate_ui_dynamic_text(text, lang=None):
     """고정 문구가 문장/로그 안에 섞여 있을 때 부분 치환한다.
     사용자 원문/번역문에는 사용하지 않고, UI/알림/로그용으로만 사용한다.
@@ -351,8 +415,7 @@ def translate_ui_dynamic_text(text, lang=None):
     s = str(text)
     if lang == LANG_EN:
         for ko, en in sorted(UI_KO_EN.items(), key=lambda kv: len(kv[0]), reverse=True):
-            if ko and ko in s:
-                s = s.replace(ko, en)
+            s = _replace_dynamic_ui_piece(s, ko, en)
         s = re.sub(r"(\d+)개", r"\1 items", s)
         s = re.sub(r"총\s*(\d+)페이지", r"total \1 page(s)", s)
         s = re.sub(r"(\d+)페이지", r"\1 page(s)", s)
@@ -435,8 +498,7 @@ def translate_ui_dynamic_text(text, lang=None):
         return s
     # 한국어 모드로 돌아갈 때 이미 영어로 바뀐 일부 고정 문구를 복구한다.
     for en, ko in sorted(UI_EN_KO.items(), key=lambda kv: len(kv[0]), reverse=True):
-        if en and en in s:
-            s = s.replace(en, ko)
+        s = _replace_dynamic_ui_piece(s, en, ko)
     return s
 
 
@@ -2255,8 +2317,222 @@ def make_splash_screen():
     return splash
 
 
-class InlineTextEditItem(QGraphicsTextItem):
-    """최종 화면에서 더블클릭으로 직접 수정하는 임시 텍스트 편집기."""
+
+class _InlinePlainTextEditWidget(QPlainTextEdit):
+    """QGraphicsProxyWidget 안에서 실제 입력만 담당하는 가벼운 plain text 편집기."""
+
+    def __init__(self, owner):
+        super().__init__()
+        self.owner = owner
+        self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.setTabChangesFocus(False)
+        self.setAcceptDrops(True)
+        try:
+            self.setFrameShape(QFrame.Shape.NoFrame)
+        except Exception:
+            pass
+        try:
+            self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        except Exception:
+            pass
+        try:
+            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+            self.setAutoFillBackground(False)
+            self.viewport().setAutoFillBackground(False)
+        except Exception:
+            pass
+        try:
+            self.document().setDocumentMargin(0)
+        except Exception:
+            pass
+        try:
+            self.textChanged.connect(lambda: self.owner._schedule_adjust_to_contents(reason='text_changed'))
+        except Exception:
+            pass
+
+    def keyPressEvent(self, event):
+        owner = getattr(self, 'owner', None)
+        if owner is not None and owner._is_alt_modifier_guard_event(event):
+            event.accept()
+            return
+
+        try:
+            key = event.key()
+            mods = event.modifiers()
+        except Exception:
+            key = None
+            mods = Qt.KeyboardModifier.NoModifier
+
+        if owner is not None:
+            if key == Qt.Key.Key_Escape:
+                owner.main_window.finish_inline_text_edit(commit=False)
+                event.accept()
+                return
+            if (
+                key in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+                and mods & Qt.KeyboardModifier.ControlModifier
+            ):
+                try:
+                    owner._inline_trace('INLINE_EDITOR_CTRL_ENTER_COMMIT_REQUEST')
+                except Exception:
+                    pass
+                owner.main_window.finish_inline_text_edit(commit=True, commit_reason='ctrl_enter')
+                event.accept()
+                return
+            if mods & Qt.KeyboardModifier.ControlModifier:
+                if key == Qt.Key.Key_Z and (mods & Qt.KeyboardModifier.ShiftModifier):
+                    owner.perform_inline_local_redo()
+                    event.accept()
+                    return
+                if key == Qt.Key.Key_Z:
+                    owner.perform_inline_local_undo()
+                    event.accept()
+                    return
+                if key == Qt.Key.Key_Y:
+                    owner.perform_inline_local_redo()
+                    event.accept()
+                    return
+                # QGraphicsProxyWidget 안의 QPlainTextEdit가 OS 클립보드만 갱신하고
+                # 메인 창의 텍스트박스 붙여넣기 버퍼는 갱신하지 못하면, 편집기 밖 Ctrl+V가
+                # 예전 텍스트박스 복사본을 붙여넣거나 아무 것도 붙여넣지 못한다.
+                # 내부 글자 복사/잘라내기도 YSB plain-text clipboard로 승격한다.
+                if key in (Qt.Key.Key_C, Qt.Key.Key_X):
+                    if owner.copy_widget_selection_to_plain_clipboard(cut=(key == Qt.Key.Key_X)):
+                        event.accept()
+                        return
+            if owner._handle_inline_text_input_shortcut(event):
+                return
+
+        super().keyPressEvent(event)
+        if owner is not None:
+            owner._schedule_adjust_to_contents(reason='key')
+
+    def inputMethodEvent(self, event):
+        super().inputMethodEvent(event)
+        owner = getattr(self, 'owner', None)
+        if owner is not None:
+            owner._schedule_adjust_to_contents(reason='ime')
+
+    def keyReleaseEvent(self, event):
+        owner = getattr(self, 'owner', None)
+        if owner is not None and owner._is_alt_modifier_guard_event(event):
+            event.accept()
+            return
+        super().keyReleaseEvent(event)
+
+    def focusOutEvent(self, event):
+        super().focusOutEvent(event)
+        owner = getattr(self, 'owner', None)
+        if owner is not None:
+            owner._handle_child_focus_out()
+
+    def dropEvent(self, event):
+        super().dropEvent(event)
+        owner = getattr(self, 'owner', None)
+        if owner is not None:
+            owner._schedule_adjust_to_contents(reason='drop')
+
+
+class _InlineCursorProxy:
+    """전용 인라인 편집기의 외부 호환용 가벼운 커서 객체."""
+
+    def __init__(self, editor, position=None, anchor=None):
+        self.editor = editor
+        try:
+            length = len(editor.toPlainText())
+        except Exception:
+            length = 0
+        self._position = max(0, min(length, int(position if position is not None else getattr(editor, '_v_caret_index', length))))
+        self._anchor = self._position if anchor is None else max(0, min(length, int(anchor)))
+
+    def clearSelection(self):
+        self._anchor = self._position
+
+    def hasSelection(self):
+        return self._anchor != self._position
+
+    def selectionStart(self):
+        return min(self._anchor, self._position)
+
+    def selectionEnd(self):
+        return max(self._anchor, self._position)
+
+    def selectedText(self):
+        try:
+            text = self.editor.toPlainText()
+            return text[self.selectionStart():self.selectionEnd()]
+        except Exception:
+            return ''
+
+    def position(self):
+        return self._position
+
+    def anchor(self):
+        return self._anchor
+
+    def setPosition(self, pos, mode=None):
+        try:
+            length = len(self.editor.toPlainText())
+        except Exception:
+            length = 0
+        pos = max(0, min(length, int(pos)))
+        extend = False
+        try:
+            extend = mode == QTextCursor.MoveMode.KeepAnchor
+        except Exception:
+            extend = False
+        if not extend:
+            self._anchor = pos
+        self._position = pos
+
+    def select(self, selection_type):
+        try:
+            if selection_type == QTextCursor.SelectionType.Document:
+                self._anchor = 0
+                self._position = len(self.editor.toPlainText())
+        except Exception:
+            pass
+
+    def movePosition(self, operation, mode=QTextCursor.MoveMode.MoveAnchor, n=1):
+        try:
+            n = max(1, int(n or 1))
+        except Exception:
+            n = 1
+        pos = self._position
+        text = self.editor.toPlainText()
+        for _ in range(n):
+            if operation == QTextCursor.MoveOperation.Start:
+                pos = 0
+            elif operation == QTextCursor.MoveOperation.End:
+                pos = len(text)
+            elif operation == QTextCursor.MoveOperation.Left:
+                pos = max(0, pos - 1)
+            elif operation == QTextCursor.MoveOperation.Right:
+                pos = min(len(text), pos + 1)
+            elif operation == QTextCursor.MoveOperation.Up:
+                pos = max(0, pos - 1)
+            elif operation == QTextCursor.MoveOperation.Down:
+                pos = min(len(text), pos + 1)
+            else:
+                break
+        self.setPosition(pos, mode)
+        return True
+
+    def insertText(self, value):
+        self.editor._replace_vertical_selection(str(value or ''))
+        self._position = getattr(self.editor, '_v_caret_index', self._position)
+        self._anchor = self._position
+
+
+class InlineTextEditItem(QGraphicsObject):
+    """최종 화면에서 더블클릭으로 직접 수정하는 YSB 전용 인라인 편집기.
+
+    세로쓰기는 항상 YSB 직접 편집기를 사용한다. 설정에서 가로쓰기 직접 편집기를
+    켜면 가로쓰기 역시 QPlainTextEdit 대신 QGraphicsItem이 직접 글자 배치/커서/클릭
+    위치를 계산한다. 텍스트 입력/커서/선택은 편집기에서 처리하고, 이펙트/변형/최종
+    조판은 기존 TypesettingItem 렌더 경로를 그대로 사용한다.
+    """
 
     def __init__(self, main_window, target_item, scene_rect):
         super().__init__()
@@ -2264,6 +2540,27 @@ class InlineTextEditItem(QGraphicsTextItem):
         self.target_item = target_item
         self._closing = False
         self._adjusting = False
+        self._inline_adjust_queued = False
+        self._edit = None
+        self._edit_proxy = None
+        self._bounds = QRectF(0, 0, 1, 1)
+        # 편집 종료 직후 QGraphicsView가 마지막 caret 프레임을 한 번 더 그리는 경우가 있다.
+        # cleanup 단계에서 이 플래그를 켜면, scene에서 제거되기 전이라도 paint()가 즉시 no-op이 된다.
+        self._inline_paint_suppressed = False
+        self._vertical_layout_cache = None
+        self._vertical_drag_selecting = False
+        self._v_preedit_text = ''
+        # IME preedit can replace an active selection before commitString arrives.
+        # Keep a small state flag so the later commit is treated as the same edit
+        # instead of a second unrelated undo step.
+        self._v_ime_selection_preedit_active = False
+        self._v_cursor_visible = True
+        # Direct inline editor vertical navigation must follow the visual caret
+        # coordinate, not the raw character offset.  Center/right aligned lines
+        # have different visual starts, so Up/Down in horizontal writing keeps
+        # a desired X, and Left/Right in vertical writing keeps a desired Y.
+        self._v_desired_caret_x = None
+        self._v_desired_caret_y = None
 
         d = target_item.data
         self.original_text = str(d.get('translated_text', '') or '')
@@ -2271,9 +2568,6 @@ class InlineTextEditItem(QGraphicsTextItem):
         if self.align not in ('left', 'center', 'right'):
             self.align = 'center'
 
-        # 편집기는 현재 보이는 실제 텍스트 bounds에서 시작한다.
-        # 세로 기준은 top을 유지해서 사용자가 편집 중 텍스트가 튀어 보이지 않게 하고,
-        # 완료 시에는 이 bounds 자체가 새 텍스트 영역이 된다.
         self.anchor_y = float(scene_rect.y())
         if self.align == 'right':
             self.anchor_x = float(scene_rect.right())
@@ -2282,61 +2576,110 @@ class InlineTextEditItem(QGraphicsTextItem):
         else:
             self.anchor_x = float(scene_rect.x())
 
-        self.document().setDocumentMargin(0)
         self.setZValue(5000)
-
-        self.letter_spacing = self._style_int(d.get('letter_spacing', 0), 0, -500, 500)
-        self.line_spacing_pct = self._style_int(d.get('line_spacing', 100), 100, 50, 300)
-        self.char_width_pct = self._style_int(d.get('char_width', 100), 100, 10, 300)
-        self.char_height_pct = self._style_int(d.get('char_height', 100), 100, 10, 300)
+        self.letter_spacing = clamp_text_letter_spacing(d.get('letter_spacing', 0), 0)
+        self.line_spacing_pct = clamp_text_line_spacing(d.get('line_spacing', 100), 100)
+        self.char_width_pct = clamp_text_char_scale(d.get('char_width', 100), 100)
+        self.char_height_pct = clamp_text_char_scale(d.get('char_height', 100), 100)
+        self.writing_direction = self._normalize_inline_writing_direction(d.get('writing_direction', 'horizontal'))
+        try:
+            self._inline_edit_scene_rect = QRectF(scene_rect)
+        except Exception:
+            self._inline_edit_scene_rect = QRectF(0, 0, 1, 1)
+        self._inline_fixed_edit_bounds = QRectF(
+            0, 0,
+            max(1.0, float(self._inline_edit_scene_rect.width())),
+            max(1.0, float(self._inline_edit_scene_rect.height())),
+        )
 
         font = QFont(d.get('font_family') or main_window.cb_font.currentFont().family())
         font.setPixelSize(int(d.get('font_size', main_window.sb_font_size.value()) or main_window.sb_font_size.value()))
-        font.setBold(bool(d.get('bold', False)))
+        ysb_apply_readable_bold_to_font(font, bool(d.get('bold', False)))
         font.setItalic(bool(d.get('italic', False)))
         self._base_font = QFont(font)
         self._apply_inline_font_metrics(font)
-        self.setFont(font)
-        try:
-            self.document().setDefaultFont(font)
-        except Exception:
-            pass
-        self._apply_inline_height_transform()
+        self._inline_font = QFont(font)
 
         color = QColor(str(d.get('text_color') or '#000000'))
         if not color.isValid():
             color = QColor('#000000')
-        self.setDefaultTextColor(color)
-
-        # 더블클릭 직접 편집 배경은 글자색의 보색을 기본으로 잡는다.
-        # 흰 글자 + 흰 반투명 배경처럼 글자가 묻히는 경우를 막기 위해,
-        # 보색 대비가 약한 회색 계열은 명도 기준으로 검정/흰색 쪽으로 보정한다.
+        self._inline_text_color = QColor(color)
+        stroke_color = QColor(str(d.get('stroke_color') or '#FFFFFF'))
+        if not stroke_color.isValid():
+            stroke_color = QColor('#FFFFFF')
+        self._inline_stroke_color = QColor(stroke_color)
+        self._inline_stroke_width = self._style_int(d.get('stroke_width', 0), 0, 0, 200)
+        self._inline_double_stroke_enabled = bool(d.get('double_stroke_enabled', False))
+        self._inline_double_stroke_color = QColor(str(d.get('double_stroke_color') or '#000000'))
+        if not self._inline_double_stroke_color.isValid():
+            self._inline_double_stroke_color = QColor('#000000')
+        self._inline_double_stroke_width = self._style_int(d.get('double_stroke_width', 0), 0, 0, 200)
         self.inline_edit_bg_color = self._make_inline_edit_background_color(color)
         self.inline_edit_border_color = self._make_inline_edit_border_color(self.inline_edit_bg_color)
 
-        # 자동 줄내림으로 들어간 명시적 개행을 그대로 보존한다.
-        self.setPlainText(self.original_text)
-        self.apply_text_alignment()
-
-        self.document().contentsChanged.connect(self.adjust_to_contents)
-        self.adjust_to_contents()
-
-        self.setTextInteractionFlags(Qt.TextInteractionFlag.TextEditorInteraction)
-        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsFocusable, True)
-
-        # QTextDocument 기본 Undo는 alignment/auto-resize 보정과 섞일 때
-        # Ctrl+Z가 글자 복원이 아니라 커서 이동/서식 undo처럼 보일 수 있다.
-        # 인라인 편집 중에는 YSB 전역 Undo와도 분리해야 하므로,
-        # 별도의 가벼운 텍스트 스냅샷 Undo/Redo를 사용한다.
-        self._inline_undo_stack = []
-        self._inline_redo_stack = []
-        self._inline_snapshot_lock = False
         try:
-            self.document().setUndoRedoEnabled(False)
+            use_direct_horizontal = bool(getattr(main_window, 'use_direct_inline_text_editor_horizontal', True))
         except Exception:
-            pass
+            use_direct_horizontal = True
+        self._inline_direct_editor = bool(self._is_vertical_writing() or use_direct_horizontal)
+        # 호환을 위해 기존 변수명은 유지하지만, 이제 True는 'YSB 직접 편집기 사용'을 뜻한다.
+        self._vertical_editor = self._inline_direct_editor
+        if self._vertical_editor:
+            self._v_text = self.original_text
+            self._v_caret_index = len(self._v_text)
+            self._v_selection_anchor = self._v_caret_index
+            self._v_undo_stack = []
+            self._v_redo_stack = []
+            self._v_document = QTextDocument()
+            self._v_document.setPlainText(self._v_text)
+            self.setAcceptedMouseButtons(Qt.MouseButton.LeftButton | Qt.MouseButton.RightButton)
+            self.setAcceptHoverEvents(True)
+            # 직접 편집기 내부에서는 도구/이동 커서보다 텍스트 삽입 커서가 우선이다.
+            # QGraphicsView/아이템 커서 override가 남아 있으면 사용자가 에디터 내부를
+            # 클릭해도 커서를 옮길 수 있는 상태인지 알아보기 어렵다.
+            try:
+                self.setCursor(Qt.CursorShape.IBeamCursor)
+            except Exception:
+                pass
+            try:
+                self._blink_timer = QTimer(self)
+                self._blink_timer.timeout.connect(self._toggle_vertical_cursor_visible)
+                self._blink_timer.start(530)
+            except Exception:
+                self._blink_timer = None
+        else:
+            self._edit = _InlinePlainTextEditWidget(self)
+            try:
+                self._edit.setCursor(Qt.CursorShape.IBeamCursor)
+                self.setCursor(Qt.CursorShape.IBeamCursor)
+            except Exception:
+                pass
+            self._apply_widget_style()
+            self._edit.setUndoRedoEnabled(False)
+            self._edit.setPlainText(self.original_text)
+            self.apply_text_alignment()
+            self._edit.setUndoRedoEnabled(True)
+            try:
+                self._edit.document().clearUndoRedoStacks(QTextDocument.Stacks.UndoAndRedoStacks)
+            except Exception:
+                pass
+            self._edit_proxy = QGraphicsProxyWidget(self)
+            self._edit_proxy.setWidget(self._edit)
+            self._edit_proxy.setPos(0, 0)
 
-        self.setFocus(Qt.FocusReason.MouseFocusReason)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsFocusable, True)
+        if self._vertical_editor:
+            try:
+                self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemAcceptsInputMethod, True)
+            except Exception:
+                pass
+        # QGraphicsObject/QGraphicsItem에는 QWidget의 setFocusPolicy()가 없다.
+        # 여기서 AttributeError가 나면 에디터 생성 자체가 중단되어 가로/세로 모두
+        # 편집기가 뜨지 않는다. 포커스 가능 여부는 ItemIsFocusable 플래그와
+        # setFocus() 호출로 처리한다.
+        self._schedule_adjust_to_contents(reason='init')
+
+    _FONT_METRICS_CACHE = {}
 
     @staticmethod
     def _style_int(value, default, min_value=None, max_value=None):
@@ -2350,29 +2693,148 @@ class InlineTextEditItem(QGraphicsTextItem):
             out = min(int(max_value), out)
         return out
 
+    @classmethod
+    def _cached_font_metrics(cls, font):
+        """QFontMetrics 생성 비용을 줄이기 위한 편집기 전용 캐시.
+
+        첫 직접 편집기 오픈 때 같은 폰트/크기/자간/폭 조합의 metrics를 반복 생성하면
+        짧은 멈칫거림이 생길 수 있다. QFontMetrics는 읽기 전용으로만 쓰므로 같은 폰트
+        키에서는 재사용한다.
+        """
+        try:
+            f = QFont(font)
+        except Exception:
+            f = QFont()
+        try:
+            key = f.toString()
+        except Exception:
+            key = str(f.family())
+        cache = getattr(cls, '_FONT_METRICS_CACHE', None)
+        if cache is None:
+            cls._FONT_METRICS_CACHE = {}
+            cache = cls._FONT_METRICS_CACHE
+        fm = cache.get(key)
+        if fm is None:
+            try:
+                # 너무 오래 켜둔 세션에서도 무한히 늘지 않게 간단히 상한을 둔다.
+                if len(cache) > 64:
+                    cache.clear()
+            except Exception:
+                pass
+            fm = QFontMetrics(f)
+            cache[key] = fm
+        return fm
+
+    @staticmethod
+    def _normalize_inline_writing_direction(value):
+        text = str(value or 'horizontal').strip().lower()
+        if text in ('vertical', 'v', '세로', '세로쓰기'):
+            return 'vertical'
+        return 'horizontal'
+
+    def _is_vertical_writing(self):
+        return self._normalize_inline_writing_direction(getattr(self, 'writing_direction', 'horizontal')) == 'vertical'
+
     def _apply_inline_font_metrics(self, font):
-        """최종 렌더 텍스트의 자간/가로 비율을 인라인 편집기에도 최대한 반영한다."""
         try:
             spacing_type = QFont.SpacingType.AbsoluteSpacing
         except AttributeError:
             spacing_type = getattr(QFont, 'AbsoluteSpacing', None)
         try:
-            if spacing_type is not None:
-                font.setLetterSpacing(spacing_type, float(getattr(self, 'letter_spacing', 0)))
+            font.setLetterSpacing(spacing_type, float(getattr(self, 'letter_spacing', 0) or 0))
         except Exception:
             pass
         try:
-            font.setStretch(int(getattr(self, 'char_width_pct', 100) or 100))
+            font.setStretch(qt_font_stretch_value(getattr(self, 'char_width_pct', 100), 100))
         except Exception:
             pass
 
-    def _apply_inline_height_transform(self):
-        """QTextDocument에는 문자 세로 비율이 없어 편집기 아이템을 세로 스케일링한다."""
+    @staticmethod
+    def _color_luma(color):
         try:
-            sy = max(0.1, min(3.0, float(getattr(self, 'char_height_pct', 100) or 100) / 100.0))
-            tr = QTransform()
-            tr.scale(1.0, sy)
-            self.setTransform(tr, False)
+            return (0.299 * color.red()) + (0.587 * color.green()) + (0.114 * color.blue())
+        except Exception:
+            return 0.0
+
+    @classmethod
+    def _make_inline_edit_background_color(cls, text_color):
+        try:
+            color = QColor(text_color)
+            if not color.isValid():
+                color = QColor('#000000')
+        except Exception:
+            color = QColor('#000000')
+        complement = QColor(255 - color.red(), 255 - color.green(), 255 - color.blue(), 190)
+        text_luma = cls._color_luma(color)
+        bg_luma = cls._color_luma(complement)
+        if abs(text_luma - bg_luma) < 95:
+            if text_luma >= 128:
+                return QColor(18, 18, 18, 190)
+            return QColor(255, 255, 255, 190)
+        complement.setAlpha(190)
+        return complement
+
+    @classmethod
+    def _make_inline_edit_border_color(cls, bg_color):
+        try:
+            color = QColor(bg_color)
+            if not color.isValid():
+                color = QColor(80, 80, 80)
+        except Exception:
+            color = QColor(80, 80, 80)
+        if cls._color_luma(color) >= 128:
+            border = color.darker(145)
+        else:
+            border = color.lighter(170)
+        border.setAlpha(230)
+        return border
+
+    def _inline_trace(self, event, **fields):
+        """Inline editor trace for selection/preview mismatch debugging."""
+        try:
+            main = getattr(self, 'main_window', None)
+            if main is None or not hasattr(main, 'audit_boundary_event'):
+                return
+            item = getattr(self, 'target_item', None)
+            data = getattr(item, 'data', {}) if item is not None else {}
+            main.audit_boundary_event(
+                event,
+                text_id=data.get('id') if isinstance(data, dict) else None,
+                editor_text_len=len(str(self.toPlainText() or '')),
+                writing_direction=getattr(self, 'writing_direction', None),
+                editor_pos=f"[{float(self.pos().x()):.2f}, {float(self.pos().y()):.2f}]",
+                editor_bounds=f"[{float(self.boundingRect().x()):.2f}, {float(self.boundingRect().y()):.2f}, {float(self.boundingRect().width()):.2f}, {float(self.boundingRect().height()):.2f}]",
+                **fields,
+            )
+        except Exception:
+            pass
+
+    def _apply_widget_style(self):
+        if self._edit is None:
+            return
+        try:
+            self._edit.setFont(QFont(getattr(self, '_inline_font', QFont())))
+        except Exception:
+            pass
+        try:
+            pal = self._edit.palette()
+            pal.setColor(QPalette.ColorRole.Text, QColor(getattr(self, '_inline_text_color', QColor('#000000'))))
+            pal.setColor(QPalette.ColorRole.Base, QColor(0, 0, 0, 0))
+            self._edit.setPalette(pal)
+            self._edit.viewport().setPalette(pal)
+        except Exception:
+            pass
+        try:
+            color = QColor(getattr(self, '_inline_text_color', QColor('#000000')))
+            self._edit.setStyleSheet(
+                "QPlainTextEdit {"
+                "background: transparent;"
+                "border: 0px;"
+                "padding: 3px 4px;"
+                f"color: rgba({color.red()}, {color.green()}, {color.blue()}, {color.alpha()});"
+                "selection-background-color: rgba(80, 160, 255, 120);"
+                "}"
+            )
         except Exception:
             pass
 
@@ -2394,8 +2856,12 @@ class InlineTextEditItem(QGraphicsTextItem):
             pass
 
     def apply_text_alignment(self):
+        if self._vertical_editor:
+            self.invalidate_vertical_layout()
+            self.update()
+            return
         try:
-            cursor = QTextCursor(self.document())
+            cursor = QTextCursor(self._edit.document())
             cursor.select(QTextCursor.SelectionType.Document)
             block_format = QTextBlockFormat()
             if self.align == 'right':
@@ -2409,66 +2875,70 @@ class InlineTextEditItem(QGraphicsTextItem):
         except Exception:
             pass
 
-    def _content_path_rect(self):
-        """현재 편집 텍스트가 실제로 차지하는 타이트한 로컬 영역을 계산한다.
+    def boundingRect(self):
+        try:
+            return QRectF(self._bounds)
+        except Exception:
+            return QRectF(0, 0, 1, 1)
 
-        QGraphicsTextItem.boundingRect()는 편집 커서/문서 여백/추가 줄 높이 때문에
-        실제 글자보다 아래쪽이 한 줄 정도 더 남는 경우가 있다. 최종 식자 박스는
-        TypesettingItem과 같은 QPainterPath 기준으로 다시 계산한다.
-        """
-        d = getattr(getattr(self, "target_item", None), "data", {}) or {}
-        text = str(self.toPlainText() or "")
+    def shape(self):
+        path = QPainterPath()
+        path.addRect(self.boundingRect().adjusted(-3, -3, 3, 3))
+        return path
+
+    def invalidate_vertical_layout(self):
+        self._vertical_layout_cache = None
+
+    def _horizontal_content_rect_fast(self):
+        try:
+            font = QFont(getattr(self, '_inline_font', QFont()))
+        except Exception:
+            font = QFont()
+        fm = self._cached_font_metrics(font)
+        try:
+            text = str(self.toPlainText() or '')
+        except Exception:
+            text = ''
         lines = text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
         if not lines:
             lines = ['']
-
-        font = QFont(getattr(self, '_base_font', self.font()))
-        try:
-            font.setBold(bool(d.get('bold', False)))
-            font.setItalic(bool(d.get('italic', False)))
-            # 편집기 표시용 QFont에는 가로 비율/stretch를 적용하지만,
-            # 최종 rect 계산은 TypesettingItem처럼 기본 font + char_width 스케일로 계산해야
-            # 너비가 두 번 적용되지 않는다.
+        max_w = 30.0
+        for line in lines:
             try:
-                font.setStretch(100)
+                max_w = max(max_w, float(fm.horizontalAdvance(str(line))))
             except Exception:
                 pass
-            letter_spacing = int(d.get('letter_spacing', 0) or 0)
-        except Exception:
-            pass
-
         try:
-            line_spacing_pct = max(50, min(300, int(d.get('line_spacing', 100) or 100)))
+            line_spacing_pct = clamp_text_line_spacing(getattr(self, 'line_spacing_pct', 100), 100)
         except Exception:
             line_spacing_pct = 100
         try:
-            char_width_pct = max(10, min(300, int(d.get('char_width', 100) or 100)))
+            _avg_w, tight_line_h = self._horizontal_tight_line_metrics_for_direct_editor(font, fm, 1.0, max(0.10, float(getattr(self, 'char_height_pct', 100) or 100) / 100.0))
         except Exception:
-            char_width_pct = 100
-        try:
-            char_height_pct = max(10, min(300, int(d.get('char_height', 100) or 100)))
-        except Exception:
-            char_height_pct = 100
+            tight_line_h = float(fm.lineSpacing())
+        line_h = max(1.0, abs(text_line_height_from_percent(float(tight_line_h), line_spacing_pct)))
+        h = max(line_h, line_h * max(1, len(lines)))
+        return QRectF(0, 0, max_w, h)
 
-        fm = QFontMetrics(font)
-        line_height = max(1, int(fm.lineSpacing() * (line_spacing_pct / 100.0)))
-        align = getattr(self, 'align', 'center')
-        path, _line_rects = build_typesetting_text_path(lines, font, align, line_height, letter_spacing)
-
-        if char_width_pct != 100 or char_height_pct != 100:
-            tr = QTransform()
-            tr.scale(char_width_pct / 100.0, char_height_pct / 100.0)
-            path = tr.map(path)
-
-        rect = path.boundingRect()
-        if rect.isNull() or rect.width() <= 0 or rect.height() <= 0:
-            # 빈 텍스트/예외 상황용 최소 박스
-            rect = QRectF(0, 0, 1, max(1, fm.height()))
-        return rect
+    def _content_path_rect(self):
+        if self._vertical_editor:
+            layout = self._layout_vertical_text()
+            return QRectF(layout.get('content_rect', QRectF(0, 0, 1, 1)))
+        return QRectF(self._horizontal_content_rect_fast())
 
     def adjusted_scene_rect(self):
-        # 실제 글자 path 기준으로 타이트한 rect를 반환한다.
-        # 완료 후에는 이 rect 자체가 새 텍스트 영역이 된다.
+        if self._vertical_editor:
+            try:
+                layout = self._layout_vertical_text()
+                content = QRectF(layout.get('content_rect', QRectF()))
+                if content.width() > 1 and content.height() > 1:
+                    return self.mapToScene(content).boundingRect()
+            except Exception:
+                pass
+            try:
+                return QRectF(getattr(self, '_inline_edit_scene_rect', QRectF(0, 0, 1, 1)))
+            except Exception:
+                return QRectF(0, 0, 1, 1)
         rect = self._content_path_rect()
         w = max(1.0, float(rect.width()))
         h = max(1.0, float(rect.height()))
@@ -2482,102 +2952,2199 @@ class InlineTextEditItem(QGraphicsTextItem):
         y = float(getattr(self, 'anchor_y', 0.0))
         return QRectF(x, y, w, h)
 
+    def _schedule_adjust_to_contents(self, reason='edit'):
+        try:
+            self.adjust_to_contents()
+        except Exception:
+            pass
+        try:
+            if getattr(self, '_inline_adjust_queued', False):
+                return
+            self._inline_adjust_queued = True
+            QTimer.singleShot(0, self._run_queued_adjust_to_contents)
+        except Exception:
+            pass
+
+    def _run_queued_adjust_to_contents(self):
+        try:
+            self._inline_adjust_queued = False
+            self.adjust_to_contents()
+        except Exception:
+            try:
+                self._inline_adjust_queued = False
+            except Exception:
+                pass
+
+    def prepareGeometryChangeSafe(self):
+        try:
+            self.prepareGeometryChange()
+        except Exception:
+            pass
+
+    def resize(self, width, height):
+        width = max(1.0, float(width))
+        height = max(1.0, float(height))
+        if abs(self._bounds.width() - width) > 0.5 or abs(self._bounds.height() - height) > 0.5:
+            self.prepareGeometryChangeSafe()
+            self._bounds = QRectF(0, 0, width, height)
+            self.invalidate_vertical_layout()
+
     def adjust_to_contents(self):
         if self._adjusting:
             return
         self._adjusting = True
         try:
-            text = self.toPlainText()
-            lines = text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
-            if not lines:
-                lines = ['']
+            if self._vertical_editor:
+                # YSB 직접 편집기는 최초 edit_rect에 고정하지 않는다.
+                # 입력/삭제로 글자 수가 바뀌면 편집 박스도 즉시 커지고 줄어야 한다.
+                width, height = self._direct_editor_desired_local_size()
+                width = max(18.0, float(width))
+                height = max(18.0, float(height))
+                try:
+                    base_rect = QRectF(getattr(self, '_inline_edit_scene_rect', QRectF(0, 0, width, height)))
+                except Exception:
+                    base_rect = QRectF(self.pos().x(), self.pos().y(), width, height)
 
-            fm = QFontMetrics(self.font())
-            max_w = 30.0
-            for line in lines:
-                max_w = max(max_w, float(fm.horizontalAdvance(line)))
+                if self._is_vertical_writing():
+                    # 세로쓰기 align은 left/center/right 값을 위/가운데/아래로 해석한다.
+                    # x 중심은 기존 텍스트 위치에 고정하고, y 기준점만 정렬값에 맞춘다.
+                    x = float(base_rect.center().x()) - width / 2.0
+                    if self.align == 'left':      # 위 정렬
+                        y = float(base_rect.top())
+                    elif self.align == 'right':   # 아래 정렬
+                        y = float(base_rect.bottom()) - height
+                    else:                         # 가운데 정렬
+                        y = float(base_rect.center().y()) - height / 2.0
+                else:
+                    # 가로쓰기 direct editor는 기존 가로 정렬 기준을 유지한다.
+                    if self.align == 'right':
+                        x = float(getattr(self, 'anchor_x', base_rect.right())) - width
+                    elif self.align == 'center':
+                        x = float(getattr(self, 'anchor_x', base_rect.center().x())) - width / 2.0
+                    else:
+                        x = float(getattr(self, 'anchor_x', base_rect.left()))
+                    y = float(getattr(self, 'anchor_y', base_rect.top()))
 
-            # 편집 중에는 실제 텍스트 자체의 가장 긴 줄 기준으로 영역이 실시간 확장된다.
-            width = max_w + 8.0
-            self.setTextWidth(width)
+                old_pos = QPointF(self.pos())
+                old_bounds = QRectF(self.boundingRect())
+                self._inline_fixed_edit_bounds = QRectF(0, 0, width, height)
+                self.setPos(x, y)
+                self.resize(width, height)
+                self.invalidate_vertical_layout()
+                self.update()
+                try:
+                    if (abs(old_bounds.width() - width) > 0.5 or abs(old_bounds.height() - height) > 0.5
+                            or abs(old_pos.x() - x) > 0.5 or abs(old_pos.y() - y) > 0.5):
+                        self._inline_trace('INLINE_EDITOR_RESIZE', reason='adjust_to_contents', width=round(float(width), 2), height=round(float(height), 2), x=round(float(x), 2), y=round(float(y), 2))
+                except Exception:
+                    pass
+                return
 
+            rect = self._horizontal_content_rect_fast()
+            width = max(30.0, float(rect.width())) + 12.0
+            height = max(20.0, float(rect.height())) + 8.0
             if self.align == 'right':
                 x = self.anchor_x - width
             elif self.align == 'center':
                 x = self.anchor_x - width / 2.0
             else:
                 x = self.anchor_x
-
             self.setPos(x, self.anchor_y)
+            self.resize(width, height)
+            if self._edit_proxy is not None:
+                self._edit_proxy.resize(width, height)
+            try:
+                self._edit.setFixedSize(max(1, int(math.ceil(width))), max(1, int(math.ceil(height))))
+            except Exception:
+                pass
             self.apply_text_alignment()
             self.update()
         finally:
             self._adjusting = False
 
-    @staticmethod
-    def _color_luma(color):
-        try:
-            return (0.299 * color.red()) + (0.587 * color.green()) + (0.114 * color.blue())
-        except Exception:
-            return 0.0
+    def _split_vertical_lines(self, text):
+        text = str(text or '')
+        parts = text.split('\n')
+        starts = []
+        pos = 0
+        for i, part in enumerate(parts):
+            starts.append(pos)
+            pos += len(part)
+            if i < len(parts) - 1:
+                pos += 1
+        if not parts:
+            parts = ['']
+            starts = [0]
+        return parts, starts
 
-    @classmethod
-    def _make_inline_edit_background_color(cls, text_color):
-        """텍스트 직접 편집용 반투명 배경색을 글자색 기준으로 계산한다.
+    def _plain_text_with_preedit_for_measurement(self):
+        """Return visible text including the current IME preedit string.
 
-        기본값은 글자색의 보색이다. 다만 회색/무채색 계열은 보색을 내도
-        거의 같은 회색이 되어 글자가 묻힐 수 있으므로, 명도 차가 부족하면
-        밝은 글자에는 어두운 배경, 어두운 글자에는 밝은 배경으로 보정한다.
+        Korean IME composition can show a live 초성/중성 before it is committed.
+        The direct editor used to resize only from committed text, so the translucent
+        editor background and hit area lagged one input behind until the caret moved.
+        Measurement must therefore include the preedit text at the caret position,
+        while the stored document text remains unchanged until commit.
         """
         try:
-            color = QColor(text_color)
-            if not color.isValid():
-                color = QColor('#000000')
+            text = str(self.toPlainText() or '')
         except Exception:
-            color = QColor('#000000')
-
-        complement = QColor(255 - color.red(), 255 - color.green(), 255 - color.blue(), 190)
-        text_luma = cls._color_luma(color)
-        bg_luma = cls._color_luma(complement)
-
-        # 중간 회색처럼 보색만으로 대비가 약한 경우는 명도 기준 배경으로 보정한다.
-        if abs(text_luma - bg_luma) < 95:
-            if text_luma >= 128:
-                return QColor(18, 18, 18, 190)
-            return QColor(255, 255, 255, 190)
-
-        complement.setAlpha(190)
-        return complement
-
-    @classmethod
-    def _make_inline_edit_border_color(cls, bg_color):
+            text = ''
         try:
-            color = QColor(bg_color)
-            if not color.isValid():
-                color = QColor(80, 80, 80)
+            preedit = str(getattr(self, '_v_preedit_text', '') or '')
         except Exception:
-            color = QColor(80, 80, 80)
+            preedit = ''
+        if not preedit:
+            return text
+        try:
+            pos = int(getattr(self, '_v_caret_index', len(text)) or 0)
+        except Exception:
+            pos = len(text)
+        pos = max(0, min(len(text), pos))
+        return text[:pos] + preedit + text[pos:]
 
-        # 배경과 같은 계열의 테두리로 맞추되, 너무 희미하지 않게 명도만 살짝 반대로 민다.
-        if cls._color_luma(color) >= 128:
-            border = color.darker(145)
-        else:
-            border = color.lighter(170)
-        border.setAlpha(230)
-        return border
+
+    def _inline_display_text_with_preedit(self):
+        """Return committed text plus live IME preedit inserted at the caret.
+
+        Important: this string is for *layout/paint/hit-test only*.  It must not be
+        written back to the document until the IME sends commitString().  The older
+        implementation measured the preedit text but painted it as an overlay at the
+        caret, so inserting a Korean 초성 in the middle of a line drew it over the next
+        committed glyph instead of pushing that glyph away.  All direct-editor layout
+        must therefore be based on this display text.
+        """
+        try:
+            text = str(self.toPlainText() or '')
+        except Exception:
+            text = ''
+        try:
+            preedit = str(getattr(self, '_v_preedit_text', '') or '')
+        except Exception:
+            preedit = ''
+        try:
+            caret = int(getattr(self, '_v_caret_index', len(text)) or 0)
+        except Exception:
+            caret = len(text)
+        caret = max(0, min(len(text), caret))
+        if not preedit:
+            return text, text, '', caret, 0
+        display = text[:caret] + preedit + text[caret:]
+        return display, text, preedit, caret, len(preedit)
+
+    def _display_index_for_logical_caret(self, logical_pos, caret=None, preedit_len=None):
+        """Map a committed-text caret offset to display-text offset.
+
+        Offsets after the live IME preedit are shifted by preedit_len because display
+        layout includes the not-yet-committed glyphs.  Offsets before/at the insertion
+        caret are unchanged.
+        """
+        try:
+            pos = int(logical_pos or 0)
+        except Exception:
+            pos = 0
+        try:
+            if caret is None:
+                caret = int(getattr(self, '_v_caret_index', 0) or 0)
+        except Exception:
+            caret = 0
+        try:
+            if preedit_len is None:
+                preedit_len = len(str(getattr(self, '_v_preedit_text', '') or ''))
+        except Exception:
+            preedit_len = 0
+        if preedit_len and pos > int(caret):
+            return pos + int(preedit_len)
+        return pos
+
+    def _logical_index_for_display_char(self, display_index, caret=None, preedit_len=None):
+        """Map a display-text character index to committed-text character index.
+
+        Returns a negative index for live preedit glyphs so selection and commit logic
+        never treat them as real document characters.
+        """
+        try:
+            d = int(display_index or 0)
+        except Exception:
+            d = 0
+        try:
+            if caret is None:
+                caret = int(getattr(self, '_v_caret_index', 0) or 0)
+        except Exception:
+            caret = 0
+        try:
+            if preedit_len is None:
+                preedit_len = len(str(getattr(self, '_v_preedit_text', '') or ''))
+        except Exception:
+            preedit_len = 0
+        if preedit_len and int(caret) <= d < int(caret) + int(preedit_len):
+            return -100000 - (d - int(caret))
+        if preedit_len and d >= int(caret) + int(preedit_len):
+            return d - int(preedit_len)
+        return d
+
+    def _horizontal_tight_line_metrics_for_direct_editor(self, font, fm, sx=1.0, sy=1.0):
+        """Return a visual line height based on real glyph ink, not font line metrics.
+
+        Some comic/display fonts carry very large ascent/descent/lineSpacing values.
+        If the inline editor uses those metrics as the background/selection height,
+        the translucent editor box can become much taller than the visible text.
+        Use QPainterPath glyph bounds as the base and only keep a small safety margin.
+        """
+        try:
+            sx = max(0.10, float(sx or 1.0))
+        except Exception:
+            sx = 1.0
+        try:
+            sy = max(0.10, float(sy or 1.0))
+        except Exception:
+            sy = 1.0
+        heights = []
+        widths = []
+        try:
+            # Include Korean, CJK, latin ascenders/descenders and punctuation-ish shapes.
+            for ch in "가나다라마바사아자차카타파하漢あアイMgypq0123":
+                path = QPainterPath()
+                path.addText(QPointF(0, 0), font, ch)
+                br = path.boundingRect()
+                if not br.isNull() and br.width() > 0 and br.height() > 0:
+                    widths.append(float(br.width()) * sx)
+                    heights.append(float(br.height()) * sy)
+        except Exception:
+            pass
+        try:
+            fm_h = float(fm.height()) * sy
+        except Exception:
+            fm_h = 12.0 * sy
+        try:
+            fm_line = float(fm.lineSpacing()) * sy
+        except Exception:
+            fm_line = fm_h
+        ink_h = max(heights) if heights else max(4.0, fm_h * 0.72)
+        # Keep a little breathing room, but cap against huge font metrics.
+        base_line_h = max(4.0, ink_h * 1.12)
+        metric_cap = max(base_line_h, ink_h * 1.28)
+        base_line_h = min(max(base_line_h, min(fm_h, metric_cap)), max(fm_line, metric_cap), metric_cap)
+        avg_w = max(widths) if widths else max(4.0, float(getattr(fm, 'averageCharWidth', lambda: 8)()) * sx)
+        try:
+            avg_w = max(4.0, min(max(4.0, avg_w), max(4.0, float(fm.averageCharWidth()) * sx * 1.80)))
+        except Exception:
+            avg_w = max(4.0, avg_w)
+        return max(4.0, avg_w), max(4.0, base_line_h)
+
+    def _vertical_tight_cell_metrics_for_direct_editor(self, font, fm, sx=1.0, sy=1.0):
+        """Return tight cell width/height for vertical direct editing.
+
+        The rendered vertical text uses actual glyph cell size as the base so
+        line spacing 50/100/150% feels the same as horizontal text.  The editor
+        must use the same logical cell size for caret/click/selection math.
+        """
+        try:
+            widths = []
+            heights = []
+            for ch in "가漢あ":
+                path = QPainterPath()
+                path.addText(0, 0, font, ch)
+                rect = path.boundingRect()
+                if not rect.isNull() and rect.width() > 0 and rect.height() > 0:
+                    widths.append(float(rect.width()))
+                    heights.append(float(rect.height()))
+            fw = max(1.0, float(fm.height()))
+            fl = max(1.0, float(fm.lineSpacing()))
+            cell_w = min(max(1.0, max(widths) if widths else fw * 0.72), fw) * max(0.10, float(sx or 1.0))
+            cell_h = min(max(1.0, max(heights) if heights else fl * 0.72), fl) * max(0.10, float(sy or 1.0))
+            return max(4.0, cell_w), max(4.0, cell_h)
+        except Exception:
+            return max(4.0, float(fm.height()) * max(0.10, float(sx or 1.0))), max(4.0, float(fm.lineSpacing()) * max(0.10, float(sy or 1.0)))
+
+    def _vertical_column_step_for_direct_editor(self, base_cell_w, line_factor):
+        """Column center advance for vertical line spacing.
+
+        50% means columns nearly touch/overlap, 100% means normal cell pitch,
+        150%+ adds breathing room.  This matches the horizontal line-spacing feel.
+        """
+        try:
+            return max(1.0, float(base_cell_w or 1.0) * float(line_factor or 1.0))
+        except Exception:
+            return max(1.0, float(base_cell_w or 1.0))
+
+    def _vertical_effective_letter_spacing_for_direct_editor(self, base_pitch):
+        try:
+            base = max(1.0, float(base_pitch or 1.0))
+        except Exception:
+            base = 1.0
+        try:
+            raw = float(getattr(self, 'letter_spacing', 0) or 0)
+        except Exception:
+            raw = 0.0
+        safe = max(0.0, base * 0.12)
+        if raw > 0:
+            return raw + safe * 0.35
+        return raw + safe
+
+    def _vertical_space_advance_for_direct_editor(self, ch, pitch):
+        """세로쓰기 직접 편집기의 공백 advance.
+
+        세로쓰기 공백을 글자 1칸으로 두면 단어 사이가 문단처럼 벌어진다.
+        원문 공백은 유지하되, 화면 배치에서는 가로쓰기 띄어쓰기처럼 작은 간격으로 본다.
+        """
+        try:
+            base = max(1.0, float(pitch or 1.0))
+        except Exception:
+            base = 1.0
+        ratio = 0.50 if str(ch or '') == '　' else 0.32
+        return max(1.0, base * ratio)
+
+    def _vertical_char_advance_for_direct_editor(self, ch, pitch):
+        if str(ch or '').isspace() and str(ch or '') != '\n':
+            return self._vertical_space_advance_for_direct_editor(ch, pitch)
+        try:
+            return max(1.0, float(pitch or 1.0))
+        except Exception:
+            return 1.0
+
+    def _vertical_line_advances_for_direct_editor(self, line, pitch):
+        return [self._vertical_char_advance_for_direct_editor(ch, pitch) for ch in str(line or '')]
+
+    def _direct_editor_desired_local_size(self):
+        """Return the live editor box size needed for the current direct-edit text.
+
+        This is deliberately independent from the current boundingRect.  The old direct
+        editor kept the initial edit_rect fixed, so added vertical text could overflow
+        outside the translucent editing box.  Here the size is derived from the current
+        text, font metrics, letter spacing, line spacing, and width/height stretch.
+        """
+        try:
+            font = QFont(getattr(self, '_inline_font', QFont()))
+        except Exception:
+            font = QFont()
+        fm = self._cached_font_metrics(font)
+        sx = positive_scale_factor(getattr(self, 'char_width_pct', 100))
+        sy = positive_scale_factor(getattr(self, 'char_height_pct', 100))
+        line_factor = abs(float(clamp_text_line_spacing(getattr(self, 'line_spacing_pct', 100), 100)) / 100.0)
+        letter_spacing = float(getattr(self, 'letter_spacing', 0) or 0)
+        text = self._plain_text_with_preedit_for_measurement()
+        lines, _starts = self._split_vertical_lines(text)
+        if not lines:
+            lines = ['']
+
+        if self._is_vertical_writing():
+            base_cell_w, base_pitch = self._vertical_tight_cell_metrics_for_direct_editor(font, fm, sx, sy)
+            pitch = max(1.0, base_pitch + self._vertical_effective_letter_spacing_for_direct_editor(base_pitch))
+            if pitch < base_pitch * 0.35:
+                pitch = base_pitch * 0.35
+            column_step = self._vertical_column_step_for_direct_editor(base_cell_w, line_factor)
+            col_count = max(1, len(lines))
+            max_line_h = pitch
+            for line in lines:
+                advances = self._vertical_line_advances_for_direct_editor(line, pitch)
+                max_line_h = max(max_line_h, sum(advances) if advances else pitch)
+            width = base_cell_w + column_step * (col_count - 1) + 14.0
+            height = max_line_h + 14.0
+            return (max(18.0, width), max(18.0, height))
+
+        min_cell_w, base_line_h = self._horizontal_tight_line_metrics_for_direct_editor(font, fm, sx, sy)
+        line_h = max(4.0, float(base_line_h) * line_factor)
+        max_w = min_cell_w
+        for line in lines:
+            line = str(line or '')
+            line_w = 0.0
+            if not line:
+                line_w = min_cell_w
+            for j, ch in enumerate(line):
+                try:
+                    adv = float(fm.horizontalAdvance(ch if ch else ' ')) * sx
+                except Exception:
+                    adv = min_cell_w
+                if ch == ' ':
+                    try:
+                        adv = max(adv, float(fm.horizontalAdvance(' ')) * sx)
+                    except Exception:
+                        pass
+                adv = max(1.0, adv)
+                if j > 0:
+                    line_w += letter_spacing
+                line_w += adv
+            max_w = max(max_w, line_w)
+        width = max_w + 14.0
+        height = line_h * max(1, len(lines)) + 12.0
+        return (max(30.0, width), max(20.0, height))
+
+
+    def _layout_horizontal_direct_text(self):
+        cache_key = (
+            'horizontal-direct',
+            self.toPlainText(),
+            getattr(self, '_v_preedit_text', ''),
+            float(self.boundingRect().width()),
+            float(self.boundingRect().height()),
+            self.align,
+            self.letter_spacing,
+            self.line_spacing_pct,
+            self.char_width_pct,
+            self.char_height_pct,
+            self._inline_font.toString() if hasattr(self, '_inline_font') else '',
+        )
+        if self._vertical_layout_cache and self._vertical_layout_cache.get('key') == cache_key:
+            return self._vertical_layout_cache
+
+        rect = self.boundingRect()
+        pad_x = 5.0
+        pad_y = 5.0
+        font = QFont(getattr(self, '_inline_font', QFont()))
+        fm = self._cached_font_metrics(font)
+        sx = positive_scale_factor(getattr(self, 'char_width_pct', 100))
+        sy = positive_scale_factor(getattr(self, 'char_height_pct', 100))
+        line_factor = abs(float(clamp_text_line_spacing(getattr(self, 'line_spacing_pct', 100), 100)) / 100.0)
+        min_cell_w, base_line_h = self._horizontal_tight_line_metrics_for_direct_editor(font, fm, sx, sy)
+        line_h = max(4.0, float(base_line_h) * line_factor)
+        letter_spacing = float(getattr(self, 'letter_spacing', 0) or 0)
+
+        display_text, logical_text, preedit, preedit_caret, preedit_len = self._inline_display_text_with_preedit()
+        text = display_text
+        logical_len = len(logical_text)
+        lines, starts = self._split_vertical_lines(text)
+        widths = []
+        advances_by_line = []
+        for line in lines:
+            advances = []
+            line_w = 0.0
+            for j, ch in enumerate(str(line or '')):
+                try:
+                    adv = float(fm.horizontalAdvance(ch if ch else ' ')) * sx
+                except Exception:
+                    adv = min_cell_w
+                if ch == ' ':
+                    try:
+                        adv = max(adv, float(fm.horizontalAdvance(' ')) * sx)
+                    except Exception:
+                        pass
+                adv = max(1.0, adv)
+                if j > 0:
+                    line_w += letter_spacing
+                advances.append(adv)
+                line_w += adv
+            if not line:
+                line_w = min_cell_w
+            widths.append(max(min_cell_w, line_w))
+            advances_by_line.append(advances)
+
+        total_h = max(line_h, line_h * max(1, len(lines)))
+        available_h = max(1.0, rect.height() - pad_y * 2.0)
+        y_start = pad_y + (available_h - total_h) / 2.0
+        y_start = max(-rect.height() * 2.0, min(rect.height() * 3.0, y_start))
+
+        display_caret_map = {}
+        char_rects = []
+        content_rect = QRectF()
+        columns = []
+        available_w = max(1.0, rect.width() - pad_x * 2.0)
+        for row, line in enumerate(lines):
+            line = str(line or '')
+            start_index = starts[row] if row < len(starts) else 0
+            line_w = widths[row] if row < len(widths) else min_cell_w
+            if self.align == 'right':
+                x0 = rect.width() - pad_x - line_w
+            elif self.align == 'center':
+                x0 = pad_x + (available_w - line_w) / 2.0
+            else:
+                x0 = pad_x
+            y0 = y_start + row * line_h
+            # Store both display offsets and committed-text offsets.  When IME preedit
+            # is inserted in the middle of a line, display offsets after the caret are
+            # shifted, but cursor navigation must still use committed-text offsets.
+            logical_start = self._logical_index_for_display_char(start_index, preedit_caret, preedit_len)
+            if logical_start < 0:
+                logical_start = preedit_caret
+            display_end = start_index + len(line)
+            if preedit_len and display_end <= preedit_caret:
+                logical_end = display_end
+            elif preedit_len and display_end <= preedit_caret + preedit_len:
+                logical_end = preedit_caret
+            elif preedit_len and display_end > preedit_caret + preedit_len:
+                logical_end = display_end - preedit_len
+            else:
+                logical_end = display_end
+            logical_start = max(0, min(logical_len, int(logical_start)))
+            logical_end = max(logical_start, min(logical_len, int(logical_end)))
+            columns.append({'line': line, 'start': logical_start, 'display_start': start_index, 'length': logical_end - logical_start, 'display_length': len(line), 'x': x0, 'y0': y0, 'pitch': line_h, 'cell_w': min_cell_w, 'line_h': line_h, 'col': row})
+            x = x0
+            display_caret_map[start_index] = QPointF(x0, y0 + line_h / 2.0)
+            advances = advances_by_line[row] if row < len(advances_by_line) else []
+            for j, ch in enumerate(line):
+                adv = advances[j] if j < len(advances) else min_cell_w
+                r = QRectF(x, y0, max(1.0, adv), line_h)
+                char_rects.append((self._logical_index_for_display_char(start_index + j, preedit_caret, preedit_len), ch, r))
+                if content_rect.isNull():
+                    content_rect = QRectF(r)
+                else:
+                    content_rect = content_rect.united(r)
+                x += adv
+                if j < len(line) - 1:
+                    x += letter_spacing
+                display_caret_map[start_index + j + 1] = QPointF(x, y0 + line_h / 2.0)
+            if not line:
+                r = QRectF(x0, y0, min_cell_w, line_h)
+                if content_rect.isNull():
+                    content_rect = QRectF(r)
+                else:
+                    content_rect = content_rect.united(r)
+            if row < len(lines) - 1:
+                display_caret_map[start_index + len(line)] = QPointF(x, y0 + line_h / 2.0)
+                display_caret_map[start_index + len(line) + 1] = QPointF(pad_x, y_start + (row + 1) * line_h + line_h / 2.0)
+
+        display_caret_map[len(text)] = display_caret_map.get(len(text), QPointF(pad_x, y_start + line_h / 2.0))
+        caret_map = {}
+        for logical_pos in range(0, logical_len + 1):
+            if preedit_len and logical_pos == preedit_caret:
+                display_pos = preedit_caret + preedit_len
+            else:
+                display_pos = self._display_index_for_logical_caret(logical_pos, preedit_caret, preedit_len)
+            pnt = display_caret_map.get(display_pos)
+            if pnt is not None:
+                caret_map[logical_pos] = pnt
+        caret_map[logical_len] = caret_map.get(logical_len, display_caret_map.get(len(text), QPointF(pad_x, y_start + line_h / 2.0)))
+        if content_rect.isNull() or content_rect.width() <= 0 or content_rect.height() <= 0:
+            content_rect = QRectF(pad_x, y_start, min_cell_w, line_h)
+        content_rect = content_rect.adjusted(-2, -2, 2, 2)
+        out = {
+            'key': cache_key,
+            'font': font,
+            'fm': fm,
+            'columns': columns,
+            'caret_map': caret_map,
+            'char_rects': char_rects,
+            'content_rect': content_rect,
+            'base_cell_w': min_cell_w,
+            'pitch': line_h,
+            'horizontal_direct': True,
+        }
+        self._vertical_layout_cache = out
+        return out
+
+    def _layout_vertical_text(self):
+        if not self._is_vertical_writing():
+            return self._layout_horizontal_direct_text()
+        cache_key = (
+            self.toPlainText(),
+            getattr(self, '_v_preedit_text', ''),
+            float(self.boundingRect().width()),
+            float(self.boundingRect().height()),
+            self.align,
+            self.letter_spacing,
+            self.line_spacing_pct,
+            self.char_width_pct,
+            self.char_height_pct,
+            self._inline_font.toString() if hasattr(self, '_inline_font') else '',
+        )
+        if self._vertical_layout_cache and self._vertical_layout_cache.get('key') == cache_key:
+            return self._vertical_layout_cache
+
+        rect = self.boundingRect()
+        pad_x = 5.0
+        pad_y = 5.0
+        font = QFont(getattr(self, '_inline_font', QFont()))
+        fm = self._cached_font_metrics(font)
+        sx = positive_scale_factor(getattr(self, 'char_width_pct', 100))
+        sy = positive_scale_factor(getattr(self, 'char_height_pct', 100))
+        base_cell_w, base_pitch = self._vertical_tight_cell_metrics_for_direct_editor(font, fm, sx, sy)
+        pitch = max(1.0, base_pitch + self._vertical_effective_letter_spacing_for_direct_editor(base_pitch))
+        if pitch < base_pitch * 0.35:
+            pitch = base_pitch * 0.35
+        line_factor = abs(float(clamp_text_line_spacing(getattr(self, 'line_spacing_pct', 100), 100)) / 100.0)
+        column_step = self._vertical_column_step_for_direct_editor(base_cell_w, line_factor)
+
+        display_text, logical_text, preedit, preedit_caret, preedit_len = self._inline_display_text_with_preedit()
+        text = display_text
+        logical_len = len(logical_text)
+        lines, starts = self._split_vertical_lines(text)
+        col_count = max(1, len(lines))
+        total_w = base_cell_w + column_step * (col_count - 1)
+        right_x = rect.center().x() + total_w / 2.0 - base_cell_w / 2.0
+
+        columns = []
+        display_caret_map = {}
+        char_rects = []
+        content_rect = QRectF()
+
+        for col, line in enumerate(lines):
+            line = str(line or '')
+            start_index = starts[col] if col < len(starts) else 0
+            x = right_x - col * column_step
+            advances = self._vertical_line_advances_for_direct_editor(line, pitch)
+            line_h = max(pitch, sum(advances) if advances else pitch)
+            available_h = max(1.0, rect.height() - pad_y * 2.0)
+            if self.align == 'left':  # 세로쓰기에서는 위 정렬
+                y0 = pad_y
+            elif self.align == 'right':  # 세로쓰기에서는 아래 정렬
+                y0 = rect.height() - pad_y - line_h
+            else:
+                y0 = pad_y + (available_h - line_h) / 2.0
+            y0 = max(-rect.height() * 2.0, min(rect.height() * 3.0, y0))
+            logical_start = self._logical_index_for_display_char(start_index, preedit_caret, preedit_len)
+            if logical_start < 0:
+                logical_start = preedit_caret
+            display_end = start_index + len(line)
+            if preedit_len and display_end <= preedit_caret:
+                logical_end = display_end
+            elif preedit_len and display_end <= preedit_caret + preedit_len:
+                logical_end = preedit_caret
+            elif preedit_len and display_end > preedit_caret + preedit_len:
+                logical_end = display_end - preedit_len
+            else:
+                logical_end = display_end
+            logical_start = max(0, min(logical_len, int(logical_start)))
+            logical_end = max(logical_start, min(logical_len, int(logical_end)))
+            column = {
+                'line': line,
+                'start': logical_start,
+                'display_start': start_index,
+                'length': logical_end - logical_start,
+                'display_length': len(line),
+                'x': x,
+                'y0': y0,
+                'pitch': pitch,
+                'cell_w': base_cell_w,
+                'line_h': line_h,
+                'col': col,
+                'advances': advances,
+            }
+            columns.append(column)
+            y_cursor = y0
+            display_caret_map[start_index] = QPointF(x, y_cursor)
+            for j, ch in enumerate(line):
+                adv = advances[j] if j < len(advances) else pitch
+                r = QRectF(x - base_cell_w / 2.0, y_cursor, base_cell_w, max(1.0, adv))
+                char_rects.append((self._logical_index_for_display_char(start_index + j, preedit_caret, preedit_len), ch, r))
+                if content_rect.isNull():
+                    content_rect = QRectF(r)
+                else:
+                    content_rect = content_rect.united(r)
+                y_cursor += adv
+                display_caret_map[start_index + j + 1] = QPointF(x, y_cursor)
+            if not line:
+                r = QRectF(x - base_cell_w / 2.0, y0, base_cell_w, pitch)
+                if content_rect.isNull():
+                    content_rect = QRectF(r)
+                else:
+                    content_rect = content_rect.united(r)
+            # newline caret belongs to the visual end of the previous column.
+            if col < len(lines) - 1:
+                display_caret_map[start_index + len(line)] = QPointF(x, y_cursor)
+                display_caret_map[start_index + len(line) + 1] = QPointF(right_x - (col + 1) * column_step, 0)
+
+        # 마지막 커서 보정
+        display_caret_map[len(text)] = display_caret_map.get(len(text), QPointF(right_x, rect.center().y()))
+        caret_map = {}
+        for logical_pos in range(0, logical_len + 1):
+            if preedit_len and logical_pos == preedit_caret:
+                display_pos = preedit_caret + preedit_len
+            else:
+                display_pos = self._display_index_for_logical_caret(logical_pos, preedit_caret, preedit_len)
+            pnt = display_caret_map.get(display_pos)
+            if pnt is not None:
+                caret_map[logical_pos] = pnt
+        caret_map[logical_len] = caret_map.get(logical_len, display_caret_map.get(len(text), QPointF(right_x, rect.center().y())))
+        if content_rect.isNull() or content_rect.width() <= 0 or content_rect.height() <= 0:
+            content_rect = QRectF(right_x - base_cell_w / 2.0, rect.center().y() - pitch / 2.0, base_cell_w, pitch)
+        content_rect = content_rect.adjusted(-2, -2, 2, 2)
+
+        out = {
+            'key': cache_key,
+            'font': font,
+            'fm': fm,
+            'columns': columns,
+            'caret_map': caret_map,
+            'char_rects': char_rects,
+            'content_rect': content_rect,
+            'base_cell_w': base_cell_w,
+            'pitch': pitch,
+        }
+        self._vertical_layout_cache = out
+        return out
+
+    def _selected_range(self):
+        try:
+            a = int(getattr(self, '_v_selection_anchor', 0))
+            b = int(getattr(self, '_v_caret_index', 0))
+            return (min(a, b), max(a, b))
+        except Exception:
+            return (0, 0)
+
+    @staticmethod
+    def _clipboard_plain_text_from_qt_selection(text):
+        # QTextCursor.selectedText() uses U+2029 for paragraph separators.
+        return str(text or '').replace('\u2029', '\n').replace('\r\n', '\n').replace('\r', '\n')
+
+    def _publish_inline_plain_text_clipboard(self, text, reason='copy'):
+        """Publish inline-editor selected text to both OS clipboard and YSB paste buffer.
+
+        The app has two clipboards: OS plain text and the internal text-box clipboard.
+        Copying text *inside* an inline editor must update both, otherwise leaving the
+        editor and pressing Ctrl+V may still paste an older text-box object.
+        """
+        text = self._clipboard_plain_text_from_qt_selection(text)
+        if not text:
+            return False
+        try:
+            QApplication.clipboard().setText(text)
+        except Exception:
+            pass
+        try:
+            main = getattr(self, 'main_window', None)
+            if main is not None and hasattr(main, 'make_text_clipboard_item_from_plain_text'):
+                item = main.make_text_clipboard_item_from_plain_text(text)
+                if item:
+                    main.text_clipboard = [item]
+                    main.text_clipboard_is_plain = True
+                    main.text_paste_pending = False
+                    try:
+                        if getattr(main, 'view', None) is not None and hasattr(main.view, 'clear_paste_preview'):
+                            main.view.clear_paste_preview()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        try:
+            self._inline_trace('INLINE_EDITOR_CLIPBOARD_TEXT_COPY', reason=str(reason or ''), text_len=len(text))
+        except Exception:
+            pass
+        return True
+
+    def copy_widget_selection_to_plain_clipboard(self, cut=False):
+        if self._vertical_editor:
+            return False
+        try:
+            if self._edit is None:
+                return False
+            cursor = self._edit.textCursor()
+            if not cursor.hasSelection():
+                return False
+            text = self._clipboard_plain_text_from_qt_selection(cursor.selectedText())
+            if not text:
+                return False
+            self._publish_inline_plain_text_clipboard(text, reason='cut' if cut else 'copy')
+            if cut:
+                cursor.removeSelectedText()
+                self._edit.setTextCursor(cursor)
+                self._schedule_adjust_to_contents(reason='cut')
+            return True
+        except Exception:
+            return False
+
+    def _copy_direct_selection_to_plain_clipboard(self, cut=False):
+        if not self._vertical_editor:
+            return False
+        a, b = self._selected_range()
+        if not (b > a):
+            return False
+        text = self.toPlainText()[a:b]
+        if not self._publish_inline_plain_text_clipboard(text, reason='cut' if cut else 'copy'):
+            return False
+        if cut:
+            self._replace_vertical_selection('', reason='cut')
+        return True
+
+    def prepare_text_for_commit(self, reason='commit'):
+        """Force pending IME/preedit state into committed text before closing.
+
+        Ctrl+Enter/focus-out used to read toPlainText() while Korean IME still had a
+        live preedit glyph.  That glyph is visible on screen but not in _v_text yet,
+        so the final commit could miss the last edit.  Treat close/commit as an
+        explicit acceptance of the visible preedit.
+        """
+        if self._vertical_editor:
+            try:
+                preedit = str(getattr(self, '_v_preedit_text', '') or '')
+            except Exception:
+                preedit = ''
+            if preedit:
+                try:
+                    self._inline_trace('INLINE_EDITOR_IME_PREEDIT_FORCE_COMMIT', reason=str(reason or ''), preedit_len=len(preedit), caret=int(getattr(self, '_v_caret_index', 0) or 0))
+                except Exception:
+                    pass
+                self._replace_vertical_selection(preedit, push_undo=False, reason='ime-preedit-force-commit')
+            return self.toPlainText()
+        try:
+            im = QApplication.inputMethod()
+            if im is not None and hasattr(im, 'commit'):
+                im.commit()
+        except Exception:
+            pass
+        try:
+            if self._edit is not None:
+                self._edit.document().adjustSize()
+        except Exception:
+            pass
+        return self.toPlainText()
+
+    def _push_vertical_undo_snapshot(self):
+        if not self._vertical_editor:
+            return
+        try:
+            snap = (self.toPlainText(), int(getattr(self, '_v_caret_index', 0)), int(getattr(self, '_v_selection_anchor', 0)))
+            stack = getattr(self, '_v_undo_stack', None)
+            if stack is None:
+                self._v_undo_stack = []
+                stack = self._v_undo_stack
+            if not stack or stack[-1] != snap:
+                stack.append(snap)
+                if len(stack) > 120:
+                    del stack[0:len(stack) - 120]
+            self._v_redo_stack = []
+        except Exception:
+            pass
+
+    def _sync_direct_editor_after_text_change(self, reason='text-change'):
+        """Immediately rebuild the direct editor layout after text changes.
+
+        Without this, inserted characters can appear to sit on top of the old layout
+        until a caret move invalidates/repaints the glyph position table.  Both
+        horizontal and vertical direct editors use the same layout cache, so every
+        insert/delete/paste/IME commit/preedit must invalidate, resize, and repaint now.
+        """
+        try:
+            old_scene_rect = self.mapToScene(self.boundingRect()).boundingRect()
+        except Exception:
+            old_scene_rect = QRectF()
+        try:
+            self.invalidate_vertical_layout()
+        except Exception:
+            pass
+        try:
+            self.adjust_to_contents()
+        except Exception:
+            pass
+        try:
+            self.invalidate_vertical_layout()
+        except Exception:
+            pass
+        try:
+            new_scene_rect = self.mapToScene(self.boundingRect()).boundingRect()
+        except Exception:
+            new_scene_rect = QRectF()
+        try:
+            dirty_local = self.boundingRect().adjusted(-12, -12, 12, 12)
+            self.update(dirty_local)
+        except Exception:
+            try:
+                self.update()
+            except Exception:
+                pass
+        try:
+            dirty_scene = QRectF(old_scene_rect)
+            if dirty_scene.isNull() or dirty_scene.width() <= 0 or dirty_scene.height() <= 0:
+                dirty_scene = QRectF(new_scene_rect)
+            else:
+                dirty_scene = dirty_scene.united(new_scene_rect)
+            dirty_scene = dirty_scene.adjusted(-24, -24, 24, 24)
+            sc = self.scene()
+            if sc is not None:
+                sc.update(dirty_scene)
+        except Exception:
+            pass
+        try:
+            self._inline_trace('INLINE_EDITOR_LIVE_SYNC', reason=reason,
+                               text_len=len(self.toPlainText()),
+                               preedit_len=len(str(getattr(self, '_v_preedit_text', '') or '')),
+                               width=round(float(self.boundingRect().width()), 2),
+                               height=round(float(self.boundingRect().height()), 2))
+        except Exception:
+            pass
+
+    def _restore_vertical_snapshot(self, snap):
+        try:
+            text, caret, anchor = snap
+        except Exception:
+            return
+        self._v_text = str(text or '')
+        self._v_caret_index = max(0, min(len(self._v_text), int(caret)))
+        self._v_selection_anchor = max(0, min(len(self._v_text), int(anchor)))
+        self._v_preedit_text = ''
+        self._v_ime_selection_preedit_active = False
+        try:
+            self._v_document.setPlainText(self._v_text)
+        except Exception:
+            pass
+        self._sync_direct_editor_after_text_change(reason='restore-snapshot')
+        self._update_desired_caret_axis_from_current()
+
+    def _has_vertical_selection(self):
+        a, b = self._selected_range()
+        return b > a
+
+    def _inline_caret_point(self, pos=None):
+        """Return the current visual caret point from the direct inline layout."""
+        try:
+            if pos is None:
+                pos = int(getattr(self, '_v_caret_index', 0) or 0)
+            pos = max(0, min(len(self.toPlainText()), int(pos)))
+            layout = self._layout_vertical_text()
+            caret_map = layout.get('caret_map') or {}
+            p = caret_map.get(pos)
+            if p is not None:
+                return QPointF(p)
+        except Exception:
+            pass
+        try:
+            return QPointF(self.boundingRect().center())
+        except Exception:
+            return QPointF(0.0, 0.0)
+
+    def _update_desired_caret_axis_from_current(self):
+        """Refresh visual navigation target after explicit caret edits/clicks."""
+        try:
+            p = self._inline_caret_point()
+            self._v_desired_caret_x = float(p.x())
+            self._v_desired_caret_y = float(p.y())
+        except Exception:
+            self._v_desired_caret_x = None
+            self._v_desired_caret_y = None
+
+    def _inline_editor_selection_dirty_rect(self):
+        """Return a conservative local dirty rect for the current direct-editor selection.
+
+        Selection/caret drawing is done by this QGraphicsItem, but the main view often runs
+        with BoundingRectViewportUpdate and cached background while zooming/panning.  If only
+        the new caret rect is updated, old selection highlights can visually remain as
+        grey/blue block fragments.  Use the union of selected glyph cells, caret and bounds.
+        """
+        try:
+            a, b = self._selected_range()
+        except Exception:
+            a = b = 0
+        rect = QRectF()
+        try:
+            layout = self._layout_vertical_text()
+            for idx, _ch, r in layout.get('char_rects') or []:
+                try:
+                    if a <= int(idx) < b:
+                        rr = QRectF(r).adjusted(-4, -4, 4, 4)
+                        rect = rr if rect.isNull() else rect.united(rr)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            cr = QRectF(self._vertical_cursor_rect()).adjusted(-12, -12, 12, 12)
+            rect = cr if rect.isNull() else rect.united(cr)
+        except Exception:
+            pass
+        try:
+            br = QRectF(self.boundingRect()).adjusted(-12, -12, 12, 12)
+            if rect.isNull():
+                rect = br
+            else:
+                rect = rect.united(br)
+        except Exception:
+            pass
+        return rect
+
+    def _force_inline_editor_dirty_repaint(self, local_rect=None, reason='selection-caret'):
+        """Force repaint of inline editor dirty area in item, scene and viewport layers."""
+        try:
+            rect = QRectF(local_rect) if local_rect is not None else self._inline_editor_selection_dirty_rect()
+            if rect.isNull() or rect.width() <= 0 or rect.height() <= 0:
+                rect = QRectF(self.boundingRect()).adjusted(-12, -12, 12, 12)
+        except Exception:
+            try:
+                rect = QRectF(self.boundingRect()).adjusted(-12, -12, 12, 12)
+            except Exception:
+                rect = None
+        try:
+            if rect is not None:
+                self.update(QRectF(rect).adjusted(-4, -4, 4, 4))
+            else:
+                self.update()
+        except Exception:
+            try:
+                self.update()
+            except Exception:
+                pass
+        try:
+            scene = self.scene()
+        except Exception:
+            scene = None
+        if scene is not None and rect is not None:
+            try:
+                scene_rect = self.mapToScene(QRectF(rect).adjusted(-8, -8, 8, 8)).boundingRect()
+                scene.update(scene_rect)
+            except Exception:
+                pass
+        try:
+            mw = getattr(self, 'main_window', None)
+            view = getattr(mw, 'view', None) if mw is not None else None
+            if view is not None and hasattr(view, 'viewport'):
+                view.viewport().update()
+        except Exception:
+            pass
+        try:
+            self._inline_trace('INLINE_EDITOR_FORCE_REPAINT', reason=str(reason or ''),
+                               has_rect=bool(rect is not None))
+        except Exception:
+            pass
+
+    def _set_vertical_caret(self, pos, keep_anchor=False, preserve_desired=False):
+        text_len = len(self.toPlainText())
+        old_caret = int(getattr(self, '_v_caret_index', 0) or 0)
+        old_anchor = int(getattr(self, '_v_selection_anchor', old_caret) or old_caret)
+        old_dirty = None
+        old_selection_dirty = None
+        try:
+            old_dirty = QRectF(self._vertical_cursor_rect()).adjusted(-10, -10, 10, 10)
+        except Exception:
+            old_dirty = None
+        try:
+            if old_anchor != old_caret:
+                old_selection_dirty = self._inline_editor_selection_dirty_rect()
+        except Exception:
+            old_selection_dirty = None
+
+        pos = max(0, min(text_len, int(pos)))
+        self._v_caret_index = pos
+        if not keep_anchor:
+            self._v_selection_anchor = pos
+        self._v_preedit_text = ''
+        self._v_ime_selection_preedit_active = False
+        self._v_cursor_visible = True
+        if not preserve_desired:
+            self._update_desired_caret_axis_from_current()
+
+        # 커서/선택 이동만으로는 글자 배치가 바뀌지 않는다. 대신 이전 커서/선택 영역과
+        # 새 커서/선택 영역을 함께 다시 그려야 잔상이 남지 않는다. 특히 Ctrl+A나
+        # 드래그 선택 뒤 방향키로 선택을 접는 경우, 예전 선택 하이라이트가 텍스트
+        # 테두리/커서처럼 남을 수 있으므로 scene/viewport까지 강제로 갱신한다.
+        try:
+            new_dirty = QRectF(self._vertical_cursor_rect()).adjusted(-10, -10, 10, 10)
+            old_selected = old_anchor != old_caret
+            new_selected = int(getattr(self, '_v_selection_anchor', pos) or pos) != pos
+            dirty = QRectF()
+            for r in (old_dirty, old_selection_dirty, new_dirty, self._inline_editor_selection_dirty_rect() if new_selected else None):
+                try:
+                    if r is not None and QRectF(r).isValid():
+                        rr = QRectF(r)
+                        dirty = rr if dirty.isNull() else dirty.united(rr)
+                except Exception:
+                    pass
+            if old_selected or new_selected or bool(keep_anchor):
+                try:
+                    dirty = dirty.united(QRectF(self.boundingRect()).adjusted(-12, -12, 12, 12)) if not dirty.isNull() else QRectF(self.boundingRect()).adjusted(-12, -12, 12, 12)
+                except Exception:
+                    pass
+                self._force_inline_editor_dirty_repaint(dirty, reason='selection-caret-change')
+            elif old_dirty is not None:
+                self._force_inline_editor_dirty_repaint(old_dirty.united(new_dirty), reason='caret-move')
+            else:
+                self._force_inline_editor_dirty_repaint(new_dirty, reason='caret-move')
+        except Exception:
+            self._force_inline_editor_dirty_repaint(reason='caret-fallback')
+
+    def _delete_selection_for_ime_preedit(self):
+        """Remove an active selection when IME preedit starts.
+
+        Korean IME can send only preedit text first (for example a single 초성)
+        and send commitString later.  Native editors still replace the selected
+        range immediately at the first preedit frame.  If we only draw preedit as
+        display_text while keeping the selection text in the document, the 초성
+        appears after the selected range and the old selection remains visible.
+        """
+        if not self._vertical_editor:
+            return False
+        a, b = self._selected_range()
+        if not (b > a):
+            return False
+        text = self.toPlainText()
+        self._push_vertical_undo_snapshot()
+        self._v_text = text[:a] + text[b:]
+        self._v_caret_index = a
+        self._v_selection_anchor = a
+        self._v_ime_selection_preedit_active = True
+        try:
+            self._v_document.setPlainText(self._v_text)
+        except Exception:
+            pass
+        try:
+            self._inline_trace('INLINE_EDITOR_IME_PREEDIT_REPLACED_SELECTION',
+                               removed_len=b - a, caret=a, text_len=len(self._v_text))
+        except Exception:
+            pass
+        return True
+
+    def _replace_vertical_selection(self, insert_text, push_undo=True, reason='text-change'):
+        if not self._vertical_editor:
+            return
+        text = self.toPlainText()
+        a, b = self._selected_range()
+        insert_text = str(insert_text or '')
+        caret = max(0, min(len(text), int(getattr(self, '_v_caret_index', 0) or 0)))
+        # A normal click must mean an insertion caret, not a one-character selection.
+        # Tiny mouse jitter after press used to leave a stale anchor, so the first typed
+        # character replaced/overlapped the next glyph while later characters inserted normally.
+        has_selection = bool(b > a)
+        if not has_selection:
+            a = b = caret
+        action = 'replace' if has_selection else 'insert'
+        if a == b and not insert_text:
+            return
+        if push_undo:
+            self._push_vertical_undo_snapshot()
+        self._v_text = text[:a] + insert_text + text[b:]
+        self._v_caret_index = a + len(insert_text)
+        self._v_selection_anchor = self._v_caret_index
+        self._v_preedit_text = ''
+        self._v_ime_selection_preedit_active = False
+        try:
+            self._v_document.setPlainText(self._v_text)
+        except Exception:
+            pass
+        self._sync_direct_editor_after_text_change(reason=reason)
+        self._update_desired_caret_axis_from_current()
+        try:
+            self._inline_trace('INLINE_EDITOR_TEXT_CHANGE', action=action, inserted_len=len(insert_text), new_len=len(self._v_text), caret=self._v_caret_index)
+        except Exception:
+            pass
+
+    def _delete_vertical_backward(self):
+        if self._has_vertical_selection():
+            self._replace_vertical_selection('')
+            return
+        if self._v_caret_index <= 0:
+            return
+        text = self.toPlainText()
+        i = self._v_caret_index
+        self._push_vertical_undo_snapshot()
+        self._v_text = text[:i - 1] + text[i:]
+        self._v_caret_index = i - 1
+        self._v_selection_anchor = self._v_caret_index
+        try:
+            self._v_document.setPlainText(self._v_text)
+        except Exception:
+            pass
+        self._sync_direct_editor_after_text_change(reason='delete-backward')
+        self._update_desired_caret_axis_from_current()
+
+    def _delete_vertical_forward(self):
+        if self._has_vertical_selection():
+            self._replace_vertical_selection('')
+            return
+        text = self.toPlainText()
+        i = self._v_caret_index
+        if i >= len(text):
+            return
+        self._push_vertical_undo_snapshot()
+        self._v_text = text[:i] + text[i + 1:]
+        self._v_selection_anchor = self._v_caret_index
+        try:
+            self._v_document.setPlainText(self._v_text)
+        except Exception:
+            pass
+        self._sync_direct_editor_after_text_change(reason='delete-forward')
+        self._update_desired_caret_axis_from_current()
+
+    def _vertical_index_from_pos(self, pos):
+        layout = self._layout_vertical_text()
+        if layout.get('horizontal_direct'):
+            lines, starts = self._split_vertical_lines(self.toPlainText())
+            rows = layout.get('columns') or []
+            if not rows:
+                return 0
+            y = float(pos.y())
+            row = min(rows, key=lambda c: abs(y - (float(c.get('y0', 0.0)) + float(c.get('pitch', 1.0)) / 2.0)))
+            line = str(row.get('line') or '')
+            start = int(row.get('start') or 0)
+            char_rects = [(idx, ch, QRectF(r)) for idx, ch, r in (layout.get('char_rects') or []) if start <= int(idx) < start + len(line)]
+            x = float(pos.x())
+            if not char_rects:
+                return start
+            for idx, _ch, r in char_rects:
+                if x < r.center().x():
+                    return int(idx)
+            return start + len(line)
+
+        columns = layout.get('columns') or []
+        if not columns:
+            return 0
+        x = float(pos.x())
+        y = float(pos.y())
+        col = min(columns, key=lambda c: abs(x - float(c.get('x', 0.0))))
+        line = str(col.get('line') or '')
+        start = int(col.get('start') or 0)
+        pitch = max(1.0, float(col.get('pitch') or 1.0))
+        y0 = float(col.get('y0') or 0.0)
+
+        # 공백 슬롯은 글자가 보이지 않기 때문에, 그 안을 클릭한 뒤 입력하면
+        # 새 글자가 '공백 칸 안에 들어간 것처럼' 보인다. 실제 텍스트에는 공백이
+        # 살아 있으므로 커서를 움직이면 다시 띄어쓰기가 살아나는 것처럼 느껴진다.
+        # 세로쓰기에서는 공백 칸 클릭을 기본적으로 '공백 뒤' caret으로 해석해
+        # 공백을 구분자처럼 보존하고, 새 글자가 빈칸을 덮어쓴 것처럼 보이지 않게 한다.
+        try:
+            for idx, ch, r in layout.get('char_rects') or []:
+                idx = int(idx)
+                if not (start <= idx < start + len(line)):
+                    continue
+                rr = QRectF(r)
+                if rr.contains(pos):
+                    if str(ch).isspace() and str(ch) != '\n':
+                        return min(start + len(line), idx + 1)
+                    return idx if y < rr.center().y() else min(start + len(line), idx + 1)
+        except Exception:
+            pass
+
+        # 공백 advance가 일반 글자보다 짧기 때문에 pitch만으로 역산하면
+        # 공백 뒤쪽 클릭에서 커서가 한 칸 밀릴 수 있다. char_rect에 걸리지 않은 위치는
+        # 캐럿 좌표 중 가장 가까운 곳으로 보정한다.
+        try:
+            candidates = []
+            caret_map = layout.get('caret_map') or {}
+            for off in range(0, len(line) + 1):
+                p = caret_map.get(start + off)
+                if p is not None:
+                    candidates.append((abs(float(p.y()) - y), off))
+            if candidates:
+                return start + sorted(candidates, key=lambda pair: pair[0])[0][1]
+        except Exception:
+            pass
+        offset = int(round((y - y0) / pitch))
+        offset = max(0, min(len(line), offset))
+        return start + offset
+
+    def _vertical_cursor_rect(self):
+        layout = self._layout_vertical_text()
+        caret_map = layout.get('caret_map') or {}
+        p = caret_map.get(int(getattr(self, '_v_caret_index', 0)))
+        if p is None:
+            p = QPointF(self.boundingRect().center())
+        if layout.get('horizontal_direct'):
+            line_h = float(layout.get('pitch') or 14.0)
+            thickness = max(2.0, min(5.0, line_h * 0.08))
+            return QRectF(p.x() - thickness / 2.0, p.y() - line_h * 0.48, thickness, line_h * 0.96)
+        cell_w = float(layout.get('base_cell_w') or 10.0)
+        # 세로쓰기 커서는 문장 진행 방향 사이에 놓이는 '가로 커서'가 맞다.
+        # 너무 얇으면 배경/확대율에 묻혀 안 보이므로 최소 높이를 둔다.
+        thickness = max(3.0, min(8.0, cell_w * 0.08))
+        return QRectF(p.x() - cell_w * 0.58, p.y() - thickness / 2.0, cell_w * 1.16, thickness)
+
+    def _toggle_vertical_cursor_visible(self):
+        if not self._vertical_editor:
+            return
+        # QGraphicsScene 안에서는 뷰/툴바가 순간적으로 포커스를 가져가는 일이 있어
+        # hasFocus()만 믿으면 활성 편집기인데도 커서가 사라질 수 있다.
+        self._v_cursor_visible = not bool(getattr(self, '_v_cursor_visible', True))
+        try:
+            self.update(self._vertical_cursor_rect().adjusted(-8, -8, 8, 8))
+        except Exception:
+            self.update()
+
+
+    def cleanup_inline_caret_visuals(self, reason='close'):
+        """Stop caret blinking and repaint the last inline-editor cursor/background area.
+
+        The direct inline editor is a QGraphicsObject.  When Ctrl+Enter/focus-out closes it,
+        the final text item may be refreshed immediately while the last caret frame is still
+        painted in the viewport.  Stop the blink timer, hide the caret/preedit/selection, and
+        explicitly repaint the old cursor/editor rect before the scene item is removed.
+        """
+        try:
+            self._inline_trace('INLINE_EDITOR_CARET_CLEANUP_BEGIN', reason=str(reason or ''))
+        except Exception:
+            pass
+
+        dirty_scene_rects = []
+        try:
+            dirty_scene_rects.append(self.mapToScene(self.boundingRect().adjusted(-12, -12, 12, 12)).boundingRect())
+        except Exception:
+            pass
+        try:
+            dirty_scene_rects.append(self.mapToScene(self._vertical_cursor_rect().adjusted(-12, -12, 12, 12)).boundingRect())
+        except Exception:
+            pass
+        try:
+            if self._edit_proxy is not None:
+                dirty_scene_rects.append(self._edit_proxy.mapToScene(self._edit_proxy.boundingRect().adjusted(-12, -12, 12, 12)).boundingRect())
+        except Exception:
+            pass
+
+        try:
+            timer = getattr(self, '_blink_timer', None)
+            if timer is not None:
+                timer.stop()
+        except Exception:
+            pass
+        try:
+            self._inline_paint_suppressed = True
+            self._closing = True
+            self.setEnabled(False)
+            self.clearFocus()
+        except Exception:
+            pass
+        try:
+            self._v_cursor_visible = False
+            self._v_preedit_text = ''
+            self._v_ime_selection_preedit_active = False
+            self._v_selection_anchor = int(getattr(self, '_v_caret_index', 0) or 0)
+        except Exception:
+            pass
+        try:
+            if self._edit is not None:
+                cursor = self._edit.textCursor()
+                cursor.clearSelection()
+                self._edit.setTextCursor(cursor)
+                self._edit.setCursorWidth(0)
+                self._edit.setVisible(False)
+        except Exception:
+            pass
+        try:
+            if self._edit_proxy is not None:
+                self._edit_proxy.setEnabled(False)
+                self._edit_proxy.setVisible(False)
+        except Exception:
+            pass
+        try:
+            self.prepareGeometryChange()
+        except Exception:
+            pass
+        try:
+            self.setOpacity(0.0)
+        except Exception:
+            pass
+        try:
+            self.setVisible(False)
+        except Exception:
+            pass
+
+        scene = None
+        try:
+            scene = self.scene()
+        except Exception:
+            scene = None
+        for rect in dirty_scene_rects:
+            try:
+                if scene is not None and rect is not None and rect.isValid():
+                    scene.update(QRectF(rect).adjusted(-4, -4, 4, 4))
+                    try:
+                        self._inline_trace(
+                            'INLINE_EDITOR_CARET_REPAINT_OLD_RECT',
+                            reason=str(reason or ''),
+                            x=round(float(QRectF(rect).x()), 2),
+                            y=round(float(QRectF(rect).y()), 2),
+                            w=round(float(QRectF(rect).width()), 2),
+                            h=round(float(QRectF(rect).height()), 2),
+                        )
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        try:
+            mw = getattr(self, 'main_window', None)
+            view = getattr(mw, 'view', None) if mw is not None else None
+            if view is not None and hasattr(view, 'viewport'):
+                view.viewport().update()
+        except Exception:
+            pass
+        try:
+            self._inline_trace('INLINE_EDITOR_CARET_CLEANUP_DONE', reason=str(reason or ''))
+        except Exception:
+            pass
 
     def paint(self, painter, option, widget=None):
+        # 종료 처리 중인 인라인 편집기는 절대 다시 그리지 않는다.
+        # removeItem 직전/직후 Qt가 마지막 paint를 한 번 더 요청하면 파란 caret이 잔상처럼 남을 수 있다.
+        try:
+            if bool(getattr(self, '_inline_paint_suppressed', False)) or bool(getattr(self, '_closing', False)):
+                return
+        except Exception:
+            pass
         bg_rect = self.boundingRect().adjusted(-4, -3, 4, 3)
         painter.save()
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(getattr(self, 'inline_edit_bg_color', QColor(255, 255, 255, 190)))
         painter.drawRoundedRect(bg_rect, 4, 4)
         painter.restore()
-        super().paint(painter, option, widget)
+
+        if self._vertical_editor:
+            self._paint_vertical_editor(painter)
+
+        painter.save()
         pen = QPen(getattr(self, 'inline_edit_border_color', QColor(80, 160, 255)), 1, Qt.PenStyle.DashLine)
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRect(self.boundingRect())
+        painter.restore()
+
+    def _inline_glyph_path(self, ch, rect, font, fm):
+        path = QPainterPath()
+        try:
+            if ch == '\n' or str(ch).isspace():
+                return path
+            raw = QPainterPath()
+            raw.addText(QPointF(0, 0), font, str(ch))
+            br = raw.boundingRect()
+            if br.isNull() or br.width() <= 0 or br.height() <= 0:
+                return path
+            # Final renderer scales glyph height after creating the path.  The editor preview
+            # mirrors that enough to avoid the current "plain QPainter text" mismatch.
+            try:
+                sy = positive_scale_factor(getattr(self, 'char_height_pct', 100))
+            except Exception:
+                sy = 1.0
+            tr = QTransform()
+            tr.translate(float(rect.center().x()), float(rect.center().y()))
+            tr.scale(1.0, sy)
+            tr.translate(-float(br.center().x()), -float(br.center().y()))
+            path = tr.map(raw)
+        except Exception:
+            pass
+        return path
+
+    def _draw_inline_preview_char(self, painter, ch, rect, font):
+        """Draw one lightweight inline-editor preview glyph.
+
+        Deliberately does not draw stroke, double stroke, shadow, gradient, warp, or other
+        final-render effects.  The direct editor must stay responsive while typing, so it only
+        reflects font, size, fill color, letter/line spacing layout, character width, and
+        character height.
+        """
+        try:
+            if ch == '\n' or str(ch).isspace():
+                return
+            rr = QRectF(rect)
+            if rr.width() <= 0 or rr.height() <= 0:
+                return
+            try:
+                sy = positive_scale_factor(getattr(self, 'char_height_pct', 100))
+            except Exception:
+                sy = 1.0
+            # QFont stretch already carries char_width.  Height has no matching QFont knob,
+            # so scale only the painter vertically around the glyph slot center.
+            if abs(sy - 1.0) < 0.015:
+                painter.drawText(rr, Qt.AlignmentFlag.AlignCenter, str(ch))
+                return
+            painter.save()
+            c = rr.center()
+            painter.translate(c)
+            painter.scale(1.0, sy)
+            scaled_rect = QRectF(-rr.width() / 2.0, -rr.height() / (2.0 * sy), rr.width(), rr.height() / sy)
+            painter.drawText(scaled_rect, Qt.AlignmentFlag.AlignCenter, str(ch))
+            painter.restore()
+        except Exception:
+            try:
+                painter.drawText(QRectF(rect), Qt.AlignmentFlag.AlignCenter, str(ch))
+            except Exception:
+                pass
+
+    def _paint_vertical_editor(self, painter):
+        layout = self._layout_vertical_text()
+        font = QFont(layout.get('font', getattr(self, '_inline_font', QFont())))
+        painter.save()
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        except Exception:
+            pass
+        painter.setFont(font)
+
+        sel_a, sel_b = self._selected_range()
+        if sel_b > sel_a:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(80, 160, 255, 95))
+            for idx, _ch, r in layout.get('char_rects') or []:
+                if sel_a <= idx < sel_b:
+                    painter.drawRoundedRect(QRectF(r).adjusted(0, 1, 0, -1), 2, 2)
+
+        # 편집 중 미리보기는 가벼워야 한다. 최종 렌더의 획/이중획/그림자/그라디언트까지
+        # 따라가면 입력할 때마다 QPainterPath와 stroke draw가 반복되어 렉이 생긴다.
+        # 여기서는 사용자가 편집 위치를 판단하는 데 필요한 최소 스타일만 반영한다:
+        # 글자 크기, 색상, 폰트, 행간, 자간, 너비, 높이.
+        painter.setPen(QColor(getattr(self, '_inline_text_color', QColor('#000000'))))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        for idx, ch, r in layout.get('char_rects') or []:
+            if ch == '\n' or str(ch).isspace():
+                continue
+            self._draw_inline_preview_char(painter, str(ch), QRectF(r), font)
+
+        # IME 조합 중인 문자열은 이제 layout 단계에서 실제 본문 사이에 임시 삽입된다.
+        # 여기서 별도로 overlay로 다시 그리면 중간 삽입 때 뒤 글자를 밀지 못하고
+        # 조합 초성이 다음 글자와 겹치거나 중복 표시된다.
+        # 확정 전 preedit는 char_rects에 음수 index로만 들어가며 저장 데이터에는 반영되지 않는다.
+
+        if bool(getattr(self, '_v_cursor_visible', True)):
+            cr = self._vertical_cursor_rect()
+            cursor_color = QColor(getattr(self, '_inline_text_color', QColor('#000000')))
+            if self._color_luma(cursor_color) < 80:
+                cursor_color = QColor(20, 120, 255)
+            cursor_color.setAlpha(245)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(cursor_color)
+            painter.drawRoundedRect(cr, 1.5, 1.5)
+        painter.restore()
+
+    def setFocus(self, reason=Qt.FocusReason.OtherFocusReason):
+        try:
+            super().setFocus(reason)
+        except TypeError:
+            try:
+                super().setFocus()
+            except Exception:
+                pass
+        except Exception:
+            pass
+        if not self._vertical_editor and self._edit is not None:
+            try:
+                self._edit.setFocus(reason)
+            except TypeError:
+                try:
+                    self._edit.setFocus()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        else:
+            self._v_cursor_visible = True
+            self.update()
+
+    def focusInEvent(self, event):
+        try:
+            super().focusInEvent(event)
+        except Exception:
+            pass
+        if self._vertical_editor:
+            self._v_cursor_visible = True
+            try:
+                self.update(self._vertical_cursor_rect().adjusted(-8, -8, 8, 8))
+            except Exception:
+                self.update()
+
+    def focusOutEvent(self, event):
+        try:
+            super().focusOutEvent(event)
+        except Exception:
+            pass
+        if self._vertical_editor:
+            try:
+                self._inline_trace('INLINE_EDITOR_FOCUS_OUT')
+            except Exception:
+                pass
+            self._handle_child_focus_out()
+
+
+    def set_initial_caret_from_scene_pos(self, scene_pos):
+        """Place the inline caret at the text position that was double-clicked.
+
+        Opening the direct editor used to move the caret to the end of the text,
+        even when the user double-clicked a specific word/letter.  Use the same
+        visual hit-test logic as normal clicks after the editor has been sized and
+        positioned, so centered/right-aligned horizontal text and vertical text both
+        land where the user clicked.
+        """
+        try:
+            self.adjust_to_contents()
+        except Exception:
+            pass
+        if self._vertical_editor:
+            try:
+                local = self.mapFromScene(QPointF(scene_pos))
+            except Exception:
+                local = QPointF(0, 0)
+            try:
+                caret = self._vertical_index_from_pos(local)
+            except Exception:
+                caret = len(self.toPlainText())
+            self._set_vertical_caret(caret, keep_anchor=False)
+            try:
+                self._inline_trace('INLINE_EDITOR_INITIAL_CARET_FROM_DOUBLE_CLICK', caret=int(getattr(self, '_v_caret_index', 0)), x=round(float(local.x()), 2), y=round(float(local.y()), 2))
+            except Exception:
+                pass
+            return
+
+        try:
+            if self._edit is None:
+                return
+            try:
+                local = self.mapFromScene(QPointF(scene_pos))
+            except Exception:
+                local = QPointF(0, 0)
+            cursor = self._edit.cursorForPosition(QPoint(int(round(local.x())), int(round(local.y()))))
+            cursor.clearSelection()
+            self._edit.setTextCursor(cursor)
+            try:
+                self._inline_trace('INLINE_EDITOR_WIDGET_INITIAL_CARET_FROM_DOUBLE_CLICK', caret=int(cursor.position()), x=round(float(local.x()), 2), y=round(float(local.y()), 2))
+            except Exception:
+                pass
+        except Exception:
+            try:
+                cursor = self.textCursor()
+                cursor.movePosition(QTextCursor.MoveOperation.End)
+                self.setTextCursor(cursor)
+            except Exception:
+                pass
+
+    def mousePressEvent(self, event):
+        if self._vertical_editor and event.button() == Qt.MouseButton.LeftButton:
+            try:
+                self.setCursor(Qt.CursorShape.IBeamCursor)
+            except Exception:
+                pass
+            self.setFocus(Qt.FocusReason.MouseFocusReason)
+            keep = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            try:
+                local_pos = event.pos()
+            except Exception:
+                local_pos = QPointF(0, 0)
+            # 클릭 위치 계산 직전 최신 레이아웃을 보장한다. 직전 입력/리사이즈가
+            # 아직 queued adjust 상태이면 hit-test가 한 프레임 전 위치를 볼 수 있다.
+            try:
+                self.adjust_to_contents()
+            except Exception:
+                pass
+            caret = self._vertical_index_from_pos(local_pos)
+            self._set_vertical_caret(caret, keep_anchor=keep)
+            try:
+                self._inline_trace('INLINE_EDITOR_MOUSE_CARET_SET', caret=int(caret), x=round(float(local_pos.x()), 2), y=round(float(local_pos.y()), 2), keep=bool(keep))
+            except Exception:
+                pass
+            try:
+                self._v_mouse_press_pos = QPointF(local_pos)
+                self._v_mouse_press_caret = int(caret)
+            except Exception:
+                self._v_mouse_press_pos = None
+                self._v_mouse_press_caret = int(caret)
+            # Only Shift-drag or a real drag beyond threshold creates selection.
+            # Plain click/jitter must leave anchor == caret so the first typed glyph inserts.
+            self._vertical_drag_selecting = bool(keep)
+            event.accept()
+            return
+        try:
+            super().mousePressEvent(event)
+        except Exception:
+            pass
+
+    def hoverEnterEvent(self, event):
+        if self._vertical_editor:
+            try:
+                self.setCursor(Qt.CursorShape.IBeamCursor)
+            except Exception:
+                pass
+            try:
+                event.accept()
+            except Exception:
+                pass
+            return
+        try:
+            super().hoverEnterEvent(event)
+        except Exception:
+            pass
+
+    def hoverMoveEvent(self, event):
+        if self._vertical_editor:
+            try:
+                self.setCursor(Qt.CursorShape.IBeamCursor)
+            except Exception:
+                pass
+            try:
+                event.accept()
+            except Exception:
+                pass
+            return
+        try:
+            super().hoverMoveEvent(event)
+        except Exception:
+            pass
+
+    def mouseMoveEvent(self, event):
+        if self._vertical_editor and bool(event.buttons() & Qt.MouseButton.LeftButton):
+            keep = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            if not keep and not bool(getattr(self, '_vertical_drag_selecting', False)):
+                try:
+                    press = QPointF(getattr(self, '_v_mouse_press_pos', event.pos()))
+                    delta = QPointF(event.pos()) - press
+                    threshold = 4
+                    try:
+                        threshold = QApplication.startDragDistance()
+                    except Exception:
+                        pass
+                    if abs(float(delta.x())) + abs(float(delta.y())) < max(1, int(threshold)):
+                        event.accept()
+                        return
+                except Exception:
+                    event.accept()
+                    return
+                self._vertical_drag_selecting = True
+            self._set_vertical_caret(self._vertical_index_from_pos(event.pos()), keep_anchor=True)
+            event.accept()
+            return
+        try:
+            super().mouseMoveEvent(event)
+        except Exception:
+            pass
+
+    def mouseReleaseEvent(self, event):
+        if self._vertical_editor:
+            self._vertical_drag_selecting = False
+            self._v_mouse_press_pos = None
+            event.accept()
+            return
+        try:
+            super().mouseReleaseEvent(event)
+        except Exception:
+            pass
+
+    def keyPressEvent(self, event):
+        if not self._vertical_editor:
+            try:
+                super().keyPressEvent(event)
+            except Exception:
+                pass
+            return
+
+        if self._is_alt_modifier_guard_event(event):
+            event.accept()
+            return
+        try:
+            key = event.key()
+            mods = event.modifiers()
+        except Exception:
+            key = None
+            mods = Qt.KeyboardModifier.NoModifier
+
+        if key == Qt.Key.Key_Escape:
+            self.main_window.finish_inline_text_edit(commit=False)
+            event.accept()
+            return
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and mods & Qt.KeyboardModifier.ControlModifier:
+            try:
+                self._inline_trace('INLINE_EDITOR_CTRL_ENTER_COMMIT_REQUEST')
+            except Exception:
+                pass
+            self.main_window.finish_inline_text_edit(commit=True, commit_reason='ctrl_enter')
+            event.accept()
+            return
+        # Text-entry shortcuts such as Ctrl+1..0 special symbols belong to the
+        # inline editor, not to the toolbox/global shortcut layer.  Check them before
+        # generic Ctrl handling so they are inserted instead of being swallowed.
+        if self._handle_inline_text_input_shortcut(event):
+            return
+        if mods & Qt.KeyboardModifier.ControlModifier:
+            if key == Qt.Key.Key_Z and (mods & Qt.KeyboardModifier.ShiftModifier):
+                self.perform_inline_local_redo()
+                event.accept()
+                return
+            if key == Qt.Key.Key_Z:
+                self.perform_inline_local_undo()
+                event.accept()
+                return
+            if key == Qt.Key.Key_Y:
+                self.perform_inline_local_redo()
+                event.accept()
+                return
+            if key == Qt.Key.Key_A:
+                self._v_selection_anchor = 0
+                self._v_caret_index = len(self.toPlainText())
+                self.update()
+                event.accept()
+                return
+            if key in (Qt.Key.Key_C, Qt.Key.Key_X):
+                self._copy_direct_selection_to_plain_clipboard(cut=(key == Qt.Key.Key_X))
+                event.accept()
+                return
+            if key == Qt.Key.Key_V:
+                try:
+                    clip = QApplication.clipboard().text()
+                except Exception:
+                    clip = ''
+                if clip:
+                    self._replace_vertical_selection(clip)
+                event.accept()
+                return
+        keep = bool(mods & Qt.KeyboardModifier.ShiftModifier)
+
+        # Ctrl+A/drag처럼 편집기 내부 글자가 선택된 상태에서 방향키를 누르면
+        # 그 순간부터 '전체 선택/범위 선택'은 깨진 것으로 본다.
+        # Shift 없이 방향키를 누른 경우에는 먼저 선택 강조를 접고 caret만 남겨,
+        # 파란 선택 영역이 계속 남아 있는 상태를 막는다.
+        if key in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down) and not keep:
+            try:
+                if self._has_vertical_selection():
+                    a, b = self._selected_range()
+                    collapse_to = a if key in (Qt.Key.Key_Left, Qt.Key.Key_Up) else b
+                    self._set_vertical_caret(collapse_to, keep_anchor=False)
+                    try:
+                        self._inline_trace('INLINE_EDITOR_SELECTION_COLLAPSE_BY_ARROW',
+                                           key=int(key), caret=int(collapse_to),
+                                           selection_start=int(a), selection_end=int(b))
+                    except Exception:
+                        pass
+                    event.accept()
+                    return
+            except Exception:
+                pass
+
+        if key == Qt.Key.Key_Backspace:
+            self._delete_vertical_backward()
+            event.accept()
+            return
+        if key == Qt.Key.Key_Delete:
+            self._delete_vertical_forward()
+            event.accept()
+            return
+        if key == Qt.Key.Key_Space and not (mods & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)):
+            self._replace_vertical_selection(' ')
+            event.accept()
+            return
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self._replace_vertical_selection('\n')
+            event.accept()
+            return
+        if key == Qt.Key.Key_Up:
+            if self._is_vertical_writing():
+                self._set_vertical_caret(self._v_caret_index - 1, keep_anchor=keep)
+            else:
+                self._move_horizontal_line(up=True, keep_anchor=keep)
+            event.accept()
+            return
+        if key == Qt.Key.Key_Down:
+            if self._is_vertical_writing():
+                self._set_vertical_caret(self._v_caret_index + 1, keep_anchor=keep)
+            else:
+                self._move_horizontal_line(up=False, keep_anchor=keep)
+            event.accept()
+            return
+        if key == Qt.Key.Key_Home:
+            text = self.toPlainText()
+            prev_nl = text.rfind('\n', 0, self._v_caret_index)
+            self._set_vertical_caret(prev_nl + 1, keep_anchor=keep)
+            event.accept()
+            return
+        if key == Qt.Key.Key_End:
+            text = self.toPlainText()
+            next_nl = text.find('\n', self._v_caret_index)
+            self._set_vertical_caret(len(text) if next_nl < 0 else next_nl, keep_anchor=keep)
+            event.accept()
+            return
+        if key in (Qt.Key.Key_Left, Qt.Key.Key_Right):
+            if self._is_vertical_writing():
+                self._move_vertical_column(left=(key == Qt.Key.Key_Left), keep_anchor=keep)
+            else:
+                delta = -1 if key == Qt.Key.Key_Left else 1
+                self._set_vertical_caret(self._v_caret_index + delta, keep_anchor=keep)
+            event.accept()
+            return
+
+        text = event.text()
+        if text and not (mods & Qt.KeyboardModifier.ControlModifier) and not (mods & Qt.KeyboardModifier.AltModifier):
+            # Key_Unknown(0) is often an IME composition key.  If there is an active
+            # preedit string, inputMethodEvent owns the text; inserting here can draw
+            # one duplicate/overlapped glyph until the next caret move.
+            try:
+                if int(key or 0) == 0 and str(getattr(self, '_v_preedit_text', '') or ''):
+                    event.accept()
+                    return
+            except Exception:
+                pass
+            self._replace_vertical_selection(text)
+            event.accept()
+            return
+        try:
+            super().keyPressEvent(event)
+        except Exception:
+            pass
+
+    def _line_index_for_caret(self, lines, starts, pos):
+        try:
+            pos = int(pos)
+        except Exception:
+            pos = 0
+        current_line = 0
+        # A caret at the start of the next line is represented by the offset just
+        # after the previous newline.  The old check treated that offset as part
+        # of the previous line, so Up/Down from line starts skipped or inverted
+        # visual rows.  Keep end-of-line on the previous row, but start-of-line
+        # belongs to the current row.
+        for i, start in enumerate(starts):
+            try:
+                line_len = len(lines[i])
+            except Exception:
+                line_len = 0
+            start_i = int(start)
+            end = start_i + int(line_len)
+            if start_i <= pos <= end:
+                current_line = i
+                break
+        return current_line
+
+    def _horizontal_visual_rows(self):
+        """Return horizontal direct-editor rows sorted by what the user sees.
+
+        Text offsets are not enough for Up/Down movement: the offset immediately
+        after a newline is the start of the next visual row, and center/right
+        alignment shifts each row.  Build a visual row list from the layout
+        coordinates so target row selection follows the screen, not raw offsets.
+        """
+        try:
+            layout = self._layout_vertical_text()
+        except Exception:
+            return []
+        if not (layout or {}).get('horizontal_direct'):
+            return []
+        rows = []
+        for order, row in enumerate((layout or {}).get('columns') or []):
+            try:
+                line = str(row.get('line') or '')
+                start = int(row.get('start') or 0)
+                y0 = float(row.get('y0') or 0.0)
+                pitch = max(1.0, float(row.get('pitch') or row.get('line_h') or 1.0))
+                x0 = float(row.get('x') or 0.0)
+                rows.append({
+                    'visual_order': order,
+                    'line': line,
+                    'start': start,
+                    'length': len(line),
+                    'y': y0 + pitch / 2.0,
+                    'x': x0,
+                    'pitch': pitch,
+                })
+            except Exception:
+                continue
+        rows.sort(key=lambda r: (float(r.get('y', 0.0)), int(r.get('start', 0))))
+        return rows
+
+    def _nearest_visual_row_index_for_caret(self, rows, pos):
+        if not rows:
+            return 0
+        try:
+            pos = int(pos)
+        except Exception:
+            pos = 0
+        try:
+            p = self._inline_caret_point(pos)
+            py = float(p.y())
+            return min(range(len(rows)), key=lambda i: (abs(float(rows[i].get('y', 0.0)) - py), abs(int(rows[i].get('start', 0)) - pos)))
+        except Exception:
+            pass
+        for i, row in enumerate(rows):
+            start = int(row.get('start') or 0)
+            end = start + int(row.get('length') or 0)
+            if start <= pos <= end:
+                return i
+        return 0
+
+    def _nearest_caret_in_line_by_axis(self, target_start, target_len, axis_value, axis='x'):
+        layout = self._layout_vertical_text()
+        caret_map = layout.get('caret_map') or {}
+        candidates = []
+        for off in range(0, int(target_len) + 1):
+            idx = int(target_start) + off
+            p = caret_map.get(idx)
+            if p is None:
+                continue
+            try:
+                v = float(p.x()) if axis == 'x' else float(p.y())
+                candidates.append((abs(v - float(axis_value)), off, idx))
+            except Exception:
+                continue
+        if candidates:
+            candidates.sort(key=lambda item: (item[0], item[1]))
+            return int(candidates[0][2])
+        return int(target_start) + min(max(0, int(target_len)), int(target_len))
+
+    def _move_horizontal_line(self, up=True, keep_anchor=False):
+        """Move Up/Down by visual X instead of raw character offset.
+
+        Center/right aligned lines do not share the same local start X.  Using the
+        raw offset makes a caret visually jump to the wrong column.  Keep the
+        desired X while moving vertically, like a normal text editor.  The target
+        row itself is selected from visual Y order, so caret positions at the
+        beginning of lines no longer get mistaken for the previous line.
+        """
+        text = self.toPlainText()
+        lines, starts = self._split_vertical_lines(text)
+        if not lines:
+            return
+        pos = int(getattr(self, '_v_caret_index', 0))
+        try:
+            desired_x = getattr(self, '_v_desired_caret_x', None)
+            if desired_x is None:
+                desired_x = float(self._inline_caret_point(pos).x())
+                self._v_desired_caret_x = desired_x
+        except Exception:
+            desired_x = float(self._inline_caret_point(pos).x())
+
+        rows = self._horizontal_visual_rows()
+        if rows:
+            current_row = self._nearest_visual_row_index_for_caret(rows, pos)
+            target_row = current_row + (-1 if up else 1)
+            if target_row < 0 or target_row >= len(rows):
+                self._set_vertical_caret(pos, keep_anchor=keep_anchor, preserve_desired=True)
+                return
+            row = rows[target_row]
+            target_start = int(row.get('start') or 0)
+            target_len = int(row.get('length') or 0)
+            target_pos = self._nearest_caret_in_line_by_axis(target_start, target_len, desired_x, axis='x')
+            try:
+                if bool(getattr(self, '_inline_caret_trace_enabled', False)):
+                    self._inline_trace('INLINE_EDITOR_CARET_VERTICAL_MOVE',
+                                       direction='up' if up else 'down',
+                                       current_offset=pos,
+                                       current_visual_row=current_row,
+                                       target_visual_row=target_row,
+                                       chosen_offset=target_pos,
+                                       desired_x=round(float(desired_x), 2),
+                                       row_count=len(rows))
+            except Exception:
+                pass
+            self._set_vertical_caret(target_pos, keep_anchor=keep_anchor, preserve_desired=True)
+            return
+
+        current_line = self._line_index_for_caret(lines, starts, pos)
+        target_line = current_line + (-1 if up else 1)
+        if target_line < 0 or target_line >= len(lines):
+            self._set_vertical_caret(pos, keep_anchor=keep_anchor, preserve_desired=True)
+            return
+        target_start = int(starts[target_line])
+        target_len = len(lines[target_line])
+        target_pos = self._nearest_caret_in_line_by_axis(target_start, target_len, desired_x, axis='x')
+        self._set_vertical_caret(target_pos, keep_anchor=keep_anchor, preserve_desired=True)
+
+    def _move_vertical_column(self, left=True, keep_anchor=False):
+        """Move between vertical columns by visual Y instead of raw offset."""
+        text = self.toPlainText()
+        lines, starts = self._split_vertical_lines(text)
+        if not lines:
+            return
+        pos = int(getattr(self, '_v_caret_index', 0))
+        current_line = self._line_index_for_caret(lines, starts, pos)
+        target_line = current_line + (1 if left else -1)
+        if target_line < 0 or target_line >= len(lines):
+            self._set_vertical_caret(pos, keep_anchor=keep_anchor, preserve_desired=True)
+            return
+        try:
+            desired_y = getattr(self, '_v_desired_caret_y', None)
+            if desired_y is None:
+                desired_y = float(self._inline_caret_point(pos).y())
+                self._v_desired_caret_y = desired_y
+        except Exception:
+            desired_y = float(self._inline_caret_point(pos).y())
+        target_start = int(starts[target_line])
+        target_len = len(lines[target_line])
+        target_pos = self._nearest_caret_in_line_by_axis(target_start, target_len, desired_y, axis='y')
+        self._set_vertical_caret(target_pos, keep_anchor=keep_anchor, preserve_desired=True)
+
+    def inputMethodEvent(self, event):
+        if not self._vertical_editor:
+            try:
+                super().inputMethodEvent(event)
+            except Exception:
+                pass
+            return
+        try:
+            commit = event.commitString()
+        except Exception:
+            commit = ''
+        try:
+            preedit = event.preeditString()
+        except Exception:
+            preedit = ''
+        preedit = str(preedit or '')
+        commit = str(commit or '')
+
+        # Ctrl+A / drag selection + Korean IME starts with a preedit-only frame.
+        # Even a single 초성 must immediately replace the selected text on screen,
+        # although it is not committed to the stored text yet.
+        replaced_selection_for_preedit = False
+        if preedit and not commit and self._has_vertical_selection():
+            replaced_selection_for_preedit = self._delete_selection_for_ime_preedit()
+
+        if commit:
+            suppress_commit_undo = bool(getattr(self, '_v_ime_selection_preedit_active', False))
+            self._replace_vertical_selection(commit,
+                                             push_undo=not suppress_commit_undo,
+                                             reason='ime-commit')
+            self._v_ime_selection_preedit_active = False
+        elif not preedit:
+            self._v_ime_selection_preedit_active = False
+
+        self._v_preedit_text = preedit
+        self._sync_direct_editor_after_text_change(
+            reason='ime-preedit-replace-selection' if replaced_selection_for_preedit else 'ime-preedit'
+        )
+        event.accept()
+
+    def inputMethodQuery(self, query):
+        if self._vertical_editor:
+            if query == Qt.InputMethodQuery.ImCursorRectangle:
+                return self._vertical_cursor_rect()
+            if query == Qt.InputMethodQuery.ImSurroundingText:
+                return self.toPlainText()
+            if query == Qt.InputMethodQuery.ImCursorPosition:
+                return int(getattr(self, '_v_caret_index', 0))
+            if query == Qt.InputMethodQuery.ImAnchorPosition:
+                return int(getattr(self, '_v_selection_anchor', getattr(self, '_v_caret_index', 0)))
+            if query == Qt.InputMethodQuery.ImCurrentSelection:
+                a, b = self._selected_range()
+                return self.toPlainText()[a:b]
+        try:
+            return super().inputMethodQuery(query)
+        except Exception:
+            return None
+
+    def toPlainText(self):
+        if self._vertical_editor:
+            return str(getattr(self, '_v_text', '') or '')
+        try:
+            return self._edit.toPlainText()
+        except Exception:
+            return ''
+
+    def setPlainText(self, text):
+        if self._vertical_editor:
+            self._v_text = str(text or '')
+            self._v_caret_index = min(int(getattr(self, '_v_caret_index', 0)), len(self._v_text))
+            self._v_selection_anchor = self._v_caret_index
+            try:
+                self._v_document.setPlainText(self._v_text)
+            except Exception:
+                pass
+            self._sync_direct_editor_after_text_change(reason='set-text')
+            return
+        try:
+            self._edit.setPlainText(str(text or ''))
+        except Exception:
+            pass
+
+    def textCursor(self):
+        if self._vertical_editor:
+            return _InlineCursorProxy(self)
+        try:
+            return self._edit.textCursor()
+        except Exception:
+            return QTextCursor()
+
+    def setTextCursor(self, cursor):
+        if self._vertical_editor:
+            try:
+                pos = cursor.position()
+            except Exception:
+                pos = getattr(self, '_v_caret_index', len(self.toPlainText()))
+            try:
+                anchor = cursor.anchor()
+            except Exception:
+                anchor = pos
+            self._v_caret_index = max(0, min(len(self.toPlainText()), int(pos)))
+            self._v_selection_anchor = max(0, min(len(self.toPlainText()), int(anchor)))
+            self.invalidate_vertical_layout()
+            self.update()
+            return
+        try:
+            self._edit.setTextCursor(cursor)
+        except Exception:
+            pass
+
+    def document(self):
+        if self._vertical_editor:
+            return getattr(self, '_v_document', None)
+        try:
+            return self._edit.document()
+        except Exception:
+            return None
 
     def _event_to_keysequence(self, event):
         key = event.key()
@@ -2590,11 +5157,6 @@ class InlineTextEditItem(QGraphicsTextItem):
         return QKeySequence(mods_value | key)
 
     def _is_alt_modifier_guard_event(self, event):
-        # Ctrl+Shift를 누른 상태에서 Alt만 추가로 들어오는 순간은
-        # Windows 입력기/언어 전환(Alt+Shift) 및 AltGr(Ctrl+Alt) 처리와
-        # QTextDocument 기본 키 처리 순서가 엉켜 커서/선택 상태가 흔들릴 수 있다.
-        # 인라인 텍스트 편집 중에는 modifier-only Alt 이벤트를 먹어서
-        # 실제 특수문자 키가 눌린 순간에만 단축키가 처리되게 한다.
         try:
             if event.key() != Qt.Key.Key_Alt:
                 return False
@@ -2614,7 +5176,25 @@ class InlineTextEditItem(QGraphicsTextItem):
             return False
 
     def _insert_inline_symbol(self, symbol):
-        self._record_inline_undo_snapshot(reason='symbol')
+        if self._vertical_editor:
+            selected = ''
+            a, b = self._selected_range()
+            if b > a:
+                selected = self.toPlainText()[a:b]
+            pair_map = {
+                "「」": ("「", "」"),
+                "『』": ("『", "』"),
+            }
+            if symbol in pair_map:
+                left, right = pair_map[symbol]
+                if selected:
+                    self._replace_vertical_selection(left + selected + right)
+                else:
+                    self._replace_vertical_selection(left + right)
+                    self._set_vertical_caret(max(0, self._v_caret_index - 1), keep_anchor=False)
+                return
+            self._replace_vertical_selection(symbol)
+            return
         cursor = self.textCursor()
         selected = cursor.selectedText()
         pair_map = {
@@ -2629,13 +5209,13 @@ class InlineTextEditItem(QGraphicsTextItem):
                 cursor.insertText(left + right)
                 cursor.movePosition(QTextCursor.MoveOperation.Left, QTextCursor.MoveMode.MoveAnchor, 1)
             self.setTextCursor(cursor)
+            self._schedule_adjust_to_contents(reason='symbol')
             return
         cursor.insertText(symbol)
         self.setTextCursor(cursor)
+        self._schedule_adjust_to_contents(reason='symbol')
 
     def _handle_inline_text_input_shortcut(self, event):
-        # 텍스트 목록 입력창에서 쓰던 특수문자 단축키를 최종결과 더블클릭 직접 편집창에서도 공유한다.
-        # QGraphicsTextItem은 QWidget이 아니므로 QShortcut 대신 keyPressEvent에서 직접 매칭한다.
         for key, (_label, symbol) in TEXT_SYMBOLS.items():
             if self._shortcut_matches(event, "text_" + key):
                 self._insert_inline_symbol(symbol)
@@ -2643,264 +5223,402 @@ class InlineTextEditItem(QGraphicsTextItem):
                 return True
         return False
 
-    def _inline_text_snapshot(self):
-        try:
-            text = str(self.toPlainText() or '')
-        except Exception:
-            text = ''
-        try:
-            cursor = self.textCursor()
-            pos = int(cursor.position())
-            anchor = int(cursor.anchor())
-        except Exception:
-            pos = len(text)
-            anchor = pos
-        pos = max(0, min(len(text), pos))
-        anchor = max(0, min(len(text), anchor))
-        return (text, pos, anchor)
-
-    def _record_inline_undo_snapshot(self, reason='edit'):
-        if getattr(self, '_inline_snapshot_lock', False):
-            return False
-        snap = self._inline_text_snapshot()
-        stack = getattr(self, '_inline_undo_stack', None)
-        if stack is None:
-            self._inline_undo_stack = []
-            stack = self._inline_undo_stack
-        if stack and stack[-1] == snap:
-            return False
-        stack.append(snap)
-        # 무한히 쌓이지 않도록 최근 편집만 보관한다. 일반 텍스트 수정 중 Ctrl+Z 용도라 200단계면 충분하다.
-        if len(stack) > 200:
-            del stack[:-200]
-        try:
-            self._inline_redo_stack.clear()
-        except Exception:
-            self._inline_redo_stack = []
-        try:
-            if hasattr(self.main_window, 'audit_boundary_event'):
-                self.main_window.audit_boundary_event(
-                    'INLINE_TEXT_EDITOR_SNAPSHOT_PUSH',
-                    page_idx=getattr(self.main_window, 'idx', None),
-                    text_id=getattr(getattr(self, 'target_item', None), 'data', {}).get('id') if getattr(self, 'target_item', None) is not None else '',
-                    reason=reason,
-                    undo_depth=len(stack),
-                    throttle_ms=120,
-                )
-        except Exception:
-            pass
-        return True
-
-    def _restore_inline_text_snapshot(self, snap, reason='undo'):
-        if not isinstance(snap, tuple) or len(snap) < 3:
-            return False
-        text, pos, anchor = snap[0], snap[1], snap[2]
-        text = str(text or '')
-        try:
-            pos = max(0, min(len(text), int(pos)))
-        except Exception:
-            pos = len(text)
-        try:
-            anchor = max(0, min(len(text), int(anchor)))
-        except Exception:
-            anchor = pos
-        self._inline_snapshot_lock = True
-        try:
-            self.setPlainText(text)
-            try:
-                self.apply_text_alignment()
-            except Exception:
-                pass
-            try:
-                self.adjust_to_contents()
-            except Exception:
-                pass
-            try:
-                cursor = self.textCursor()
-                cursor.setPosition(anchor)
-                if pos != anchor:
-                    cursor.setPosition(pos, QTextCursor.MoveMode.KeepAnchor)
-                else:
-                    cursor.setPosition(pos)
-                self.setTextCursor(cursor)
-            except Exception:
-                pass
-            try:
-                self.setFocus(Qt.FocusReason.ShortcutFocusReason)
-            except Exception:
-                pass
-            return True
-        finally:
-            self._inline_snapshot_lock = False
-
     def perform_inline_local_undo(self):
-        stack = getattr(self, '_inline_undo_stack', [])
-        if not stack:
+        if self._vertical_editor:
             try:
-                if hasattr(self.main_window, 'audit_boundary_event'):
-                    self.main_window.audit_boundary_event(
-                        'INLINE_TEXT_EDITOR_LOCAL_UNDO_EMPTY',
-                        page_idx=getattr(self.main_window, 'idx', None),
-                        text_id=getattr(getattr(self, 'target_item', None), 'data', {}).get('id') if getattr(self, 'target_item', None) is not None else '',
-                        throttle_ms=80,
-                    )
+                stack = getattr(self, '_v_undo_stack', [])
+                if not stack:
+                    return True
+                current = (self.toPlainText(), int(getattr(self, '_v_caret_index', 0)), int(getattr(self, '_v_selection_anchor', 0)))
+                self._v_redo_stack.append(current)
+                snap = stack.pop()
+                self._restore_vertical_snapshot(snap)
             except Exception:
                 pass
             return True
-        current = self._inline_text_snapshot()
-        snap = stack.pop()
-        redo_stack = getattr(self, '_inline_redo_stack', None)
-        if redo_stack is None:
-            self._inline_redo_stack = []
-            redo_stack = self._inline_redo_stack
-        if current != snap:
-            redo_stack.append(current)
-        ok = self._restore_inline_text_snapshot(snap, reason='undo')
         try:
-            if hasattr(self.main_window, 'audit_boundary_event'):
-                self.main_window.audit_boundary_event(
-                    'INLINE_TEXT_EDITOR_LOCAL_UNDO',
-                    page_idx=getattr(self.main_window, 'idx', None),
-                    text_id=getattr(getattr(self, 'target_item', None), 'data', {}).get('id') if getattr(self, 'target_item', None) is not None else '',
-                    ok=bool(ok),
-                    undo_depth=len(stack),
-                    redo_depth=len(redo_stack),
-                    throttle_ms=80,
-                )
+            self._edit.undo()
         except Exception:
             pass
+        self._schedule_adjust_to_contents(reason='undo')
         return True
 
     def perform_inline_local_redo(self):
-        redo_stack = getattr(self, '_inline_redo_stack', [])
-        if not redo_stack:
+        if self._vertical_editor:
             try:
-                if hasattr(self.main_window, 'audit_boundary_event'):
-                    self.main_window.audit_boundary_event(
-                        'INLINE_TEXT_EDITOR_LOCAL_REDO_EMPTY',
-                        page_idx=getattr(self.main_window, 'idx', None),
-                        text_id=getattr(getattr(self, 'target_item', None), 'data', {}).get('id') if getattr(self, 'target_item', None) is not None else '',
-                        throttle_ms=80,
-                    )
+                stack = getattr(self, '_v_redo_stack', [])
+                if not stack:
+                    return True
+                current = (self.toPlainText(), int(getattr(self, '_v_caret_index', 0)), int(getattr(self, '_v_selection_anchor', 0)))
+                self._v_undo_stack.append(current)
+                snap = stack.pop()
+                self._restore_vertical_snapshot(snap)
             except Exception:
                 pass
             return True
-        current = self._inline_text_snapshot()
-        snap = redo_stack.pop()
-        undo_stack = getattr(self, '_inline_undo_stack', None)
-        if undo_stack is None:
-            self._inline_undo_stack = []
-            undo_stack = self._inline_undo_stack
-        if current != snap:
-            undo_stack.append(current)
-        ok = self._restore_inline_text_snapshot(snap, reason='redo')
         try:
-            if hasattr(self.main_window, 'audit_boundary_event'):
-                self.main_window.audit_boundary_event(
-                    'INLINE_TEXT_EDITOR_LOCAL_REDO',
-                    page_idx=getattr(self.main_window, 'idx', None),
-                    text_id=getattr(getattr(self, 'target_item', None), 'data', {}).get('id') if getattr(self, 'target_item', None) is not None else '',
-                    ok=bool(ok),
-                    undo_depth=len(undo_stack),
-                    redo_depth=len(redo_stack),
-                    throttle_ms=80,
-                )
+            self._edit.redo()
+        except Exception:
+            pass
+        self._schedule_adjust_to_contents(reason='redo')
+        return True
+
+    def _handle_child_focus_out(self):
+        if getattr(self.main_window, "_app_is_closing", False):
+            return
+        if getattr(self, '_closing', False):
+            return
+        try:
+            view = getattr(self.main_window, 'view', None)
+            if view is not None:
+                vp = view.mapFromGlobal(QCursor.pos())
+                sp = view.mapToScene(vp)
+                edit_scene = self.mapToScene(self.boundingRect()).boundingRect().adjusted(-2, -2, 2, 2)
+                if edit_scene.contains(sp):
+                    QTimer.singleShot(0, lambda: self.setFocus(Qt.FocusReason.MouseFocusReason))
+                    return
+        except Exception:
+            pass
+        self.main_window.finish_inline_text_edit(commit=True, commit_reason='focus_out')
+
+
+class TextTableWidget(QTableWidget):
+    """텍스트 레이어 표.
+
+    이 표의 드래그는 셀 텍스트 이동이 아니라 "행 전체 = 텍스트 레이어" 이동만 허용한다.
+    Qt 기본 DragDrop/InternalMove는 셀 문자열을 MIME 데이터로 옮길 수 있어서,
+    원문/번역문이 다른 행 안으로 들어가는 문제가 생긴다.
+
+    그래서 이 위젯은 자체 마우스 처리로만 행 재배치를 수행한다.
+    - 꾹 누르기/드래그 시작: 잡은 행 테두리 표시
+    - 드래그 중: 행 위/아래 삽입선 표시
+    - 드롭: 셀 데이터 삽입 금지, 행 순서만 변경
+    """
+    rowsReordered = pyqtSignal()
+
+    ROW_MIME = "application/x-ysb-text-layer-row-move"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._drag_start_pos = QPoint()
+        self._pending_row_id_order = None
+        self._pending_drop_row = None
+        self._pending_source_rows = []
+
+        self._row_drag_press_row = -1
+        self._row_drag_hint_row = -1
+        self._row_drag_active = False
+        self._row_drag_insert_row = -1
+        self._row_drag_source_rows = []
+        self._row_drag_hint_timer = QTimer(self)
+        self._row_drag_hint_timer.setSingleShot(True)
+        self._row_drag_hint_timer.timeout.connect(self._show_row_drag_hint)
+        try:
+            self.setMouseTracking(True)
+            self.viewport().setMouseTracking(True)
+        except Exception:
+            pass
+
+    def _event_pos(self, event):
+        try:
+            return event.position().toPoint()
+        except Exception:
+            return event.pos()
+
+    def _stop_row_drag_hint_timer(self):
+        try:
+            if self._row_drag_hint_timer.isActive():
+                self._row_drag_hint_timer.stop()
+        except Exception:
+            pass
+
+    def _show_row_drag_hint(self):
+        row = int(getattr(self, '_row_drag_press_row', -1) or -1)
+        if row <= 0 or row >= self.rowCount():
+            return
+        self._row_drag_hint_row = row
+        try:
+            self.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
+        except Exception:
+            pass
+        try:
+            self.viewport().update()
+        except Exception:
+            pass
+
+    def _clear_row_drag_visuals(self):
+        self._stop_row_drag_hint_timer()
+        self._row_drag_press_row = -1
+        self._row_drag_hint_row = -1
+        self._row_drag_active = False
+        self._row_drag_insert_row = -1
+        self._row_drag_source_rows = []
+        try:
+            self.viewport().unsetCursor()
+        except Exception:
+            pass
+        try:
+            self.viewport().update()
+        except Exception:
+            pass
+
+    def _begin_row_drag(self):
+        row = int(getattr(self, '_row_drag_press_row', -1) or -1)
+        if row <= 0 or row >= self.rowCount():
+            return False
+        try:
+            rows = self._selected_text_rows()
+        except Exception:
+            rows = []
+        if row not in rows:
+            rows = [row]
+            try:
+                self.selectRow(row)
+            except Exception:
+                pass
+        rows = [r for r in sorted(set(rows)) if 0 < r < self.rowCount()]
+        if not rows:
+            return False
+        self._stop_row_drag_hint_timer()
+        self._row_drag_active = True
+        self._row_drag_hint_row = row
+        self._row_drag_source_rows = rows
+        self._row_drag_insert_row = row
+        try:
+            self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+        except Exception:
+            pass
+        try:
+            self.viewport().update()
         except Exception:
             pass
         return True
 
-    def _is_inline_text_mutating_key(self, event):
+    def _drop_insert_row_from_pos(self, pos):
         try:
-            key = event.key()
-            mods = event.modifiers()
+            y = int(pos.y())
         except Exception:
-            return False
-        if key in (
-            Qt.Key.Key_Control, Qt.Key.Key_Shift, Qt.Key.Key_Alt, Qt.Key.Key_Meta,
-            Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down,
-            Qt.Key.Key_Home, Qt.Key.Key_End, Qt.Key.Key_PageUp, Qt.Key.Key_PageDown,
-            Qt.Key.Key_Escape, Qt.Key.Key_Return, Qt.Key.Key_Enter,
-        ):
-            return False
-        if key in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete):
-            return True
-        if mods & Qt.KeyboardModifier.ControlModifier:
-            # Paste/Cut은 문서를 바꾼다. Copy/SelectAll/Undo/Redo는 여기서 snapshot을 만들지 않는다.
-            return key in (Qt.Key.Key_V, Qt.Key.Key_X)
+            y = 0
+        row = self.rowAt(y)
+        if row < 0:
+            try:
+                first_y = self.rowViewportPosition(1) if self.rowCount() > 1 else 0
+                if y < first_y:
+                    return 1
+            except Exception:
+                pass
+            return self.rowCount()
+        if row <= 0:
+            return 1
         try:
-            return bool(event.text())
-        except Exception:
-            return False
-
-    def inputMethodEvent(self, event):
-        try:
-            if not getattr(self, '_inline_snapshot_lock', False):
-                commit = str(event.commitString() or '')
-                if commit:
-                    self._record_inline_undo_snapshot(reason='ime')
+            top = self.rowViewportPosition(row)
+            h = max(1, self.rowHeight(row))
+            if y >= top + (h // 2):
+                row += 1
         except Exception:
             pass
-        super().inputMethodEvent(event)
+        return max(1, min(row, self.rowCount()))
 
-    def keyPressEvent(self, event):
-        if self._is_alt_modifier_guard_event(event):
-            event.accept()
-            return
-        mods = event.modifiers()
-        if mods & Qt.KeyboardModifier.ControlModifier:
-            # 인라인 텍스트 수정 중 Ctrl+Z/Y는 YSB 전역 Undo가 아니라
-            # 이 임시 편집기 내부 스냅샷 Undo/Redo가 처리한다.
-            if event.key() == Qt.Key.Key_Z and (mods & Qt.KeyboardModifier.ShiftModifier):
-                self.perform_inline_local_redo()
-                event.accept()
+    def _move_row_order_from_drop(self, source_rows, insert_row):
+        row_ids = self._row_ids()
+        indexed = [(row + 1, rid) for row, rid in enumerate(row_ids)]
+        moving = [rid for row, rid in indexed if row in source_rows]
+        remaining = [rid for row, rid in indexed if row not in source_rows]
+        removed_before_target = sum(1 for row in source_rows if row < insert_row)
+        insert_pos = max(0, min((insert_row - 1) - removed_before_target, len(remaining)))
+        return remaining[:insert_pos] + moving + remaining[insert_pos:]
+
+    def mousePressEvent(self, event):
+        try:
+            if event.button() == Qt.MouseButton.LeftButton:
+                pos = self._event_pos(event)
+                row = self.rowAt(pos.y())
+                self._drag_start_pos = QPoint(pos)
+                self._row_drag_press_row = row if row > 0 else -1
+                self._row_drag_hint_row = -1
+                self._row_drag_active = False
+                self._row_drag_insert_row = -1
+                self._row_drag_source_rows = []
+                if self._row_drag_press_row > 0:
+                    self._stop_row_drag_hint_timer()
+                    self._row_drag_hint_timer.start(260)
+        except Exception:
+            pass
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        try:
+            if event.buttons() & Qt.MouseButton.LeftButton and int(getattr(self, '_row_drag_press_row', -1) or -1) > 0:
+                pos = self._event_pos(event)
+                distance = (pos - self._drag_start_pos).manhattanLength()
+                threshold = max(3, QApplication.startDragDistance())
+                if not self._row_drag_active and distance >= threshold:
+                    self._begin_row_drag()
+                if self._row_drag_active:
+                    insert_row = self._drop_insert_row_from_pos(pos)
+                    if insert_row != self._row_drag_insert_row:
+                        self._row_drag_insert_row = insert_row
+                        try:
+                            self.viewport().update()
+                        except Exception:
+                            pass
+                    try:
+                        event.accept()
+                    except Exception:
+                        pass
+                    return
+                # 드래그 후보 상태에서는 셀 텍스트 드래그/선택을 만들지 않는다.
+                try:
+                    event.accept()
+                except Exception:
+                    pass
                 return
-            if event.key() == Qt.Key.Key_Z:
-                self.perform_inline_local_undo()
-                event.accept()
+        except Exception:
+            pass
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        try:
+            if event.button() == Qt.MouseButton.LeftButton and self._row_drag_active:
+                source_rows = [r for r in getattr(self, '_row_drag_source_rows', []) if 0 < r < self.rowCount()]
+                try:
+                    pos = self._event_pos(event)
+                    insert_row = self._drop_insert_row_from_pos(pos)
+                except Exception:
+                    insert_row = int(getattr(self, '_row_drag_insert_row', -1) or -1)
+                changed = False
+                if source_rows and insert_row >= 1:
+                    if not (insert_row in source_rows or insert_row == max(source_rows) + 1):
+                        old_order = self._row_ids()
+                        new_order = self._move_row_order_from_drop(source_rows, insert_row)
+                        if new_order != old_order:
+                            self._pending_row_id_order = new_order
+                            self._pending_drop_row = insert_row
+                            self._pending_source_rows = source_rows
+                            changed = True
+                self._clear_row_drag_visuals()
+                try:
+                    event.accept()
+                except Exception:
+                    pass
+                if changed:
+                    self.rowsReordered.emit()
                 return
-            if event.key() == Qt.Key.Key_Y:
-                self.perform_inline_local_redo()
-                event.accept()
-                return
-        if event.key() == Qt.Key.Key_Escape:
-            self.main_window.finish_inline_text_edit(commit=False)
-            event.accept()
-            return
-        if (
-            event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
-            and event.modifiers() & Qt.KeyboardModifier.ControlModifier
-        ):
-            self.main_window.finish_inline_text_edit(commit=True)
-            event.accept()
-            return
-        if self._handle_inline_text_input_shortcut(event):
-            return
-        if self._is_inline_text_mutating_key(event):
-            self._record_inline_undo_snapshot(reason='key')
-        super().keyPressEvent(event)
+        except Exception:
+            pass
+        self._clear_row_drag_visuals()
+        super().mouseReleaseEvent(event)
 
-    def keyReleaseEvent(self, event):
-        if self._is_alt_modifier_guard_event(event):
-            event.accept()
-            return
-        super().keyReleaseEvent(event)
+    def leaveEvent(self, event):
+        if not getattr(self, '_row_drag_active', False):
+            self._stop_row_drag_hint_timer()
+            if int(getattr(self, '_row_drag_hint_row', -1) or -1) >= 0:
+                self._row_drag_hint_row = -1
+                try:
+                    self.viewport().unsetCursor()
+                    self.viewport().update()
+                except Exception:
+                    pass
+        super().leaveEvent(event)
 
-    def focusOutEvent(self, event):
-        super().focusOutEvent(event)
-        if getattr(self.main_window, "_app_is_closing", False):
-            return
-        if not self._closing:
-            self.main_window.finish_inline_text_edit(commit=True)
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        try:
+            painter = QPainter(self.viewport())
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+            vw = self.viewport().width()
 
+            hint_row = int(getattr(self, '_row_drag_hint_row', -1) or -1)
+            if hint_row > 0 and hint_row < self.rowCount():
+                y = self.rowViewportPosition(hint_row)
+                h = self.rowHeight(hint_row)
+                if h > 0:
+                    rect = QRect(1, y + 1, max(1, vw - 3), max(1, h - 3))
+                    pen = QPen(QColor('#E0A0AA'))
+                    pen.setWidth(2)
+                    painter.setPen(pen)
+                    painter.setBrush(Qt.BrushStyle.NoBrush)
+                    painter.drawRect(rect)
+                    # 왼쪽 잡기 표시 막대. 텍스트가 아니라 "행 이동 가능" 시각 표시만 준다.
+                    painter.fillRect(QRect(1, y + 2, 4, max(1, h - 4)), QColor('#E0A0AA'))
 
-class TextTableWidget(QTableWidget):
-    """텍스트 행 드래그 순서 변경 감지용 테이블."""
-    rowsReordered = pyqtSignal()
+            if bool(getattr(self, '_row_drag_active', False)):
+                insert_row = int(getattr(self, '_row_drag_insert_row', -1) or -1)
+                if insert_row >= 1:
+                    if insert_row >= self.rowCount():
+                        last = max(1, self.rowCount() - 1)
+                        y = self.rowViewportPosition(last) + self.rowHeight(last)
+                    else:
+                        y = self.rowViewportPosition(insert_row)
+                    y = max(0, min(y, self.viewport().height() - 1))
+                    pen = QPen(QColor('#FFD36A'))
+                    pen.setWidth(3)
+                    painter.setPen(pen)
+                    painter.drawLine(0, y, vw, y)
+                    painter.setBrush(QColor('#FFD36A'))
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.drawPolygon(QPolygon([QPoint(0, y - 5), QPoint(9, y), QPoint(0, y + 5)]))
+                    painter.drawPolygon(QPolygon([QPoint(vw - 1, y - 5), QPoint(max(0, vw - 10), y), QPoint(vw - 1, y + 5)]))
+            painter.end()
+        except Exception:
+            try:
+                painter.end()
+            except Exception:
+                pass
+
+    def mimeData(self, indexes):
+        mime = QMimeData()
+        rows = sorted({idx.row() for idx in indexes if idx.isValid() and idx.row() > 0})
+        try:
+            mime.setData(self.ROW_MIME, (",".join(str(r) for r in rows)).encode("utf-8"))
+        except Exception:
+            pass
+        # 의도적으로 text/html/plain 데이터를 넣지 않는다.
+        # 그래야 원문/번역문 셀 안으로 드래그 텍스트가 붙지 않는다.
+        return mime
+
+    def supportedDropActions(self):
+        return Qt.DropAction.MoveAction
+
+    def dragEnterEvent(self, event):
+        # 기본 Qt 드롭은 쓰지 않는다. 텍스트 셀 드롭을 막기 위한 안전장치다.
+        event.ignore()
+
+    def dragMoveEvent(self, event):
+        # 기본 Qt 드롭은 쓰지 않는다. 행 이동은 mouseMove/mouseRelease에서 직접 처리한다.
+        event.ignore()
+
+    def _drop_insert_row_from_event(self, event):
+        return self._drop_insert_row_from_pos(self._event_pos(event))
+
+    def _selected_text_rows(self):
+        try:
+            rows = sorted({idx.row() for idx in self.selectedIndexes() if idx.row() > 0})
+        except Exception:
+            rows = []
+        try:
+            cur = self.currentRow()
+            if cur > 0 and cur not in rows:
+                rows.append(cur)
+                rows.sort()
+        except Exception:
+            pass
+        return rows
+
+    def _row_ids(self):
+        ids = []
+        for row in range(1, self.rowCount()):
+            item = self.item(row, 0)
+            if item is None:
+                ids.append("")
+            else:
+                ids.append(str(item.text() or "").strip())
+        return ids
 
     def dropEvent(self, event):
-        super().dropEvent(event)
-        self.rowsReordered.emit()
-
+        # 외부/기본 드롭 경로는 모두 차단한다.
+        # 행 재배치는 mouseReleaseEvent에서만 실행된다.
+        event.ignore()
 
 
 def ysb_focus_color_dialog_hex_field(dialog):
@@ -4795,12 +7513,16 @@ class CenterTaskProgressOverlay(QFrame):
         panel = QFrame(self)
         panel.setObjectName("CenterTaskProgressPanel")
         self.panel = panel
-        # 진행창은 작업 중에 새로 만들어지거나 리사이즈되면 깜빡임처럼 보인다.
-        # 가장 큰 상세 문구 기준으로 고정 크기를 잡고, 이후에는 텍스트/진행률만 바꾼다.
-        panel.setFixedSize(560, 264)
+        # 진행창은 작업별 상세 문구 길이가 다르다.
+        # 고정 크기로 두면 일괄 작업처럼 줄이 많은 상세 문구가 아래에서 잘리므로,
+        # 내용 높이에 맞춰 패널을 키우되 화면 크기 안에서만 커지게 한다.
+        panel.setMinimumSize(600, 264)
+        panel.setMaximumSize(900, 760)
+        panel.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         panel_layout = QVBoxLayout(panel)
         panel_layout.setContentsMargins(18, 16, 18, 14)
         panel_layout.setSpacing(8)
+        self.panel_layout = panel_layout
 
         self.title_label = QLabel("작업 중", panel)
         self.title_label.setObjectName("CenterTaskTitle")
@@ -4809,8 +7531,9 @@ class CenterTaskProgressOverlay(QFrame):
         self.detail_label = QLabel("", panel)
         self.detail_label.setObjectName("CenterTaskDetail")
         self.detail_label.setWordWrap(True)
-        self.detail_label.setMinimumHeight(104)
+        self.detail_label.setMinimumHeight(112)
         self.detail_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self.detail_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         panel_layout.addWidget(self.detail_label)
 
         self.progress = QProgressBar(panel)
@@ -4867,9 +7590,86 @@ class CenterTaskProgressOverlay(QFrame):
                 QPushButton:disabled { background:#302C31; color:#827A80; }
             """)
 
+
+    def _panel_size_limits(self):
+        """Return safe dynamic size limits for the centered progress panel."""
+        parent = self.parentWidget()
+        try:
+            if parent is not None:
+                rect = parent.rect()
+                parent_w = max(1, int(rect.width()))
+                parent_h = max(1, int(rect.height()))
+            else:
+                parent_w, parent_h = 1280, 720
+        except Exception:
+            parent_w, parent_h = 1280, 720
+        min_w = 600
+        min_h = 264
+        max_w = max(min_w, min(900, parent_w - 56))
+        max_h = max(min_h, min(760, parent_h - 56))
+        return min_w, min_h, max_w, max_h
+
+    def _detail_text_height(self, width):
+        text = str(self.detail_label.text() or "")
+        if not text:
+            return 112
+        try:
+            fm = QFontMetrics(self.detail_label.font())
+            flags = int(Qt.TextFlag.TextWordWrap | Qt.TextFlag.TextExpandTabs)
+            rect = fm.boundingRect(QRect(0, 0, max(80, int(width)), 100000), flags, text)
+            # QLabel의 줄 간격/여백을 감안해 약간 더 준다.
+            return max(112, int(rect.height()) + 12)
+        except Exception:
+            line_count = max(1, text.count("\n") + 1)
+            return max(112, line_count * 18 + 12)
+
+    def _resize_panel_to_content(self):
+        """Grow the panel when detail text has many lines, capped by the parent window.
+
+        The progress overlay is often used as a live supervisor panel for batch jobs.
+        A fixed 560x264 panel clips multi-line status details, so the panel height is
+        recalculated whenever the title/detail/cancel state changes.
+        """
+        try:
+            min_w, min_h, max_w, max_h = self._panel_size_limits()
+            # Wider than the old panel so page/file/status lines fit more comfortably.
+            panel_w = min(max_w, max(min_w, 640))
+            contents = self.panel_layout.contentsMargins()
+            left = int(contents.left())
+            right = int(contents.right())
+            top = int(contents.top())
+            bottom = int(contents.bottom())
+            spacing = int(self.panel_layout.spacing())
+            inner_w = max(80, panel_w - left - right)
+
+            title_h = max(24, int(self.title_label.sizeHint().height()))
+            progress_h = max(18, int(self.progress.sizeHint().height()))
+            note_h = 0
+            if self.note_label.isVisible():
+                note_h = max(34, int(self.note_label.sizeHint().height()))
+            btn_h = max(30, int(self.cancel_btn.sizeHint().height()) if self.cancel_btn.isVisible() else 0)
+            visible_blocks = 3 + (1 if self.note_label.isVisible() else 0) + (1 if self.cancel_btn.isVisible() else 0)
+            spacing_total = max(0, visible_blocks - 1) * spacing
+
+            fixed_h = top + bottom + title_h + progress_h + note_h + btn_h + spacing_total
+            max_detail_h = max(112, max_h - fixed_h)
+            detail_h = min(max_detail_h, self._detail_text_height(inner_w))
+            self.detail_label.setFixedHeight(detail_h)
+            panel_h = max(min_h, min(max_h, fixed_h + detail_h))
+            current = self.panel.size()
+            if current.width() != panel_w or current.height() != panel_h:
+                self.panel.setFixedSize(panel_w, panel_h)
+        except Exception:
+            try:
+                self.panel.setFixedSize(640, 320)
+                self.detail_label.setFixedHeight(152)
+            except Exception:
+                pass
+
     def _emit_cancel(self):
         self.cancel_btn.setEnabled(False)
         self.note_label.setText("취소 요청됨. 현재 페이지 작업이 끝난 뒤 중단됩니다.")
+        self._resize_panel_to_content()
         self.cancelRequested.emit()
 
     def show_task(self, title, detail="", total=0, cancellable=True):
@@ -4899,6 +7699,7 @@ class CenterTaskProgressOverlay(QFrame):
             self.progress.setRange(0, 0)
         self._ysb_task_title = str(title or "작업 중")
         self._ysb_task_total = int(total or 0) if str(total or "").strip() else 0
+        self._resize_panel_to_content()
         self.show()
         self.raise_()
 
@@ -4913,6 +7714,7 @@ class CenterTaskProgressOverlay(QFrame):
             self._ysb_task_total = new_total
         if current is not None and self.progress.maximum() > 0:
             self.progress.setValue(max(0, min(int(current), self.progress.maximum())))
+        self._resize_panel_to_content()
 
     def set_paused(self, paused=True, detail=None):
         if detail is not None:
@@ -4925,11 +7727,16 @@ class CenterTaskProgressOverlay(QFrame):
             self.progress.setEnabled(False)
         else:
             self.progress.setEnabled(True)
+        self._resize_panel_to_content()
 
     def resizeEvent(self, event):
         parent = self.parentWidget()
         if parent is not None:
             self.setGeometry(parent.rect())
+        try:
+            self._resize_panel_to_content()
+        except Exception:
+            pass
         super().resizeEvent(event)
 
 

@@ -4,6 +4,7 @@ import copy
 from PyQt6.QtWidgets import QGraphicsPathItem, QGraphicsRectItem, QInputDialog, QGraphicsItem, QGraphicsView, QApplication
 from PyQt6.QtGui import QFont, QFontInfo, QFontMetrics, QPainterPath, QPainterPathStroker, QPen, QBrush, QColor, QTransform, QImage, QPixmap, QLinearGradient, QPainter, QPolygonF
 from PyQt6.QtCore import Qt, QRectF, QPointF, QBuffer, QByteArray, QIODevice, QTimer
+from ysb.core.text_style_limits import clamp_text_line_spacing, clamp_text_char_scale, text_line_height_from_percent
 
 try:
     import numpy as _np
@@ -11,6 +12,15 @@ try:
 except Exception:
     _np = None
     _cv2 = None
+
+try:
+    from ysb.engines.japanese_text.qt_layout import (
+        build_japanese_vertical_text_path as _build_japanese_vertical_text_path,
+        vertical_space_advance as _vertical_space_advance,
+    )
+except Exception:
+    _build_japanese_vertical_text_path = None
+    _vertical_space_advance = None
 
 
 # Photoshop의 Faux Italic 느낌에 맞춘 합성 기울임 강도.
@@ -496,27 +506,48 @@ def _draw_glow_path(painter, path, color, size=0.0, blur=0.0, dx=0.0, dy=0.0, si
         _draw_silhouette_path(painter, glow_path, fill_color, silhouette_width + size * 2.0, use_mask=use_mask)
 
 
+def _apply_readable_bold_to_font(font, enabled):
+    """Apply a moderate bold weight for manga text rendering.
+
+    QFont.setBold(True) plus the old path-based faux bold made Korean/Japanese
+    glyphs too heavy once an outline was added.  Use DemiBold as the default
+    visible weight so the white fill area remains readable inside thick strokes.
+    """
+    try:
+        if enabled:
+            font.setWeight(QFont.Weight.DemiBold)
+        else:
+            font.setWeight(QFont.Weight.Normal)
+    except Exception:
+        try:
+            font.setBold(bool(enabled))
+        except Exception:
+            pass
+    return font
+
+
 def _synthetic_bold_width_for(font, font_size, enabled):
     if not enabled:
         return 0.0
-    try:
-        actual_bold = bool(QFontInfo(font).bold())
-    except Exception:
-        actual_bold = False
     try:
         size = max(1.0, float(font_size))
     except Exception:
         size = 24.0
 
-    # 일부 한글/일본어/OTF 계열 폰트는 QFont.setBold(True)를 줘도
-    # 실제 굵기 변화가 거의 없거나 QFontInfo가 requested bold를 actual bold처럼
-    # 보고하는 경우가 있다. 그래서 Bold ON 상태에서는 항상 path 기반 faux bold를
-    # 한 번 더 얹는다. 실제 Bold face가 있는 폰트는 살짝, 없는 폰트는 더 강하게.
-    # G단계: 일부 폰트는 Bold face 선택/요청이 실제 path 두께에 거의 반영되지 않는다.
-    # B 버튼이 켜진 경우에는 폰트의 실제 Bold 지원 여부와 무관하게 눈에 보이는
-    # 합성 굵기를 만든다. 너무 과한 번짐을 막기 위해 글자 크기 비율로 제한한다.
-    ratio = 0.10 if actual_bold else 0.14
-    return max(1.6, min(14.0, size * ratio))
+    # Bold는 이제 폰트 weight(DemiBold)를 우선 사용한다.  이전처럼 모든 Bold에
+    # path 확장을 크게 얹으면 `Bold + 검은 외곽선` 조합에서 글자 내부가 먹혀
+    # 너무 떡져 보인다.  합성 보정은 폰트가 거의 굵어지지 않는 예외만을 위한
+    # 아주 얇은 보조값으로 제한한다.
+    try:
+        weight = font.weight()
+        if hasattr(weight, 'value'):
+            weight = weight.value
+        weight = int(weight)
+    except Exception:
+        weight = 0
+    if weight >= 60:
+        return 0.0
+    return max(0.0, min(2.2, size * 0.025))
 
 
 def _expand_path_for_synthetic_bold(path, width):
@@ -787,17 +818,242 @@ def _warp_path_by_arc_handles(path, handles):
     return out
 
 
-def build_typesetting_text_path(lines, font, align="center", line_height=None, letter_spacing=0):
+def _normalize_typesetting_writing_direction(value=None):
+    text = str(value or "horizontal").strip().lower()
+    if text in ("vertical", "v", "세로", "세로쓰기"):
+        return "vertical"
+    return "horizontal"
+
+
+def _line_to_vertical_glyphs(line):
+    """Return display glyphs for first-pass vertical writing.
+
+    2단계에서는 원문 데이터를 절대 바꾸지 않고, 렌더링 path에서만 한 글자씩
+    위에서 아래로 배치한다. 세로쓰기 전용 문장부호 치환/영숫자 묶음은
+    3단계 이후 보강 대상으로 남긴다.
+    """
+    return list(str(line or ""))
+
+
+def _fallback_vertical_space_advance(ch, base_cell_h, char_gap=0.0):
+    if _vertical_space_advance is not None:
+        try:
+            return _vertical_space_advance(ch, base_cell_h, char_gap)
+        except Exception:
+            pass
+    try:
+        base = max(1.0, float(base_cell_h or 1.0))
+    except Exception:
+        base = 1.0
+    try:
+        gap = max(0.0, float(char_gap or 0.0))
+    except Exception:
+        gap = 0.0
+    ratio = 0.50 if str(ch or '') == '　' else 0.32
+    return max(1.0, base * ratio) + gap * 0.25
+
+
+def _fallback_vertical_tight_cell_metrics(font, fm):
+    """Tight vertical cell metrics used by the fallback renderer.
+
+    This keeps vertical row/column spacing percentages close to horizontal
+    behavior: 50% should bring glyphs/columns close instead of leaving a full
+    blank font cell.
+    """
+    try:
+        widths = []
+        heights = []
+        for ch in "가漢あ":
+            path = QPainterPath()
+            path.addText(0, 0, font, ch)
+            rect = path.boundingRect()
+            if not rect.isNull() and rect.width() > 0 and rect.height() > 0:
+                widths.append(float(rect.width()))
+                heights.append(float(rect.height()))
+        fw = max(1.0, float(fm.height()))
+        fl = max(1.0, float(fm.lineSpacing()))
+        cell_w = min(max(1.0, max(widths) if widths else fw * 0.72), fw)
+        cell_h = min(max(1.0, max(heights) if heights else fl * 0.72), fl)
+        return cell_w, cell_h
+    except Exception:
+        return max(1.0, float(fm.height())), max(1.0, float(fm.lineSpacing()))
+
+
+def _fallback_vertical_effective_char_gap(base_cell_h, raw_gap=0.0):
+    try:
+        base = max(1.0, float(base_cell_h or 1.0))
+    except Exception:
+        base = 1.0
+    try:
+        raw = float(raw_gap or 0.0)
+    except Exception:
+        raw = 0.0
+    safe = max(0.0, base * 0.12)
+    if raw > 0:
+        return raw + safe * 0.35
+    return raw + safe
+
+
+def build_typesetting_vertical_text_path(lines, font, align="center", line_height=None, letter_spacing=0):
+    """Build a vertical-writing QPainterPath without mutating source text.
+
+    The primary path uses the Japanese vertical typesetting engine imported from
+    the sample generator.  It treats quote marks, ellipsis, punctuation, latin
+    runs, and short digit runs as vertical-layout tokens instead of stacking every
+    character as a full cell.  If that helper is unavailable, the old simple
+    one-glyph-per-cell fallback below is still kept for startup safety.
+    """
+    if _build_japanese_vertical_text_path is not None:
+        try:
+            return _build_japanese_vertical_text_path(
+                lines,
+                font,
+                align=align,
+                line_height=line_height,
+                letter_spacing=letter_spacing,
+                latin_mode="auto",
+                digit_mode="auto",
+                punctuation_mode="japanese_vertical",
+                random_key="ysb_vertical_text",
+                vertical_char_spacing=letter_spacing,
+            )
+        except Exception:
+            # Keep the legacy renderer as a no-crash fallback.  Rendering quality
+            # may be lower, but source text/OCR data remain untouched.
+            pass
+
+    align = (align or "center").lower()
+    if align not in ("left", "center", "right"):
+        align = "center"
+    try:
+        letter_spacing = int(letter_spacing or 0)
+    except Exception:
+        letter_spacing = 0
+
+    italic_requested = bool(font.italic())
+    path_font = QFont(font)
+    path_font.setItalic(False)
+
+    fm = QFontMetrics(path_font)
+    nominal_line_h = max(1.0, float(fm.lineSpacing()))
+    if line_height is None:
+        line_height = fm.lineSpacing()
+    line_height = int(line_height)
+    line_factor = max(0.01, abs(float(line_height) / nominal_line_h))
+    tight_cell_w, tight_cell_h = _fallback_vertical_tight_cell_metrics(path_font, fm)
+    vertical_letter_gap = _fallback_vertical_effective_char_gap(tight_cell_h, letter_spacing)
+
+    columns = [str(line or "") for line in (lines or [])]
+    if not columns:
+        columns = [""]
+
+    column_paths = []
+    column_rects_raw = []
+    max_col_width = 1.0
+
+    for line in columns:
+        glyphs = _line_to_vertical_glyphs(line)
+        col_path = QPainterPath()
+        cursor_y = 0.0
+        glyph_rects = []
+        for ch in glyphs:
+            if str(ch).isspace():
+                cursor_y += _fallback_vertical_space_advance(ch, line_height, vertical_letter_gap)
+                continue
+            glyph_path = QPainterPath()
+            glyph_path.addText(0, 0, path_font, ch)
+            glyph_rect = glyph_path.boundingRect()
+            if glyph_rect.isNull() or glyph_rect.width() <= 0 or glyph_rect.height() <= 0:
+                glyph_rect = QRectF(0, -fm.ascent(), max(1, fm.horizontalAdvance(ch)), max(1, tight_cell_h))
+            dx = -glyph_rect.center().x()
+            dy = cursor_y - glyph_rect.top()
+            tr = QTransform()
+            tr.translate(dx, dy)
+            mapped_glyph = tr.map(glyph_path)
+            if not mapped_glyph.isEmpty():
+                col_path.addPath(mapped_glyph)
+            mapped_rect = QRectF(glyph_rect)
+            mapped_rect.translate(dx, dy)
+            glyph_rects.append(mapped_rect)
+            try:
+                adv_y = max(float(tight_cell_h), float(glyph_rect.height()))
+            except Exception:
+                adv_y = float(tight_cell_h)
+            cursor_y += adv_y + float(vertical_letter_gap)
+
+        if italic_requested and not col_path.isEmpty():
+            shear = QTransform()
+            shear.shear(FAUX_ITALIC_SHEAR, 0.0)
+            col_path = shear.map(col_path)
+
+        col_rect = col_path.boundingRect()
+        if col_rect.isNull() or col_rect.width() <= 0 or col_rect.height() <= 0:
+            col_rect = QRectF(0, 0, max(1, tight_cell_w), max(1, tight_cell_h))
+        column_paths.append(col_path)
+        column_rects_raw.append(QRectF(col_rect))
+        max_col_width = max(max_col_width, float(col_rect.width()))
+
+    column_step = max(1.0, max_col_width * line_factor)
+    total_width = column_step * max(0, len(column_paths) - 1) + max_col_width
+
+    path = QPainterPath()
+    line_rects = []
+    for idx, col_path in enumerate(column_paths):
+        col_rect = column_rects_raw[idx]
+        # 세로쓰기 기본 관례에 맞춰 첫 줄을 오른쪽에 두고, 이후 줄은 왼쪽으로 보낸다.
+        col_center_x = (total_width / 2.0) - (idx * column_step) - (max_col_width / 2.0)
+        dx = col_center_x - col_rect.center().x()
+        dy = -col_rect.top()
+        tr = QTransform()
+        tr.translate(dx, dy)
+        if not col_path.isEmpty():
+            mapped = tr.map(col_path)
+            path.addPath(mapped)
+            mapped_rect = mapped.boundingRect()
+        else:
+            mapped_rect = QRectF(col_rect)
+            mapped_rect.translate(dx, dy)
+        line_rects.append(QRectF(mapped_rect))
+
+    rect = path.boundingRect()
+    if rect.isNull() or rect.width() <= 0 or rect.height() <= 0:
+        rect = QRectF(-0.5, 0, 1, max(1, fm.height()))
+
+    if align == "left":
+        dx = -rect.left()
+    elif align == "right":
+        dx = -rect.right()
+    else:
+        dx = -rect.center().x()
+    if dx:
+        tr = QTransform()
+        tr.translate(dx, 0)
+        path = tr.map(path)
+        line_rects = [QRectF(r.translated(dx, 0)) for r in line_rects]
+
+    return path, line_rects
+
+
+def build_typesetting_text_path(lines, font, align="center", line_height=None, letter_spacing=0, writing_direction="horizontal"):
     """Build a QPainterPath with manual tracking and faux italic support.
 
     Qt/QPainterPath does not reliably synthesize Photoshop-style font effects for
     every font.  In particular, some OTF/CJK fonts ignore QFont.setItalic() or
     negative tracking when the family has no matching face.  This helper therefore
-    lays out characters manually and applies a small synthetic shear when italic
-    is requested.  The returned rects are already in the final local coordinates.
+    lays out characters manually and applies a small synthetic shear when italic is
+    requested.  The returned rects are already in the final local coordinates.
+
+    writing_direction='vertical' switches only the display path; source text, OCR
+    rect, mask, and OCR id are not modified.
 
     Returns: (path, line_rects)
     """
+    if _normalize_typesetting_writing_direction(writing_direction) == "vertical":
+        # 세로쓰기에서는 align 값을 좌/중/우가 아니라 위/중/아래 정렬로 해석한다.
+        # path 내부의 가로 정렬은 항상 중앙으로 고정하고, 실제 위/중/아래 배치는
+        # TypesettingItem의 rect 배치 단계에서 처리한다.
+        return build_typesetting_vertical_text_path(lines, font, "center", line_height, letter_spacing)
+
     align = (align or "center").lower()
     if align not in ("left", "center", "right"):
         align = "center"
@@ -817,7 +1073,7 @@ def build_typesetting_text_path(lines, font, align="center", line_height=None, l
     fm = QFontMetrics(path_font)
     if line_height is None:
         line_height = fm.lineSpacing()
-    line_height = max(1, int(line_height))
+    line_height = int(line_height)
 
     path = QPainterPath()
     line_rects = []
@@ -921,7 +1177,7 @@ class TypesettingItem(QGraphicsPathItem):
 
         font = QFont(item_font_family)
         font.setPixelSize(item_font_size)
-        font.setBold(bool(data.get('bold', False)))
+        _apply_readable_bold_to_font(font, bool(data.get('bold', False)))
         font.setItalic(bool(data.get('italic', False)))
 
         try:
@@ -929,27 +1185,28 @@ class TypesettingItem(QGraphicsPathItem):
         except Exception:
             letter_spacing = 0
         try:
-            line_spacing_pct = max(50, min(300, int(data.get('line_spacing', 100) or 100)))
+            line_spacing_pct = clamp_text_line_spacing(data.get('line_spacing', 100), 100)
         except Exception:
             line_spacing_pct = 100
         try:
-            char_width_pct = max(10, min(300, int(data.get('char_width', 100) or 100)))
+            char_width_pct = clamp_text_char_scale(data.get('char_width', 100), 100)
         except Exception:
             char_width_pct = 100
         try:
-            char_height_pct = max(10, min(300, int(data.get('char_height', 100) or 100)))
+            char_height_pct = clamp_text_char_scale(data.get('char_height', 100), 100)
         except Exception:
             char_height_pct = 100
 
         fm = QFontMetrics(font)
-        line_height = max(1, int(fm.lineSpacing() * (line_spacing_pct / 100.0)))
+        line_height = text_line_height_from_percent(fm.lineSpacing(), line_spacing_pct)
         self._strike_lines = []
         self._synthetic_bold_width = _synthetic_bold_width_for(font, item_font_size, bool(data.get('bold', False)))
 
         sx = char_width_pct / 100.0
         sy = char_height_pct / 100.0
 
-        path, line_rects = build_typesetting_text_path(lines, font, item_align, line_height, letter_spacing)
+        writing_direction = _normalize_typesetting_writing_direction(data.get('writing_direction', 'horizontal'))
+        path, line_rects = build_typesetting_text_path(lines, font, item_align, line_height, letter_spacing, writing_direction)
 
         if data.get('strike', False):
             for line_rect in line_rects:
@@ -1009,6 +1266,16 @@ class TypesettingItem(QGraphicsPathItem):
         rect = data['rect']
         final_x = float(rect[0]) + float(data.get('x_off', 0) or 0)
         final_y = float(rect[1]) + float(data.get('y_off', 0) or 0)
+        # 자동 겹침 보정용 내부 오프셋. OCR/작업 박스(final_x/final_y)는 그대로 두고
+        # 실제 글자 path 위치만 박스 안에서 이동시킨다.
+        try:
+            inner_text_x_off = float(data.get('inner_text_x_off', 0) or 0)
+        except Exception:
+            inner_text_x_off = 0.0
+        try:
+            inner_text_y_off = float(data.get('inner_text_y_off', 0) or 0)
+        except Exception:
+            inner_text_y_off = 0.0
         rect_w = max(1.0, float(rect[2]))
         rect_h = max(1.0, float(rect[3]))
 
@@ -1019,32 +1286,51 @@ class TypesettingItem(QGraphicsPathItem):
         if path_rect.isNull() or path_rect.width() <= 0 or path_rect.height() <= 0:
             path_rect = QRectF(0, 0, 1, max(1, item_font_size))
 
-        if item_align == 'left':
-            anchor_x = final_x
-            pos_x = anchor_x - path_rect.left()
-        elif item_align == 'right':
-            anchor_x = final_x + rect_w
-            pos_x = anchor_x - path_rect.right()
-        else:
+        if writing_direction == 'vertical':
+            # 세로쓰기에서는 기존 align 저장값을 다음처럼 읽는다.
+            # left=center 값 변경 없이 '위 정렬', center='가운데 정렬', right='아래 정렬'.
             anchor_x = final_x + rect_w / 2.0
             pos_x = anchor_x - path_rect.center().x()
-
-        anchor_y = final_y + rect_h / 2.0
-        pos_y = anchor_y - path_rect.center().y()
-        self.setPos(pos_x, pos_y)
-
-        # 작업용 텍스트 영역은 OCR 단계와 편집 이후 단계의 기준을 분리한다.
-        # - OCR 단계: 원래 OCR 영역 전체를 선택/변형 박스로 사용한다.
-        # - 텍스트 편집 이후: 실제 글자 bounds를 새 텍스트 영역으로 사용한다.
-        #   최종화면에서 수정한 순간부터 기존 OCR 박스는 더 이상 기준이 아니기 때문이다.
-        self._text_path_rect = QRectF(path_rect)
-        text_anchor_mode = str(data.get('text_anchor_mode') or '').lower() == 'text'
-        manual_rect = bool(data.get('manual_text_rect')) or text_anchor_mode
-        if manual_rect:
-            self._local_text_area_rect = QRectF(self._text_path_rect)
+            if item_align == 'left':
+                anchor_y = final_y
+                pos_y = anchor_y - path_rect.top()
+            elif item_align == 'right':
+                anchor_y = final_y + rect_h
+                pos_y = anchor_y - path_rect.bottom()
+            else:
+                anchor_y = final_y + rect_h / 2.0
+                pos_y = anchor_y - path_rect.center().y()
         else:
-            scene_rect = QRectF(final_x, final_y, rect_w, rect_h)
-            self._local_text_area_rect = self.mapFromScene(scene_rect).boundingRect()
+            if item_align == 'left':
+                anchor_x = final_x
+                pos_x = anchor_x - path_rect.left()
+            elif item_align == 'right':
+                anchor_x = final_x + rect_w
+                pos_x = anchor_x - path_rect.right()
+            else:
+                anchor_x = final_x + rect_w / 2.0
+                pos_x = anchor_x - path_rect.center().x()
+
+            anchor_y = final_y + rect_h / 2.0
+            pos_y = anchor_y - path_rect.center().y()
+        self.setPos(pos_x + inner_text_x_off, pos_y + inner_text_y_off)
+
+        # 작업용 텍스트 영역은 항상 저장된 rect/OCR 박스 전체를 기준으로 유지한다.
+        # 실제 글자 bounds는 _text_path_rect로 따로 보관하고, 클릭/더블클릭/변형 hit 영역은
+        # 사용자가 보는 빨간 점선 박스와 일치시킨다. 텍스트 수정만으로 hit 박스가 글자
+        # bounds까지 줄어들면 OCR 박스 안 빈 공간을 눌러도 텍스트로 인식되지 않는다.
+        self._text_path_rect = QRectF(path_rect)
+        scene_rect = QRectF(final_x, final_y, rect_w, rect_h)
+        # Keep a raw local OCR/work box.  Do not use mapFromScene(...).boundingRect():
+        # after rotation that produces a larger axis-aligned box and makes text
+        # selectable outside the actual rotated OCR rectangle.
+        self._strict_local_text_work_rect = QRectF(
+            final_x - float(self.pos().x()),
+            final_y - float(self.pos().y()),
+            rect_w,
+            rect_h,
+        )
+        self._local_text_area_rect = QRectF(self._strict_local_text_work_rect)
 
         # 텍스트 변형: 회전은 실제 글자 영역의 중앙을 기준으로 한다.
         try:
@@ -1263,7 +1549,7 @@ class TypesettingItem(QGraphicsPathItem):
 
         font = QFont(item_font_family)
         font.setPixelSize(item_font_size)
-        font.setBold(bool(data.get('bold', False)))
+        _apply_readable_bold_to_font(font, bool(data.get('bold', False)))
         font.setItalic(bool(data.get('italic', False)))
 
         try:
@@ -1271,26 +1557,27 @@ class TypesettingItem(QGraphicsPathItem):
         except Exception:
             letter_spacing = 0
         try:
-            line_spacing_pct = max(50, min(300, int(data.get('line_spacing', 100) or 100)))
+            line_spacing_pct = clamp_text_line_spacing(data.get('line_spacing', 100), 100)
         except Exception:
             line_spacing_pct = 100
         try:
-            char_width_pct = max(10, min(300, int(data.get('char_width', 100) or 100)))
+            char_width_pct = clamp_text_char_scale(data.get('char_width', 100), 100)
         except Exception:
             char_width_pct = 100
         try:
-            char_height_pct = max(10, min(300, int(data.get('char_height', 100) or 100)))
+            char_height_pct = clamp_text_char_scale(data.get('char_height', 100), 100)
         except Exception:
             char_height_pct = 100
 
         fm = QFontMetrics(font)
-        line_height = max(1, int(fm.lineSpacing() * (line_spacing_pct / 100.0)))
+        line_height = text_line_height_from_percent(fm.lineSpacing(), line_spacing_pct)
         self._strike_lines = []
         self._synthetic_bold_width = _synthetic_bold_width_for(font, item_font_size, bool(data.get('bold', False)))
 
         sx = char_width_pct / 100.0
         sy = char_height_pct / 100.0
-        path, line_rects = build_typesetting_text_path(lines, font, item_align, line_height, letter_spacing)
+        writing_direction = _normalize_typesetting_writing_direction(data.get('writing_direction', 'horizontal'))
+        path, line_rects = build_typesetting_text_path(lines, font, item_align, line_height, letter_spacing, writing_direction)
 
         if data.get('strike', False):
             for line_rect in line_rects:
@@ -1352,33 +1639,65 @@ class TypesettingItem(QGraphicsPathItem):
             rect.append(1)
         final_x = float(rect[0]) + float(data.get('x_off', 0) or 0)
         final_y = float(rect[1]) + float(data.get('y_off', 0) or 0)
+        try:
+            inner_text_x_off = float(data.get('inner_text_x_off', 0) or 0)
+        except Exception:
+            inner_text_x_off = 0.0
+        try:
+            inner_text_y_off = float(data.get('inner_text_y_off', 0) or 0)
+        except Exception:
+            inner_text_y_off = 0.0
         rect_w = max(1.0, float(rect[2]))
         rect_h = max(1.0, float(rect[3]))
         path_rect = path.boundingRect()
         if path_rect.isNull() or path_rect.width() <= 0 or path_rect.height() <= 0:
             path_rect = QRectF(0, 0, 1, max(1, item_font_size))
 
-        if item_align == 'left':
-            anchor_x = final_x
-            pos_x = anchor_x - path_rect.left()
-        elif item_align == 'right':
-            anchor_x = final_x + rect_w
-            pos_x = anchor_x - path_rect.right()
-        else:
+        if writing_direction == 'vertical':
+            # 세로쓰기에서는 align 저장값을 가로 좌/중/우가 아니라 위/중/아래로 해석한다.
+            # __init__ 경로와 live refresh 경로가 서로 다르면 버튼을 눌러도 다시 가로 정렬처럼
+            # 배치되는 버그가 생기므로 두 경로를 반드시 동일하게 맞춘다.
             anchor_x = final_x + rect_w / 2.0
             pos_x = anchor_x - path_rect.center().x()
-        anchor_y = final_y + rect_h / 2.0
-        pos_y = anchor_y - path_rect.center().y()
-        self.setPos(pos_x, pos_y)
+            if item_align == 'left':      # 위 정렬
+                anchor_y = final_y
+                pos_y = anchor_y - path_rect.top()
+            elif item_align == 'right':   # 아래 정렬
+                anchor_y = final_y + rect_h
+                pos_y = anchor_y - path_rect.bottom()
+            else:                         # 가운데 정렬
+                anchor_y = final_y + rect_h / 2.0
+                pos_y = anchor_y - path_rect.center().y()
+        else:
+            if item_align == 'left':
+                anchor_x = final_x
+                pos_x = anchor_x - path_rect.left()
+            elif item_align == 'right':
+                anchor_x = final_x + rect_w
+                pos_x = anchor_x - path_rect.right()
+            else:
+                anchor_x = final_x + rect_w / 2.0
+                pos_x = anchor_x - path_rect.center().x()
+            anchor_y = final_y + rect_h / 2.0
+            pos_y = anchor_y - path_rect.center().y()
+        self.setPos(pos_x + inner_text_x_off, pos_y + inner_text_y_off)
 
         self._text_path_rect = QRectF(path_rect)
-        text_anchor_mode = str(data.get('text_anchor_mode') or '').lower() == 'text'
-        manual_rect = bool(data.get('manual_text_rect')) or text_anchor_mode
-        if manual_rect:
-            self._local_text_area_rect = QRectF(self._text_path_rect)
-        else:
-            scene_rect = QRectF(final_x, final_y, rect_w, rect_h)
-            self._local_text_area_rect = self.mapFromScene(scene_rect).boundingRect()
+        # 클릭/선택/변형 hit 영역은 항상 저장된 rect 기준이다.
+        # manual_text_rect/text_anchor_mode='text'라고 해서 path_rect로 바꾸면,
+        # 직접 수정 후 줄어든 박스를 클릭할 때 Qt hit-test와 YSB rect hit-test가 엇갈려
+        # 선택이 바로 풀리는 증상이 생긴다. 실제 글자 bounds는 text_content_scene_rect()만 쓴다.
+        scene_rect = QRectF(final_x, final_y, rect_w, rect_h)
+        # Keep a raw local OCR/work box.  Do not use mapFromScene(...).boundingRect():
+        # after rotation that produces a larger axis-aligned box and makes text
+        # selectable outside the actual rotated OCR rectangle.
+        self._strict_local_text_work_rect = QRectF(
+            final_x - float(self.pos().x()),
+            final_y - float(self.pos().y()),
+            rect_w,
+            rect_h,
+        )
+        self._local_text_area_rect = QRectF(self._strict_local_text_work_rect)
 
         try:
             self.setTransformOriginPoint(self.transform_rect().center())
@@ -1405,6 +1724,7 @@ class TypesettingItem(QGraphicsPathItem):
         self._strike_lines = []
         self._synthetic_bold_width = 0.0
         self._text_path_rect = QRectF(self._raster_rect)
+        self._strict_local_text_work_rect = QRectF(self._raster_rect)
         self._local_text_area_rect = QRectF(self._raster_rect)
 
         rect = list(self.data.get('rect') or [0, 0, self._raster_image.width(), self._raster_image.height()])
@@ -2028,8 +2348,8 @@ class TypesettingItem(QGraphicsPathItem):
         # 영역 크기 변화만큼 글자 너비/높이 비율도 같이 바꾼다.
         cw = int(round(self._transform_press_char_width * (new_rect.width() / press_rect.width())))
         ch = int(round(self._transform_press_char_height * (new_rect.height() / press_rect.height())))
-        cw = max(10, min(300, cw))
-        ch = max(10, min(300, ch))
+        cw = clamp_text_char_scale(cw, 100)
+        ch = clamp_text_char_scale(ch, 100)
         self.data['char_width'] = cw
         self.data['char_height'] = ch
 
@@ -2047,6 +2367,88 @@ class TypesettingItem(QGraphicsPathItem):
         self.data['rect'] = base
         self.rebuild_text_render_for_live_preview()
 
+    def _uses_visual_text_area_rect(self):
+        """Return True when selection/guide/hit should follow visible glyphs.
+
+        OCR-created boxes still keep their OCR rectangle until the user explicitly
+        turns them into text-anchored/manual rectangles.  Once a text object is
+        manually edited, created as a free text item, or reset to text-anchor mode,
+        using the saved OCR/work rectangle makes certain fonts look absurdly large:
+        many display fonts report generous line metrics even though the ink is much
+        tighter.  The final-screen guide and click envelope should therefore follow
+        the actual rendered glyph path, plus only a small safety pad.
+        """
+        try:
+            d = self.data or {}
+            return bool(d.get('manual_text_rect')) or str(d.get('text_anchor_mode') or '').lower() in ('text', 'visual')
+        except Exception:
+            return False
+
+    def _visual_text_local_rect(self, include_effects=True, minimum_pad=True):
+        """Tight visible glyph rectangle in local coordinates.
+
+        This is separate from text_area_rect()'s legacy OCR rectangle.  It is used
+        for manual/text-anchored items so decorative fonts with huge font metrics do
+        not create giant editable/selection boxes around small visible glyphs.
+        """
+        try:
+            rect = QRectF(getattr(self, '_text_path_rect', QRectF()))
+        except Exception:
+            rect = QRectF()
+        if rect.isNull() or rect.width() <= 0 or rect.height() <= 0:
+            try:
+                rect = QRectF(self.path().boundingRect())
+            except Exception:
+                rect = QRectF()
+        if rect.isNull() or rect.width() <= 0 or rect.height() <= 0:
+            area_rect = getattr(self, '_local_text_area_rect', None)
+            if area_rect is not None:
+                return QRectF(area_rect)
+            return QRectF(0, 0, 1, 1)
+
+        pad = 0.0
+        try:
+            stroke = float((self.data or {}).get('stroke_width') or 0.0)
+        except Exception:
+            stroke = 0.0
+        try:
+            pad = max(pad, stroke + 3.0)
+        except Exception:
+            pass
+        try:
+            pad = max(pad, float(getattr(self, '_synthetic_bold_width', 0.0) or 0.0) + 3.0)
+        except Exception:
+            pass
+        if include_effects:
+            try:
+                if _bool_value((self.data or {}).get('double_stroke_enabled'), False):
+                    pad = max(pad, stroke + float((self.data or {}).get('double_stroke_width', 0) or 0.0) * 2.0 + 4.0)
+            except Exception:
+                pass
+            try:
+                if _bool_value((self.data or {}).get('text_shadow_enabled'), False):
+                    shadow_pad = max(abs(float((self.data or {}).get('text_shadow_offset_x', 0) or 0.0)), abs(float((self.data or {}).get('text_shadow_offset_y', 0) or 0.0)))
+                    shadow_pad += max(0.0, float((self.data or {}).get('text_shadow_blur', 0) or 0.0)) + 5.0
+                    pad = max(pad, shadow_pad)
+            except Exception:
+                pass
+            try:
+                if _bool_value((self.data or {}).get('text_glow_enabled'), False):
+                    glow_pad = max(abs(float((self.data or {}).get('text_glow_offset_x', 0) or 0.0)), abs(float((self.data or {}).get('text_glow_offset_y', 0) or 0.0)))
+                    glow_pad += max(0.0, float((self.data or {}).get('text_glow_size', 0) or 0.0)) + max(0.0, float((self.data or {}).get('text_glow_blur', 0) or 0.0)) + 5.0
+                    pad = max(pad, glow_pad)
+            except Exception:
+                pass
+        if minimum_pad:
+            try:
+                font_size = float((self.data or {}).get('font_size') or 0.0)
+            except Exception:
+                font_size = 0.0
+            pad = max(pad, min(10.0, max(3.0, font_size * 0.035)))
+        if pad > 0:
+            rect = rect.adjusted(-pad, -pad, pad, pad)
+        return rect
+
     def text_area_rect(self):
         """최종 화면에서 표시할 작업용 텍스트 영역. 실제 출력에는 포함되지 않는다."""
         # 변형 드래그 중에는 화면에 보이는 박스가 즉시 줄거나 늘어야 하므로
@@ -2055,18 +2457,12 @@ class TypesettingItem(QGraphicsPathItem):
         if live_rect is not None:
             return QRectF(live_rect)
 
-        # 텍스트 수정 이후에는 실제 글자 bounds가 곧 텍스트 영역이다.
-        # 주의: getattr(..., QGraphicsPathItem.boundingRect(self)) 형태는 default 인자가 매번 평가되어
-        # shape()/boundingRect() 호출 중 Qt 쪽 재귀를 만들 수 있다. path().boundingRect()로 가볍게 계산한다.
-        text_anchor_mode = str(self.data.get('text_anchor_mode') or '').lower() == 'text'
-        if bool(self.data.get('manual_text_rect')) or text_anchor_mode or bool(self.data.get('_transform_mode', False)) or bool(self.data.get('_skew_mode', False)) or bool(self.data.get('_trapezoid_mode', False)) or bool(self.data.get('_arc_mode', False)):
-            rect = getattr(self, '_text_path_rect', None)
-            if rect is None:
-                rect = self.path().boundingRect()
-            if not rect.isNull() and rect.width() > 0 and rect.height() > 0:
-                return QRectF(rect)
+        # 직접 수정/수동 텍스트는 OCR 박스가 아니라 실제 glyph bounds를 따른다.
+        # 폰트 메트릭 여백이 큰 장식 폰트에서 선택/편집 박스가 글자보다 과하게 커지는 것을 막는다.
+        if self._uses_visual_text_area_rect():
+            return self._visual_text_local_rect(include_effects=True, minimum_pad=True)
 
-        # OCR 초기 단계에서는 원래 OCR 박스 전체를 선택 기준으로 쓴다.
+        # OCR 원본 상태는 기존처럼 박스 전체를 유지한다.
         area_rect = getattr(self, '_local_text_area_rect', None)
         if area_rect is not None:
             return QRectF(area_rect)
@@ -2082,6 +2478,91 @@ class TypesettingItem(QGraphicsPathItem):
         )
         return self.mapFromScene(scene_rect).boundingRect()
 
+    def _full_text_area_click_enabled(self):
+        """The whole saved text/work rectangle is always a hit area.
+
+        This is no longer a user option.  Clicking should be easy: after direct
+        editing, blank slots and spaces inside the adjusted text rectangle behave
+        like the original OCR rectangle.
+        """
+        return True
+
+    def _data_text_scene_rect(self):
+        """Saved OCR/work rectangle in scene coordinates, without visual padding."""
+        try:
+            rect = list((self.data or {}).get('rect') or [0, 0, 1, 1])
+            while len(rect) < 4:
+                rect.append(1)
+            x_off = float((self.data or {}).get('x_off', 0) or 0)
+            y_off = float((self.data or {}).get('y_off', 0) or 0)
+            return QRectF(
+                float(rect[0]) + x_off,
+                float(rect[1]) + y_off,
+                max(1.0, float(rect[2])),
+                max(1.0, float(rect[3])),
+            )
+        except Exception:
+            return QRectF()
+
+    def _data_text_local_rect_no_rotation(self):
+        """Local OCR/work rectangle computed from data without mapFromScene().
+
+        mapFromScene(scene_rect).boundingRect() is unsafe for hit testing after
+        rotation because it turns the rotated rectangle into a larger
+        axis-aligned local box.  The saved OCR/work box is a scene-space box whose
+        local counterpart is simply offset by the item position.  Rotation is
+        applied later only when the local box is mapped back to scene as a
+        polygon for contains() checks.
+        """
+        try:
+            scene_rect = self._data_text_scene_rect()
+            if scene_rect.isNull() or scene_rect.width() <= 0 or scene_rect.height() <= 0:
+                return QRectF()
+            pos = self.pos()
+            return QRectF(
+                float(scene_rect.x()) - float(pos.x()),
+                float(scene_rect.y()) - float(pos.y()),
+                float(scene_rect.width()),
+                float(scene_rect.height()),
+            )
+        except Exception:
+            return QRectF()
+
+    def strict_text_work_rect(self):
+        """Local OCR/work rectangle used for *hit testing only*.
+
+        This is an absolute interlock: text click/selection must use only the
+        saved OCR/text work rectangle.  It must never follow visual glyph bounds,
+        font metric padding, stroke/shadow/glow overflow, cursor repaint regions,
+        or mapFromScene(...).boundingRect() expansion after rotation.
+        """
+        try:
+            area_rect = getattr(self, '_strict_local_text_work_rect', None)
+            if area_rect is not None and not area_rect.isNull() and area_rect.width() > 0 and area_rect.height() > 0:
+                return QRectF(area_rect)
+        except Exception:
+            pass
+        try:
+            # Rasterized text has no separate OCR work box in local coordinates;
+            # keep its own raster rectangle as the strict hit area.
+            if bool(getattr(self, '_is_rasterized_text', False)):
+                rr = getattr(self, '_raster_rect', None)
+                if rr is not None and not rr.isNull():
+                    return QRectF(rr)
+        except Exception:
+            pass
+        return self._data_text_local_rect_no_rotation()
+
+    def text_hit_rect(self):
+        """Local rectangle used only for selection/click hit testing.
+
+        Hit detection must stay inside the saved OCR/work text rectangle.  The
+        rendered glyph path, visual text_area_rect(), font metrics, stroke/shadow/
+        glow overflow, and previous cursor repaint padding are intentionally
+        excluded here.
+        """
+        return QRectF(self.strict_text_work_rect())
+
     def text_content_scene_rect(self):
         """실제 글자가 차지하는 영역. 직접 편집 시작 위치/영역 계산에 쓴다."""
         rect = getattr(self, '_text_path_rect', None)
@@ -2096,7 +2577,8 @@ class TypesettingItem(QGraphicsPathItem):
         # 최종화면 진입 때 재귀/렉을 만들 수 있다. 순수 path bounds 기준으로 직접 계산한다.
         base = self.path().boundingRect()
         area = self.text_area_rect()
-        out = base.united(area)
+        hit_area = self.text_hit_rect()
+        out = base.united(area).united(hit_area)
         if self.data.get('_transform_mode', False):
             tr = self.transform_rect()
             for r in self.transform_handle_rects().values():
@@ -2149,15 +2631,16 @@ class TypesettingItem(QGraphicsPathItem):
         return out.adjusted(-pad, -pad, pad, pad)
 
     def shape(self):
-        # 클릭 판정은 실제 글자 선이 아니라 작업용 텍스트 영역 전체로 잡는다.
-        # super().shape() 호출은 Qt 내부에서 다시 boundingRect()/shape()로 이어져 재귀가 날 수 있으므로
-        # path()를 직접 더하는 방식으로 가볍게 처리한다.
+        # 클릭 판정은 실제 글자 선이나 시각 bounds가 아니라 저장된 OCR/텍스트 박스만 따른다.
+        # text_area_rect()는 화면 가이드용으로 visual bounds를 반환할 수 있으므로 shape()에도
+        # 넣지 않는다. 넣는 순간 Qt 기본 hit-test가 글자 여백/효과 영역을 다시 잡아버린다.
         s = QPainterPath()
-        area = self.text_area_rect()
-        s.addRect(area)
-        text_path = self.path()
-        if not text_path.isEmpty():
-            s.addPath(text_path)
+        hit_area = self.text_hit_rect()
+        if not hit_area.isNull():
+            s.addRect(hit_area)
+        # Text selection/click hit must not follow glyph overflow.  Keep shape()
+        # strict to the OCR/work text rectangle; boundingRect() still includes the
+        # actual path/effects so painting is not clipped.
         if self.data.get('_transform_mode', False):
             tr = self.transform_rect()
             box_pad = self._guide_pad(10.0)
@@ -2189,6 +2672,15 @@ class TypesettingItem(QGraphicsPathItem):
             for r in self.arc_handle_rects().values():
                 s.addRect(r.adjusted(-handle_pad, -handle_pad, handle_pad, handle_pad))
         return s
+
+    def contains(self, point):
+        # Absolute hit interlock.  Never fall back to QGraphicsPathItem.contains(),
+        # because that follows the rendered glyph path and can make oversized font
+        # metrics or visual overflow selectable outside the OCR/work box.
+        try:
+            return bool(self.shape().contains(point))
+        except Exception:
+            return False
 
     def _view_fast_text_paint_active(self, widget=None):
         """Return True while the owning view is in zoom/scroll fast path.
@@ -2615,6 +3107,19 @@ class TypesettingItem(QGraphicsPathItem):
         return True
 
     def hoverMoveEvent(self, event):
+        main = getattr(self, "main_window", None)
+        draw_mode = getattr(getattr(main, "view", None), "draw_mode", None) if main is not None else None
+        if draw_mode is not None and draw_mode != 'final_text':
+            # While a paint/mask/selection tool is active, item-level cursors
+            # must not override the tool cursor.  This especially matters after
+            # undo/redo, where the mouse can still be hovering an item that set
+            # a transform cursor on the previous event.
+            try:
+                self.unsetCursor()
+            except Exception:
+                pass
+            event.ignore()
+            return
         if self.data.get('_transform_mode', False):
             action = self.transform_action_at(event.pos())
             if action:
@@ -2795,6 +3300,15 @@ class TypesettingItem(QGraphicsPathItem):
             if getattr(self, '_is_rasterized_text', False) or self.data.get('rasterized_text'):
                 new_x_off = int(round(float(pos.x()) - rect_x))
                 new_y_off = int(round(float(pos.y()) - rect_y))
+            elif str(self.data.get('writing_direction') or '').strip().lower() in ('vertical', 'v', '세로', '세로쓰기'):
+                # 세로쓰기 align 의미: left=위, center=가운데, right=아래.
+                new_x_off = int(round(float(pos.x()) + float(path_rect.center().x()) - (rect_x + rect_w / 2.0)))
+                if align == 'left':
+                    new_y_off = int(round(float(pos.y()) + float(path_rect.top()) - rect_y))
+                elif align == 'right':
+                    new_y_off = int(round(float(pos.y()) + float(path_rect.bottom()) - (rect_y + rect_h)))
+                else:
+                    new_y_off = int(round(float(pos.y()) + float(path_rect.center().y()) - (rect_y + rect_h / 2.0)))
             elif align == 'left':
                 new_x_off = int(round(float(pos.x()) + float(path_rect.left()) - rect_x))
                 new_y_off = int(round(float(pos.y()) + float(path_rect.center().y()) - (rect_y + rect_h / 2.0)))
@@ -2834,6 +3348,43 @@ class TypesettingItem(QGraphicsPathItem):
             event.ignore()
             return
 
+        # Absolute hit interlock: a text item may only begin selection/move from
+        # inside its strict OCR/work rectangle.  QGraphicsScene can still route an
+        # event to this item through transform guide padding or a broad cached
+        # shape, so the item itself must reject outside presses as the final gate.
+        try:
+            if event.button() == Qt.MouseButton.LeftButton:
+                local_press = QPointF(event.pos())
+                strict_hit = self.text_hit_rect() if callable(getattr(self, 'text_hit_rect', None)) else QRectF()
+                inside_strict_text = bool(strict_hit is not None and (not strict_hit.isNull()) and strict_hit.contains(local_press))
+                transform_action = None
+                try:
+                    if self.data.get('_skew_mode', False):
+                        transform_action = self.skew_action_at(local_press)
+                    elif self.data.get('_trapezoid_mode', False):
+                        transform_action = self.trapezoid_action_at(local_press)
+                    elif self.data.get('_arc_mode', False):
+                        transform_action = self.arc_action_at(local_press)
+                    elif self.data.get('_transform_mode', False):
+                        transform_action = self.transform_action_at(local_press)
+                except Exception:
+                    transform_action = None
+                if not inside_strict_text and not transform_action:
+                    try:
+                        if main is not None and hasattr(main, 'audit_boundary_event'):
+                            main.audit_boundary_event(
+                                'TEXT_HIT_REJECT_OUTSIDE_OCR_RECT',
+                                text_id=str((self.data or {}).get('id')),
+                                local_x=round(float(local_press.x()), 2),
+                                local_y=round(float(local_press.y()), 2),
+                            )
+                    except Exception:
+                        pass
+                    event.ignore()
+                    return
+        except Exception:
+            pass
+
         self.last_press_y = self.pos().y()
         self._normal_move_press_pos = QPointF(self.pos())
         try:
@@ -2867,10 +3418,20 @@ class TypesettingItem(QGraphicsPathItem):
         self._shift_vertical_drag_active = False
 
         active_transform = main.current_transform_data_item() if main is not None and hasattr(main, 'current_transform_data_item') else None
-        if active_transform is not None and active_transform is not self.data:
-            self.setSelected(False)
-            event.accept()
-            return
+        if active_transform is not None:
+            # 직접 편집/스타일 적용/라이브 갱신 뒤에는 같은 텍스트라도 data dict 객체가
+            # 새로 rebound될 수 있다. 객체 동일성(is)으로 비교하면 같은 ID의 텍스트를
+            # 다른 텍스트로 오판해 클릭 즉시 선택을 풀어버리는 토글 버그가 난다.
+            try:
+                active_id = str(active_transform.get('id'))
+                self_id = str(self.data.get('id'))
+            except Exception:
+                active_id = None
+                self_id = None
+            if active_id is None or self_id is None or active_id != self_id:
+                self.setSelected(False)
+                event.accept()
+                return
 
         # Ctrl+드래그는 선택 누적이 아니라 복제 이동으로 승격될 수 있다.
         # 단순 Ctrl+클릭은 기존처럼 선택만 누적한다.
@@ -3159,7 +3720,7 @@ class TypesettingItem(QGraphicsPathItem):
                 return
 
             if main is not None and hasattr(main, "start_inline_text_edit"):
-                main.start_inline_text_edit(self)
+                main.start_inline_text_edit(self, click_scene_pos=event.scenePos())
                 event.accept()
                 return
         super().mouseDoubleClickEvent(event)
@@ -3307,7 +3868,23 @@ class TypesettingItem(QGraphicsPathItem):
         # rasterized_text/Shift 수직 잠금은 위에서 직접 이동했으므로 base mouseRelease가 없어도 된다.
         # 일반 텍스트는 기존 흐름을 유지한다.
         if not raster_drag_active and not manual_vertical_drag_active:
-            super().mouseReleaseEvent(event)
+            try:
+                super().mouseReleaseEvent(event)
+            except RuntimeError:
+                try:
+                    self._manual_text_drag_scene_press = None
+                    self._manual_text_drag_item_press = None
+                    self._shift_vertical_drag_active = False
+                    self._finish_text_move_fast_path()
+                except Exception:
+                    pass
+                event.accept()
+                return
+            except Exception:
+                try:
+                    self._finish_text_move_fast_path()
+                except Exception:
+                    pass
         new_pos = self.pos()
         new_x_off, new_y_off = self.current_text_offsets_from_item_pos(new_pos)
         press_geometry = getattr(self, '_normal_move_press_geometry', None)
@@ -3457,6 +4034,14 @@ class ToggleBoxItem(QGraphicsRectItem):
         self.setAcceptedMouseButtons(Qt.MouseButton.LeftButton)
 
     def hoverEnterEvent(self, event):
+        try:
+            draw_mode = getattr(getattr(self.main, "view", None), "draw_mode", None)
+            if draw_mode is not None and draw_mode != 'final_text':
+                self.unsetCursor()
+                event.ignore()
+                return
+        except Exception:
+            pass
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         super().hoverEnterEvent(event)
 

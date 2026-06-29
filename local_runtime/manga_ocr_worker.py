@@ -20,8 +20,39 @@ from typing import Any
 os.environ.setdefault("PYTHONUTF8", "1")
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
-_ENGINE = None
+
+def _ysb_prepend_managed_runtime_target() -> None:
+    target = os.environ.get("YSB_MANAGED_RUNTIME_TARGET") or ""
+    if not target:
+        return
+    try:
+        if os.path.isdir(target) and target not in sys.path:
+            sys.path.insert(0, target)
+        if os.name == "nt":
+            for sub in ("", "torch/lib", "nvidia/cublas/bin", "nvidia/cudnn/bin"):
+                p = os.path.join(target, sub) if sub else target
+                if os.path.isdir(p):
+                    try:
+                        os.add_dll_directory(p)
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+
+_ysb_prepend_managed_runtime_target()
+
+_ENGINES: dict[str, object] = {}
 MODEL_ID = "kha-white/manga-ocr-base"
+
+
+def _normalize_device(value: str | None) -> str:
+    v = str(value or "auto").strip().lower()
+    if v in ("gpu", "cuda:0", "cuda"):
+        return "cuda"
+    if v in ("cpu", "mps"):
+        return v
+    return "auto"
 
 
 def _package_root() -> Path:
@@ -139,7 +170,8 @@ class _DirectMangaOcr:
     preprocessor_config.
     """
 
-    def __init__(self):
+    def __init__(self, device: str = "auto"):
+        self.requested_device = _normalize_device(device)
         _configure_local_model_cache()
         import torch
         from PIL import Image
@@ -158,10 +190,24 @@ class _DirectMangaOcr:
         self.processor = ViTImageProcessor.from_pretrained(MODEL_ID, local_files_only=local_only)
         self.tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, local_files_only=local_only)
         self.model = MangaOcrModel.from_pretrained(MODEL_ID, local_files_only=local_only)
-        if torch.cuda.is_available():
+        selected = self.requested_device
+        if selected == "cuda":
+            if not torch.cuda.is_available() or torch.cuda.device_count() <= 0:
+                raise RuntimeError("Manga OCR CUDA를 사용할 수 없습니다. Torch CUDA 런타임/드라이버 상태를 확인해 주세요.")
+            self.model.cuda()
+        elif selected == "cpu":
+            self.model.to("cpu")
+        elif selected == "mps":
+            if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+                self.model.to("mps")
+            else:
+                self.model.to("cpu")
+        elif torch.cuda.is_available() and torch.cuda.device_count() > 0:
             self.model.cuda()
         elif getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
             self.model.to("mps")
+        else:
+            self.model.to("cpu")
         self.model.eval()
 
     def __call__(self, img_or_path):
@@ -177,11 +223,13 @@ class _DirectMangaOcr:
         return _post_process(text)
 
 
-def _get_engine():
-    global _ENGINE
-    if _ENGINE is None:
-        _ENGINE = _DirectMangaOcr()
-    return _ENGINE
+def _get_engine(device: str = "auto"):
+    key = _normalize_device(device)
+    engine = _ENGINES.get(key)
+    if engine is None:
+        engine = _DirectMangaOcr(device=key)
+        _ENGINES[key] = engine
+    return engine
 
 
 def _image_size(image_path: str) -> tuple[int, int]:
@@ -196,10 +244,11 @@ def _image_size(image_path: str) -> tuple[int, int]:
 
 def run_once(req: dict[str, Any]) -> dict[str, Any]:
     image_path = str(req.get("image_path") or "")
+    device = _normalize_device(req.get("device") or os.environ.get("YSB_MANGA_OCR_DEVICE") or "auto")
     if not image_path:
         return {"ok": False, "engine": "manga_ocr_external", "error": "image_path is empty", "lines": []}
     try:
-        text = str(_get_engine()(image_path) or "").strip()
+        text = str(_get_engine(device)(image_path) or "").strip()
         if not text:
             return {"ok": True, "engine": "manga_ocr_external", "lines": [], "raw": text}
         w, h = _image_size(image_path)
@@ -225,7 +274,7 @@ def run_once(req: dict[str, Any]) -> dict[str, Any]:
 
 def server_loop() -> int:
     _configure_local_model_cache()
-    print(json.dumps({"ready": True, "engine": "manga_ocr_external"}, ensure_ascii=False), flush=True)
+    print(json.dumps({"ready": True, "engine": "manga_ocr_external", "device": _normalize_device(os.environ.get("YSB_MANGA_OCR_DEVICE") or "auto")}, ensure_ascii=False), flush=True)
     for line in sys.stdin:
         line = line.strip()
         if not line:

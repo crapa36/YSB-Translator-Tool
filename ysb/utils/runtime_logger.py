@@ -74,7 +74,7 @@ def make_log_path(prefix: str, suffix: str = "log") -> Path:
     return log_dir() / f"{safe_prefix}_{_file_stamp()}_{pid}.{suffix.lstrip('.')}"
 
 
-def append_log(path: str | os.PathLike[str] | None, event: str = "", **fields: Any) -> None:
+def append_log(log_path: str | os.PathLike[str] | None = None, event: str = "", **fields: Any) -> None:
     """Append one diagnostic line.
 
     The first text argument used to be named ``message``.  Keep accepting
@@ -82,7 +82,24 @@ def append_log(path: str | os.PathLike[str] | None, event: str = "", **fields: A
     user-facing message.  A diagnostic logger must never be able to crash a
     running job merely because a field is called ``message``.
     """
-    if path is None:
+    # NOTE: The first parameter used to be named ``path``.  Some callers also
+    # legitimately log a payload field named ``path`` (for example cleanup paths).
+    # If the formal parameter is called ``path``, calls such as
+    # append_log(batch_log, "EVENT", path=temp_path) fail before this best-effort
+    # logger can catch them.  Keep the public positional calling convention, but
+    # name the log-file argument ``log_path`` so ``path=...`` remains a normal
+    # diagnostic field.  Also accept legacy append_log(path=...) calls.
+    if log_path is None and "log_path" in fields:
+        try:
+            log_path = fields.pop("log_path")
+        except Exception:
+            log_path = None
+    if log_path is None and "path" in fields and event:
+        # Ambiguous legacy keyword-only call.  Prefer not to steal payload path
+        # fields for normal event calls.  This branch only helps rare callers that
+        # pass no positional log path and use path=... as the log file.
+        pass
+    if log_path is None:
         return
     try:
         # Backward compatibility for accidental calls like append_log(path, message="...").
@@ -92,7 +109,7 @@ def append_log(path: str | os.PathLike[str] | None, event: str = "", **fields: A
                 event = str(fields.pop("message") or "")
             except Exception:
                 event = ""
-        p = Path(path)
+        p = Path(log_path)
         p.parent.mkdir(parents=True, exist_ok=True)
         pairs = []
         for k, v in fields.items():
@@ -109,11 +126,17 @@ def append_log(path: str | os.PathLike[str] | None, event: str = "", **fields: A
         pass
 
 
-def append_block(path: str | os.PathLike[str] | None, title: str, text: str) -> None:
-    if path is None:
+def append_block(log_path: str | os.PathLike[str] | None, title: str, text: str) -> None:
+    """Append a multi-line diagnostic block.
+
+    This logger must never crash the worker that is trying to report the
+    original error.  Keep the API simple: first argument is the log file path,
+    followed by a block title and text payload.
+    """
+    if log_path is None:
         return
     try:
-        p = Path(path)
+        p = Path(log_path)
         p.parent.mkdir(parents=True, exist_ok=True)
         block = f"\n[{_now_stamp()}] ===== {title} =====\n{text}\n===== END {title} =====\n"
         with _LOG_LOCK:
@@ -230,7 +253,7 @@ def image_size(path: str | os.PathLike[str] | None) -> tuple[int, int] | None:
     try:
         if not path:
             return None
-        p = Path(path)
+        p = Path(log_path)
         with p.open("rb") as f:
             head = f.read(64)
             if len(head) < 10:

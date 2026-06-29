@@ -556,6 +556,7 @@ class MainWindowCloudMixin:
             self.ui_language = normalize_ui_language(self.app_options.get(UI_LANGUAGE_KEY, self.ui_language))
             self.show_paths_in_log = bool(self.app_options.get(SHOW_PATHS_IN_LOG_KEY, False))
             self.show_cache_paths_in_settings = bool(self.app_options.get(SHOW_CACHE_PATHS_IN_SETTINGS_KEY, False))
+            self.operation_mode = normalize_operation_mode(self.app_options.get(OPERATION_MODE_KEY, getattr(self, "operation_mode", DEFAULT_OPERATION_MODE)))
             self.log_panel_collapsed = bool(self.app_options.get(LOG_PANEL_COLLAPSED_KEY, DEFAULT_LOG_PANEL_COLLAPSED))
             try:
                 self.refresh_log_panel_state(save=False)
