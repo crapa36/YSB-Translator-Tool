@@ -1779,6 +1779,111 @@ class MainWindowProjectPagesMixin:
         """텍스트 수정 후 작업/변형 박스를 실제 텍스트 크기로 줄인다."""
         return self.ensure_text_anchor_rect(data_item, record_undo=False)
 
+    def _ensure_text_ocr_source_rect(self, data_item):
+        """Preserve the original OCR/work rect before any text-bound resize overwrites rect.
+
+        ocr_source_rect is stored in scene coordinates and must not be changed by
+        inline editing, auto-resize, or manual text-area reset.  Older projects do
+        not have it, so create it from the current rect+x_off/y_off at the first
+        moment before rect is replaced.
+        """
+        if not isinstance(data_item, dict):
+            return False
+        try:
+            src = data_item.get('ocr_source_rect')
+            if isinstance(src, (list, tuple)) and len(src) >= 4:
+                vals = [float(src[i]) for i in range(4)]
+                if vals[2] > 0 and vals[3] > 0:
+                    return False
+        except Exception:
+            pass
+        try:
+            rect = list(data_item.get('rect') or [])
+            while len(rect) < 4:
+                rect.append(1)
+            x_off = float(data_item.get('x_off', 0) or 0)
+            y_off = float(data_item.get('y_off', 0) or 0)
+            source_rect = [
+                int(round(float(rect[0]) + x_off)),
+                int(round(float(rect[1]) + y_off)),
+                max(1, int(round(float(rect[2])))),
+                max(1, int(round(float(rect[3])))),
+            ]
+            data_item['ocr_source_rect'] = source_rect
+            return True
+        except Exception:
+            return False
+
+    def _apply_inline_committed_text_rect(self, target, editor=None, *, reason='inline_text_edit'):
+        """Resize an edited text object's work/OCR box to the committed text bounds.
+
+        This is intentionally used after a real inline text content change.  It is
+        different from typing inside the editor: only commit compares the final
+        text with editor.original_text, then the rendered text path becomes the new
+        work box.
+        """
+        try:
+            if target is None or not isinstance(getattr(target, 'data', None), dict):
+                return False
+            data_item = target.data
+            self._ensure_text_ocr_source_rect(data_item)
+            render_rect = self._inline_committed_text_scene_rect_for_target(target, editor)
+            if render_rect is None or render_rect.isNull() or render_rect.width() <= 1 or render_rect.height() <= 1:
+                return False
+            new_rect = [
+                int(round(float(render_rect.x()))),
+                int(round(float(render_rect.y()))),
+                max(1, int(round(float(render_rect.width())))),
+                max(1, int(round(float(render_rect.height())))),
+            ]
+            old_rect = list(data_item.get('rect') or [])
+            while len(old_rect) < 4:
+                old_rect.append(0)
+            try:
+                old_rect4 = [int(round(float(v))) for v in old_rect[:4]]
+            except Exception:
+                old_rect4 = old_rect[:4]
+            old_x = int(round(float(data_item.get('x_off', 0) or 0)))
+            old_y = int(round(float(data_item.get('y_off', 0) or 0)))
+            old_inner_x = int(round(float(data_item.get('inner_text_x_off', 0) or 0)))
+            old_inner_y = int(round(float(data_item.get('inner_text_y_off', 0) or 0)))
+            changed = (
+                old_rect4 != new_rect
+                or old_x != 0
+                or old_y != 0
+                or old_inner_x != 0
+                or old_inner_y != 0
+                or not bool(data_item.get('manual_text_rect'))
+                or str(data_item.get('text_anchor_mode') or '').lower() != 'text'
+            )
+            data_item['rect'] = new_rect
+            data_item['x_off'] = 0
+            data_item['y_off'] = 0
+            data_item['inner_text_x_off'] = 0
+            data_item['inner_text_y_off'] = 0
+            data_item['manual_text_rect'] = True
+            data_item['text_anchor_mode'] = 'text'
+            try:
+                self._text_select_trace(
+                    'INLINE_EDITOR_COMMIT_AUTO_TEXT_RECT',
+                    text_id=data_item.get('id'),
+                    reason=str(reason or ''),
+                    changed=bool(changed),
+                    x=round(float(render_rect.x()), 2),
+                    y=round(float(render_rect.y()), 2),
+                    w=round(float(render_rect.width()), 2),
+                    h=round(float(render_rect.height()), 2),
+                )
+            except Exception:
+                pass
+            return bool(changed)
+        except Exception as exc:
+            try:
+                self._text_select_trace('INLINE_EDITOR_COMMIT_AUTO_TEXT_RECT_ERROR', reason=str(reason or ''), error=repr(exc))
+            except Exception:
+                pass
+            return False
+
     def ensure_text_anchor_rect(self, data_item, record_undo=False, reason="텍스트 영역 자동 재생성"):
         """현재 보이는 실제 텍스트 bounds를 새 텍스트 영역으로 확정한다.
 
@@ -1788,6 +1893,10 @@ class MainWindowProjectPagesMixin:
         """
         if not isinstance(data_item, dict):
             return False
+        try:
+            self._ensure_text_ocr_source_rect(data_item)
+        except Exception:
+            pass
         # Prefer the live final-tab item because this action means "reset to the
         # currently visible text".  For batch/unloaded pages, fall back to the
         # data-based 2.4.1 estimator.
@@ -2427,7 +2536,7 @@ class MainWindowProjectPagesMixin:
                 changed = False
                 self.log(f"↩️ 새 텍스트 입력 취소 (ID: {target.data.get('id')})")
             elif changed or pending_new:
-                command_fields = ['translated_text', 'rect', 'x_off', 'y_off', 'manual_text_rect', 'text_anchor_mode', 'force_show', 'pending_new_text']
+                command_fields = ['translated_text', 'rect', 'x_off', 'y_off', 'inner_text_x_off', 'inner_text_y_off', 'manual_text_rect', 'text_anchor_mode', 'ocr_source_rect', 'force_show', 'pending_new_text']
                 before_direct_values = None
                 before_item_copy = None
                 before_index = None
@@ -2469,27 +2578,25 @@ class MainWindowProjectPagesMixin:
                         except Exception:
                             pass
 
-                # 기존 텍스트의 직접 수정은 '내용 변경'만 해야 한다. 편집기 박스나
-                # 새로 계산한 글자 bounds를 rect/x_off/y_off에 다시 저장하면 정렬/앵커 기준이
-                # 바뀌어 텍스트가 수정 후 움직인 것처럼 보인다. 위치/영역 재설정은 별도
-                # '텍스트 영역 재설정' 기능에서만 수행한다.
-                preserved_existing_geometry = {}
+                # 기존 텍스트도 내용이 실제로 바뀐 경우에는 커밋 직후 최종 렌더 bounds를
+                # 새 작업/OCR 박스로 확정한다.  단, 입력 도중이 아니라 더블클릭 편집기 완료 시점에만
+                # 적용하고, 최초 OCR 원본 rect는 ocr_source_rect에 별도로 보존한다.
                 if not pending_new:
-                    for _k in ('rect', 'x_off', 'y_off', 'inner_text_x_off', 'inner_text_y_off', 'manual_text_rect', 'text_anchor_mode'):
-                        if _k in target.data:
-                            try:
-                                preserved_existing_geometry[_k] = copy.deepcopy(target.data.get(_k))
-                            except Exception:
-                                preserved_existing_geometry[_k] = target.data.get(_k)
+                    try:
+                        self._ensure_text_ocr_source_rect(target.data)
+                    except Exception:
+                        pass
 
                 target.data['translated_text'] = new_text
+                try:
+                    target.data['partial_style_runs'] = self._normalize_partial_style_runs_for_text(target.data.get('partial_style_runs') or [], len(str(new_text or '')))
+                except Exception:
+                    pass
                 target.data.pop('force_show', None)
                 target.data.pop('pending_new_text', None)
-                if preserved_existing_geometry:
-                    for _k, _v in preserved_existing_geometry.items():
-                        target.data[_k] = _v
+                if not pending_new:
                     try:
-                        self._text_select_trace('INLINE_EDITOR_COMMIT_KEEP_GEOMETRY', text_id=target.data.get('id'))
+                        self._apply_inline_committed_text_rect(target, editor, reason=commit_reason or 'inline_text_edit')
                     except Exception:
                         pass
 
@@ -2509,14 +2616,18 @@ class MainWindowProjectPagesMixin:
                                 break
                         if synced_data_obj is not None and synced_data_obj is not target.data:
                             synced_data_obj['translated_text'] = new_text
+                            try:
+                                synced_data_obj['partial_style_runs'] = copy.deepcopy(target.data.get('partial_style_runs') or [])
+                            except Exception:
+                                pass
                             synced_data_obj.pop('force_show', None)
                             synced_data_obj.pop('pending_new_text', None)
-                            if preserved_existing_geometry:
-                                for _k, _v in preserved_existing_geometry.items():
+                            for _k in ('rect', 'x_off', 'y_off', 'inner_text_x_off', 'inner_text_y_off', 'manual_text_rect', 'text_anchor_mode', 'ocr_source_rect'):
+                                if _k in target.data:
                                     try:
-                                        synced_data_obj[_k] = copy.deepcopy(_v)
+                                        synced_data_obj[_k] = copy.deepcopy(target.data.get(_k))
                                     except Exception:
-                                        synced_data_obj[_k] = _v
+                                        synced_data_obj[_k] = target.data.get(_k)
                             try:
                                 self._text_select_trace('INLINE_EDITOR_COMMIT_DATA_SYNC', text_id=target.data.get('id'))
                             except Exception:
@@ -2898,8 +3009,14 @@ class MainWindowProjectPagesMixin:
         ids = [item.data.get('id') for item in items]
         if ids:
             try:
-                self.focus_final_text_canvas_for_shortcut(reason='scene_selection_changed')
-                QTimer.singleShot(0, lambda: self.focus_final_text_canvas_for_shortcut(reason='scene_selection_changed_deferred'))
+                # 우측 텍스트 표를 클릭/더블클릭하면 표 선택과 캔버스 선택이
+                # 같이 맞춰지면서 selectionChanged가 발생한다.  이때 캔버스 포커스
+                # 복구를 0ms 뒤에 다시 예약하면 표 delegate 편집기가 열리자마자
+                # 포커스를 빼앗기므로, right_table 소유권이 살아있는 동안은
+                # 즉시/지연 포커스 복구를 모두 건너뛴다.
+                if not self._right_text_shortcut_owner_active():
+                    self.focus_final_text_canvas_for_shortcut(reason='scene_selection_changed')
+                    QTimer.singleShot(0, lambda: self.focus_final_text_canvas_for_shortcut(reason='scene_selection_changed_deferred'))
             except Exception:
                 pass
         if not ids:
@@ -3041,16 +3158,80 @@ class MainWindowProjectPagesMixin:
         if not has_pages:
             self.update_text_style_control_state([])
 
+    def _active_inline_text_style_item(self):
+        """Return the text item currently being edited by the direct inline editor.
+
+        While the YSB inline editor is open, the scene selection can temporarily be
+        empty or the focus can bounce to the editor/viewport.  The right-side text
+        controls should still treat the edited text item as the active target.
+        """
+        try:
+            if not self._inline_text_editor_is_active():
+                return None
+        except Exception:
+            return None
+        try:
+            target = getattr(self, 'inline_text_target', None)
+            if target is not None and isinstance(getattr(target, 'data', None), dict):
+                return target
+        except Exception:
+            pass
+        return None
+
+    def _inline_text_style_controls_allowed_widgets(self):
+        """Widgets that may remain usable while editing a text object inline.
+
+        Box/layout-global tools such as alignment and advanced effects stay locked;
+        basic text styling controls are allowed so a selected character range can
+        receive a partial style run, or the whole edited text item can be updated.
+        """
+        allowed = []
+        for attr in (
+            'cb_font', 'sb_font_size', 'btn_text_color',
+            'sb_strk', 'btn_stroke_color',
+            'sb_line_spacing', 'sb_letter_spacing', 'sb_char_width', 'sb_char_height',
+            'btn_bold', 'btn_italic', 'btn_strike',
+            'cb_item_text_preset', 'sb_text_opacity',
+            'final_item_font', 'final_item_size', 'final_item_stroke',
+            'btn_item_text_color', 'btn_item_stroke_color',
+        ):
+            try:
+                w = getattr(self, attr, None)
+                if w is not None:
+                    allowed.append(w)
+            except Exception:
+                pass
+        return set(allowed)
+
     def update_text_style_control_state(self, selected_items=None):
         if getattr(self, "_app_is_closing", False) or getattr(self, "_closing_confirmed", False):
             return
+        inline_item = self._active_inline_text_style_item()
         try:
             items = list(selected_items) if selected_items is not None else self.selected_text_items()
         except Exception:
             items = []
+        inline_active = inline_item is not None
+        if inline_active and not items:
+            items = [inline_item]
         enabled = bool(items) and hasattr(self, 'cb_mode') and self.cb_mode.currentIndex() == 4
-        for widget in getattr(self, 'text_style_control_widgets', []):
-            self.set_widget_interlock_visual(widget, enabled, disabled_opacity=0.35)
+        if inline_active and enabled:
+            allowed_widgets = self._inline_text_style_controls_allowed_widgets()
+            for widget in getattr(self, 'text_style_control_widgets', []):
+                if widget is None:
+                    continue
+                self.set_widget_interlock_visual(widget, widget in allowed_widgets, disabled_opacity=0.35)
+            try:
+                self.audit_boundary_event(
+                    'INLINE_EDITOR_TEXT_STYLE_CONTROLS_UNLOCKED',
+                    text_id=getattr(inline_item, 'data', {}).get('id') if inline_item is not None else None,
+                    throttle_ms=120,
+                )
+            except Exception:
+                pass
+        else:
+            for widget in getattr(self, 'text_style_control_widgets', []):
+                self.set_widget_interlock_visual(widget, enabled, disabled_opacity=0.35)
         self._style_signal_lock = True
         try:
             if not enabled:
@@ -3163,7 +3344,7 @@ class MainWindowProjectPagesMixin:
     def on_final_item_style_changed(self, *args):
         if self._style_signal_lock:
             return
-        if not self.selected_text_items():
+        if not self.selected_text_items() and self._active_inline_text_style_item() is None:
             return
         patch = self._final_item_style_patch_from_sender()
         if not patch:
@@ -3174,7 +3355,7 @@ class MainWindowProjectPagesMixin:
     def on_text_opacity_changed(self, value):
         if getattr(self, '_style_signal_lock', False):
             return
-        if not self.selected_text_items() or self.cb_mode.currentIndex() != 4:
+        if (not self.selected_text_items() and self._active_inline_text_style_item() is None) or self.cb_mode.currentIndex() != 4:
             return
         self.apply_style_to_selected(opacity=max(0, min(100, int(value))))
 
@@ -3650,10 +3831,213 @@ class MainWindowProjectPagesMixin:
             pass
         return True
 
+
+    def _normalize_partial_style_runs_for_text(self, runs, text_len):
+        try:
+            from ysb.engine.graphics_items import _normalize_partial_style_runs
+            return _normalize_partial_style_runs(runs, text_len)
+        except Exception:
+            out = []
+            if not isinstance(runs, (list, tuple)):
+                return out
+            for run in runs:
+                if not isinstance(run, dict):
+                    continue
+                try:
+                    a = max(0, min(int(text_len), int(run.get('start', 0) or 0)))
+                    b = max(0, min(int(text_len), int(run.get('end', 0) or 0)))
+                except Exception:
+                    continue
+                if b <= a:
+                    continue
+                st = run.get('style') or {}
+                if isinstance(st, dict) and st:
+                    out.append({'start': a, 'end': b, 'style': copy.deepcopy(st)})
+            return out
+
+    def _merge_partial_text_style_run(self, data_item, start, end, style):
+        if not isinstance(data_item, dict):
+            return False
+        try:
+            text = str(data_item.get('translated_text', '') or '')
+            text_len = len(text)
+            start = max(0, min(text_len, int(start)))
+            end = max(0, min(text_len, int(end)))
+        except Exception:
+            return False
+        if end <= start:
+            return False
+        supported = {'font_family', 'font_size', 'text_color', 'stroke_color', 'stroke_width', 'bold', 'italic', 'strike', 'line_spacing', 'letter_spacing', 'char_width', 'char_height'}
+        new_style = {str(k): copy.deepcopy(v) for k, v in (style or {}).items() if str(k) in supported and v is not None}
+        if not new_style:
+            return False
+        old_runs = self._normalize_partial_style_runs_for_text(data_item.get('partial_style_runs') or data_item.get('style_runs') or [], text_len)
+        merged = []
+        for run in old_runs:
+            try:
+                a = int(run.get('start', 0)); b = int(run.get('end', 0)); st = copy.deepcopy(run.get('style') or {})
+            except Exception:
+                continue
+            if b <= start or a >= end:
+                merged.append({'start': a, 'end': b, 'style': st})
+                continue
+            if a < start:
+                merged.append({'start': a, 'end': start, 'style': copy.deepcopy(st)})
+            overlap_a = max(a, start)
+            overlap_b = min(b, end)
+            overlap_style = copy.deepcopy(st)
+            overlap_style.update(copy.deepcopy(new_style))
+            if overlap_b > overlap_a:
+                merged.append({'start': overlap_a, 'end': overlap_b, 'style': overlap_style})
+            if b > end:
+                merged.append({'start': end, 'end': b, 'style': copy.deepcopy(st)})
+        # Cover gaps inside the requested selection that had no previous run.
+        covered = []
+        for run in merged:
+            try:
+                a = max(start, int(run.get('start', 0))); b = min(end, int(run.get('end', 0)))
+                if b > a:
+                    covered.append((a, b))
+            except Exception:
+                pass
+        cursor = start
+        for a, b in sorted(covered):
+            if cursor < a:
+                merged.append({'start': cursor, 'end': a, 'style': copy.deepcopy(new_style)})
+            cursor = max(cursor, b)
+        if cursor < end:
+            merged.append({'start': cursor, 'end': end, 'style': copy.deepcopy(new_style)})
+        merged = self._normalize_partial_style_runs_for_text(merged, text_len)
+        data_item['partial_style_runs'] = merged
+        # Keep legacy experimental key from overriding the normalized value.
+        data_item.pop('style_runs', None)
+        return True
+
+    def _apply_inline_partial_style_if_possible(self, style, preset_name=None, record_undo=True):
+        """Apply supported style fields to the current inline text selection.
+
+        Alignment/writing-direction/warp-like settings are whole-box operations, so
+        they are intentionally locked while only part of the text is selected.
+        """
+        try:
+            editor = getattr(self, 'inline_text_editor', None)
+            target = getattr(self, 'inline_text_target', None)
+            if editor is None or target is None or bool(getattr(editor, '_closing', False)):
+                return False
+            if not hasattr(editor, 'inline_selection_range'):
+                return False
+            a, b = editor.inline_selection_range()
+            if not (b > a):
+                return False
+        except Exception:
+            return False
+        supported = {'font_family', 'font_size', 'text_color', 'stroke_color', 'stroke_width', 'bold', 'italic', 'strike', 'line_spacing', 'letter_spacing', 'char_width', 'char_height'}
+        locked = {'align', 'writing_direction'}
+        partial_style = {str(k): copy.deepcopy(v) for k, v in (style or {}).items() if str(k) in supported and v is not None}
+        if not partial_style:
+            if any(str(k) in locked for k in (style or {}).keys()):
+                try:
+                    self.audit_boundary_event('INLINE_PARTIAL_STYLE_LOCKED', fields=','.join(str(k) for k in (style or {}).keys()), throttle_ms=80)
+                except Exception:
+                    pass
+                return True
+            return False
+        data_item = getattr(target, 'data', None)
+        if not isinstance(data_item, dict):
+            return False
+        if record_undo:
+            try:
+                self.push_page_text_undo('부분 텍스트 스타일 변경')
+            except Exception:
+                try:
+                    self.undo_text_checkpoint('부분 텍스트 스타일 변경')
+                except Exception:
+                    pass
+        changed = self._merge_partial_text_style_run(data_item, a, b, partial_style)
+        if not changed:
+            return False
+        if preset_name:
+            # Preset name itself remains whole-object metadata; a partial range can
+            # receive the preset's visual fields without replacing the object's label.
+            data_item.pop('item_text_preset_name', None)
+        try:
+            page_data = self.data.get(self.idx) or {}
+            tid = str(data_item.get('id'))
+            for d in page_data.get('data', []) or []:
+                if isinstance(d, dict) and str(d.get('id')) == tid and d is not data_item:
+                    d['partial_style_runs'] = copy.deepcopy(data_item.get('partial_style_runs') or [])
+                    d.pop('style_runs', None)
+                    break
+        except Exception:
+            pass
+        # The direct inline editor and the final TypesettingItem are separate paint
+        # paths.  Applying a partial run must invalidate both immediately; otherwise
+        # the editor preview can show the range color while the final canvas keeps the
+        # old single-color DeviceCoordinateCache until a full item rebuild happens.
+        try:
+            editor._vertical_layout_cache = None
+        except Exception:
+            pass
+        try:
+            editor.update()
+        except Exception:
+            pass
+        try:
+            if hasattr(target, 'rebuild_text_render_for_live_preview'):
+                target.rebuild_text_render_for_live_preview(force=True)
+            else:
+                target.update()
+        except Exception:
+            try:
+                target.update()
+            except Exception:
+                pass
+        try:
+            sc = target.scene() if target is not None else None
+            if sc is not None:
+                sc.update()
+        except Exception:
+            pass
+        try:
+            view = getattr(self, 'view', None)
+            if view is not None and hasattr(view, 'viewport'):
+                view.viewport().update()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'text_engine') and self.text_engine is not None:
+                self.text_engine.mark_dirty(int(getattr(self, 'idx', 0) or 0), [data_item.get('id')], ['partial_style_runs'])
+            self.mark_active_page_dirty('text')
+        except Exception:
+            pass
+        try:
+            self.schedule_deferred_auto_save_project(900)
+        except Exception:
+            pass
+        try:
+            self.audit_boundary_event(
+                'INLINE_PARTIAL_STYLE_APPLIED',
+                text_id=data_item.get('id'),
+                start=int(a), end=int(b), fields=','.join(sorted(partial_style.keys())),
+                throttle_ms=80,
+            )
+        except Exception:
+            pass
+        return True
+
     def apply_style_to_selected(self, keep_selection=True, preset_name=None, record_undo=True, **style):
         if getattr(self, "_app_is_closing", False) or getattr(self, "_closing_confirmed", False):
             return
+        try:
+            if self._apply_inline_partial_style_if_possible(style, preset_name=preset_name, record_undo=record_undo):
+                return
+        except Exception:
+            pass
         items = self.selected_text_items()
+        if not items:
+            inline_item = self._active_inline_text_style_item()
+            if inline_item is not None:
+                items = [inline_item]
         if not items:
             return
         try:
@@ -4289,6 +4673,9 @@ class MainWindowProjectPagesMixin:
         if getattr(self, "_app_is_closing", False) or getattr(self, "_closing_confirmed", False):
             return
         selected = self.selected_text_items()
+        inline_item = self._active_inline_text_style_item()
+        if not selected and inline_item is not None:
+            selected = [inline_item]
         if not selected or self.cb_mode.currentIndex() != 4:
             self.update_text_style_control_state([])
             return
@@ -4303,6 +4690,12 @@ class MainWindowProjectPagesMixin:
     def set_global_align(self, align):
         if getattr(self, "_app_is_closing", False) or getattr(self, "_closing_confirmed", False):
             return
+        if self._active_inline_text_style_item() is not None:
+            try:
+                self.audit_boundary_event('INLINE_EDITOR_WHOLE_BOX_STYLE_LOCKED', field='align', throttle_ms=80)
+            except Exception:
+                pass
+            return
         selected = self.selected_text_items()
         if not selected or self.cb_mode.currentIndex() != 4:
             self.update_text_style_control_state([])
@@ -4315,7 +4708,8 @@ class MainWindowProjectPagesMixin:
         self.update_text_style_control_state(selected)
 
     def pick_color(self, target):
-        if target in ("global_text", "global_stroke") and (not self.selected_text_items() or self.cb_mode.currentIndex() != 4):
+        inline_item = self._active_inline_text_style_item()
+        if target in ("global_text", "global_stroke") and ((not self.selected_text_items() and inline_item is None) or self.cb_mode.currentIndex() != 4):
             self.update_text_style_control_state([])
             return
         if target == "final_paint":
@@ -4329,7 +4723,7 @@ class MainWindowProjectPagesMixin:
         if target == "global_text":
             self.default_text_color = hex_color
             self.update_color_button_styles()
-            if self.cb_mode.currentIndex() == 4 and self.selected_text_items():
+            if self.cb_mode.currentIndex() == 4 and (self.selected_text_items() or inline_item is not None):
                 self.set_preset_combo_to_last()
                 self.set_item_preset_combo_custom()
                 self.schedule_last_text_preset_save("__last__")
@@ -4337,7 +4731,7 @@ class MainWindowProjectPagesMixin:
         elif target == "global_stroke":
             self.default_stroke_color = hex_color
             self.update_color_button_styles()
-            if self.cb_mode.currentIndex() == 4 and self.selected_text_items():
+            if self.cb_mode.currentIndex() == 4 and (self.selected_text_items() or inline_item is not None):
                 self.set_preset_combo_to_last()
                 self.set_item_preset_combo_custom()
                 self.schedule_last_text_preset_save("__last__")
@@ -4770,6 +5164,125 @@ class MainWindowProjectPagesMixin:
         except ValueError:
             return value
 
+    def choose_text_extract_options(self, *, allow_project_combined=False):
+        """Choose text export mode and optional project-combined TXT export."""
+        if not allow_project_combined:
+            mode = self.choose_text_extract_mode()
+            return (mode, False) if mode else (None, False)
+
+        ko_items = ["원문만", "번역문만", "원문+번역문"]
+        display_items = [self.tr_ui(x) for x in ko_items]
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(self.tr_ui("일괄 지문 추출"))
+        dlg.setModal(True)
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        label = QLabel(self.tr_ui("추출할 내용:"), dlg)
+        layout.addWidget(label)
+
+        combo = QComboBox(dlg)
+        combo.addItems(display_items)
+        layout.addWidget(combo)
+
+        combined_cb = QCheckBox(self.tr_ui("프로젝트 통합 파일 추출"), dlg)
+        combined_cb.setToolTip(self.tr_ui("선택한 페이지의 지문을 프로젝트 제목의 단일 TXT 파일로도 함께 추출합니다."))
+        layout.addWidget(combined_cb)
+
+        help_label = QLabel(self.tr_ui("기존 페이지별 TXT도 함께 생성됩니다."), dlg)
+        try:
+            help_label.setWordWrap(True)
+            help_label.setStyleSheet("color:#9aa0a6;")
+        except Exception:
+            pass
+        layout.addWidget(help_label)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dlg)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+
+        try:
+            if self.message_box_style():
+                dlg.setStyleSheet(self.message_box_style())
+        except Exception:
+            pass
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None, False
+        idx = max(0, min(combo.currentIndex(), len(ko_items) - 1))
+        return ko_items[idx], bool(combined_cb.isChecked())
+
+    def project_text_export_stem(self):
+        """Return the project-title stem used for combined text export/import."""
+        candidates = []
+        for attr in ("suggested_project_name", "project_name"):
+            try:
+                v = str(getattr(self, attr, "") or "").strip()
+                if v:
+                    candidates.append(v)
+            except Exception:
+                pass
+        try:
+            pkg = str(getattr(self, "ysbt_package_path", "") or "").strip()
+            if pkg:
+                candidates.append(Path(pkg).stem)
+        except Exception:
+            pass
+        try:
+            if self.project_dir:
+                name = Path(str(self.project_dir)).name
+                # Workspaces are often stored as title_uuid8.  Keep the user-facing
+                # title part when that suffix pattern is present.
+                name = re.sub(r"_[0-9a-fA-F]{8}$", "", name)
+                candidates.append(name)
+        except Exception:
+            pass
+        for value in candidates:
+            try:
+                stem = safe_page_file_stem(clean_workspace_name(str(value)), fallback="")
+                if stem:
+                    return stem
+            except Exception:
+                pass
+        return "project"
+
+    def combined_text_export_path(self, txt_dir):
+        stem = self.project_text_export_stem()
+        path = Path(str(txt_dir)) / f"{stem}.txt"
+        if not path.exists():
+            return str(path)
+        # Avoid overwriting a per-page TXT that happens to have the same title.
+        try:
+            return str(Path(str(txt_dir)) / f"{stem}_통합.txt")
+        except Exception:
+            return str(path)
+
+    def build_project_text_export_content(self, page_indices, mode):
+        blocks = []
+        for page_idx in list(page_indices or []):
+            try:
+                i = int(page_idx)
+            except Exception:
+                continue
+            curr = self.data.get(i, {})
+            if not curr or not curr.get('data'):
+                continue
+            try:
+                header = self.page_display_name(
+                    i,
+                    mode=getattr(self, "page_tab_display_name_mode", DEFAULT_PAGE_DISPLAY_MODE),
+                    include_ext=False,
+                )
+            except Exception:
+                header = f"{i + 1}p_{self.get_page_stem(i)}"
+            body = self.build_text_export_content(i, mode).rstrip()
+            if body:
+                blocks.append(f"{header}\n\n{body}")
+        return "\n\n".join(blocks).rstrip() + ("\n" if blocks else "")
+
     def build_text_export_content(self, page_idx, mode):
         curr = self.data.get(page_idx, {})
         blocks = []
@@ -4804,14 +5317,22 @@ class MainWindowProjectPagesMixin:
         if not self.paths:
             return
         title = "일괄 지문 추출"
+        try:
+            self._batch_extract_project_combined = False
+        except Exception:
+            pass
         selected_indices, selected_label = self.choose_batch_page_indices_for_context(title, "extract_text")
         if selected_indices is None:
             self.log("↩️ Batch extract text canceled" if self.ui_language == LANG_EN else "↩️ 일괄 지문 추출 취소")
             return
         self.commit_current_page_ui_to_data()
-        mode = self.choose_text_extract_mode()
+        mode, _unused_project_combined = self.choose_text_extract_options(allow_project_combined=False)
         if not mode:
             return
+        try:
+            project_combined = bool(getattr(self, "_batch_extract_project_combined", False))
+        except Exception:
+            project_combined = False
         txt_dir = self.ensure_subdir("txt")
 
         def process_page(i):
@@ -4824,9 +5345,25 @@ class MainWindowProjectPagesMixin:
 
         self.run_page_queue_batch(title, "extract_text", selected_indices, selected_label, process_page, visual=False, cancellable=True)
 
+        if project_combined:
+            try:
+                combined = self.build_project_text_export_content(selected_indices, mode)
+                if combined.strip():
+                    out_path = self.combined_text_export_path(txt_dir)
+                    with open(out_path, "w", encoding="utf-8") as f:
+                        f.write(combined)
+                    self.log(f"📘 {self.tr_ui('프로젝트 통합 지문 추출 완료')}: {out_path}")
+                else:
+                    self.log(f"↩️ {self.tr_ui('프로젝트 통합 지문 추출')}: {self.tr_ui('내보낼 텍스트가 없습니다.')}")
+            except Exception as e:
+                try:
+                    self.log(f"⚠️ {self.tr_ui('프로젝트 통합 지문 추출 실패')}: {e}")
+                except Exception:
+                    pass
 
 
-    def parse_translation_txt(self, path, valid_ids):
+
+    def parse_translation_lines(self, lines, valid_ids):
         valid = {str(x) for x in valid_ids}
 
         def marker_to_id(token):
@@ -4837,11 +5374,9 @@ class MainWindowProjectPagesMixin:
                     return inner
             return None
 
-        with open(path, "r", encoding="utf-8-sig") as f:
-            lines = f.read().splitlines()
-
         result = {}
         i = 0
+        lines = list(lines or [])
         while i < len(lines):
             text_id = marker_to_id(lines[i])
             if text_id:
@@ -4865,6 +5400,127 @@ class MainWindowProjectPagesMixin:
 
         return result
 
+    def parse_translation_txt(self, path, valid_ids):
+        with open(path, "r", encoding="utf-8-sig") as f:
+            lines = f.read().splitlines()
+        return self.parse_translation_lines(lines, valid_ids)
+
+    def translation_txt_header_candidates(self, page_idx):
+        candidates = []
+        seen = set()
+
+        def add(value):
+            for stem in self.filename_match_aliases(value):
+                key = str(stem or "").strip().casefold()
+                if stem and key not in seen:
+                    seen.add(key)
+                    candidates.append(stem)
+
+        try:
+            add(self.page_display_name(page_idx, mode=getattr(self, "page_tab_display_name_mode", DEFAULT_PAGE_DISPLAY_MODE), include_ext=False))
+        except Exception:
+            pass
+        try:
+            for stem in self.translation_txt_name_candidates(page_idx):
+                add(stem)
+        except Exception:
+            pass
+        try:
+            add(f"{int(page_idx) + 1}p_{self.get_page_stem(page_idx)}")
+            add(f"page{int(page_idx) + 1:03d}")
+        except Exception:
+            pass
+        return candidates
+
+    def parse_project_combined_translation_txt(self, path):
+        """Parse a project-combined TXT exported by batch extract text.
+
+        Format:
+            1p_page-title
+            [1]
+            translation
+            [2]
+            translation
+            2p_page-title
+            [1]
+            translation
+
+        A page header is accepted only when it matches a known page display name and
+        the next non-empty line is a valid [id] marker for that page.  This avoids
+        treating ordinary translated text as a page header.
+        """
+        if not path:
+            return {}
+        with open(path, "r", encoding="utf-8-sig") as f:
+            lines = f.read().splitlines()
+
+        header_map = {}
+        valid_ids_by_page = {}
+        for page_idx in range(len(getattr(self, "paths", []) or [])):
+            curr = self.data.get(page_idx, {}) if isinstance(self.data, dict) else {}
+            ids = [str(x.get('id', n + 1)) for n, x in enumerate(curr.get('data', []) or [])]
+            if not ids:
+                continue
+            valid_ids_by_page[int(page_idx)] = set(ids)
+            for cand in self.translation_txt_header_candidates(page_idx):
+                key = str(cand or "").strip().casefold()
+                if key and key not in header_map:
+                    header_map[key] = int(page_idx)
+
+        def marker_for_page(token, page_idx):
+            token = str(token or "").strip()
+            if len(token) >= 3 and token.startswith("[") and token.endswith("]"):
+                inner = token[1:-1].strip()
+                return inner.isdigit() and inner in valid_ids_by_page.get(int(page_idx), set())
+            return False
+
+        def nonempty_after(pos):
+            j = int(pos) + 1
+            while j < len(lines):
+                if str(lines[j]).strip():
+                    return j
+                j += 1
+            return -1
+
+        def header_page_at(pos):
+            if pos < 0 or pos >= len(lines):
+                return None
+            raw = str(lines[pos] or "").strip()
+            if not raw or raw.startswith("["):
+                return None
+            page_idx = header_map.get(raw.casefold())
+            if page_idx is None:
+                # Accept aliases of the literal line too.
+                for alias in self.filename_match_aliases(raw):
+                    page_idx = header_map.get(str(alias or "").strip().casefold())
+                    if page_idx is not None:
+                        break
+            if page_idx is None:
+                return None
+            next_i = nonempty_after(pos)
+            if next_i < 0 or not marker_for_page(lines[next_i], page_idx):
+                return None
+            return int(page_idx)
+
+        result = {}
+        i = 0
+        while i < len(lines):
+            page_idx = header_page_at(i)
+            if page_idx is None:
+                i += 1
+                continue
+            start = i + 1
+            j = start
+            while j < len(lines):
+                if header_page_at(j) is not None:
+                    break
+                j += 1
+            trans_map = self.parse_translation_lines(lines[start:j], valid_ids_by_page.get(page_idx, set()))
+            if trans_map:
+                result[int(page_idx)] = trans_map
+            i = j
+        return result
+
     def apply_translation_map_to_page(self, page_idx, trans_map):
         curr = self.data.get(page_idx)
         if not curr:
@@ -4877,10 +5533,8 @@ class MainWindowProjectPagesMixin:
                 old_text = str(item.get('translated_text', '') or '')
                 if new_text != old_text:
                     item['translated_text'] = new_text
-                    try:
-                        self.shrink_text_rect_to_content(item)
-                    except Exception:
-                        pass
+                    # 번역문 불러오기는 OCR/작업 영역(rect)을 절대 자동 변경하지 않는다.
+                    # rect는 자동 줄내림 기준이므로 Ctrl+G 영역 재설정이나 직접 편집 확정 경로에서만 바꾼다.
                     count += 1
         if count > 0:
             try:
@@ -6310,9 +6964,18 @@ class MainWindowProjectPagesMixin:
             pass
 
         title = "번역문 불러오기"
+        combined_maps = None
         if len(files) == 1:
-            target_map = {int(getattr(self, "idx", 0) or 0): files[0]}
-            selected_label = self.tr_ui("현재 페이지")
+            try:
+                combined_maps = self.parse_project_combined_translation_txt(files[0])
+            except Exception:
+                combined_maps = None
+            if combined_maps:
+                target_map = {int(k): files[0] for k in combined_maps.keys()}
+                selected_label = self.tr_ui("프로젝트 통합 파일")
+            else:
+                target_map = {int(getattr(self, "idx", 0) or 0): files[0]}
+                selected_label = self.tr_ui("현재 페이지")
         else:
             target_map = self.match_translation_txt_paths_to_pages(files)
             selected_label = self.tr_ui("파일명 매칭")
@@ -6336,7 +6999,10 @@ class MainWindowProjectPagesMixin:
             valid_ids = [str(x.get('id', n + 1)) for n, x in enumerate(curr.get('data', []))]
             if not valid_ids:
                 return "skipped", "불러올 텍스트 번호 없음"
-            trans_map = self.parse_translation_txt(path, valid_ids)
+            if isinstance(combined_maps, dict) and page_idx in combined_maps:
+                trans_map = combined_maps.get(page_idx) or {}
+            else:
+                trans_map = self.parse_translation_txt(path, valid_ids)
             if not trans_map:
                 return "skipped", "맞는 텍스트 번호 없음"
             count = self.apply_translation_map_to_page(page_idx, trans_map)
@@ -7129,6 +7795,11 @@ class MainWindowProjectPagesMixin:
         use_inpainted_as_source=True면 프로젝트 내부의 작업중 원본(working_source)을 우선 사용한다.
         working_source는 "인페인팅을 원본으로"와 "최종 브러시를 원본으로"가 공유하는 최신 기준 파일이다.
         """
+        try:
+            if hasattr(self, "_apply_pending_work_cache_image_delta_payload_for_page"):
+                self._apply_pending_work_cache_image_delta_payload_for_page(page_idx, reason="source_display")
+        except Exception:
+            pass
         curr = self.data.get(page_idx, {})
 
         if curr.get('use_inpainted_as_source'):
@@ -12462,14 +13133,593 @@ class MainWindowProjectPagesMixin:
             pass
         return False
 
-    def flush_workspace_image_pages(self, page_indices, *, reason="image_heavy", release_non_current=True):
-        """이미지-heavy 페이지를 즉시 workspace delta로 저장한다.
+    def _work_cache_pending_dict(self):
+        pending = getattr(self, "_work_cache_image_delta_pending_payloads", None)
+        if not isinstance(pending, dict):
+            pending = {}
+            self._work_cache_image_delta_pending_payloads = pending
+        return pending
 
-        인페인팅/클린본/배경 교체처럼 큰 이미지 payload가 생기는 작업은
-        page journal이 아니라 save_pages_delta()로 바로 파일 flush 해야 한다.
-        일괄 작업에서는 페이지 하나를 저장한 뒤 메모리 payload를 끊어 다음
-        페이지로 넘어가도록 이 helper를 쓴다.
+    def _work_cache_pending_key(self, page_idx):
+        try:
+            return int(page_idx)
+        except Exception:
+            return page_idx
+
+    def _copy_pending_page_payload_snapshot(self, page):
+        if not isinstance(page, dict):
+            return {}
+        keys = (
+            "bg_clean", "clean_path", "bg_clean_path",
+            "working_source", "working_source_path",
+            "final_paint", "final_paint_path",
+            "final_paint_above", "final_paint_above_path",
+            "mask_merge", "mask_merge_path", "mask_merge_dirty",
+            "mask_inpaint", "mask_inpaint_path", "mask_inpaint_dirty",
+            "mask_merge_off", "mask_merge_off_path", "mask_merge_off_dirty",
+            "mask_inpaint_off", "mask_inpaint_off_path", "mask_inpaint_off_dirty",
+            "mask_toggle_enabled", "use_inpainted_as_source",
+        )
+        out = {}
+        for k in keys:
+            if k not in page:
+                continue
+            v = page.get(k)
+            try:
+                if isinstance(v, np.ndarray):
+                    out[k] = v.copy()
+                elif isinstance(v, (bytes, bytearray)):
+                    out[k] = bytes(v)
+                else:
+                    out[k] = copy.deepcopy(v)
+            except Exception:
+                try:
+                    out[k] = v.copy()
+                except Exception:
+                    out[k] = v
+        return out
+
+    def _mark_work_cache_image_delta_pending(self, job):
+        """Remember the latest in-memory image payload while a worker is saving it.
+
+        Page loading must prefer this payload over disk paths until the worker
+        finishes.  Otherwise, page switching can briefly rebuild the scene from
+        the old clean_path/original image even though the inpaint result is already
+        visible in memory.
         """
+        if job is None:
+            return 0
+        pending = self._work_cache_pending_dict()
+        made = 0
+        try:
+            snapshots = dict(getattr(job, "data_snapshot", {}) or {})
+        except Exception:
+            snapshots = {}
+        for raw_i in list(getattr(job, "page_indices", []) or []):
+            try:
+                i = int(raw_i)
+            except Exception:
+                continue
+            snap = snapshots.get(i) or snapshots.get(str(i)) or {}
+            if not isinstance(snap, dict):
+                continue
+            payload = self._copy_pending_page_payload_snapshot(snap)
+            if not payload:
+                continue
+            pending[self._work_cache_pending_key(i)] = {
+                "token": str(getattr(job, "token", "") or ""),
+                "key": str(getattr(job, "key", "") or ""),
+                "reason": str(getattr(job, "reason", "") or ""),
+                "payload": payload,
+            }
+            made += 1
+        if made:
+            try:
+                self.audit_boundary_event(
+                    "WORK_CACHE_IMAGE_DELTA_PENDING_MARKED",
+                    dirty_pages=list(getattr(job, "page_indices", []) or []),
+                    reason=str(getattr(job, "reason", "") or ""),
+                    throttle_ms=120,
+                )
+            except Exception:
+                pass
+        return made
+
+    def _has_pending_work_cache_image_delta_page(self, page_idx):
+        try:
+            return self._work_cache_pending_key(page_idx) in self._work_cache_pending_dict()
+        except Exception:
+            return False
+
+    def _apply_pending_work_cache_image_delta_payload_for_page(self, page_idx, *, reason=""):
+        try:
+            i = int(page_idx)
+        except Exception:
+            return False
+        curr = (getattr(self, "data", {}) or {}).get(i)
+        if not isinstance(curr, dict):
+            return False
+        pending = self._work_cache_pending_dict().get(self._work_cache_pending_key(i))
+        if not isinstance(pending, dict):
+            return False
+        payload = pending.get("payload")
+        if not isinstance(payload, dict) or not payload:
+            return False
+        changed = False
+        for k, v in payload.items():
+            try:
+                if isinstance(v, np.ndarray):
+                    curr[k] = v.copy()
+                elif isinstance(v, (bytes, bytearray)):
+                    curr[k] = bytes(v)
+                else:
+                    curr[k] = copy.deepcopy(v)
+            except Exception:
+                curr[k] = v
+            changed = True
+        if changed:
+            try:
+                self.touch_page_payload_cache(i)
+                self.touch_page_image_cache(i)
+                self.trim_page_payload_cache(keep_indices=[i])
+                self.trim_page_image_cache(keep_indices=[i])
+            except Exception:
+                pass
+            try:
+                self.audit_boundary_event(
+                    "WORK_CACHE_IMAGE_DELTA_PENDING_PAGE_RESTORED",
+                    detail_page_idx=i,
+                    reason=str(reason or pending.get("reason") or ""),
+                    pending_reason=str(pending.get("reason") or ""),
+                    has_bg_clean=bool(curr.get("bg_clean") is not None),
+                    has_working_source=bool(curr.get("working_source") is not None),
+                    has_final_paint=bool(curr.get("final_paint") is not None),
+                    throttle_ms=180,
+                )
+            except Exception:
+                pass
+        return changed
+
+    def _clear_work_cache_image_delta_pending_pages(self, indices):
+        pending = self._work_cache_pending_dict()
+        cleared = 0
+        for raw_i in list(indices or []):
+            try:
+                key = self._work_cache_pending_key(int(raw_i))
+            except Exception:
+                key = raw_i
+            if key in pending:
+                pending.pop(key, None)
+                cleared += 1
+        if cleared:
+            try:
+                self.audit_boundary_event("WORK_CACHE_IMAGE_DELTA_PENDING_CLEARED", pages=int(cleared), throttle_ms=180)
+            except Exception:
+                pass
+        return cleared
+
+    def _invalidate_work_cache_image_delta_page_caches(self, indices, *, reason=""):
+        for raw_i in list(indices or []):
+            try:
+                i = int(raw_i)
+            except Exception:
+                continue
+            try:
+                if hasattr(self, "_invalidate_inpaint_result_base_cache"):
+                    self._invalidate_inpaint_result_base_cache(i)
+            except Exception:
+                pass
+            try:
+                view = getattr(self, "view", None)
+                if view is not None and getattr(view, "_force_layer_base_rebuild", None) is not None:
+                    if i == int(getattr(self, "idx", -1) or -1):
+                        view._force_layer_base_rebuild = True
+            except Exception:
+                pass
+        try:
+            if indices:
+                self.audit_boundary_event(
+                    "WORK_CACHE_IMAGE_DELTA_PAGE_CACHE_INVALIDATED",
+                    dirty_pages=[int(x) for x in indices],
+                    reason=str(reason or ""),
+                    throttle_ms=180,
+                )
+        except Exception:
+            pass
+
+    def _refresh_current_page_after_image_delta_if_needed(self, indices, *, reason=""):
+        try:
+            current_idx = int(getattr(self, "idx", -1) or -1)
+        except Exception:
+            current_idx = -1
+        if current_idx < 0:
+            return False
+        try:
+            idx_set = {int(x) for x in list(indices or [])}
+        except Exception:
+            idx_set = set()
+        if current_idx not in idx_set:
+            return False
+        try:
+            self._apply_pending_work_cache_image_delta_payload_for_page(current_idx, reason=f"refresh:{reason}")
+        except Exception:
+            pass
+        try:
+            if getattr(self, "is_page_loading", False) or getattr(self, "is_batch_running", False):
+                return False
+            mode = int(self.cb_mode.currentIndex()) if hasattr(self, "cb_mode") else int(getattr(self, "last_mode", 0) or 0)
+            old_suppress = getattr(self, "_suppress_mode_undo", False)
+            old_skip_mask = getattr(self, "_skip_mode_mask_commit", False)
+            old_skip_paint = getattr(self, "_skip_mode_paint_commit", False)
+            self._suppress_mode_undo = True
+            self._skip_mode_mask_commit = True
+            self._skip_mode_paint_commit = True
+            try:
+                self.mode_chg(mode)
+            finally:
+                self._suppress_mode_undo = old_suppress
+                self._skip_mode_mask_commit = old_skip_mask
+                self._skip_mode_paint_commit = old_skip_paint
+            try:
+                self.audit_boundary_event(
+                    "WORK_CACHE_IMAGE_DELTA_CURRENT_PAGE_REFRESHED",
+                    detail_page_idx=current_idx,
+                    reason=str(reason or ""),
+                    mode=mode,
+                    throttle_ms=180,
+                )
+            except Exception:
+                pass
+            return True
+        except Exception as exc:
+            try:
+                self.audit_boundary_event(
+                    "WORK_CACHE_IMAGE_DELTA_CURRENT_PAGE_REFRESH_FAILED",
+                    detail_page_idx=current_idx,
+                    reason=str(reason or ""),
+                    error=repr(exc),
+                    throttle_ms=300,
+                )
+            except Exception:
+                pass
+            return False
+
+    def _copy_work_cache_page_snapshot(self, curr):
+        """Return a worker-safe snapshot of one page data dict.
+
+        ProjectStore.save_pages_delta() writes image/mask/clean payloads to disk and
+        mutates page dictionaries.  The UI data object must not be touched from a
+        QRunnable, so only plain values, bytes and copied numpy arrays are passed to
+        the worker.
+        """
+        if not isinstance(curr, dict):
+            return {}
+        # Keep this whitelist tight.  Copying ori/page runtime caches here would
+        # move the 렉 from save_pages_delta() to snapshot creation.
+        keys = (
+            "original_name", "data", "ocr_analysis_regions",
+            "mask_merge", "mask_merge_path", "mask_merge_dirty",
+            "mask_inpaint", "mask_inpaint_path", "mask_inpaint_dirty",
+            "mask_merge_off", "mask_merge_off_path", "mask_merge_off_dirty",
+            "mask_inpaint_off", "mask_inpaint_off_path", "mask_inpaint_off_dirty",
+            "mask_toggle_enabled", "use_inpainted_as_source",
+            "working_source", "working_source_path",
+            "bg_clean", "clean_path",
+            "final_paint", "final_paint_path",
+            "final_paint_above", "final_paint_above_path",
+        )
+        out = {}
+        for k in keys:
+            if k not in curr:
+                continue
+            v = curr.get(k)
+            try:
+                if isinstance(v, np.ndarray):
+                    out[k] = v.copy()
+                elif isinstance(v, (bytes, bytearray)):
+                    out[k] = bytes(v)
+                else:
+                    out[k] = copy.deepcopy(v)
+            except Exception:
+                try:
+                    out[k] = v.copy()
+                except Exception:
+                    out[k] = v
+        return out
+
+    def _make_work_cache_image_delta_job(self, indices, *, reason="image_heavy", release_non_current=True):
+        try:
+            from ysb.core.work_cache_save_worker import WorkCacheImageDeltaSaveJob
+        except Exception:
+            return None
+        try:
+            paths_snapshot = list(getattr(self, "paths", []) or [])
+            data_snapshot = {}
+            for i in sorted({int(x) for x in list(indices or [])}):
+                curr = (getattr(self, "data", {}) or {}).get(int(i))
+                if isinstance(curr, dict):
+                    data_snapshot[int(i)] = self._copy_work_cache_page_snapshot(curr)
+            if not data_snapshot:
+                return None
+            try:
+                ui_state = self.current_project_ui_state() if hasattr(self, "current_project_ui_state") else {}
+            except Exception:
+                ui_state = {}
+            try:
+                clean_fmt = self.current_clean_image_format() if hasattr(self, "current_clean_image_format") else getattr(self, "clean_image_format", "png")
+            except Exception:
+                clean_fmt = getattr(self, "clean_image_format", "png")
+            try:
+                clean_quality = self.current_clean_image_quality() if hasattr(self, "current_clean_image_quality") else getattr(self, "clean_image_quality", 95)
+            except Exception:
+                clean_quality = getattr(self, "clean_image_quality", 95)
+            return WorkCacheImageDeltaSaveJob(
+                project_dir=str(getattr(self, "project_dir", "") or ""),
+                paths_snapshot=paths_snapshot,
+                data_snapshot=data_snapshot,
+                page_indices=sorted(data_snapshot.keys()),
+                current_index=int(getattr(self, "idx", 0) or 0),
+                ui_state=ui_state if isinstance(ui_state, dict) else {},
+                clean_image_format=str(clean_fmt or "png"),
+                clean_image_quality=int(clean_quality or 95),
+                reason=str(reason or "image_heavy"),
+                release_non_current=bool(release_non_current),
+            )
+        except Exception:
+            return None
+
+    def enqueue_work_cache_image_delta_save_job(self, job):
+        if job is None:
+            return False
+        try:
+            from PyQt6.QtCore import QThreadPool
+            from ysb.core.work_cache_save_worker import WorkCacheImageDeltaSaveRunnable
+            key = str(job.key)
+            if not hasattr(self, "_work_cache_image_delta_active_keys"):
+                self._work_cache_image_delta_active_keys = set()
+            if not hasattr(self, "_work_cache_image_delta_queued_jobs"):
+                self._work_cache_image_delta_queued_jobs = {}
+            if not hasattr(self, "_work_cache_image_delta_runnables"):
+                self._work_cache_image_delta_runnables = {}
+            try:
+                self._mark_work_cache_image_delta_pending(job)
+            except Exception:
+                pass
+            if key in self._work_cache_image_delta_active_keys:
+                self._work_cache_image_delta_queued_jobs[key] = job
+                try:
+                    self.audit_boundary_event(
+                        "WORK_CACHE_IMAGE_DELTA_SAVE_JOB_COALESCED",
+                        dirty_pages=list(getattr(job, "page_indices", []) or []),
+                        reason=str(getattr(job, "reason", "") or ""),
+                        throttle_ms=180,
+                    )
+                except Exception:
+                    pass
+                return True
+            self._work_cache_image_delta_active_keys.add(key)
+            runnable = WorkCacheImageDeltaSaveRunnable(job)
+            try:
+                runnable.signals.started.connect(self._on_work_cache_image_delta_save_started)
+            except Exception:
+                pass
+            runnable.signals.done.connect(self._on_work_cache_image_delta_save_done)
+            runnable.signals.failed.connect(self._on_work_cache_image_delta_save_failed)
+            self._work_cache_image_delta_runnables[str(getattr(job, "token", key))] = runnable
+            try:
+                self.audit_boundary_event(
+                    "WORK_CACHE_IMAGE_DELTA_SAVE_JOB_ENQUEUE",
+                    dirty_pages=list(getattr(job, "page_indices", []) or []),
+                    reason=str(getattr(job, "reason", "") or ""),
+                    throttle_ms=120,
+                )
+            except Exception:
+                pass
+            QThreadPool.globalInstance().start(runnable)
+            return True
+        except Exception as exc:
+            try:
+                self.audit_boundary_event("WORK_CACHE_IMAGE_DELTA_SAVE_JOB_ENQUEUE_FAILED", error=repr(exc), throttle_ms=600)
+            except Exception:
+                pass
+            return False
+
+    def _finish_work_cache_image_delta_save_key(self, result):
+        key = str((result or {}).get("key") or "")
+        token = str((result or {}).get("token") or "")
+        try:
+            if hasattr(self, "_work_cache_image_delta_active_keys"):
+                self._work_cache_image_delta_active_keys.discard(key)
+            if token and hasattr(self, "_work_cache_image_delta_runnables"):
+                self._work_cache_image_delta_runnables.pop(token, None)
+        except Exception:
+            pass
+        try:
+            queued = None
+            if key and hasattr(self, "_work_cache_image_delta_queued_jobs"):
+                queued = self._work_cache_image_delta_queued_jobs.pop(key, None)
+            if queued is not None:
+                self.enqueue_work_cache_image_delta_save_job(queued)
+        except Exception:
+            pass
+
+    def _on_work_cache_image_delta_save_started(self, result):
+        try:
+            self.audit_boundary_event(
+                "WORK_CACHE_IMAGE_DELTA_SAVE_WORKER_START",
+                dirty_pages=list((result or {}).get("page_indices") or []),
+                reason=str((result or {}).get("reason") or ""),
+                throttle_ms=120,
+            )
+        except Exception:
+            pass
+
+    def _on_work_cache_image_delta_save_done(self, result):
+        result = result or {}
+        try:
+            indices = [int(x) for x in list(result.get("page_indices") or [])]
+        except Exception:
+            indices = []
+        try:
+            self._invalidate_work_cache_image_delta_page_caches(indices, reason=str(result.get("reason") or ""))
+        except Exception:
+            pass
+        try:
+            # If the user already navigated back while the worker was still saving,
+            # keep the live page data on the newest pending payload until the disk
+            # write result is copied back below.
+            for _i in indices:
+                self._apply_pending_work_cache_image_delta_payload_for_page(_i, reason="worker_done_before_update")
+        except Exception:
+            pass
+        try:
+            updates = result.get("page_updates") or {}
+            updated_paths = result.get("updated_paths") or {}
+            for raw_i in indices:
+                i = int(raw_i)
+                curr = (getattr(self, "data", {}) or {}).get(i)
+                if isinstance(curr, dict):
+                    upd = updates.get(i) or updates.get(str(i)) or {}
+                    if isinstance(upd, dict):
+                        for k, v in upd.items():
+                            curr[k] = v
+                    try:
+                        new_path = updated_paths.get(i) if isinstance(updated_paths, dict) else None
+                        if new_path is None and isinstance(updated_paths, dict):
+                            new_path = updated_paths.get(str(i))
+                        if new_path and 0 <= i < len(getattr(self, "paths", []) or []):
+                            self.paths[i] = new_path
+                    except Exception:
+                        pass
+            try:
+                pages = getattr(self, "_checkpoint_dirty_pages", None)
+                if pages is not None:
+                    pages.difference_update(set(indices))
+            except Exception:
+                pass
+            try:
+                kinds = getattr(self, "_checkpoint_dirty_kinds", None)
+                if isinstance(kinds, dict):
+                    for i in indices:
+                        kinds.pop(int(i), None)
+            except Exception:
+                pass
+            try:
+                self.record_recovery_project_dir(getattr(self, "project_dir", None))
+            except Exception:
+                pass
+            try:
+                key = str(result.get("key") or "")
+                has_queued_after_done = bool(key and hasattr(self, "_work_cache_image_delta_queued_jobs") and self._work_cache_image_delta_queued_jobs.get(key) is not None)
+            except Exception:
+                has_queued_after_done = False
+            if not has_queued_after_done:
+                try:
+                    self._clear_work_cache_image_delta_pending_pages(indices)
+                except Exception:
+                    pass
+            if bool(result.get("release_non_current", False)) and not has_queued_after_done:
+                self._release_saved_work_cache_payloads(indices)
+            try:
+                QTimer.singleShot(0, lambda _indices=list(indices), _reason=str(result.get("reason") or ""): self._refresh_current_page_after_image_delta_if_needed(_indices, reason=_reason))
+            except Exception:
+                pass
+            try:
+                self.audit_boundary_event(
+                    "WORK_CACHE_IMAGE_DELTA_SAVE_WORKER_DONE",
+                    dirty_pages=indices,
+                    reason=str(result.get("reason") or ""),
+                    ok=bool(result.get("ok", True)),
+                    throttle_ms=120,
+                )
+            except Exception:
+                pass
+            try:
+                self.has_unsaved_changes = True
+                self.update_window_title()
+            except Exception:
+                pass
+        finally:
+            self._finish_work_cache_image_delta_save_key(result)
+
+    def _on_work_cache_image_delta_save_failed(self, result):
+        result = result or {}
+        try:
+            self.audit_boundary_event(
+                "WORK_CACHE_IMAGE_DELTA_SAVE_WORKER_FAILED",
+                dirty_pages=list(result.get("page_indices") or []),
+                reason=str(result.get("reason") or ""),
+                error=str(result.get("error") or ""),
+                throttle_ms=300,
+            )
+        except Exception:
+            pass
+        try:
+            self._record_background_save_failure_for_explicit_save(result or {}, kind="image_delta")
+        except Exception:
+            pass
+        try:
+            self.schedule_workspace_checkpoint(1800, reason="work_cache_image_delta_worker_failed")
+        except Exception:
+            pass
+        finally:
+            self._finish_work_cache_image_delta_save_key(result)
+
+    def _release_saved_work_cache_payloads(self, indices):
+        try:
+            current_idx = int(getattr(self, 'idx', -1) or -1)
+        except Exception:
+            current_idx = -1
+        for i in list(indices or []):
+            try:
+                i = int(i)
+            except Exception:
+                continue
+            if i == current_idx:
+                continue
+            try:
+                if self._has_pending_work_cache_image_delta_page(i):
+                    try:
+                        self.audit_boundary_event("WORK_CACHE_IMAGE_DELTA_RELEASE_SKIPPED_PENDING", detail_page_idx=i, throttle_ms=300)
+                    except Exception:
+                        pass
+                    continue
+            except Exception:
+                pass
+            try:
+                curr = (getattr(self, 'data', {}) or {}).get(i)
+                if not isinstance(curr, dict):
+                    continue
+                if curr.get('clean_path'):
+                    curr['bg_clean'] = None
+                if curr.get('working_source_path'):
+                    curr['working_source'] = None
+                if curr.get('final_paint_path'):
+                    curr['final_paint'] = None
+                if curr.get('final_paint_above_path'):
+                    curr['final_paint_above'] = None
+                curr['ori'] = None
+            except Exception:
+                pass
+        try:
+            if hasattr(self, 'trim_page_image_cache'):
+                keep = [current_idx] if current_idx >= 0 else []
+                self.trim_page_image_cache(keep_indices=keep)
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'trim_page_mask_cache'):
+                keep = [current_idx] if current_idx >= 0 else []
+                self.trim_page_mask_cache(keep_indices=keep)
+        except Exception:
+            pass
+        try:
+            __import__('gc').collect()
+        except Exception:
+            pass
+
+    def flush_workspace_image_pages(self, page_indices, *, reason="image_heavy", release_non_current=True):
+        """Queue image-heavy page delta saves instead of writing them on the UI thread."""
         if (
             getattr(self, "_suppress_work_cache_dirty", False)
             or getattr(self, "is_loading_project", False)
@@ -12495,20 +13745,58 @@ class MainWindowProjectPagesMixin:
         if self.work_project_store is None or not self.work_project_dir:
             return False
         try:
+            self.audit_boundary_event(
+                'WORK_CACHE_IMAGE_DELTA_SAVE_ENTER',
+                dirty_pages=sorted(int(x) for x in indices),
+                reason=str(reason or 'image_heavy'),
+                queued=True,
+                stack=True,
+            )
+        except Exception:
+            pass
+        job = self._make_work_cache_image_delta_job(indices, reason=reason, release_non_current=release_non_current)
+        if job is not None and self.enqueue_work_cache_image_delta_save_job(job):
+            try:
+                self._last_work_cache_image_delta_enqueued = True
+            except Exception:
+                pass
+            try:
+                self.audit_boundary_event(
+                    'WORK_CACHE_IMAGE_DELTA_SAVE_ENQUEUED_INSTEAD_OF_DIRECT_SAVE',
+                    dirty_pages=sorted(int(x) for x in indices),
+                    reason=str(reason or 'image_heavy'),
+                    release_non_current=bool(release_non_current),
+                    throttle_ms=180,
+                )
+            except Exception:
+                pass
+            try:
+                self.has_unsaved_changes = True
+                self.update_window_title()
+            except Exception:
+                pass
+            return True
+        # If the background queue cannot be created, keep the old synchronous path
+        # as an emergency fallback so no data is lost.
+        try:
+            self._last_work_cache_image_delta_enqueued = False
+        except Exception:
+            pass
+        try:
+            self.audit_boundary_event(
+                'WORK_CACHE_IMAGE_DELTA_SAVE_FALLBACK_DIRECT',
+                dirty_pages=sorted(int(x) for x in indices),
+                reason=str(reason or 'image_heavy'),
+                throttle_ms=300,
+            )
+        except Exception:
+            pass
+        try:
             self.work_project_store.ui_state = self.current_project_ui_state()
         except Exception:
             self.work_project_store.ui_state = getattr(self.work_project_store, 'ui_state', {}) or {}
         self.work_project_store.clean_image_format = self.current_clean_image_format() if hasattr(self, 'current_clean_image_format') else getattr(self, 'clean_image_format', 'png')
         self.work_project_store.clean_image_quality = self.current_clean_image_quality() if hasattr(self, 'current_clean_image_quality') else getattr(self, 'clean_image_quality', 95)
-        try:
-            self.audit_boundary_event(
-                'WORK_CACHE_IMAGE_DELTA_SAVE_ENTER',
-                dirty_pages=sorted(int(x) for x in indices),
-                reason=str(reason or 'image_heavy'),
-                stack=True,
-            )
-        except Exception:
-            pass
         self.work_project_store.save_pages_delta(self.paths, self.data, set(indices), current_index=getattr(self, 'idx', 0))
         try:
             self.record_recovery_project_dir(self.work_project_dir)
@@ -12519,48 +13807,12 @@ class MainWindowProjectPagesMixin:
                 'WORK_CACHE_IMAGE_DELTA_SAVE_DONE',
                 dirty_pages=sorted(int(x) for x in indices),
                 reason=str(reason or 'image_heavy'),
+                queued=False,
             )
         except Exception:
             pass
         if release_non_current:
-            try:
-                current_idx = int(getattr(self, 'idx', -1) or -1)
-            except Exception:
-                current_idx = -1
-            for i in indices:
-                if i == current_idx:
-                    continue
-                try:
-                    curr = (getattr(self, 'data', {}) or {}).get(int(i))
-                    if not isinstance(curr, dict):
-                        continue
-                    if curr.get('clean_path'):
-                        curr['bg_clean'] = None
-                    if curr.get('working_source_path'):
-                        curr['working_source'] = None
-                    if curr.get('final_paint_path'):
-                        curr['final_paint'] = None
-                    if curr.get('final_paint_above_path'):
-                        curr['final_paint_above'] = None
-                    curr['ori'] = None
-                except Exception:
-                    pass
-            try:
-                if hasattr(self, 'trim_page_image_cache'):
-                    keep = [current_idx] if current_idx >= 0 else []
-                    self.trim_page_image_cache(keep_indices=keep)
-            except Exception:
-                pass
-            try:
-                if hasattr(self, 'trim_page_mask_cache'):
-                    keep = [current_idx] if current_idx >= 0 else []
-                    self.trim_page_mask_cache(keep_indices=keep)
-            except Exception:
-                pass
-            try:
-                __import__('gc').collect()
-            except Exception:
-                pass
+            self._release_saved_work_cache_payloads(indices)
         return True
 
     def hydrate_checkpoint_dirty_from_project_dirty(self, *, text_only_hint=False):
@@ -12748,23 +14000,210 @@ class MainWindowProjectPagesMixin:
 
         if saved:
             try:
-                self._checkpoint_dirty_pages.difference_update(valid_pages)
+                image_delta_enqueued = bool(getattr(self, "_last_work_cache_image_delta_enqueued", False))
             except Exception:
-                pass
+                image_delta_enqueued = False
             try:
-                for page_idx in list(valid_pages):
-                    try:
-                        self._checkpoint_dirty_kinds.pop(int(page_idx), None)
-                    except Exception:
-                        pass
+                self._last_work_cache_image_delta_enqueued = False
             except Exception:
                 pass
+            if not image_delta_enqueued:
+                try:
+                    self._checkpoint_dirty_pages.difference_update(valid_pages)
+                except Exception:
+                    pass
+                try:
+                    for page_idx in list(valid_pages):
+                        try:
+                            self._checkpoint_dirty_kinds.pop(int(page_idx), None)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
         try:
             self.has_unsaved_changes = True
             self.update_window_title()
         except Exception:
             pass
         return bool(saved)
+
+    def _background_save_queue_counts(self):
+        """Return lightweight counts for background save queues that must be drained before packaging."""
+        counts = {
+            "view_active": 0,
+            "view_queued": 0,
+            "image_active": 0,
+            "image_queued": 0,
+            "pending_view_commit": 0,
+        }
+        try:
+            counts["view_active"] = len(getattr(self, "_view_layer_save_active_keys", set()) or set())
+        except Exception:
+            counts["view_active"] = 0
+        try:
+            counts["view_queued"] = len(getattr(self, "_view_layer_save_queued_jobs", {}) or {})
+        except Exception:
+            counts["view_queued"] = 0
+        try:
+            counts["image_active"] = len(getattr(self, "_work_cache_image_delta_active_keys", set()) or set())
+        except Exception:
+            counts["image_active"] = 0
+        try:
+            counts["image_queued"] = len(getattr(self, "_work_cache_image_delta_queued_jobs", {}) or {})
+        except Exception:
+            counts["image_queued"] = 0
+        try:
+            counts["pending_view_commit"] = len(getattr(self, "_pending_view_layer_commit_kinds", set()) or set())
+        except Exception:
+            counts["pending_view_commit"] = 0
+        return counts
+
+    def _background_save_queue_total(self):
+        try:
+            counts = self._background_save_queue_counts()
+            return sum(int(v or 0) for v in counts.values())
+        except Exception:
+            return 0
+
+    def _record_background_save_failure_for_explicit_save(self, result, *, kind=""):
+        try:
+            failures = getattr(self, "_background_save_worker_failures", None)
+            if not isinstance(failures, list):
+                failures = []
+                self._background_save_worker_failures = failures
+            payload = dict(result or {}) if isinstance(result, dict) else {"error": repr(result)}
+            payload["kind"] = str(kind or payload.get("kind") or "background_save")
+            payload["ts"] = __import__("time").time()
+            failures.append(payload)
+            # Keep the list bounded so a long session does not accumulate unbounded diagnostics.
+            if len(failures) > 40:
+                del failures[:-40]
+        except Exception:
+            pass
+
+    def wait_for_background_save_workers_before_package(self, *, reason="explicit_save", timeout_ms=90000):
+        """Drain queued view-layer/image-delta saves before writing the YSBT package.
+
+        Saving a YSBT is a hard boundary: anything the user sees on the page must be
+        present in project.json/assets before package_project() reads the workspace.
+        Background saves are still useful during editing, but explicit save must wait.
+        """
+        try:
+            timeout_ms = max(1000, int(timeout_ms or 90000))
+        except Exception:
+            timeout_ms = 90000
+        try:
+            baseline_failures = len(getattr(self, "_background_save_worker_failures", []) or [])
+        except Exception:
+            baseline_failures = 0
+
+        # Convert any pending layer timer into an actual worker job first.
+        try:
+            timer = getattr(self, "_deferred_view_layer_commit_timer", None)
+            if timer is not None:
+                timer.stop()
+        except Exception:
+            pass
+        try:
+            self.flush_pending_view_layer_commit(save_after=False)
+        except Exception:
+            pass
+
+        try:
+            counts = self._background_save_queue_counts()
+            self.audit_boundary_event(
+                "EXPLICIT_SAVE_BACKGROUND_FLUSH_BEGIN",
+                reason=str(reason or "explicit_save"),
+                **counts,
+                throttle_ms=100,
+            )
+        except Exception:
+            pass
+
+        start = __import__("time").time()
+        stable_empty_rounds = 0
+        last_log = 0.0
+        while True:
+            try:
+                counts = self._background_save_queue_counts()
+                total = sum(int(v or 0) for v in counts.values())
+            except Exception:
+                counts = {}
+                total = 0
+            if total <= 0:
+                stable_empty_rounds += 1
+                if stable_empty_rounds >= 2:
+                    break
+            else:
+                stable_empty_rounds = 0
+            elapsed_ms = int((__import__("time").time() - start) * 1000)
+            if elapsed_ms > timeout_ms:
+                try:
+                    self.audit_boundary_event(
+                        "EXPLICIT_SAVE_BACKGROUND_FLUSH_TIMEOUT",
+                        reason=str(reason or "explicit_save"),
+                        elapsed_ms=int(elapsed_ms),
+                        **counts,
+                        throttle_ms=100,
+                    )
+                except Exception:
+                    pass
+                return False
+            try:
+                now = __import__("time").time()
+                if now - last_log > 0.8:
+                    last_log = now
+                    self.audit_boundary_event(
+                        "EXPLICIT_SAVE_BACKGROUND_FLUSH_WAIT",
+                        reason=str(reason or "explicit_save"),
+                        elapsed_ms=int(elapsed_ms),
+                        **counts,
+                        throttle_ms=500,
+                    )
+            except Exception:
+                pass
+            try:
+                QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+            except Exception:
+                try:
+                    QApplication.processEvents()
+                except Exception:
+                    pass
+            try:
+                QThread.msleep(35)
+            except Exception:
+                __import__("time").sleep(0.035)
+        try:
+            QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+        except Exception:
+            pass
+        try:
+            failures = getattr(self, "_background_save_worker_failures", []) or []
+            new_failures = failures[baseline_failures:]
+        except Exception:
+            new_failures = []
+        if new_failures:
+            try:
+                self.audit_boundary_event(
+                    "EXPLICIT_SAVE_BACKGROUND_FLUSH_FAILED_WORKER",
+                    reason=str(reason or "explicit_save"),
+                    failure_count=len(new_failures),
+                    last_error=str((new_failures[-1] or {}).get("error") or new_failures[-1]),
+                    throttle_ms=100,
+                )
+            except Exception:
+                pass
+            return False
+        try:
+            self.audit_boundary_event(
+                "EXPLICIT_SAVE_BACKGROUND_FLUSH_DONE",
+                reason=str(reason or "explicit_save"),
+                elapsed_ms=int((__import__("time").time() - start) * 1000),
+                throttle_ms=100,
+            )
+        except Exception:
+            pass
+        return True
 
     def mark_saved_state(self):
         try:
@@ -12786,7 +14225,13 @@ class MainWindowProjectPagesMixin:
         self.app_options["auto_save_enabled"] = False
         self.app_options[UI_THEME_KEY] = str(getattr(self, "ui_theme", THEME_DARK) or THEME_DARK)
         self.app_options[UI_LANGUAGE_KEY] = normalize_ui_language(getattr(self, "ui_language", LANG_KO))
-        self.app_options["analysis_number_box_width"] = int(getattr(self, "analysis_number_box_width", 40))
+        mode = str(getattr(self, "analysis_box_size_mode", "auto") or "auto").lower()
+        if mode not in ("auto", "manual"):
+            mode = "auto"
+        self.app_options["analysis_box_size_mode"] = mode
+        self.app_options["analysis_number_box_width"] = max(1, int(getattr(self, "analysis_number_box_width", 40) or 40))
+        self.app_options["analysis_outline_width"] = max(1, int(getattr(self, "analysis_outline_width", 2) or 2))
+        self.app_options["text_number_boxes_hidden"] = bool(getattr(self, "text_number_boxes_hidden", False))
         try:
             self.app_options["brush_size"] = max(1, min(500, int(getattr(getattr(self, "view", None), "brush_size", 25) or 25)))
         except Exception:
@@ -12807,6 +14252,10 @@ class MainWindowProjectPagesMixin:
             self.app_options["default_writing_direction"] = self.normalize_writing_direction(getattr(self, "default_writing_direction", "horizontal"))
         except Exception:
             self.app_options["default_writing_direction"] = "horizontal"
+        try:
+            self.app_options["default_partial_horizontal_writing_enabled"] = self.normalize_partial_horizontal_writing_enabled(getattr(self, "default_partial_horizontal_writing_enabled", True), True)
+        except Exception:
+            self.app_options["default_partial_horizontal_writing_enabled"] = True
         self.app_options["auto_text_apply_vertical_writing"] = bool(self.app_options.get("auto_text_apply_vertical_writing", True))
         self.app_options["use_light_file_dialog"] = bool(getattr(self, "use_light_file_dialog", True))
         self.app_options["use_direct_inline_text_editor_horizontal"] = bool(getattr(self, "use_direct_inline_text_editor_horizontal", True))
@@ -13660,6 +15109,28 @@ class MainWindowProjectPagesMixin:
             self.commit_current_page_ui_to_data()
             _save_ui_diag("COMMIT_CURRENT_PAGE_UI_DONE", total_pages=total_pages)
             try:
+                self.flush_pending_view_layer_commit(save_after=False)
+            except Exception:
+                pass
+            self.update_task_progress_overlay(current=0, total=total_pages, detail=f"""전체 페이지: {total_pages}개
+변경 페이지: 계산 중
+저장 진행: 0/{total_pages}
+현재 작업: 브러시/인페인팅 백그라운드 저장을 마무리하는 중입니다...""")
+            QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+            _save_ui_diag("BACKGROUND_FLUSH_BEFORE_STORE_BEGIN", counts=(self._background_save_queue_counts() if hasattr(self, "_background_save_queue_counts") else {}))
+            if hasattr(self, "wait_for_background_save_workers_before_package"):
+                if not self.wait_for_background_save_workers_before_package(reason="explicit_save_before_store", timeout_ms=90000):
+                    _save_ui_diag("BACKGROUND_FLUSH_BEFORE_STORE_FAILED", counts=(self._background_save_queue_counts() if hasattr(self, "_background_save_queue_counts") else {}))
+                    self.has_unsaved_changes = True
+                    self.hide_task_progress_overlay()
+                    QMessageBox.critical(
+                        self,
+                        self.tr_ui("프로젝트 저장 실패"),
+                        self.tr_ui("브러시/인페인팅 백그라운드 저장이 아직 완료되지 않았거나 실패해서 YSBT 저장을 중단했습니다. 작업 내용은 현재 프로젝트에 남아 있습니다."),
+                    )
+                    return
+            _save_ui_diag("BACKGROUND_FLUSH_BEFORE_STORE_DONE", counts=(self._background_save_queue_counts() if hasattr(self, "_background_save_queue_counts") else {}))
+            try:
                 # 리팩토링 중 일부 구형 편집 경로가 dirty flag를 못 찍는 경우를 방어한다.
                 pe = getattr(self, "project_engine", None)
                 if bool(getattr(self, "has_unsaved_changes", False)) and pe is not None and not pe.has_dirty():
@@ -13712,6 +15183,37 @@ class MainWindowProjectPagesMixin:
             _save_ui_diag("SAVE_PROJECT_STORE_BEGIN")
             self.save_project_store(self.project_store)
             _save_ui_diag("SAVE_PROJECT_STORE_DONE")
+            try:
+                if hasattr(self, "_background_save_queue_total") and int(self._background_save_queue_total() or 0) > 0:
+                    _save_ui_diag("BACKGROUND_FLUSH_AFTER_STORE_BEGIN", counts=(self._background_save_queue_counts() if hasattr(self, "_background_save_queue_counts") else {}))
+                    self.update_task_progress_overlay(current=0, total=total_pages, detail=f"""전체 페이지: {total_pages}개
+변경 페이지: 계산 중
+저장 진행: 0/{total_pages}
+현재 작업: 저장 직후 남은 백그라운드 작업을 마무리하는 중입니다...""")
+                    QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+                    if hasattr(self, "wait_for_background_save_workers_before_package") and not self.wait_for_background_save_workers_before_package(reason="explicit_save_after_store", timeout_ms=90000):
+                        _save_ui_diag("BACKGROUND_FLUSH_AFTER_STORE_FAILED", counts=(self._background_save_queue_counts() if hasattr(self, "_background_save_queue_counts") else {}))
+                        self.has_unsaved_changes = True
+                        self.hide_task_progress_overlay()
+                        QMessageBox.critical(
+                            self,
+                            self.tr_ui("프로젝트 저장 실패"),
+                            self.tr_ui("저장 직후 남은 백그라운드 작업이 완료되지 않아 YSBT 저장을 중단했습니다. 작업 내용은 현재 프로젝트에 남아 있습니다."),
+                        )
+                        return
+                    _save_ui_diag("SAVE_PROJECT_STORE_REFRESH_BEGIN")
+                    self.save_project_store(self.project_store)
+                    _save_ui_diag("SAVE_PROJECT_STORE_REFRESH_DONE")
+            except Exception as flush_e:
+                _save_ui_diag("BACKGROUND_FLUSH_AFTER_STORE_EXCEPTION", error=repr(flush_e))
+                self.has_unsaved_changes = True
+                self.hide_task_progress_overlay()
+                QMessageBox.critical(
+                    self,
+                    self.tr_ui("프로젝트 저장 실패"),
+                    f"{self.tr_ui('백그라운드 저장 마무리 중 오류가 발생해서 YSBT 저장을 중단했습니다.')}\n\n{flush_e}",
+                )
+                return
             if bool(getattr(self, "_long_task_cancel_requested", False)):
                 raise PackageProjectCancelled("YSBT 반영 전 저장이 취소되었습니다.")
 
@@ -14574,6 +16076,35 @@ class MainWindowProjectPagesMixin:
                 pass
             return False
         try:
+            busy_ms = 0
+            if hasattr(self, "_ui_heavy_interaction_remaining_ms"):
+                busy_ms = int(self._ui_heavy_interaction_remaining_ms(minimum_when_view_fast_path=1200) or 0)
+            if busy_ms > 0:
+                try:
+                    self.audit_boundary_event(
+                        "WORK_CACHE_SAVE_DEFERRED_DURING_UI_ACTIVITY",
+                        busy_ms=int(busy_ms),
+                        source="auto_save_project",
+                        throttle_ms=600,
+                    )
+                except Exception:
+                    pass
+                try:
+                    self.has_unsaved_changes = True
+                    self.update_window_title()
+                except Exception:
+                    pass
+                try:
+                    self.schedule_workspace_checkpoint(max(900, min(int(busy_ms) + 900, 3500)), reason="auto_save_wait_ui_activity")
+                except Exception:
+                    try:
+                        self.schedule_deferred_auto_save_project(max(900, min(int(busy_ms) + 900, 3500)))
+                    except Exception:
+                        pass
+                return False
+        except Exception:
+            pass
+        try:
             self.audit_boundary_event("PROJECT_DELTA_SAVE_ENTER", stack=True, throttle_ms=900)
         except Exception:
             pass
@@ -14583,11 +16114,21 @@ class MainWindowProjectPagesMixin:
             pass
         self.is_autosaving = True
         saved = False
+        view_layer_enqueued = False
         try:
             try:
-                self.flush_pending_view_layer_commit(save_after=False)
+                view_layer_enqueued = bool(self.flush_pending_view_layer_commit(save_after=False))
+                if view_layer_enqueued:
+                    try:
+                        self.audit_boundary_event(
+                            "AUTOSAVE_ENQUEUE_INSTEAD_OF_DIRECT_SAVE",
+                            source="auto_save_project",
+                            throttle_ms=600,
+                        )
+                    except Exception:
+                        pass
             except Exception:
-                pass
+                view_layer_enqueued = False
             try:
                 self.commit_current_page_ui_to_data(include_mask=False)
             except TypeError:
@@ -14601,6 +16142,10 @@ class MainWindowProjectPagesMixin:
                 saved = bool(self.save_to_work_cache())
             except Exception:
                 saved = False
+            if view_layer_enqueued and not saved:
+                # 이미지-heavy 레이어는 background worker가 project.json을 갱신한다.
+                # 남은 text/json dirty가 없으면 여기서는 실패가 아니라 enqueue 성공으로 본다.
+                saved = True
             try:
                 self.update_window_title()
             except Exception:

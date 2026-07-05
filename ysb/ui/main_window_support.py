@@ -73,9 +73,133 @@ class StableComboBox(QComboBox):
 
 from ysb.settings.shortcut_settings import ShortcutSettingsStore, ShortcutSettingsDialog, MacroSettingsDialog, TEXT_SYMBOLS, shortcut_label_map, ConfirmingKeySequenceEdit, sequence_without_confirm_keys, key_sequence_from_text, key_sequence_to_portable, key_event_matches_sequence
 from ysb.ui.viewer import MuleImageViewer
-from ysb.engine.graphics_items import TypesettingItem, build_typesetting_text_path
+from ysb.engine.graphics_items import (
+    TypesettingItem,
+    build_typesetting_text_path,
+    build_typesetting_styled_text_paths,
+    _normalize_partial_style_runs,
+    _style_for_char_index,
+    _line_char_path_for_style,
+    _same_long_mark_pair,
+    _same_special_long_pair,
+    _same_mergeable_special_pair,
+    _long_mark_run_len,
+    build_long_mark_run_path,
+    _special_writing_char_kind,
+    _style_scale_factor,
+    _style_letter_spacing_value,
+    _style_line_spacing_pct_value,
+    build_special_writing_char_path,
+)
 from ysb.ui.delegates import MultilineDelegate
-from ysb.services.workers import UniversalBatchWorker, AnalysisWorker, InpaintWorker, TranslationWorker, QuickOCRWorker
+from ysb.ui.inline_editor_live_renderer import YSBInlineEditRenderer
+try:
+    from ysb.engines.japanese_text.qt_layout import tokenize_vertical_text as _ysb_qt_tokenize_vertical_text
+except Exception:
+    _ysb_qt_tokenize_vertical_text = None
+try:
+    from ysb.engines.text_layout.editor_layout_engine import (
+        build_vertical_editor_layout as _ysb_build_vertical_editor_layout,
+        build_horizontal_editor_layout as _ysb_build_horizontal_editor_layout,
+    )
+except Exception:
+    _ysb_build_vertical_editor_layout = None
+    _ysb_build_horizontal_editor_layout = None
+try:
+    from ysb.engines.text_input import (
+        set_caret as _ysb_text_input_set_caret,
+        replace_selection as _ysb_text_input_replace_selection,
+        delete_backward as _ysb_text_input_delete_backward,
+        delete_forward as _ysb_text_input_delete_forward,
+        delete_selection_for_ime_preedit as _ysb_text_input_delete_selection_for_ime_preedit,
+        insert_symbol as _ysb_text_input_insert_symbol,
+        insert_inline_symbol as _ysb_text_input_insert_inline_symbol,
+        handle_inline_text_input_shortcut as _ysb_text_input_handle_inline_text_input_shortcut,
+        handle_key_press as _ysb_text_input_handle_key_press,
+        wrap_or_pair_quote as _ysb_text_input_wrap_or_pair_quote,
+        select_all_inline as _ysb_text_input_select_all_inline,
+        event_is_select_all as _ysb_text_input_event_is_select_all,
+        caret_index_from_pos as _ysb_text_input_caret_index_from_pos,
+        cursor_rect as _ysb_text_input_cursor_rect,
+        process_input_method_event as _ysb_text_input_process_input_method_event,
+        input_method_query as _ysb_text_input_method_query,
+        selected_range as _ysb_text_input_selected_range,
+        has_selection as _ysb_text_input_has_selection,
+        inline_caret_point as _ysb_text_input_inline_caret_point,
+        update_desired_caret_axis_from_current as _ysb_text_input_update_desired_caret_axis,
+        inline_selection_dirty_rect as _ysb_text_input_selection_dirty_rect,
+        line_index_for_caret as _ysb_text_input_line_index_for_caret,
+        horizontal_visual_rows as _ysb_text_input_horizontal_visual_rows,
+        nearest_visual_row_index_for_caret as _ysb_text_input_nearest_visual_row_index_for_caret,
+        nearest_caret_in_line_by_axis as _ysb_text_input_nearest_caret_in_line_by_axis,
+        move_horizontal_line as _ysb_text_input_move_horizontal_line,
+        move_vertical_column as _ysb_text_input_move_vertical_column,
+        clipboard_plain_text_from_qt_selection as _ysb_text_input_clipboard_plain_text,
+        publish_plain_text_clipboard as _ysb_text_input_publish_clipboard,
+        copy_direct_selection_to_plain_clipboard as _ysb_text_input_copy_direct_selection,
+        copy_widget_selection_to_plain_clipboard as _ysb_text_input_copy_widget_selection,
+        visible_preedit_text as _ysb_text_input_visible_preedit_text,
+        plain_text_with_preedit as _ysb_text_input_plain_text_with_preedit,
+        display_text_with_preedit as _ysb_text_input_display_text_with_preedit,
+        display_index_for_logical_caret as _ysb_text_input_display_index_for_logical_caret,
+        logical_index_for_display_char as _ysb_text_input_logical_index_for_display_char,
+        handle_mouse_press as _ysb_text_input_handle_mouse_press,
+        handle_mouse_move as _ysb_text_input_handle_mouse_move,
+        handle_mouse_release as _ysb_text_input_handle_mouse_release,
+        set_initial_caret_from_scene_pos as _ysb_text_input_set_initial_caret_from_scene_pos,
+        prepare_text_for_commit as _ysb_text_input_prepare_text_for_commit,
+        push_undo_snapshot as _ysb_text_input_push_undo_snapshot,
+        restore_snapshot as _ysb_text_input_restore_snapshot,
+        perform_inline_local_undo as _ysb_text_input_perform_inline_local_undo,
+        perform_inline_local_redo as _ysb_text_input_perform_inline_local_redo,
+    )
+except Exception:
+    _ysb_text_input_set_caret = None
+    _ysb_text_input_replace_selection = None
+    _ysb_text_input_delete_backward = None
+    _ysb_text_input_delete_forward = None
+    _ysb_text_input_delete_selection_for_ime_preedit = None
+    _ysb_text_input_insert_symbol = None
+    _ysb_text_input_insert_inline_symbol = None
+    _ysb_text_input_handle_inline_text_input_shortcut = None
+    _ysb_text_input_handle_key_press = None
+    _ysb_text_input_wrap_or_pair_quote = None
+    _ysb_text_input_select_all_inline = None
+    _ysb_text_input_event_is_select_all = None
+    _ysb_text_input_caret_index_from_pos = None
+    _ysb_text_input_cursor_rect = None
+    _ysb_text_input_process_input_method_event = None
+    _ysb_text_input_method_query = None
+    _ysb_text_input_selected_range = None
+    _ysb_text_input_has_selection = None
+    _ysb_text_input_inline_caret_point = None
+    _ysb_text_input_update_desired_caret_axis = None
+    _ysb_text_input_selection_dirty_rect = None
+    _ysb_text_input_line_index_for_caret = None
+    _ysb_text_input_horizontal_visual_rows = None
+    _ysb_text_input_nearest_visual_row_index_for_caret = None
+    _ysb_text_input_nearest_caret_in_line_by_axis = None
+    _ysb_text_input_move_horizontal_line = None
+    _ysb_text_input_move_vertical_column = None
+    _ysb_text_input_clipboard_plain_text = None
+    _ysb_text_input_publish_clipboard = None
+    _ysb_text_input_copy_direct_selection = None
+    _ysb_text_input_copy_widget_selection = None
+    _ysb_text_input_visible_preedit_text = None
+    _ysb_text_input_plain_text_with_preedit = None
+    _ysb_text_input_display_text_with_preedit = None
+    _ysb_text_input_display_index_for_logical_caret = None
+    _ysb_text_input_logical_index_for_display_char = None
+    _ysb_text_input_handle_mouse_press = None
+    _ysb_text_input_handle_mouse_move = None
+    _ysb_text_input_handle_mouse_release = None
+    _ysb_text_input_set_initial_caret_from_scene_pos = None
+    _ysb_text_input_prepare_text_for_commit = None
+    _ysb_text_input_push_undo_snapshot = None
+    _ysb_text_input_restore_snapshot = None
+    _ysb_text_input_perform_inline_local_undo = None
+    _ysb_text_input_perform_inline_local_redo = None
+from ysb.services.workers import UniversalBatchWorker, AnalysisWorker, InpaintWorker, GroupedInpaintWorker, TranslationWorker, QuickOCRWorker
 from ysb.core.cache_utils import get_cache_dir, get_cache_file
 from ysb.editions.current import get_current_edition
 from ysb.ui.launcher import LauncherWidget, RecentProjectStore
@@ -2380,7 +2504,31 @@ class _InlinePlainTextEditWidget(QPlainTextEdit):
                 owner.main_window.finish_inline_text_edit(commit=True, commit_reason='ctrl_enter')
                 event.accept()
                 return
-            if mods & Qt.KeyboardModifier.ControlModifier:
+            if _ysb_text_input_event_is_select_all is not None and _ysb_text_input_event_is_select_all(event):
+                try:
+                    if _ysb_text_input_select_all_inline is not None and _ysb_text_input_select_all_inline(owner):
+                        event.accept()
+                        return
+                except Exception:
+                    pass
+                try:
+                    self.selectAll()
+                except Exception:
+                    pass
+                event.accept()
+                return
+            try:
+                t = event.text()
+            except Exception:
+                t = ''
+            if t in {'"', "'"} and not bool(mods & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier | Qt.KeyboardModifier.AltModifier)):
+                try:
+                    if _ysb_text_input_wrap_or_pair_quote is not None and _ysb_text_input_wrap_or_pair_quote(owner, t):
+                        event.accept()
+                        return
+                except Exception:
+                    pass
+            if mods & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier):
                 if key == Qt.Key.Key_Z and (mods & Qt.KeyboardModifier.ShiftModifier):
                     owner.perform_inline_local_redo()
                     event.accept()
@@ -2391,6 +2539,24 @@ class _InlinePlainTextEditWidget(QPlainTextEdit):
                     return
                 if key == Qt.Key.Key_Y:
                     owner.perform_inline_local_redo()
+                    event.accept()
+                    return
+                if key == Qt.Key.Key_A:
+                    try:
+                        if _ysb_text_input_select_all_inline is not None and _ysb_text_input_select_all_inline(owner):
+                            event.accept()
+                            return
+                    except Exception:
+                        pass
+                    try:
+                        self.selectAll()
+                    except Exception:
+                        try:
+                            cursor = self.textCursor()
+                            cursor.select(QTextCursor.SelectionType.Document)
+                            self.setTextCursor(cursor)
+                        except Exception:
+                            pass
                     event.accept()
                     return
                 # QGraphicsProxyWidget 안의 QPlainTextEdit가 OS 클립보드만 갱신하고
@@ -2530,8 +2696,9 @@ class InlineTextEditItem(QGraphicsObject):
 
     세로쓰기는 항상 YSB 직접 편집기를 사용한다. 설정에서 가로쓰기 직접 편집기를
     켜면 가로쓰기 역시 QPlainTextEdit 대신 QGraphicsItem이 직접 글자 배치/커서/클릭
-    위치를 계산한다. 텍스트 입력/커서/선택은 편집기에서 처리하고, 이펙트/변형/최종
-    조판은 기존 TypesettingItem 렌더 경로를 그대로 사용한다.
+    위치를 계산한다. 텍스트 입력/커서/선택은 편집기 전용 실시간 렌더가 처리한다.
+    편집 중에는 고급 변형/이펙트를 잠시 벗기고, 편집 종료 후 캔버스 표시 렌더가
+    같은 TextData에 고급 옵션을 다시 얹는다.
     """
 
     def __init__(self, main_window, target_item, scene_rect):
@@ -2550,6 +2717,7 @@ class InlineTextEditItem(QGraphicsObject):
         self._vertical_layout_cache = None
         self._vertical_drag_selecting = False
         self._v_preedit_text = ''
+        self._v_ime_composition_serial = 0
         # IME preedit can replace an active selection before commitString arrives.
         # Keep a small state flag so the later commit is treated as the same edit
         # instead of a second unrelated undo step.
@@ -2582,6 +2750,7 @@ class InlineTextEditItem(QGraphicsObject):
         self.char_width_pct = clamp_text_char_scale(d.get('char_width', 100), 100)
         self.char_height_pct = clamp_text_char_scale(d.get('char_height', 100), 100)
         self.writing_direction = self._normalize_inline_writing_direction(d.get('writing_direction', 'horizontal'))
+        self.partial_horizontal_writing_enabled = self._normalize_inline_partial_horizontal_writing_enabled(d.get('partial_horizontal_writing_enabled', True), True)
         try:
             self._inline_edit_scene_rect = QRectF(scene_rect)
         except Exception:
@@ -2591,6 +2760,24 @@ class InlineTextEditItem(QGraphicsObject):
             max(1.0, float(self._inline_edit_scene_rect.width())),
             max(1.0, float(self._inline_edit_scene_rect.height())),
         )
+        # Direct editing is the source of truth while the editor is open.
+        # The rendered item is re-baked from this state at commit time.  Therefore the
+        # editor's scene origin must not be re-centered on every key/preedit frame.
+        # If it moves, a live Korean 초성 does push following glyphs in local layout,
+        # but the whole editor box shifts at the same time and visually cancels the
+        # push.  Keep a stable edit origin/paint offset during the session and only
+        # grow the local update area as needed.
+        self._inline_position_lock_ready = False
+        self._inline_locked_scene_pos = None
+        self._inline_locked_bounds = None
+        self._inline_locked_horizontal_text_offset = None
+        # YSB editor-only live renderer.  This is the in-editor text engine;
+        # canvas/display/export renderers are used only after editing is closed.
+        self._ysb_edit_renderer = YSBInlineEditRenderer(self)
+        self._ysb_edit_render_origin = None
+        self._ysb_edit_render_frame_rect = None
+        self._ysb_edit_render_line_y0 = None
+        self._ysb_edit_render_line_height_signature = None
 
         font = QFont(d.get('font_family') or main_window.cb_font.currentFont().family())
         font.setPixelSize(int(d.get('font_size', main_window.sb_font_size.value()) or main_window.sb_font_size.value()))
@@ -2732,6 +2919,18 @@ class InlineTextEditItem(QGraphicsObject):
             return 'vertical'
         return 'horizontal'
 
+    @staticmethod
+    def _normalize_inline_partial_horizontal_writing_enabled(value=None, default=True):
+        if value is None:
+            return bool(default)
+        if isinstance(value, str):
+            text = value.strip().lower()
+            if text in ('0', 'false', 'off', 'no', 'n', '아니오', '끔', '꺼짐'):
+                return False
+            if text in ('1', 'true', 'on', 'yes', 'y', '예', '켬', '켜짐'):
+                return True
+        return bool(value)
+
     def _is_vertical_writing(self):
         return self._normalize_inline_writing_direction(getattr(self, 'writing_direction', 'horizontal')) == 'vertical'
 
@@ -2788,6 +2987,66 @@ class InlineTextEditItem(QGraphicsObject):
             border = color.lighter(170)
         border.setAlpha(230)
         return border
+
+
+    def inline_selection_range(self):
+        """Return selected character range in the inline editor."""
+        try:
+            if self._vertical_editor:
+                return self._selected_range()
+            if self._edit is not None:
+                cur = self._edit.textCursor()
+                if cur is not None and cur.hasSelection():
+                    a = int(cur.selectionStart())
+                    b = int(cur.selectionEnd())
+                    return (min(a, b), max(a, b))
+        except Exception:
+            pass
+        return (0, 0)
+
+    def _partial_style_runs(self):
+        try:
+            data = getattr(getattr(self, 'target_item', None), 'data', {})
+            runs = data.get('partial_style_runs') or data.get('style_runs') or []
+            text_len = len(self.toPlainText())
+            from ysb.engine.graphics_items import _normalize_partial_style_runs
+            return _normalize_partial_style_runs(runs, text_len)
+        except Exception:
+            return []
+
+    def _partial_style_for_index(self, index):
+        try:
+            from ysb.engine.graphics_items import _style_for_char_index
+            base = {
+                'font_family': self._inline_font.family() if hasattr(self, '_inline_font') else self._base_font.family(),
+                'font_size': self._inline_font.pixelSize() if hasattr(self, '_inline_font') and self._inline_font.pixelSize() > 0 else self._base_font.pixelSize(),
+                'text_color': QColor(getattr(self, '_inline_text_color', QColor('#000000'))).name(),
+                'stroke_color': QColor(getattr(self, '_inline_stroke_color', QColor('#FFFFFF'))).name(),
+                'stroke_width': int(getattr(self, '_inline_stroke_width', 0) or 0),
+                'bold': bool(getattr(self, '_base_font', QFont()).bold()),
+                'italic': bool(getattr(self, '_base_font', QFont()).italic()),
+                'strike': False,
+            }
+            return _style_for_char_index(self._partial_style_runs(), int(index), base)
+        except Exception:
+            return {}
+
+    def _inline_font_for_partial_style(self, style):
+        try:
+            font = QFont(getattr(self, '_inline_font', QFont()))
+            if isinstance(style, dict):
+                if style.get('font_family'):
+                    font.setFamily(str(style.get('font_family')))
+                if style.get('font_size'):
+                    font.setPixelSize(max(1, int(style.get('font_size'))))
+                if 'bold' in style:
+                    ysb_apply_readable_bold_to_font(font, bool(style.get('bold')))
+                if 'italic' in style:
+                    font.setItalic(bool(style.get('italic')))
+            self._apply_inline_font_metrics(font)
+            return font
+        except Exception:
+            return QFont(getattr(self, '_inline_font', QFont()))
 
     def _inline_trace(self, event, **fields):
         """Inline editor trace for selection/preview mismatch debugging."""
@@ -3016,14 +3275,30 @@ class InlineTextEditItem(QGraphicsObject):
                     else:                         # 가운데 정렬
                         y = float(base_rect.center().y()) - height / 2.0
                 else:
-                    # 가로쓰기 direct editor는 기존 가로 정렬 기준을 유지한다.
-                    if self.align == 'right':
-                        x = float(getattr(self, 'anchor_x', base_rect.right())) - width
-                    elif self.align == 'center':
-                        x = float(getattr(self, 'anchor_x', base_rect.center().x())) - width / 2.0
-                    else:
-                        x = float(getattr(self, 'anchor_x', base_rect.left()))
-                    y = float(getattr(self, 'anchor_y', base_rect.top()))
+                    # 가로쓰기 live edit renderer는 기존 텍스트가 있던 장면 좌표를
+                    # 작업대 원점으로 삼는다.  새 renderer가 계산한 더 작은/큰 bounds로
+                    # center/right 정렬을 다시 적용하면 더블클릭 순간 편집기가 밀려 보인다.
+                    # 따라서 편집 세션 시작 위치는 원본 scene_rect의 top-left에 고정하고,
+                    # 입력 중에는 local bounds만 커지게 한다.
+                    try:
+                        width = max(float(width), float(base_rect.width()))
+                        height = max(float(height), float(base_rect.height()))
+                    except Exception:
+                        pass
+                    x = float(base_rect.left())
+                    y = float(base_rect.top())
+                    try:
+                        if bool(getattr(self, '_inline_position_lock_ready', False)) and getattr(self, '_inline_locked_scene_pos', None) is not None:
+                            locked_pos = QPointF(getattr(self, '_inline_locked_scene_pos'))
+                            x = float(locked_pos.x())
+                            y = float(locked_pos.y())
+                            locked_bounds = getattr(self, '_inline_locked_bounds', None)
+                            if locked_bounds is not None:
+                                lb = QRectF(locked_bounds)
+                                width = max(float(width), float(lb.width()), float(self.boundingRect().width()))
+                                height = max(float(height), float(lb.height()), float(self.boundingRect().height()))
+                    except Exception:
+                        pass
 
                 old_pos = QPointF(self.pos())
                 old_bounds = QRectF(self.boundingRect())
@@ -3033,9 +3308,23 @@ class InlineTextEditItem(QGraphicsObject):
                 self.invalidate_vertical_layout()
                 self.update()
                 try:
+                    # Capture the first stable direct-editor scene position after the
+                    # original text has been sized.  Subsequent input/preedit frames grow
+                    # only the local box and never re-center the whole editor.
+                    if (not self._is_vertical_writing()) and not bool(getattr(self, '_inline_position_lock_ready', False)):
+                        self._inline_locked_scene_pos = QPointF(self.pos())
+                        self._inline_locked_bounds = QRectF(self.boundingRect())
+                        self._inline_position_lock_ready = True
+                        try:
+                            self._inline_trace('INLINE_EDITOR_POSITION_LOCK_INIT', x=round(float(self.pos().x()), 2), y=round(float(self.pos().y()), 2), width=round(float(width), 2), height=round(float(height), 2))
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                try:
                     if (abs(old_bounds.width() - width) > 0.5 or abs(old_bounds.height() - height) > 0.5
                             or abs(old_pos.x() - x) > 0.5 or abs(old_pos.y() - y) > 0.5):
-                        self._inline_trace('INLINE_EDITOR_RESIZE', reason='adjust_to_contents', width=round(float(width), 2), height=round(float(height), 2), x=round(float(x), 2), y=round(float(y), 2))
+                        self._inline_trace('INLINE_EDITOR_RESIZE', reason='adjust_to_contents', width=round(float(width), 2), height=round(float(height), 2), x=round(float(x), 2), y=round(float(y), 2), locked=bool(getattr(self, '_inline_position_lock_ready', False) and not self._is_vertical_writing()))
                 except Exception:
                     pass
                 return
@@ -3077,111 +3366,26 @@ class InlineTextEditItem(QGraphicsObject):
             starts = [0]
         return parts, starts
 
-    def _plain_text_with_preedit_for_measurement(self):
-        """Return visible text including the current IME preedit string.
+    @staticmethod
+    @staticmethod
+    def _inline_visible_preedit_text(preedit):
+        return _ysb_text_input_visible_preedit_text(preedit) if _ysb_text_input_visible_preedit_text is not None else str(preedit or '')
 
-        Korean IME composition can show a live 초성/중성 before it is committed.
-        The direct editor used to resize only from committed text, so the translucent
-        editor background and hit area lagged one input behind until the caret moved.
-        Measurement must therefore include the preedit text at the caret position,
-        while the stored document text remains unchanged until commit.
-        """
-        try:
-            text = str(self.toPlainText() or '')
-        except Exception:
-            text = ''
-        try:
-            preedit = str(getattr(self, '_v_preedit_text', '') or '')
-        except Exception:
-            preedit = ''
-        if not preedit:
-            return text
-        try:
-            pos = int(getattr(self, '_v_caret_index', len(text)) or 0)
-        except Exception:
-            pos = len(text)
-        pos = max(0, min(len(text), pos))
-        return text[:pos] + preedit + text[pos:]
+    def _plain_text_with_preedit_for_measurement(self):
+        return _ysb_text_input_plain_text_with_preedit(self) if _ysb_text_input_plain_text_with_preedit is not None else str(self.toPlainText() or '')
 
 
     def _inline_display_text_with_preedit(self):
-        """Return committed text plus live IME preedit inserted at the caret.
-
-        Important: this string is for *layout/paint/hit-test only*.  It must not be
-        written back to the document until the IME sends commitString().  The older
-        implementation measured the preedit text but painted it as an overlay at the
-        caret, so inserting a Korean 초성 in the middle of a line drew it over the next
-        committed glyph instead of pushing that glyph away.  All direct-editor layout
-        must therefore be based on this display text.
-        """
-        try:
-            text = str(self.toPlainText() or '')
-        except Exception:
-            text = ''
-        try:
-            preedit = str(getattr(self, '_v_preedit_text', '') or '')
-        except Exception:
-            preedit = ''
-        try:
-            caret = int(getattr(self, '_v_caret_index', len(text)) or 0)
-        except Exception:
-            caret = len(text)
-        caret = max(0, min(len(text), caret))
-        if not preedit:
-            return text, text, '', caret, 0
-        display = text[:caret] + preedit + text[caret:]
-        return display, text, preedit, caret, len(preedit)
+        if _ysb_text_input_display_text_with_preedit is not None:
+            return _ysb_text_input_display_text_with_preedit(self)
+        text = str(self.toPlainText() or '')
+        return text, text, '', int(getattr(self, '_v_caret_index', len(text)) or 0), 0
 
     def _display_index_for_logical_caret(self, logical_pos, caret=None, preedit_len=None):
-        """Map a committed-text caret offset to display-text offset.
-
-        Offsets after the live IME preedit are shifted by preedit_len because display
-        layout includes the not-yet-committed glyphs.  Offsets before/at the insertion
-        caret are unchanged.
-        """
-        try:
-            pos = int(logical_pos or 0)
-        except Exception:
-            pos = 0
-        try:
-            if caret is None:
-                caret = int(getattr(self, '_v_caret_index', 0) or 0)
-        except Exception:
-            caret = 0
-        try:
-            if preedit_len is None:
-                preedit_len = len(str(getattr(self, '_v_preedit_text', '') or ''))
-        except Exception:
-            preedit_len = 0
-        if preedit_len and pos > int(caret):
-            return pos + int(preedit_len)
-        return pos
+        return _ysb_text_input_display_index_for_logical_caret(self, logical_pos, caret, preedit_len) if _ysb_text_input_display_index_for_logical_caret is not None else int(logical_pos or 0)
 
     def _logical_index_for_display_char(self, display_index, caret=None, preedit_len=None):
-        """Map a display-text character index to committed-text character index.
-
-        Returns a negative index for live preedit glyphs so selection and commit logic
-        never treat them as real document characters.
-        """
-        try:
-            d = int(display_index or 0)
-        except Exception:
-            d = 0
-        try:
-            if caret is None:
-                caret = int(getattr(self, '_v_caret_index', 0) or 0)
-        except Exception:
-            caret = 0
-        try:
-            if preedit_len is None:
-                preedit_len = len(str(getattr(self, '_v_preedit_text', '') or ''))
-        except Exception:
-            preedit_len = 0
-        if preedit_len and int(caret) <= d < int(caret) + int(preedit_len):
-            return -100000 - (d - int(caret))
-        if preedit_len and d >= int(caret) + int(preedit_len):
-            return d - int(preedit_len)
-        return d
+        return _ysb_text_input_logical_index_for_display_char(self, display_index, caret, preedit_len) if _ysb_text_input_logical_index_for_display_char is not None else int(display_index or 0)
 
     def _horizontal_tight_line_metrics_for_direct_editor(self, font, fm, sx=1.0, sy=1.0):
         """Return a visual line height based on real glyph ink, not font line metrics.
@@ -3303,8 +3507,415 @@ class InlineTextEditItem(QGraphicsObject):
         except Exception:
             return 1.0
 
+    def _vertical_special_horizontal_metrics_for_direct_editor(self, ch, font=None):
+        """Horizontal-writing metrics used after rotation for vertical special marks."""
+        try:
+            f = QFont(font or getattr(self, '_inline_font', QFont()))
+        except Exception:
+            f = QFont()
+        try:
+            fm = self._cached_font_metrics(f)
+        except Exception:
+            fm = QFontMetrics(f)
+        try:
+            sx = positive_scale_factor(getattr(self, 'char_width_pct', 100))
+        except Exception:
+            sx = 1.0
+        try:
+            sy = positive_scale_factor(getattr(self, 'char_height_pct', 100))
+        except Exception:
+            sy = 1.0
+        try:
+            adv = max(1.0, float(fm.horizontalAdvance(str(ch))) * sx)
+        except Exception:
+            adv = max(1.0, float(fm.height()) * sx)
+        try:
+            metric_h = max(1.0, float(fm.height()) * sy)
+        except Exception:
+            metric_h = max(1.0, float(adv))
+        return adv, metric_h
+
     def _vertical_line_advances_for_direct_editor(self, line, pitch):
-        return [self._vertical_char_advance_for_direct_editor(ch, pitch) for ch in str(line or '')]
+        out = []
+        font = QFont(getattr(self, '_inline_font', QFont()))
+        for ch in str(line or ''):
+            if _special_writing_char_kind(ch, 'vertical'):
+                adv, _metric_h = self._vertical_special_horizontal_metrics_for_direct_editor(ch, font)
+                out.append(adv)
+            else:
+                out.append(self._vertical_char_advance_for_direct_editor(ch, pitch))
+        return out
+
+
+    def _horizontal_final_renderer_geometry(self, display_text=None, logical_text=None, preedit_caret=0, preedit_len=0, for_size=False):
+        """Return final-render-like horizontal geometry for inline caret/selection.
+
+        The direct editor used to calculate caret/selection cells from QFontMetrics slots,
+        while the visible preview/final text is drawn from QPainterPath glyph bounds.  Display
+        fonts with heavy strokes, stretch and italic therefore made the editing box/selection
+        drift away from the actual rendered text.  This helper mirrors the final path builder
+        enough to expose line rects, character rects and caret points in the editor's local
+        coordinate system.
+        """
+        if self._is_vertical_writing():
+            return None
+        try:
+            target = getattr(self, 'target_item', None)
+            data = getattr(target, 'data', {}) if target is not None else {}
+            if not isinstance(data, dict):
+                data = {}
+            if display_text is None:
+                display_text = self.toPlainText()
+            display_text = str(display_text or '')
+            if logical_text is None:
+                logical_text = self.toPlainText()
+            logical_text = str(logical_text or '')
+            try:
+                preedit_caret = int(preedit_caret or 0)
+            except Exception:
+                preedit_caret = 0
+            try:
+                preedit_len = int(preedit_len or 0)
+            except Exception:
+                preedit_len = 0
+            logical_len = len(logical_text)
+
+            family = str(data.get('font_family') or getattr(self, '_base_font', QFont()).family() or getattr(self, '_inline_font', QFont()).family() or 'Arial')
+            try:
+                size = int(data.get('font_size') or getattr(self, '_base_font', QFont()).pixelSize() or getattr(self, '_inline_font', QFont()).pixelSize() or 20)
+            except Exception:
+                size = 20
+            size = max(1, int(size))
+            font = QFont(family)
+            font.setPixelSize(size)
+            ysb_apply_readable_bold_to_font(font, bool(data.get('bold', getattr(self, '_base_font', QFont()).bold())))
+            font.setItalic(bool(data.get('italic', getattr(self, '_base_font', QFont()).italic())))
+            fm = QFontMetrics(font)
+            try:
+                line_spacing_pct = clamp_text_line_spacing(getattr(self, 'line_spacing_pct', data.get('line_spacing', 100)), 100)
+            except Exception:
+                line_spacing_pct = 100
+            try:
+                line_h = float(text_line_height_from_percent(fm.lineSpacing(), line_spacing_pct))
+            except Exception:
+                line_h = float(fm.lineSpacing() or size + 4)
+            line_h = max(1.0, line_h)
+            try:
+                letter_spacing = float(getattr(self, 'letter_spacing', data.get('letter_spacing', 0)) or 0)
+            except Exception:
+                letter_spacing = 0.0
+            try:
+                sx = positive_scale_factor(getattr(self, 'char_width_pct', data.get('char_width', 100)))
+            except Exception:
+                sx = 1.0
+            try:
+                sy = positive_scale_factor(getattr(self, 'char_height_pct', data.get('char_height', 100)))
+            except Exception:
+                sy = 1.0
+            try:
+                skew_x = float(data.get('skew_x', 0) or 0) / 100.0
+                skew_y = float(data.get('skew_y', 0) or 0) / 100.0
+            except Exception:
+                skew_x = skew_y = 0.0
+
+            base_style = {
+                'font_family': family,
+                'font_size': size,
+                'text_color': QColor(getattr(self, '_inline_text_color', QColor(str(data.get('text_color') or '#000000')))).name(),
+                'stroke_color': QColor(getattr(self, '_inline_stroke_color', QColor(str(data.get('stroke_color') or '#FFFFFF')))).name(),
+                'stroke_width': int(getattr(self, '_inline_stroke_width', data.get('stroke_width', 0)) or 0),
+                'bold': bool(data.get('bold', False)),
+                'italic': bool(data.get('italic', False)),
+                'strike': bool(data.get('strike', False)),
+            }
+            runs = _normalize_partial_style_runs(data.get('partial_style_runs') or data.get('style_runs') or [], logical_len)
+            align = str(getattr(self, 'align', data.get('align', 'center')) or 'center').lower()
+            if align not in ('left', 'center', 'right'):
+                align = 'center'
+
+            aggregate = QPainterPath()
+            line_rects_raw = []
+            char_entries = []
+            columns_raw = []
+            caret_display_raw = {}
+            lines = display_text.split('\n') if display_text.strip() else ['']
+            display_index = 0
+            current_y = 0.0
+            for line_no, line in enumerate(lines):
+                line = str(line or '')
+                cursor_x = 0.0
+                line_path = QPainterPath()
+                line_chars = []
+                line_max_stroke = 0.0
+                # Default line rect for an empty line.  It follows final renderer's baseline-ish box.
+                fallback_line_rect = QRectF(0.0, -float(fm.ascent()), 1.0, max(1.0, float(fm.height())))
+                caret_display_raw[display_index] = QPointF(0.0, current_y + line_h / 2.0)
+                for j, ch in enumerate(line):
+                    d_index = display_index + j
+                    logical_idx = self._logical_index_for_display_char(d_index, preedit_caret, preedit_len)
+                    if logical_idx < 0 or logical_idx > logical_len:
+                        style = dict(base_style)
+                    else:
+                        style = _style_for_char_index(runs, int(logical_idx), base_style)
+                    try:
+                        line_max_stroke = max(line_max_stroke, float(style.get('stroke_width', base_style.get('stroke_width', 0)) or 0.0))
+                    except Exception:
+                        pass
+                    ch_path, ch_font = _line_char_path_for_style(ch, cursor_x, 0.0, style, family, size)
+                    try:
+                        adv = float(QFontMetrics(ch_font).horizontalAdvance(str(ch))) * _style_scale_factor(style, 'char_width', 100)
+                    except Exception:
+                        adv = float(size) * _style_scale_factor(style, 'char_width', 100)
+                    adv = max(1.0, adv)
+                    if not ch_path.isEmpty():
+                        line_path.addPath(ch_path)
+                        ch_rect = ch_path.boundingRect()
+                    else:
+                        try:
+                            ch_fm = QFontMetrics(ch_font)
+                            ch_rect = QRectF(cursor_x, -float(ch_fm.ascent()), adv, max(1.0, float(ch_fm.height())))
+                        except Exception:
+                            ch_rect = QRectF(cursor_x, -float(size), adv, max(1.0, float(size + 4)))
+                    try:
+                        _stroke_for_char = float(style.get('stroke_width', base_style.get('stroke_width', 0)) or 0.0)
+                    except Exception:
+                        _stroke_for_char = 0.0
+                    line_chars.append({'display_index': d_index, 'logical_index': logical_idx, 'char': ch, 'rect': QRectF(ch_rect), 'stroke_width': _stroke_for_char})
+                    next_ch = line[j + 1] if j + 1 < len(line) else ''
+                    if _same_long_mark_pair(ch, next_ch):
+                        cursor_x += max(1.0, float(adv) * 0.18)
+                    else:
+                        cursor_x += adv + float(_style_letter_spacing_value(style, letter_spacing))
+                    caret_display_raw[d_index + 1] = QPointF(cursor_x, current_y + line_h / 2.0)
+                line_rect = line_path.boundingRect() if not line_path.isEmpty() else QRectF(fallback_line_rect)
+                if line_rect.isNull() or line_rect.width() <= 0 or line_rect.height() <= 0:
+                    line_rect = QRectF(fallback_line_rect)
+                if align == 'left':
+                    dx_line = -line_rect.left()
+                elif align == 'right':
+                    dx_line = -line_rect.right()
+                else:
+                    dx_line = -line_rect.center().x()
+                tr_line = QTransform()
+                tr_line.translate(dx_line, current_y)
+                mapped_line_path = tr_line.map(line_path) if not line_path.isEmpty() else QPainterPath()
+                if not mapped_line_path.isEmpty():
+                    aggregate.addPath(mapped_line_path)
+                    mapped_line_rect = mapped_line_path.boundingRect()
+                else:
+                    mapped_line_rect = tr_line.mapRect(QRectF(line_rect))
+                # Use visible ink bounds plus stroke padding.  Font metrics often include
+                # large ascent/descent whitespace, while the editor selection/caret should
+                # follow the actually painted glyph body.
+                try:
+                    stroke_pad = max(0.0, float(line_max_stroke) / 2.0) + 1.0
+                    mapped_line_rect = QRectF(mapped_line_rect).adjusted(-stroke_pad, -stroke_pad, stroke_pad, stroke_pad)
+                except Exception:
+                    mapped_line_rect = QRectF(mapped_line_rect)
+                line_rects_raw.append(QRectF(mapped_line_rect))
+                display_start_for_line = int(display_index)
+                display_end_for_line = int(display_start_for_line + len(line))
+                try:
+                    logical_start = self._logical_index_for_display_char(display_start_for_line, preedit_caret, preedit_len)
+                    if logical_start < 0:
+                        logical_start = preedit_caret
+                except Exception:
+                    logical_start = 0
+                try:
+                    if preedit_len and display_end_for_line <= preedit_caret:
+                        logical_end = display_end_for_line
+                    elif preedit_len and display_end_for_line <= preedit_caret + preedit_len:
+                        logical_end = preedit_caret
+                    elif preedit_len and display_end_for_line > preedit_caret + preedit_len:
+                        logical_end = display_end_for_line - preedit_len
+                    else:
+                        logical_end = display_end_for_line
+                except Exception:
+                    logical_end = logical_start + len(line)
+                logical_start = max(0, min(logical_len, int(logical_start)))
+                logical_end = max(logical_start, min(logical_len, int(logical_end)))
+                columns_raw.append({
+                    'line': line,
+                    'start': logical_start,
+                    'display_start': display_start_for_line,
+                    'length': logical_end - logical_start,
+                    'display_length': len(line),
+                    'rect': QRectF(mapped_line_rect),
+                    'col': line_no,
+                })
+                for ce in line_chars:
+                    _rr = tr_line.mapRect(QRectF(ce.get('rect')))
+                    try:
+                        _sp = max(0.0, float(ce.get('stroke_width') or 0.0) / 2.0) + 0.5
+                        _rr = QRectF(_rr).adjusted(-_sp, -_sp, _sp, _sp)
+                    except Exception:
+                        pass
+                    char_entries.append({
+                        'display_index': ce.get('display_index'),
+                        'logical_index': ce.get('logical_index'),
+                        'char': ce.get('char'),
+                        'rect': _rr,
+                        'stroke_width': ce.get('stroke_width', 0.0),
+                    })
+                # Map caret points for current line explicitly.  X follows advance positions,
+                # but Y follows the visible ink line center, not QFontMetrics lineHeight/2.
+                # This keeps the caret from dropping below heavy display fonts.
+                ink_center_y = float(QRectF(mapped_line_rect).center().y())
+                for off in range(0, len(line) + 1):
+                    key = display_index + off
+                    raw = caret_display_raw.get(key)
+                    if raw is not None:
+                        mapped_x = tr_line.map(QPointF(raw.x(), 0.0)).x()
+                        caret_display_raw[key] = QPointF(mapped_x, ink_center_y)
+                display_index += len(line)
+                if line_no < len(lines) - 1:
+                    # newline caret: end of current line and start of next line
+                    display_index += 1
+                current_y += float(line_h)
+
+            # Transform scale/skew exactly like final preview.
+            geom_tr = QTransform()
+            if abs(sx - 1.0) > 0.015 or abs(sy - 1.0) > 0.015:
+                geom_tr.scale(sx, sy)
+            if skew_x or skew_y:
+                geom_tr.shear(skew_x, skew_y)
+            if not geom_tr.isIdentity():
+                aggregate = geom_tr.map(aggregate)
+                line_rects_raw = [geom_tr.mapRect(QRectF(r)) for r in line_rects_raw]
+                for ce in char_entries:
+                    ce['rect'] = geom_tr.mapRect(QRectF(ce.get('rect')))
+                for col in columns_raw:
+                    try:
+                        col['rect'] = geom_tr.mapRect(QRectF(col.get('rect')))
+                    except Exception:
+                        pass
+                for k, pnt in list(caret_display_raw.items()):
+                    caret_display_raw[k] = geom_tr.map(QPointF(pnt))
+
+            agg_rect = aggregate.boundingRect()
+            if agg_rect.isNull() or agg_rect.width() <= 0 or agg_rect.height() <= 0:
+                rects = [QRectF(r) for r in line_rects_raw if QRectF(r).isValid()]
+                agg_rect = QRectF()
+                for rr in rects:
+                    agg_rect = rr if agg_rect.isNull() else agg_rect.united(rr)
+            if agg_rect.isNull() or agg_rect.width() <= 0 or agg_rect.height() <= 0:
+                agg_rect = QRectF(0, 0, max(1.0, float(size)), max(1.0, line_h))
+
+            # For sizing, return raw final-render bounds before fitting into current boundingRect.
+            if for_size:
+                content_rect = QRectF(agg_rect)
+                content_rect = content_rect.adjusted(-2, -2, 2, 2)
+                return {'content_rect': content_rect, 'text_rect': QRectF(agg_rect)}
+
+            rect = QRectF(self.boundingRect())
+            if align == 'left':
+                dx = rect.left() - agg_rect.left()
+            elif align == 'right':
+                dx = rect.right() - agg_rect.right()
+            else:
+                dx = rect.center().x() - agg_rect.center().x()
+            dy = rect.center().y() - agg_rect.center().y()
+            # During inline editing the text flow must have a stable local origin.
+            # Otherwise a live IME 초성 expands the text, adjust_to_contents grows the
+            # item, and this center/right alignment offset is recomputed in the opposite
+            # direction, visually canceling the expected glyph push.  Freeze the first
+            # alignment offset of the edit session; final commit will re-bake normally.
+            try:
+                if bool(getattr(self, '_inline_position_lock_ready', False)) and not self._is_vertical_writing():
+                    locked_offset = getattr(self, '_inline_locked_horizontal_text_offset', None)
+                    if locked_offset is None:
+                        locked_offset = QPointF(dx, dy)
+                        self._inline_locked_horizontal_text_offset = QPointF(locked_offset)
+                        try:
+                            self._inline_trace('INLINE_EDITOR_TEXT_OFFSET_LOCK_INIT', x=round(float(dx), 2), y=round(float(dy), 2))
+                        except Exception:
+                            pass
+                    else:
+                        locked_offset = QPointF(locked_offset)
+                        dx = float(locked_offset.x())
+                        dy = float(locked_offset.y())
+            except Exception:
+                pass
+            offset = QPointF(dx, dy)
+            content_rect = QRectF(agg_rect).translated(offset)
+            char_rects = []
+            for ce in char_entries:
+                try:
+                    logical_idx = int(ce.get('logical_index'))
+                except Exception:
+                    logical_idx = -1
+                rr = QRectF(ce.get('rect')).translated(offset)
+                # Keep visible ink rects but give spaces/thin glyphs a minimum hit height.
+                if rr.width() < 1.0:
+                    rr.setWidth(1.0)
+                if rr.height() < max(3.0, line_h * 0.18):
+                    cy = rr.center().y()
+                    rr.setTop(cy - max(3.0, line_h * 0.18) / 2.0)
+                    rr.setBottom(cy + max(3.0, line_h * 0.18) / 2.0)
+                char_rects.append((logical_idx, ce.get('char'), rr))
+            line_rects = [QRectF(r).translated(offset) for r in line_rects_raw]
+            # Prefer the union of actual ink line bounds as the editor content box.
+            try:
+                ink_content = QRectF()
+                for rr in line_rects:
+                    if QRectF(rr).isValid() and QRectF(rr).width() > 0 and QRectF(rr).height() > 0:
+                        ink_content = QRectF(rr) if ink_content.isNull() else ink_content.united(QRectF(rr))
+                if not ink_content.isNull() and ink_content.width() > 0 and ink_content.height() > 0:
+                    content_rect = QRectF(ink_content)
+            except Exception:
+                pass
+            columns = []
+            for col in columns_raw:
+                try:
+                    rr = QRectF(col.get('rect')).translated(offset)
+                    columns.append({
+                        'line': col.get('line', ''),
+                        'start': int(col.get('start') or 0),
+                        'display_start': int(col.get('display_start') or 0),
+                        'length': int(col.get('length') or 0),
+                        'display_length': int(col.get('display_length') or 0),
+                        'x': float(rr.left()),
+                        'y0': float(rr.top()),
+                        'pitch': max(1.0, float(rr.height())),
+                        'line_h': max(1.0, float(rr.height())),
+                        'cell_w': max(1.0, float(size) * 0.5),
+                        'col': int(col.get('col') or 0),
+                        'rect': rr,
+                    })
+                except Exception:
+                    continue
+            display_caret_map = {int(k): QPointF(v).operator_add(offset) if hasattr(QPointF(v), 'operator_add') else QPointF(QPointF(v).x() + offset.x(), QPointF(v).y() + offset.y()) for k, v in caret_display_raw.items()}
+            caret_map = {}
+            for logical_pos in range(0, logical_len + 1):
+                if preedit_len and logical_pos == preedit_caret:
+                    display_pos = preedit_caret + preedit_len
+                else:
+                    display_pos = self._display_index_for_logical_caret(logical_pos, preedit_caret, preedit_len)
+                pnt = display_caret_map.get(display_pos)
+                if pnt is not None:
+                    caret_map[logical_pos] = QPointF(pnt)
+            if logical_len not in caret_map:
+                caret_map[logical_len] = QPointF(content_rect.right(), content_rect.center().y())
+            content_rect = QRectF(content_rect).adjusted(-2, -2, 2, 2)
+            return {
+                'font': font,
+                'fm': fm,
+                'columns': columns,
+                'caret_map': caret_map,
+                'char_rects': char_rects,
+                'content_rect': content_rect,
+                'line_rects': line_rects,
+                'base_cell_w': max(1.0, float(size) * 0.5),
+                'pitch': line_h,
+                'horizontal_direct': True,
+                'final_geometry': True,
+            }
+        except Exception as exc:
+            try:
+                self._inline_trace('INLINE_EDITOR_FINAL_GEOMETRY_ERROR', error=repr(exc))
+            except Exception:
+                pass
+            return None
 
     def _direct_editor_desired_local_size(self):
         """Return the live editor box size needed for the current direct-edit text.
@@ -3329,6 +3940,13 @@ class InlineTextEditItem(QGraphicsObject):
             lines = ['']
 
         if self._is_vertical_writing():
+            try:
+                layout = self._layout_vertical_text()
+                desired = layout.get('desired_size')
+                if desired:
+                    return (max(18.0, float(desired[0])), max(18.0, float(desired[1])))
+            except Exception:
+                pass
             base_cell_w, base_pitch = self._vertical_tight_cell_metrics_for_direct_editor(font, fm, sx, sy)
             pitch = max(1.0, base_pitch + self._vertical_effective_letter_spacing_for_direct_editor(base_pitch))
             if pitch < base_pitch * 0.35:
@@ -3342,6 +3960,21 @@ class InlineTextEditItem(QGraphicsObject):
             width = base_cell_w + column_step * (col_count - 1) + 14.0
             height = max_line_h + 14.0
             return (max(18.0, width), max(18.0, height))
+
+        # Horizontal editing is now driven by the YSB editor-only live renderer,
+        # not by the final/canvas renderer.  The editor renderer keeps its text origin
+        # fixed during the edit session, supports the basic text properties live, and
+        # returns a monotonically growing desired local box so typing/preedit does not
+        # flash from repeated shrink/re-center cycles.
+        try:
+            renderer = getattr(self, '_ysb_edit_renderer', None) or YSBInlineEditRenderer(self)
+            self._ysb_edit_renderer = renderer
+            layout = renderer.layout_horizontal()
+            desired = layout.get('desired_size')
+            if desired:
+                return (max(30.0, float(desired[0])), max(20.0, float(desired[1])))
+        except Exception:
+            pass
 
         min_cell_w, base_line_h = self._horizontal_tight_line_metrics_for_direct_editor(font, fm, sx, sy)
         line_h = max(4.0, float(base_line_h) * line_factor)
@@ -3373,440 +4006,155 @@ class InlineTextEditItem(QGraphicsObject):
 
     def _layout_horizontal_direct_text(self):
         cache_key = (
-            'horizontal-direct',
-            self.toPlainText(),
-            getattr(self, '_v_preedit_text', ''),
-            float(self.boundingRect().width()),
-            float(self.boundingRect().height()),
-            self.align,
-            self.letter_spacing,
-            self.line_spacing_pct,
-            self.char_width_pct,
-            self.char_height_pct,
+            self.toPlainText(), getattr(self, '_v_preedit_text', ''),
+            float(self.boundingRect().width()), float(self.boundingRect().height()),
+            self.align, self.letter_spacing, self.line_spacing_pct,
+            self.char_width_pct, self.char_height_pct,
             self._inline_font.toString() if hasattr(self, '_inline_font') else '',
+            'horizontal_text_layout_module_only_v2',
         )
         if self._vertical_layout_cache and self._vertical_layout_cache.get('key') == cache_key:
             return self._vertical_layout_cache
-
-        rect = self.boundingRect()
-        pad_x = 5.0
-        pad_y = 5.0
-        font = QFont(getattr(self, '_inline_font', QFont()))
-        fm = self._cached_font_metrics(font)
-        sx = positive_scale_factor(getattr(self, 'char_width_pct', 100))
-        sy = positive_scale_factor(getattr(self, 'char_height_pct', 100))
-        line_factor = abs(float(clamp_text_line_spacing(getattr(self, 'line_spacing_pct', 100), 100)) / 100.0)
-        min_cell_w, base_line_h = self._horizontal_tight_line_metrics_for_direct_editor(font, fm, sx, sy)
-        line_h = max(4.0, float(base_line_h) * line_factor)
-        letter_spacing = float(getattr(self, 'letter_spacing', 0) or 0)
-
-        display_text, logical_text, preedit, preedit_caret, preedit_len = self._inline_display_text_with_preedit()
-        text = display_text
-        logical_len = len(logical_text)
-        lines, starts = self._split_vertical_lines(text)
-        widths = []
-        advances_by_line = []
-        for line in lines:
-            advances = []
-            line_w = 0.0
-            for j, ch in enumerate(str(line or '')):
-                try:
-                    adv = float(fm.horizontalAdvance(ch if ch else ' ')) * sx
-                except Exception:
-                    adv = min_cell_w
-                if ch == ' ':
-                    try:
-                        adv = max(adv, float(fm.horizontalAdvance(' ')) * sx)
-                    except Exception:
-                        pass
-                adv = max(1.0, adv)
-                if j > 0:
-                    line_w += letter_spacing
-                advances.append(adv)
-                line_w += adv
-            if not line:
-                line_w = min_cell_w
-            widths.append(max(min_cell_w, line_w))
-            advances_by_line.append(advances)
-
-        total_h = max(line_h, line_h * max(1, len(lines)))
-        available_h = max(1.0, rect.height() - pad_y * 2.0)
-        y_start = pad_y + (available_h - total_h) / 2.0
-        y_start = max(-rect.height() * 2.0, min(rect.height() * 3.0, y_start))
-
-        display_caret_map = {}
-        char_rects = []
-        content_rect = QRectF()
-        columns = []
-        available_w = max(1.0, rect.width() - pad_x * 2.0)
-        for row, line in enumerate(lines):
-            line = str(line or '')
-            start_index = starts[row] if row < len(starts) else 0
-            line_w = widths[row] if row < len(widths) else min_cell_w
-            if self.align == 'right':
-                x0 = rect.width() - pad_x - line_w
-            elif self.align == 'center':
-                x0 = pad_x + (available_w - line_w) / 2.0
-            else:
-                x0 = pad_x
-            y0 = y_start + row * line_h
-            # Store both display offsets and committed-text offsets.  When IME preedit
-            # is inserted in the middle of a line, display offsets after the caret are
-            # shifted, but cursor navigation must still use committed-text offsets.
-            logical_start = self._logical_index_for_display_char(start_index, preedit_caret, preedit_len)
-            if logical_start < 0:
-                logical_start = preedit_caret
-            display_end = start_index + len(line)
-            if preedit_len and display_end <= preedit_caret:
-                logical_end = display_end
-            elif preedit_len and display_end <= preedit_caret + preedit_len:
-                logical_end = preedit_caret
-            elif preedit_len and display_end > preedit_caret + preedit_len:
-                logical_end = display_end - preedit_len
-            else:
-                logical_end = display_end
-            logical_start = max(0, min(logical_len, int(logical_start)))
-            logical_end = max(logical_start, min(logical_len, int(logical_end)))
-            columns.append({'line': line, 'start': logical_start, 'display_start': start_index, 'length': logical_end - logical_start, 'display_length': len(line), 'x': x0, 'y0': y0, 'pitch': line_h, 'cell_w': min_cell_w, 'line_h': line_h, 'col': row})
-            x = x0
-            display_caret_map[start_index] = QPointF(x0, y0 + line_h / 2.0)
-            advances = advances_by_line[row] if row < len(advances_by_line) else []
-            for j, ch in enumerate(line):
-                adv = advances[j] if j < len(advances) else min_cell_w
-                r = QRectF(x, y0, max(1.0, adv), line_h)
-                char_rects.append((self._logical_index_for_display_char(start_index + j, preedit_caret, preedit_len), ch, r))
-                if content_rect.isNull():
-                    content_rect = QRectF(r)
-                else:
-                    content_rect = content_rect.united(r)
-                x += adv
-                if j < len(line) - 1:
-                    x += letter_spacing
-                display_caret_map[start_index + j + 1] = QPointF(x, y0 + line_h / 2.0)
-            if not line:
-                r = QRectF(x0, y0, min_cell_w, line_h)
-                if content_rect.isNull():
-                    content_rect = QRectF(r)
-                else:
-                    content_rect = content_rect.united(r)
-            if row < len(lines) - 1:
-                display_caret_map[start_index + len(line)] = QPointF(x, y0 + line_h / 2.0)
-                display_caret_map[start_index + len(line) + 1] = QPointF(pad_x, y_start + (row + 1) * line_h + line_h / 2.0)
-
-        display_caret_map[len(text)] = display_caret_map.get(len(text), QPointF(pad_x, y_start + line_h / 2.0))
-        caret_map = {}
-        for logical_pos in range(0, logical_len + 1):
-            if preedit_len and logical_pos == preedit_caret:
-                display_pos = preedit_caret + preedit_len
-            else:
-                display_pos = self._display_index_for_logical_caret(logical_pos, preedit_caret, preedit_len)
-            pnt = display_caret_map.get(display_pos)
-            if pnt is not None:
-                caret_map[logical_pos] = pnt
-        caret_map[logical_len] = caret_map.get(logical_len, display_caret_map.get(len(text), QPointF(pad_x, y_start + line_h / 2.0)))
-        if content_rect.isNull() or content_rect.width() <= 0 or content_rect.height() <= 0:
-            content_rect = QRectF(pad_x, y_start, min_cell_w, line_h)
-        content_rect = content_rect.adjusted(-2, -2, 2, 2)
-        out = {
-            'key': cache_key,
-            'font': font,
-            'fm': fm,
-            'columns': columns,
-            'caret_map': caret_map,
-            'char_rects': char_rects,
-            'content_rect': content_rect,
-            'base_cell_w': min_cell_w,
-            'pitch': line_h,
-            'horizontal_direct': True,
-        }
-        self._vertical_layout_cache = out
-        return out
+        if _ysb_build_horizontal_editor_layout is not None:
+            out = _ysb_build_horizontal_editor_layout(self, cache_key=cache_key)
+            self._vertical_layout_cache = out
+            return out
+        return {'key': cache_key, 'horizontal_direct': True, 'columns': [], 'caret_map': {}, 'char_rects': [], 'char_paths': [], 'content_rect': QRectF(self.boundingRect()), 'line_rects': [], 'pitch': 12.0}
 
     def _layout_vertical_text(self):
         if not self._is_vertical_writing():
             return self._layout_horizontal_direct_text()
         cache_key = (
-            self.toPlainText(),
-            getattr(self, '_v_preedit_text', ''),
-            float(self.boundingRect().width()),
-            float(self.boundingRect().height()),
-            self.align,
-            self.letter_spacing,
-            self.line_spacing_pct,
-            self.char_width_pct,
-            self.char_height_pct,
+            self.toPlainText(), getattr(self, '_v_preedit_text', ''),
+            float(self.boundingRect().width()), float(self.boundingRect().height()),
+            self.align, self.letter_spacing, self.line_spacing_pct,
+            self.char_width_pct, self.char_height_pct,
+            bool(getattr(self, 'partial_horizontal_writing_enabled', True)),
             self._inline_font.toString() if hasattr(self, '_inline_font') else '',
+            'vertical_text_layout_module_only_v3',
         )
         if self._vertical_layout_cache and self._vertical_layout_cache.get('key') == cache_key:
             return self._vertical_layout_cache
-
-        rect = self.boundingRect()
-        pad_x = 5.0
-        pad_y = 5.0
-        font = QFont(getattr(self, '_inline_font', QFont()))
-        fm = self._cached_font_metrics(font)
-        sx = positive_scale_factor(getattr(self, 'char_width_pct', 100))
-        sy = positive_scale_factor(getattr(self, 'char_height_pct', 100))
-        base_cell_w, base_pitch = self._vertical_tight_cell_metrics_for_direct_editor(font, fm, sx, sy)
-        pitch = max(1.0, base_pitch + self._vertical_effective_letter_spacing_for_direct_editor(base_pitch))
-        if pitch < base_pitch * 0.35:
-            pitch = base_pitch * 0.35
-        line_factor = abs(float(clamp_text_line_spacing(getattr(self, 'line_spacing_pct', 100), 100)) / 100.0)
-        column_step = self._vertical_column_step_for_direct_editor(base_cell_w, line_factor)
-
-        display_text, logical_text, preedit, preedit_caret, preedit_len = self._inline_display_text_with_preedit()
-        text = display_text
-        logical_len = len(logical_text)
-        lines, starts = self._split_vertical_lines(text)
-        col_count = max(1, len(lines))
-        total_w = base_cell_w + column_step * (col_count - 1)
-        right_x = rect.center().x() + total_w / 2.0 - base_cell_w / 2.0
-
-        columns = []
-        display_caret_map = {}
-        char_rects = []
-        content_rect = QRectF()
-
-        for col, line in enumerate(lines):
-            line = str(line or '')
-            start_index = starts[col] if col < len(starts) else 0
-            x = right_x - col * column_step
-            advances = self._vertical_line_advances_for_direct_editor(line, pitch)
-            line_h = max(pitch, sum(advances) if advances else pitch)
-            available_h = max(1.0, rect.height() - pad_y * 2.0)
-            if self.align == 'left':  # 세로쓰기에서는 위 정렬
-                y0 = pad_y
-            elif self.align == 'right':  # 세로쓰기에서는 아래 정렬
-                y0 = rect.height() - pad_y - line_h
-            else:
-                y0 = pad_y + (available_h - line_h) / 2.0
-            y0 = max(-rect.height() * 2.0, min(rect.height() * 3.0, y0))
-            logical_start = self._logical_index_for_display_char(start_index, preedit_caret, preedit_len)
-            if logical_start < 0:
-                logical_start = preedit_caret
-            display_end = start_index + len(line)
-            if preedit_len and display_end <= preedit_caret:
-                logical_end = display_end
-            elif preedit_len and display_end <= preedit_caret + preedit_len:
-                logical_end = preedit_caret
-            elif preedit_len and display_end > preedit_caret + preedit_len:
-                logical_end = display_end - preedit_len
-            else:
-                logical_end = display_end
-            logical_start = max(0, min(logical_len, int(logical_start)))
-            logical_end = max(logical_start, min(logical_len, int(logical_end)))
-            column = {
-                'line': line,
-                'start': logical_start,
-                'display_start': start_index,
-                'length': logical_end - logical_start,
-                'display_length': len(line),
-                'x': x,
-                'y0': y0,
-                'pitch': pitch,
-                'cell_w': base_cell_w,
-                'line_h': line_h,
-                'col': col,
-                'advances': advances,
-            }
-            columns.append(column)
-            y_cursor = y0
-            display_caret_map[start_index] = QPointF(x, y_cursor)
-            for j, ch in enumerate(line):
-                adv = advances[j] if j < len(advances) else pitch
-                r = QRectF(x - base_cell_w / 2.0, y_cursor, base_cell_w, max(1.0, adv))
-                char_rects.append((self._logical_index_for_display_char(start_index + j, preedit_caret, preedit_len), ch, r))
-                if content_rect.isNull():
-                    content_rect = QRectF(r)
-                else:
-                    content_rect = content_rect.united(r)
-                y_cursor += adv
-                display_caret_map[start_index + j + 1] = QPointF(x, y_cursor)
-            if not line:
-                r = QRectF(x - base_cell_w / 2.0, y0, base_cell_w, pitch)
-                if content_rect.isNull():
-                    content_rect = QRectF(r)
-                else:
-                    content_rect = content_rect.united(r)
-            # newline caret belongs to the visual end of the previous column.
-            if col < len(lines) - 1:
-                display_caret_map[start_index + len(line)] = QPointF(x, y_cursor)
-                display_caret_map[start_index + len(line) + 1] = QPointF(right_x - (col + 1) * column_step, 0)
-
-        # 마지막 커서 보정
-        display_caret_map[len(text)] = display_caret_map.get(len(text), QPointF(right_x, rect.center().y()))
-        caret_map = {}
-        for logical_pos in range(0, logical_len + 1):
-            if preedit_len and logical_pos == preedit_caret:
-                display_pos = preedit_caret + preedit_len
-            else:
-                display_pos = self._display_index_for_logical_caret(logical_pos, preedit_caret, preedit_len)
-            pnt = display_caret_map.get(display_pos)
-            if pnt is not None:
-                caret_map[logical_pos] = pnt
-        caret_map[logical_len] = caret_map.get(logical_len, display_caret_map.get(len(text), QPointF(right_x, rect.center().y())))
-        if content_rect.isNull() or content_rect.width() <= 0 or content_rect.height() <= 0:
-            content_rect = QRectF(right_x - base_cell_w / 2.0, rect.center().y() - pitch / 2.0, base_cell_w, pitch)
-        content_rect = content_rect.adjusted(-2, -2, 2, 2)
-
-        out = {
-            'key': cache_key,
-            'font': font,
-            'fm': fm,
-            'columns': columns,
-            'caret_map': caret_map,
-            'char_rects': char_rects,
-            'content_rect': content_rect,
-            'base_cell_w': base_cell_w,
-            'pitch': pitch,
-        }
-        self._vertical_layout_cache = out
-        return out
+        if _ysb_build_vertical_editor_layout is not None:
+            out = _ysb_build_vertical_editor_layout(self, cache_key=cache_key)
+            self._vertical_layout_cache = out
+            return out
+        return {'key': cache_key, 'columns': [], 'caret_map': {}, 'char_rects': [], 'char_paths': [], 'content_rect': QRectF(self.boundingRect()), 'line_rects': [], 'base_cell_w': 10.0, 'pitch': 12.0, 'vertical_path_editor': True}
 
     def _selected_range(self):
-        try:
-            a = int(getattr(self, '_v_selection_anchor', 0))
-            b = int(getattr(self, '_v_caret_index', 0))
-            return (min(a, b), max(a, b))
-        except Exception:
-            return (0, 0)
+        return _ysb_text_input_selected_range(self) if _ysb_text_input_selected_range is not None else (0, 0)
 
     @staticmethod
     def _clipboard_plain_text_from_qt_selection(text):
-        # QTextCursor.selectedText() uses U+2029 for paragraph separators.
-        return str(text or '').replace('\u2029', '\n').replace('\r\n', '\n').replace('\r', '\n')
+        return _ysb_text_input_clipboard_plain_text(text) if _ysb_text_input_clipboard_plain_text is not None else str(text or '')
 
     def _publish_inline_plain_text_clipboard(self, text, reason='copy'):
-        """Publish inline-editor selected text to both OS clipboard and YSB paste buffer.
-
-        The app has two clipboards: OS plain text and the internal text-box clipboard.
-        Copying text *inside* an inline editor must update both, otherwise leaving the
-        editor and pressing Ctrl+V may still paste an older text-box object.
-        """
-        text = self._clipboard_plain_text_from_qt_selection(text)
-        if not text:
-            return False
-        try:
-            QApplication.clipboard().setText(text)
-        except Exception:
-            pass
-        try:
-            main = getattr(self, 'main_window', None)
-            if main is not None and hasattr(main, 'make_text_clipboard_item_from_plain_text'):
-                item = main.make_text_clipboard_item_from_plain_text(text)
-                if item:
-                    main.text_clipboard = [item]
-                    main.text_clipboard_is_plain = True
-                    main.text_paste_pending = False
-                    try:
-                        if getattr(main, 'view', None) is not None and hasattr(main.view, 'clear_paste_preview'):
-                            main.view.clear_paste_preview()
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-        try:
-            self._inline_trace('INLINE_EDITOR_CLIPBOARD_TEXT_COPY', reason=str(reason or ''), text_len=len(text))
-        except Exception:
-            pass
-        return True
+        return bool(_ysb_text_input_publish_clipboard(self, text, reason=reason)) if _ysb_text_input_publish_clipboard is not None else False
 
     def copy_widget_selection_to_plain_clipboard(self, cut=False):
-        if self._vertical_editor:
-            return False
-        try:
-            if self._edit is None:
-                return False
-            cursor = self._edit.textCursor()
-            if not cursor.hasSelection():
-                return False
-            text = self._clipboard_plain_text_from_qt_selection(cursor.selectedText())
-            if not text:
-                return False
-            self._publish_inline_plain_text_clipboard(text, reason='cut' if cut else 'copy')
-            if cut:
-                cursor.removeSelectedText()
-                self._edit.setTextCursor(cursor)
-                self._schedule_adjust_to_contents(reason='cut')
-            return True
-        except Exception:
-            return False
+        return bool(_ysb_text_input_copy_widget_selection(self, cut=cut)) if _ysb_text_input_copy_widget_selection is not None else False
 
     def _copy_direct_selection_to_plain_clipboard(self, cut=False):
-        if not self._vertical_editor:
-            return False
-        a, b = self._selected_range()
-        if not (b > a):
-            return False
-        text = self.toPlainText()[a:b]
-        if not self._publish_inline_plain_text_clipboard(text, reason='cut' if cut else 'copy'):
-            return False
-        if cut:
-            self._replace_vertical_selection('', reason='cut')
-        return True
+        return bool(_ysb_text_input_copy_direct_selection(self, cut=cut)) if _ysb_text_input_copy_direct_selection is not None else False
 
     def prepare_text_for_commit(self, reason='commit'):
-        """Force pending IME/preedit state into committed text before closing.
-
-        Ctrl+Enter/focus-out used to read toPlainText() while Korean IME still had a
-        live preedit glyph.  That glyph is visible on screen but not in _v_text yet,
-        so the final commit could miss the last edit.  Treat close/commit as an
-        explicit acceptance of the visible preedit.
-        """
-        if self._vertical_editor:
-            try:
-                preedit = str(getattr(self, '_v_preedit_text', '') or '')
-            except Exception:
-                preedit = ''
-            if preedit:
-                try:
-                    self._inline_trace('INLINE_EDITOR_IME_PREEDIT_FORCE_COMMIT', reason=str(reason or ''), preedit_len=len(preedit), caret=int(getattr(self, '_v_caret_index', 0) or 0))
-                except Exception:
-                    pass
-                self._replace_vertical_selection(preedit, push_undo=False, reason='ime-preedit-force-commit')
-            return self.toPlainText()
-        try:
-            im = QApplication.inputMethod()
-            if im is not None and hasattr(im, 'commit'):
-                im.commit()
-        except Exception:
-            pass
-        try:
-            if self._edit is not None:
-                self._edit.document().adjustSize()
-        except Exception:
-            pass
-        return self.toPlainText()
+        return _ysb_text_input_prepare_text_for_commit(self, reason=reason) if _ysb_text_input_prepare_text_for_commit is not None else self.toPlainText()
 
     def _push_vertical_undo_snapshot(self):
-        if not self._vertical_editor:
-            return
+        if _ysb_text_input_push_undo_snapshot is not None:
+            _ysb_text_input_push_undo_snapshot(self)
+        return
+
+    def _inline_editor_scene_paint_rect(self, extra_pad=48.0):
+        """Return the broad scene rect that may contain the previous/current editor paint."""
+        rects = []
         try:
-            snap = (self.toPlainText(), int(getattr(self, '_v_caret_index', 0)), int(getattr(self, '_v_selection_anchor', 0)))
-            stack = getattr(self, '_v_undo_stack', None)
-            if stack is None:
-                self._v_undo_stack = []
-                stack = self._v_undo_stack
-            if not stack or stack[-1] != snap:
-                stack.append(snap)
-                if len(stack) > 120:
-                    del stack[0:len(stack) - 120]
-            self._v_redo_stack = []
+            rects.append(self.mapToScene(QRectF(self.boundingRect())).boundingRect())
         except Exception:
             pass
+        try:
+            layout = self._layout_vertical_text()
+            content = QRectF(layout.get('content_rect', QRectF()))
+            if content.isValid() and content.width() > 0 and content.height() > 0:
+                rects.append(self.mapToScene(content.adjusted(-8, -8, 8, 8)).boundingRect())
+        except Exception:
+            pass
+        try:
+            last_scene = QRectF(getattr(self, '_last_inline_paint_scene_rect', QRectF()))
+            if last_scene.isValid() and last_scene.width() > 0 and last_scene.height() > 0:
+                rects.append(last_scene)
+        except Exception:
+            pass
+        out = QRectF()
+        for rr in rects:
+            try:
+                rr = QRectF(rr)
+                if not rr.isValid() or rr.width() <= 0 or rr.height() <= 0:
+                    continue
+                out = rr if out.isNull() else out.united(rr)
+            except Exception:
+                pass
+        try:
+            if not out.isNull() and out.width() > 0 and out.height() > 0:
+                pad = float(extra_pad or 0)
+                out = out.adjusted(-pad, -pad, pad, pad)
+        except Exception:
+            pass
+        return out
+
+    def _inline_editor_local_paint_rect(self, extra_pad=24.0):
+        rects = []
+        try:
+            rects.append(QRectF(self.boundingRect()))
+        except Exception:
+            pass
+        try:
+            layout = self._layout_vertical_text()
+            content = QRectF(layout.get('content_rect', QRectF()))
+            if content.isValid() and content.width() > 0 and content.height() > 0:
+                rects.append(content)
+        except Exception:
+            pass
+        try:
+            last_local = QRectF(getattr(self, '_last_inline_paint_local_rect', QRectF()))
+            if last_local.isValid() and last_local.width() > 0 and last_local.height() > 0:
+                rects.append(last_local)
+        except Exception:
+            pass
+        out = QRectF()
+        for rr in rects:
+            try:
+                rr = QRectF(rr)
+                if not rr.isValid() or rr.width() <= 0 or rr.height() <= 0:
+                    continue
+                out = rr if out.isNull() else out.united(rr)
+            except Exception:
+                pass
+        try:
+            if not out.isNull() and out.width() > 0 and out.height() > 0:
+                pad = float(extra_pad or 0)
+                out = out.adjusted(-pad, -pad, pad, pad)
+        except Exception:
+            pass
+        return out
 
     def _sync_direct_editor_after_text_change(self, reason='text-change'):
-        """Immediately rebuild the direct editor layout after text changes.
+        """Immediately rebuild and repaint the direct inline editor after any input.
 
-        Without this, inserted characters can appear to sit on top of the old layout
-        until a caret move invalidates/repaints the glyph position table.  Both
-        horizontal and vertical direct editors use the same layout cache, so every
-        insert/delete/paste/IME commit/preedit must invalidate, resize, and repaint now.
+        The direct editor now draws with final-render geometry.  That geometry is cached,
+        and QGraphicsScene can defer repainting until the next caret movement.  Force the
+        full input cycle here: invalidate -> resize -> rebuild layout -> repaint item,
+        scene and viewport.  Text insert/delete/paste/IME/style edits must be visible on
+        the very same key frame, not one cursor move later.
         """
         try:
-            old_scene_rect = self.mapToScene(self.boundingRect()).boundingRect()
+            old_scene_rect = self._inline_editor_scene_paint_rect(extra_pad=56.0)
         except Exception:
             old_scene_rect = QRectF()
+        try:
+            old_local_rect = self._inline_editor_local_paint_rect(extra_pad=28.0)
+        except Exception:
+            old_local_rect = QRectF()
         try:
             self.invalidate_vertical_layout()
         except Exception:
@@ -3819,12 +4167,28 @@ class InlineTextEditItem(QGraphicsObject):
             self.invalidate_vertical_layout()
         except Exception:
             pass
+        # Prebuild the new glyph/caret layout immediately.  paint() and hit testing then
+        # see the same fresh geometry without waiting for a later cursor move.
         try:
-            new_scene_rect = self.mapToScene(self.boundingRect()).boundingRect()
+            self._layout_vertical_text()
+        except Exception:
+            pass
+        try:
+            new_scene_rect = self._inline_editor_scene_paint_rect(extra_pad=56.0)
         except Exception:
             new_scene_rect = QRectF()
         try:
-            dirty_local = self.boundingRect().adjusted(-12, -12, 12, 12)
+            new_local_rect = self._inline_editor_local_paint_rect(extra_pad=28.0)
+        except Exception:
+            new_local_rect = QRectF()
+        try:
+            dirty_local = QRectF(old_local_rect)
+            if dirty_local.isNull() or dirty_local.width() <= 0 or dirty_local.height() <= 0:
+                dirty_local = QRectF(new_local_rect)
+            else:
+                dirty_local = dirty_local.united(new_local_rect)
+            if dirty_local.isNull() or dirty_local.width() <= 0 or dirty_local.height() <= 0:
+                dirty_local = QRectF(self.boundingRect()).adjusted(-18, -18, 18, 18)
             self.update(dirty_local)
         except Exception:
             try:
@@ -3837,12 +4201,37 @@ class InlineTextEditItem(QGraphicsObject):
                 dirty_scene = QRectF(new_scene_rect)
             else:
                 dirty_scene = dirty_scene.united(new_scene_rect)
-            dirty_scene = dirty_scene.adjusted(-24, -24, 24, 24)
+            dirty_scene = dirty_scene.adjusted(-32, -32, 32, 32)
             sc = self.scene()
             if sc is not None:
                 sc.update(dirty_scene)
+                try:
+                    # Long paste / line-wrap changes can leave stale background-cache
+                    # fragments outside the current item bounds.  Invalidate the scene
+                    # region as well as scheduling an item repaint.
+                    sc.invalidate(dirty_scene)
+                except Exception:
+                    pass
         except Exception:
             pass
+        try:
+            mw = getattr(self, 'main_window', None)
+            view = getattr(mw, 'view', None) if mw is not None else None
+            if view is not None and hasattr(view, 'mapFromScene') and hasattr(view, 'viewport'):
+                vp_rect = view.mapFromScene(dirty_scene).boundingRect().adjusted(-6, -6, 6, 6)
+                view.viewport().update(vp_rect)
+        except Exception:
+            pass
+        # Do not force a full viewport/processEvents repaint for every IME frame.
+        # The editor-only renderer updates its own QGraphicsItem area; forcing the whole
+        # view here makes Korean composition look like it flashes on every 초성/commit.
+        try:
+            self.update(dirty_local)
+        except Exception:
+            try:
+                self.update()
+            except Exception:
+                pass
         try:
             self._inline_trace('INLINE_EDITOR_LIVE_SYNC', reason=reason,
                                text_len=len(self.toPlainText()),
@@ -3853,92 +4242,23 @@ class InlineTextEditItem(QGraphicsObject):
             pass
 
     def _restore_vertical_snapshot(self, snap):
-        try:
-            text, caret, anchor = snap
-        except Exception:
-            return
-        self._v_text = str(text or '')
-        self._v_caret_index = max(0, min(len(self._v_text), int(caret)))
-        self._v_selection_anchor = max(0, min(len(self._v_text), int(anchor)))
-        self._v_preedit_text = ''
-        self._v_ime_selection_preedit_active = False
-        try:
-            self._v_document.setPlainText(self._v_text)
-        except Exception:
-            pass
-        self._sync_direct_editor_after_text_change(reason='restore-snapshot')
-        self._update_desired_caret_axis_from_current()
+        if _ysb_text_input_restore_snapshot is not None:
+            _ysb_text_input_restore_snapshot(self, snap)
+        return
 
     def _has_vertical_selection(self):
-        a, b = self._selected_range()
-        return b > a
+        return bool(_ysb_text_input_has_selection(self)) if _ysb_text_input_has_selection is not None else False
 
     def _inline_caret_point(self, pos=None):
-        """Return the current visual caret point from the direct inline layout."""
-        try:
-            if pos is None:
-                pos = int(getattr(self, '_v_caret_index', 0) or 0)
-            pos = max(0, min(len(self.toPlainText()), int(pos)))
-            layout = self._layout_vertical_text()
-            caret_map = layout.get('caret_map') or {}
-            p = caret_map.get(pos)
-            if p is not None:
-                return QPointF(p)
-        except Exception:
-            pass
-        try:
-            return QPointF(self.boundingRect().center())
-        except Exception:
-            return QPointF(0.0, 0.0)
+        return _ysb_text_input_inline_caret_point(self, pos) if _ysb_text_input_inline_caret_point is not None else QPointF(self.boundingRect().center())
 
     def _update_desired_caret_axis_from_current(self):
-        """Refresh visual navigation target after explicit caret edits/clicks."""
-        try:
-            p = self._inline_caret_point()
-            self._v_desired_caret_x = float(p.x())
-            self._v_desired_caret_y = float(p.y())
-        except Exception:
-            self._v_desired_caret_x = None
-            self._v_desired_caret_y = None
+        if _ysb_text_input_update_desired_caret_axis is not None:
+            return _ysb_text_input_update_desired_caret_axis(self)
+        return None
 
     def _inline_editor_selection_dirty_rect(self):
-        """Return a conservative local dirty rect for the current direct-editor selection.
-
-        Selection/caret drawing is done by this QGraphicsItem, but the main view often runs
-        with BoundingRectViewportUpdate and cached background while zooming/panning.  If only
-        the new caret rect is updated, old selection highlights can visually remain as
-        grey/blue block fragments.  Use the union of selected glyph cells, caret and bounds.
-        """
-        try:
-            a, b = self._selected_range()
-        except Exception:
-            a = b = 0
-        rect = QRectF()
-        try:
-            layout = self._layout_vertical_text()
-            for idx, _ch, r in layout.get('char_rects') or []:
-                try:
-                    if a <= int(idx) < b:
-                        rr = QRectF(r).adjusted(-4, -4, 4, 4)
-                        rect = rr if rect.isNull() else rect.united(rr)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        try:
-            cr = QRectF(self._vertical_cursor_rect()).adjusted(-12, -12, 12, 12)
-            rect = cr if rect.isNull() else rect.united(cr)
-        except Exception:
-            pass
-        try:
-            br = QRectF(self.boundingRect()).adjusted(-12, -12, 12, 12)
-            if rect.isNull():
-                rect = br
-            else:
-                rect = rect.united(br)
-        except Exception:
-            pass
-        return rect
+        return QRectF(_ysb_text_input_selection_dirty_rect(self)) if _ysb_text_input_selection_dirty_rect is not None else QRectF(self.boundingRect()).adjusted(-8, -8, 8, 8)
 
     def _force_inline_editor_dirty_repaint(self, local_rect=None, reason='selection-caret'):
         """Force repaint of inline editor dirty area in item, scene and viewport layers."""
@@ -3968,14 +4288,29 @@ class InlineTextEditItem(QGraphicsObject):
         if scene is not None and rect is not None:
             try:
                 scene_rect = self.mapToScene(QRectF(rect).adjusted(-8, -8, 8, 8)).boundingRect()
+                try:
+                    last_scene = QRectF(getattr(self, '_last_inline_paint_scene_rect', QRectF()))
+                    if last_scene.isValid() and last_scene.width() > 0 and last_scene.height() > 0:
+                        scene_rect = scene_rect.united(last_scene.adjusted(-8, -8, 8, 8))
+                except Exception:
+                    pass
                 scene.update(scene_rect)
+                try:
+                    scene.invalidate(scene_rect)
+                except Exception:
+                    pass
             except Exception:
-                pass
+                scene_rect = QRectF()
+        else:
+            scene_rect = QRectF()
         try:
             mw = getattr(self, 'main_window', None)
             view = getattr(mw, 'view', None) if mw is not None else None
             if view is not None and hasattr(view, 'viewport'):
-                view.viewport().update()
+                if scene_rect.isValid() and scene_rect.width() > 0 and scene_rect.height() > 0 and hasattr(view, 'mapFromScene'):
+                    view.viewport().update(view.mapFromScene(scene_rect).boundingRect().adjusted(-6, -6, 6, 6))
+                else:
+                    view.viewport().update()
         except Exception:
             pass
         try:
@@ -3985,244 +4320,33 @@ class InlineTextEditItem(QGraphicsObject):
             pass
 
     def _set_vertical_caret(self, pos, keep_anchor=False, preserve_desired=False):
-        text_len = len(self.toPlainText())
-        old_caret = int(getattr(self, '_v_caret_index', 0) or 0)
-        old_anchor = int(getattr(self, '_v_selection_anchor', old_caret) or old_caret)
-        old_dirty = None
-        old_selection_dirty = None
-        try:
-            old_dirty = QRectF(self._vertical_cursor_rect()).adjusted(-10, -10, 10, 10)
-        except Exception:
-            old_dirty = None
-        try:
-            if old_anchor != old_caret:
-                old_selection_dirty = self._inline_editor_selection_dirty_rect()
-        except Exception:
-            old_selection_dirty = None
-
-        pos = max(0, min(text_len, int(pos)))
-        self._v_caret_index = pos
-        if not keep_anchor:
-            self._v_selection_anchor = pos
-        self._v_preedit_text = ''
-        self._v_ime_selection_preedit_active = False
-        self._v_cursor_visible = True
-        if not preserve_desired:
-            self._update_desired_caret_axis_from_current()
-
-        # 커서/선택 이동만으로는 글자 배치가 바뀌지 않는다. 대신 이전 커서/선택 영역과
-        # 새 커서/선택 영역을 함께 다시 그려야 잔상이 남지 않는다. 특히 Ctrl+A나
-        # 드래그 선택 뒤 방향키로 선택을 접는 경우, 예전 선택 하이라이트가 텍스트
-        # 테두리/커서처럼 남을 수 있으므로 scene/viewport까지 강제로 갱신한다.
-        try:
-            new_dirty = QRectF(self._vertical_cursor_rect()).adjusted(-10, -10, 10, 10)
-            old_selected = old_anchor != old_caret
-            new_selected = int(getattr(self, '_v_selection_anchor', pos) or pos) != pos
-            dirty = QRectF()
-            for r in (old_dirty, old_selection_dirty, new_dirty, self._inline_editor_selection_dirty_rect() if new_selected else None):
-                try:
-                    if r is not None and QRectF(r).isValid():
-                        rr = QRectF(r)
-                        dirty = rr if dirty.isNull() else dirty.united(rr)
-                except Exception:
-                    pass
-            if old_selected or new_selected or bool(keep_anchor):
-                try:
-                    dirty = dirty.united(QRectF(self.boundingRect()).adjusted(-12, -12, 12, 12)) if not dirty.isNull() else QRectF(self.boundingRect()).adjusted(-12, -12, 12, 12)
-                except Exception:
-                    pass
-                self._force_inline_editor_dirty_repaint(dirty, reason='selection-caret-change')
-            elif old_dirty is not None:
-                self._force_inline_editor_dirty_repaint(old_dirty.united(new_dirty), reason='caret-move')
-            else:
-                self._force_inline_editor_dirty_repaint(new_dirty, reason='caret-move')
-        except Exception:
-            self._force_inline_editor_dirty_repaint(reason='caret-fallback')
+        if _ysb_text_input_set_caret is not None:
+            _ysb_text_input_set_caret(self, pos, keep_anchor=keep_anchor, preserve_desired=preserve_desired)
+        return
 
     def _delete_selection_for_ime_preedit(self):
-        """Remove an active selection when IME preedit starts.
-
-        Korean IME can send only preedit text first (for example a single 초성)
-        and send commitString later.  Native editors still replace the selected
-        range immediately at the first preedit frame.  If we only draw preedit as
-        display_text while keeping the selection text in the document, the 초성
-        appears after the selected range and the old selection remains visible.
-        """
-        if not self._vertical_editor:
-            return False
-        a, b = self._selected_range()
-        if not (b > a):
-            return False
-        text = self.toPlainText()
-        self._push_vertical_undo_snapshot()
-        self._v_text = text[:a] + text[b:]
-        self._v_caret_index = a
-        self._v_selection_anchor = a
-        self._v_ime_selection_preedit_active = True
-        try:
-            self._v_document.setPlainText(self._v_text)
-        except Exception:
-            pass
-        try:
-            self._inline_trace('INLINE_EDITOR_IME_PREEDIT_REPLACED_SELECTION',
-                               removed_len=b - a, caret=a, text_len=len(self._v_text))
-        except Exception:
-            pass
-        return True
+        return bool(_ysb_text_input_delete_selection_for_ime_preedit(self)) if _ysb_text_input_delete_selection_for_ime_preedit is not None else False
 
     def _replace_vertical_selection(self, insert_text, push_undo=True, reason='text-change'):
-        if not self._vertical_editor:
-            return
-        text = self.toPlainText()
-        a, b = self._selected_range()
-        insert_text = str(insert_text or '')
-        caret = max(0, min(len(text), int(getattr(self, '_v_caret_index', 0) or 0)))
-        # A normal click must mean an insertion caret, not a one-character selection.
-        # Tiny mouse jitter after press used to leave a stale anchor, so the first typed
-        # character replaced/overlapped the next glyph while later characters inserted normally.
-        has_selection = bool(b > a)
-        if not has_selection:
-            a = b = caret
-        action = 'replace' if has_selection else 'insert'
-        if a == b and not insert_text:
-            return
-        if push_undo:
-            self._push_vertical_undo_snapshot()
-        self._v_text = text[:a] + insert_text + text[b:]
-        self._v_caret_index = a + len(insert_text)
-        self._v_selection_anchor = self._v_caret_index
-        self._v_preedit_text = ''
-        self._v_ime_selection_preedit_active = False
-        try:
-            self._v_document.setPlainText(self._v_text)
-        except Exception:
-            pass
-        self._sync_direct_editor_after_text_change(reason=reason)
-        self._update_desired_caret_axis_from_current()
-        try:
-            self._inline_trace('INLINE_EDITOR_TEXT_CHANGE', action=action, inserted_len=len(insert_text), new_len=len(self._v_text), caret=self._v_caret_index)
-        except Exception:
-            pass
+        if _ysb_text_input_replace_selection is not None:
+            _ysb_text_input_replace_selection(self, insert_text, push_undo=push_undo, reason=reason)
+        return
 
     def _delete_vertical_backward(self):
-        if self._has_vertical_selection():
-            self._replace_vertical_selection('')
-            return
-        if self._v_caret_index <= 0:
-            return
-        text = self.toPlainText()
-        i = self._v_caret_index
-        self._push_vertical_undo_snapshot()
-        self._v_text = text[:i - 1] + text[i:]
-        self._v_caret_index = i - 1
-        self._v_selection_anchor = self._v_caret_index
-        try:
-            self._v_document.setPlainText(self._v_text)
-        except Exception:
-            pass
-        self._sync_direct_editor_after_text_change(reason='delete-backward')
-        self._update_desired_caret_axis_from_current()
+        if _ysb_text_input_delete_backward is not None:
+            _ysb_text_input_delete_backward(self)
+        return
 
     def _delete_vertical_forward(self):
-        if self._has_vertical_selection():
-            self._replace_vertical_selection('')
-            return
-        text = self.toPlainText()
-        i = self._v_caret_index
-        if i >= len(text):
-            return
-        self._push_vertical_undo_snapshot()
-        self._v_text = text[:i] + text[i + 1:]
-        self._v_selection_anchor = self._v_caret_index
-        try:
-            self._v_document.setPlainText(self._v_text)
-        except Exception:
-            pass
-        self._sync_direct_editor_after_text_change(reason='delete-forward')
-        self._update_desired_caret_axis_from_current()
+        if _ysb_text_input_delete_forward is not None:
+            _ysb_text_input_delete_forward(self)
+        return
 
     def _vertical_index_from_pos(self, pos):
-        layout = self._layout_vertical_text()
-        if layout.get('horizontal_direct'):
-            lines, starts = self._split_vertical_lines(self.toPlainText())
-            rows = layout.get('columns') or []
-            if not rows:
-                return 0
-            y = float(pos.y())
-            row = min(rows, key=lambda c: abs(y - (float(c.get('y0', 0.0)) + float(c.get('pitch', 1.0)) / 2.0)))
-            line = str(row.get('line') or '')
-            start = int(row.get('start') or 0)
-            char_rects = [(idx, ch, QRectF(r)) for idx, ch, r in (layout.get('char_rects') or []) if start <= int(idx) < start + len(line)]
-            x = float(pos.x())
-            if not char_rects:
-                return start
-            for idx, _ch, r in char_rects:
-                if x < r.center().x():
-                    return int(idx)
-            return start + len(line)
-
-        columns = layout.get('columns') or []
-        if not columns:
-            return 0
-        x = float(pos.x())
-        y = float(pos.y())
-        col = min(columns, key=lambda c: abs(x - float(c.get('x', 0.0))))
-        line = str(col.get('line') or '')
-        start = int(col.get('start') or 0)
-        pitch = max(1.0, float(col.get('pitch') or 1.0))
-        y0 = float(col.get('y0') or 0.0)
-
-        # 공백 슬롯은 글자가 보이지 않기 때문에, 그 안을 클릭한 뒤 입력하면
-        # 새 글자가 '공백 칸 안에 들어간 것처럼' 보인다. 실제 텍스트에는 공백이
-        # 살아 있으므로 커서를 움직이면 다시 띄어쓰기가 살아나는 것처럼 느껴진다.
-        # 세로쓰기에서는 공백 칸 클릭을 기본적으로 '공백 뒤' caret으로 해석해
-        # 공백을 구분자처럼 보존하고, 새 글자가 빈칸을 덮어쓴 것처럼 보이지 않게 한다.
-        try:
-            for idx, ch, r in layout.get('char_rects') or []:
-                idx = int(idx)
-                if not (start <= idx < start + len(line)):
-                    continue
-                rr = QRectF(r)
-                if rr.contains(pos):
-                    if str(ch).isspace() and str(ch) != '\n':
-                        return min(start + len(line), idx + 1)
-                    return idx if y < rr.center().y() else min(start + len(line), idx + 1)
-        except Exception:
-            pass
-
-        # 공백 advance가 일반 글자보다 짧기 때문에 pitch만으로 역산하면
-        # 공백 뒤쪽 클릭에서 커서가 한 칸 밀릴 수 있다. char_rect에 걸리지 않은 위치는
-        # 캐럿 좌표 중 가장 가까운 곳으로 보정한다.
-        try:
-            candidates = []
-            caret_map = layout.get('caret_map') or {}
-            for off in range(0, len(line) + 1):
-                p = caret_map.get(start + off)
-                if p is not None:
-                    candidates.append((abs(float(p.y()) - y), off))
-            if candidates:
-                return start + sorted(candidates, key=lambda pair: pair[0])[0][1]
-        except Exception:
-            pass
-        offset = int(round((y - y0) / pitch))
-        offset = max(0, min(len(line), offset))
-        return start + offset
+        return int(_ysb_text_input_caret_index_from_pos(self, pos)) if _ysb_text_input_caret_index_from_pos is not None else 0
 
     def _vertical_cursor_rect(self):
-        layout = self._layout_vertical_text()
-        caret_map = layout.get('caret_map') or {}
-        p = caret_map.get(int(getattr(self, '_v_caret_index', 0)))
-        if p is None:
-            p = QPointF(self.boundingRect().center())
-        if layout.get('horizontal_direct'):
-            line_h = float(layout.get('pitch') or 14.0)
-            thickness = max(2.0, min(5.0, line_h * 0.08))
-            return QRectF(p.x() - thickness / 2.0, p.y() - line_h * 0.48, thickness, line_h * 0.96)
-        cell_w = float(layout.get('base_cell_w') or 10.0)
-        # 세로쓰기 커서는 문장 진행 방향 사이에 놓이는 '가로 커서'가 맞다.
-        # 너무 얇으면 배경/확대율에 묻혀 안 보이므로 최소 높이를 둔다.
-        thickness = max(3.0, min(8.0, cell_w * 0.08))
-        return QRectF(p.x() - cell_w * 0.58, p.y() - thickness / 2.0, cell_w * 1.16, thickness)
+        return QRectF(_ysb_text_input_cursor_rect(self)) if _ysb_text_input_cursor_rect is not None else QRectF(self.boundingRect()).adjusted(-2, -2, 2, 2)
 
     def _toggle_vertical_cursor_visible(self):
         if not self._vertical_editor:
@@ -4354,7 +4478,25 @@ class InlineTextEditItem(QGraphicsObject):
                 return
         except Exception:
             pass
-        bg_rect = self.boundingRect().adjusted(-4, -3, 4, 3)
+        visual_rect = QRectF(self.boundingRect())
+        try:
+            if self._vertical_editor:
+                layout = self._layout_vertical_text()
+                content = QRectF(layout.get('content_rect', QRectF()))
+                if content.width() > 1 and content.height() > 1:
+                    if bool(layout.get('editor_live_renderer')) and not self._is_vertical_writing():
+                        # The live edit renderer may have a tighter ink rect than the
+                        # original display item.  Keep the old inline-editor workbench feel:
+                        # background/border cover the original text box plus any newly grown
+                        # live text area, instead of jumping to the renderer's tight bounds.
+                        visual_rect = QRectF(self.boundingRect()).united(content.adjusted(-2, -2, 2, 2))
+                    else:
+                        # Follow the actual rendered ink area tightly.  The old double padding
+                        # could cover neighboring text below the active editor.
+                        visual_rect = content.adjusted(-2, -2, 2, 2)
+        except Exception:
+            visual_rect = QRectF(self.boundingRect())
+        bg_rect = QRectF(visual_rect).adjusted(-1, -1, 1, 1)
         painter.save()
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(getattr(self, 'inline_edit_bg_color', QColor(255, 255, 255, 190)))
@@ -4368,29 +4510,71 @@ class InlineTextEditItem(QGraphicsObject):
         pen = QPen(getattr(self, 'inline_edit_border_color', QColor(80, 160, 255)), 1, Qt.PenStyle.DashLine)
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRect(self.boundingRect())
+        painter.drawRect(visual_rect)
         painter.restore()
+        try:
+            paint_local = QRectF(bg_rect).united(QRectF(visual_rect)).adjusted(-4, -4, 4, 4)
+            self._last_inline_paint_local_rect = QRectF(paint_local)
+            self._last_inline_paint_scene_rect = self.mapToScene(paint_local).boundingRect().adjusted(-8, -8, 8, 8)
+        except Exception:
+            pass
 
     def _inline_glyph_path(self, ch, rect, font, fm):
         path = QPainterPath()
         try:
             if ch == '\n' or str(ch).isspace():
                 return path
+            rr = QRectF(rect)
             raw = QPainterPath()
             raw.addText(QPointF(0, 0), font, str(ch))
             br = raw.boundingRect()
             if br.isNull() or br.width() <= 0 or br.height() <= 0:
                 return path
-            # Final renderer scales glyph height after creating the path.  The editor preview
-            # mirrors that enough to avoid the current "plain QPainter text" mismatch.
+            try:
+                sx = positive_scale_factor(getattr(self, 'char_width_pct', 100))
+            except Exception:
+                sx = 1.0
             try:
                 sy = positive_scale_factor(getattr(self, 'char_height_pct', 100))
             except Exception:
                 sy = 1.0
+
+            if self._is_vertical_writing():
+                try:
+                    style = {
+                        'font_size': int(font.pixelSize() if font.pixelSize() > 0 else fm.height()),
+                        'char_width': int(getattr(self, 'char_width_pct', 100) or 100),
+                        'char_height': int(getattr(self, 'char_height_pct', 100) or 100),
+                    }
+                except Exception:
+                    style = {}
+                special = build_special_writing_char_path(ch, rr, style, 'vertical')
+                if special is not None and not special.isEmpty():
+                    return special
+                # Match the vertical display fallback more closely: the column owns the
+                # horizontal center, and each glyph starts from the cell's visual top.
+                # Do not center narrow punctuation vertically inside the whole cell.
+                scaled = QTransform()
+                scaled.scale(float(sx), float(sy))
+                scaled_path = scaled.map(raw)
+                sbr = scaled_path.boundingRect()
+                if sbr.isNull() or sbr.width() <= 0 or sbr.height() <= 0:
+                    return path
+                tr = QTransform()
+                tr.translate(float(rr.center().x()) - float(sbr.center().x()), float(rr.top()) - float(sbr.top()))
+                return tr.map(scaled_path)
+
+            # Horizontal text should use the font-native pen position and baseline.
+            # Centering glyph ink inside the advance slot moves '.', quotes, brackets,
+            # and other narrow punctuation away from the place the font intended.
+            try:
+                metric_h = max(1.0, float(fm.height()) * sy)
+                baseline_y = float(rr.top()) + (float(rr.height()) - metric_h) / 2.0 + float(fm.ascent()) * sy
+            except Exception:
+                baseline_y = float(rr.center().y())
             tr = QTransform()
-            tr.translate(float(rect.center().x()), float(rect.center().y()))
-            tr.scale(1.0, sy)
-            tr.translate(-float(br.center().x()), -float(br.center().y()))
+            tr.translate(float(rr.left()), float(baseline_y))
+            tr.scale(float(sx), float(sy))
             path = tr.map(raw)
         except Exception:
             pass
@@ -4399,10 +4583,11 @@ class InlineTextEditItem(QGraphicsObject):
     def _draw_inline_preview_char(self, painter, ch, rect, font):
         """Draw one lightweight inline-editor preview glyph.
 
-        Deliberately does not draw stroke, double stroke, shadow, gradient, warp, or other
-        final-render effects.  The direct editor must stay responsive while typing, so it only
-        reflects font, size, fill color, letter/line spacing layout, character width, and
-        character height.
+        The preview uses the same natural glyph placement rule as the editor
+        layout: horizontal glyphs are drawn from the pen x/baseline, while
+        vertical glyphs keep the column center and cell top.  Do not align text
+        with AlignCenter here; that drags narrow punctuation to the middle of its
+        slot and makes the editor disagree with the canvas display.
         """
         try:
             if ch == '\n' or str(ch).isspace():
@@ -4411,26 +4596,492 @@ class InlineTextEditItem(QGraphicsObject):
             if rr.width() <= 0 or rr.height() <= 0:
                 return
             try:
-                sy = positive_scale_factor(getattr(self, 'char_height_pct', 100))
+                fm = QFontMetrics(font)
             except Exception:
-                sy = 1.0
-            # QFont stretch already carries char_width.  Height has no matching QFont knob,
-            # so scale only the painter vertically around the glyph slot center.
-            if abs(sy - 1.0) < 0.015:
-                painter.drawText(rr, Qt.AlignmentFlag.AlignCenter, str(ch))
+                fm = self._cached_font_metrics(font)
+            path = self._inline_glyph_path(ch, rr, font, fm)
+            if path is None or path.isEmpty():
                 return
+            try:
+                color = painter.pen().color()
+                if not color.isValid():
+                    color = QColor(getattr(self, '_inline_text_color', QColor('#000000')))
+            except Exception:
+                color = QColor(getattr(self, '_inline_text_color', QColor('#000000')))
             painter.save()
-            c = rr.center()
-            painter.translate(c)
-            painter.scale(1.0, sy)
-            scaled_rect = QRectF(-rr.width() / 2.0, -rr.height() / (2.0 * sy), rr.width(), rr.height() / sy)
-            painter.drawText(scaled_rect, Qt.AlignmentFlag.AlignCenter, str(ch))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(color))
+            painter.drawPath(path)
             painter.restore()
         except Exception:
             try:
-                painter.drawText(QRectF(rect), Qt.AlignmentFlag.AlignCenter, str(ch))
+                painter.drawText(QRectF(rect), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, str(ch))
             except Exception:
                 pass
+
+
+    def _paint_horizontal_final_renderer_preview(self, painter, layout):
+        """Paint horizontal direct-editor text with the same path builder as TypesettingItem.
+
+        The old inline editor drew each glyph with QPainter.drawText() inside editor slots.
+        That was responsive, but it could drift far from the final QPainterPath renderer,
+        especially for display fonts, faux italic, stroke and partial style runs.  Use the
+        final renderer's path builder for the visible text preview; selection/caret math
+        still uses the editor layout so editing stays lightweight.
+        """
+        writing_direction = 'vertical' if self._is_vertical_writing() else 'horizontal'
+        try:
+            target = getattr(self, 'target_item', None)
+            data = getattr(target, 'data', {}) if target is not None else {}
+            text = self.toPlainText()
+            family = str(data.get('font_family') or getattr(self, '_base_font', QFont()).family() or getattr(self, '_inline_font', QFont()).family())
+            size = int(data.get('font_size') or getattr(self, '_base_font', QFont()).pixelSize() or getattr(self, '_inline_font', QFont()).pixelSize() or 20)
+            font = QFont(family)
+            font.setPixelSize(max(1, size))
+            ysb_apply_readable_bold_to_font(font, bool(data.get('bold', getattr(self, '_base_font', QFont()).bold())))
+            font.setItalic(bool(data.get('italic', getattr(self, '_base_font', QFont()).italic())))
+            fm = QFontMetrics(font)
+            try:
+                line_h = text_line_height_from_percent(fm.lineSpacing(), clamp_text_line_spacing(getattr(self, 'line_spacing_pct', data.get('line_spacing', 100)), 100))
+            except Exception:
+                line_h = fm.lineSpacing()
+            try:
+                letter_spacing = int(getattr(self, 'letter_spacing', data.get('letter_spacing', 0)) or 0)
+            except Exception:
+                letter_spacing = 0
+            base_style = {
+                'font_family': family,
+                'font_size': size,
+                'text_color': QColor(getattr(self, '_inline_text_color', QColor(str(data.get('text_color') or '#000000')))).name(),
+                'stroke_color': QColor(getattr(self, '_inline_stroke_color', QColor(str(data.get('stroke_color') or '#FFFFFF')))).name(),
+                'stroke_width': int(getattr(self, '_inline_stroke_width', data.get('stroke_width', 0)) or 0),
+                'bold': bool(data.get('bold', False)),
+                'italic': bool(data.get('italic', False)),
+                'strike': bool(data.get('strike', False)),
+            }
+            partial_runs = data.get('partial_style_runs') or data.get('style_runs') or []
+            # Paint the live IME preedit string inside the text flow.  The stored
+            # partial style runs are logical-text offsets, so shift runs that live
+            # after the preedit insertion point before passing them to the display renderer.
+            try:
+                display_text, _logical_text, _preedit, preedit_caret, preedit_len = self._inline_display_text_with_preedit()
+                text = display_text
+            except Exception:
+                preedit_caret = 0
+                preedit_len = 0
+            display_runs = partial_runs
+            if int(preedit_len or 0) > 0:
+                shifted = []
+                for run in _normalize_partial_style_runs(partial_runs, len(self.toPlainText())):
+                    try:
+                        st = int(run.get('start', 0) or 0)
+                        en = int(run.get('end', 0) or 0)
+                        style = dict(run.get('style') or {})
+                        caret = int(preedit_caret or 0)
+                        plen = int(preedit_len or 0)
+                        if en <= caret:
+                            shifted.append({'start': st, 'end': en, 'style': style})
+                        elif st >= caret:
+                            shifted.append({'start': st + plen, 'end': en + plen, 'style': style})
+                        else:
+                            # Run crosses the live composition point: split before/after.
+                            if st < caret:
+                                shifted.append({'start': st, 'end': caret, 'style': style})
+                            if en > caret:
+                                shifted.append({'start': caret + plen, 'end': en + plen, 'style': style})
+                    except Exception:
+                        continue
+                display_runs = shifted
+            path, _line_rects, styled_paths = build_typesetting_styled_text_paths(
+                text, display_runs, font, base_style, self.align, line_h, letter_spacing, writing_direction
+            )
+            if path is None or path.isEmpty():
+                return False
+            sx = positive_scale_factor(getattr(self, 'char_width_pct', data.get('char_width', 100)))
+            sy = positive_scale_factor(getattr(self, 'char_height_pct', data.get('char_height', 100)))
+            if abs(sx - 1.0) > 0.015 or abs(sy - 1.0) > 0.015:
+                tr = QTransform()
+                tr.scale(sx, sy)
+                path = tr.map(path)
+                new_entries = []
+                for entry in styled_paths or []:
+                    ep = entry.get('path')
+                    if ep is not None and not ep.isEmpty():
+                        new_entries.append(dict(entry, path=tr.map(ep)))
+                styled_paths = new_entries
+            try:
+                skew_x = float(data.get('skew_x', 0) or 0) / 100.0
+                skew_y = float(data.get('skew_y', 0) or 0) / 100.0
+            except Exception:
+                skew_x = skew_y = 0.0
+            if skew_x or skew_y:
+                tr = QTransform()
+                tr.shear(skew_x, skew_y)
+                path = tr.map(path)
+                new_entries = []
+                for entry in styled_paths or []:
+                    ep = entry.get('path')
+                    if ep is not None and not ep.isEmpty():
+                        new_entries.append(dict(entry, path=tr.map(ep)))
+                styled_paths = new_entries
+
+            rect = self.boundingRect()
+            pr = path.boundingRect()
+            if pr.isNull() or pr.width() <= 0 or pr.height() <= 0:
+                return False
+            if self.align == 'left':
+                dx = rect.left() - pr.left()
+            elif self.align == 'right':
+                dx = rect.right() - pr.right()
+            else:
+                dx = rect.center().x() - pr.center().x()
+            dy = rect.center().y() - pr.center().y()
+            try:
+                if bool(getattr(self, '_inline_position_lock_ready', False)) and not self._is_vertical_writing():
+                    locked_offset = getattr(self, '_inline_locked_horizontal_text_offset', None)
+                    if locked_offset is None:
+                        locked_offset = QPointF(dx, dy)
+                        self._inline_locked_horizontal_text_offset = QPointF(locked_offset)
+                        try:
+                            self._inline_trace('INLINE_EDITOR_TEXT_OFFSET_LOCK_INIT', x=round(float(dx), 2), y=round(float(dy), 2))
+                        except Exception:
+                            pass
+                    else:
+                        locked_offset = QPointF(locked_offset)
+                        dx = float(locked_offset.x())
+                        dy = float(locked_offset.y())
+            except Exception:
+                pass
+            painter.save()
+            painter.translate(dx, dy)
+
+            def draw_one(run_path, st):
+                if run_path is None or run_path.isEmpty():
+                    return
+                try:
+                    sw = max(0.0, float(st.get('stroke_width', base_style.get('stroke_width', 0)) or 0.0))
+                except Exception:
+                    sw = float(base_style.get('stroke_width', 0) or 0)
+                if sw > 0:
+                    stroke_color = QColor(str(st.get('stroke_color') or base_style.get('stroke_color') or '#FFFFFF'))
+                    if not stroke_color.isValid():
+                        stroke_color = QColor('#FFFFFF')
+                    pen = QPen(stroke_color, sw)
+                    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+                    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+                    painter.setPen(pen)
+                    painter.setBrush(Qt.BrushStyle.NoBrush)
+                    painter.drawPath(run_path)
+                fill_color = QColor(str(st.get('text_color') or base_style.get('text_color') or '#000000'))
+                if not fill_color.isValid():
+                    fill_color = QColor('#000000')
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QBrush(fill_color))
+                painter.drawPath(run_path)
+                if bool(st.get('strike', False)):
+                    rr = run_path.boundingRect()
+                    if rr.width() > 0 and rr.height() > 0:
+                        try:
+                            strike_w = max(1.0, float(st.get('font_size') or size) * 0.075)
+                        except Exception:
+                            strike_w = max(1.0, float(size) * 0.075)
+                        painter.setPen(QPen(fill_color, strike_w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                        painter.setBrush(Qt.BrushStyle.NoBrush)
+                        painter.drawLine(QPointF(rr.left(), rr.center().y()), QPointF(rr.right(), rr.center().y()))
+
+            if styled_paths:
+                grouped = []
+                prev_entry = None
+                current_group = []
+                def _flush_preview_group(group):
+                    if not group:
+                        return
+                    merged = QPainterPath()
+                    st = dict(group[0].get('style') or {})
+                    for ge in group:
+                        gp = ge.get('path')
+                        if gp is None or gp.isEmpty():
+                            continue
+                        merged = gp if merged.isEmpty() else merged.united(gp)
+                    draw_one(merged, st)
+                for entry in styled_paths:
+                    gp = entry.get('path')
+                    if gp is None or gp.isEmpty():
+                        continue
+                    merge = False
+                    if prev_entry is not None:
+                        merge = (
+                            _same_mergeable_special_pair(prev_entry.get('char'), entry.get('char'))
+                            and str(dict(prev_entry.get('style') or {})) == str(dict(entry.get('style') or {}))
+                        )
+                    if merge:
+                        current_group.append(entry)
+                    else:
+                        _flush_preview_group(current_group)
+                        current_group = [entry]
+                    prev_entry = entry
+                _flush_preview_group(current_group)
+            else:
+                draw_one(path, base_style)
+            painter.restore()
+            return True
+        except Exception as exc:
+            try:
+                self._inline_trace('INLINE_EDITOR_FINAL_RENDER_PREVIEW_ERROR', error=repr(exc))
+            except Exception:
+                pass
+            return False
+
+    def _inline_selection_paint_rect(self, rect, content_rect=None):
+        """Return a selection rect based on rendered ink, not loose font metrics.
+
+        The previous tightening step shrank glyph boxes independently.  With heavy
+        manga fonts this made Y too thin and, because each glyph box was painted
+        separately, overlapped semi-transparent boxes became darker.  Keep the real
+        rendered-stroke area, add only a small vertical breathing room, and let the
+        caller merge rects before painting.
+        """
+        try:
+            rr = QRectF(rect)
+        except Exception:
+            return QRectF()
+        if rr.isNull() or rr.width() <= 0 or rr.height() <= 0:
+            return QRectF()
+        try:
+            # X should stay close to the rendered stroke.  Y needs a little more room
+            # than raw glyph ink so blue selection reads as a stable text-selection band.
+            pad_x = min(2.0, max(0.5, float(rr.width()) * 0.018))
+            pad_y = min(8.0, max(3.0, float(rr.height()) * 0.13))
+            rr.adjust(-pad_x, -pad_y, pad_x, pad_y)
+        except Exception:
+            pass
+        try:
+            if content_rect is not None:
+                clip = QRectF(content_rect).adjusted(-1.5, -1.5, 1.5, 1.5)
+                rr = rr.intersected(clip)
+        except Exception:
+            pass
+        return rr
+
+    def _inline_merge_selection_rects_by_line(self, rects, content_rect=None):
+        """Merge selected glyph ink boxes into line bands before painting.
+
+        Painting every glyph rectangle separately makes overlaps darker, especially
+        when Korean display fonts have wide glyph boxes.  Group rects whose vertical
+        centers are on the same rendered line, union them, then paint once per line.
+        """
+        cleaned = []
+        for r in rects or []:
+            try:
+                rr = self._inline_selection_paint_rect(r, content_rect)
+                if rr.isValid() and rr.width() > 0 and rr.height() > 0:
+                    cleaned.append(QRectF(rr))
+            except Exception:
+                pass
+        if not cleaned:
+            return []
+        cleaned.sort(key=lambda x: (float(x.center().y()), float(x.left())))
+        bands = []
+        for rr in cleaned:
+            cy = float(rr.center().y())
+            matched = False
+            for i, (band, center_y) in enumerate(list(bands)):
+                try:
+                    tol = max(4.0, min(float(band.height()), float(rr.height())) * 0.65)
+                    if abs(cy - float(center_y)) <= tol:
+                        merged = QRectF(band).united(QRectF(rr))
+                        bands[i] = (merged, float(merged.center().y()))
+                        matched = True
+                        break
+                except Exception:
+                    pass
+            if not matched:
+                bands.append((QRectF(rr), cy))
+        out = []
+        for band, _cy in bands:
+            try:
+                br = QRectF(band)
+                if content_rect is not None:
+                    br = br.intersected(QRectF(content_rect).adjusted(-1.5, -1.5, 1.5, 1.5))
+                if br.isValid() and br.width() > 0 and br.height() > 0:
+                    out.append(br)
+            except Exception:
+                pass
+        return out
+
+    def _inline_selection_rects_for_overlay(self, layout, sel_a, sel_b):
+        """Build rectangular selection bands from character slots, not glyph ink paths."""
+        try:
+            sel_a = int(sel_a or 0)
+            sel_b = int(sel_b or 0)
+        except Exception:
+            return []
+        if sel_b <= sel_a:
+            return []
+
+        rects = []
+        # Prefer char_paths slot rectangles when the final-like renderer produced them.
+        for entry in layout.get('char_paths') or []:
+            try:
+                logical_index = int(entry.get('logical_index', -1))
+            except Exception:
+                continue
+            if logical_index < sel_a or logical_index >= sel_b:
+                continue
+            try:
+                rr = QRectF(entry.get('slot', QRectF()))
+                if rr.isValid() and rr.width() > 0 and rr.height() > 0:
+                    rects.append(rr)
+            except Exception:
+                pass
+
+        # Fallback / vertical lightweight renderer path.
+        for idx, _ch, r in layout.get('char_rects') or []:
+            try:
+                logical_index = int(idx)
+            except Exception:
+                continue
+            if logical_index < sel_a or logical_index >= sel_b:
+                continue
+            try:
+                rr = QRectF(r)
+                if rr.isValid() and rr.width() > 0 and rr.height() > 0:
+                    rects.append(rr)
+            except Exception:
+                pass
+
+        return rects
+
+    def _inline_merge_selection_rects_by_visual_band(self, rects, content_rect=None, vertical=None):
+        """Merge selected character cells into rectangular visual bands.
+
+        This intentionally uses character cells / line bands instead of glyph paths.
+        Selection must read as an editor overlay, not as a temporary text-color change.
+        Horizontal text merges by line (Y); vertical text merges by column (X).
+        """
+        cleaned = []
+        content = None
+        try:
+            content = QRectF(content_rect) if content_rect is not None else QRectF()
+            if content.isNull() or content.width() <= 0 or content.height() <= 0:
+                content = None
+        except Exception:
+            content = None
+
+        for r in rects or []:
+            try:
+                rr = QRectF(r)
+                if not rr.isValid() or rr.width() <= 0 or rr.height() <= 0:
+                    continue
+                if bool(vertical if vertical is not None else self._is_vertical_writing()):
+                    pad_x = max(2.0, min(10.0, float(rr.width()) * 0.22))
+                    pad_y = max(1.5, min(6.0, float(rr.height()) * 0.08))
+                else:
+                    pad_x = max(1.5, min(8.0, float(rr.width()) * 0.10))
+                    pad_y = max(2.0, min(9.0, float(rr.height()) * 0.18))
+                rr.adjust(-pad_x, -pad_y, pad_x, pad_y)
+                if content is not None:
+                    rr = rr.intersected(content.adjusted(-2.0, -2.0, 2.0, 2.0))
+                if rr.isValid() and rr.width() > 0 and rr.height() > 0:
+                    cleaned.append(rr)
+            except Exception:
+                continue
+
+        if not cleaned:
+            return []
+        vertical = bool(vertical if vertical is not None else self._is_vertical_writing())
+        if vertical:
+            cleaned.sort(key=lambda x: (float(x.center().x()), float(x.top())))
+        else:
+            cleaned.sort(key=lambda x: (float(x.center().y()), float(x.left())))
+
+        bands = []
+        for rr in cleaned:
+            center = float(rr.center().x() if vertical else rr.center().y())
+            matched = False
+            for i, (band, band_center) in enumerate(list(bands)):
+                try:
+                    if vertical:
+                        tol = max(4.0, min(float(band.width()), float(rr.width())) * 0.72)
+                    else:
+                        tol = max(4.0, min(float(band.height()), float(rr.height())) * 0.72)
+                    if abs(center - float(band_center)) <= tol:
+                        merged = QRectF(band).united(QRectF(rr))
+                        bands[i] = (merged, float(merged.center().x() if vertical else merged.center().y()))
+                        matched = True
+                        break
+                except Exception:
+                    pass
+            if not matched:
+                bands.append((QRectF(rr), center))
+
+        out = []
+        for band, _center in bands:
+            try:
+                br = QRectF(band)
+                if content is not None:
+                    br = br.intersected(content.adjusted(-2.0, -2.0, 2.0, 2.0))
+                if br.isValid() and br.width() > 0 and br.height() > 0:
+                    out.append(br)
+            except Exception:
+                pass
+        return out
+
+    def _paint_inline_selection_overlay(self, painter, layout, sel_a, sel_b, font=None):
+        """Paint selection as translucent rectangular bands over text.
+
+        Do not color only the glyph ink.  Glyph-path overlay makes selected text look
+        like its actual text color changed.  The editor selection should be a semi-
+        transparent rectangle that covers the glyphs and the surrounding selected cell.
+        """
+        try:
+            if int(sel_b or 0) <= int(sel_a or 0):
+                return
+        except Exception:
+            return
+
+        rects = self._inline_selection_rects_for_overlay(layout, sel_a, sel_b)
+        content_rect = layout.get('content_rect', QRectF())
+        bands = self._inline_merge_selection_rects_by_visual_band(
+            rects,
+            content_rect,
+            vertical=self._is_vertical_writing(),
+        )
+        if not bands:
+            return
+
+        painter.save()
+        try:
+            clip = QRectF(content_rect).adjusted(-2.0, -2.0, 2.0, 2.0)
+            if clip.isValid() and clip.width() > 0 and clip.height() > 0:
+                painter.setClipRect(clip)
+        except Exception:
+            pass
+        try:
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+        except Exception:
+            pass
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(80, 150, 245, 82))
+
+        try:
+            path = QPainterPath()
+            try:
+                path.setFillRule(Qt.FillRule.WindingFill)
+            except Exception:
+                pass
+            for rr in bands:
+                if QRectF(rr).isValid() and QRectF(rr).width() > 0 and QRectF(rr).height() > 0:
+                    path.addRoundedRect(QRectF(rr), 2.5, 2.5)
+            if not path.isEmpty():
+                painter.drawPath(path)
+        except Exception:
+            for rr in bands:
+                try:
+                    painter.drawRoundedRect(QRectF(rr), 2.5, 2.5)
+                except Exception:
+                    pass
+        painter.restore()
 
     def _paint_vertical_editor(self, painter):
         layout = self._layout_vertical_text()
@@ -4444,23 +5095,74 @@ class InlineTextEditItem(QGraphicsObject):
         painter.setFont(font)
 
         sel_a, sel_b = self._selected_range()
-        if sel_b > sel_a:
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(80, 160, 255, 95))
-            for idx, _ch, r in layout.get('char_rects') or []:
-                if sel_a <= idx < sel_b:
-                    painter.drawRoundedRect(QRectF(r).adjusted(0, 1, 0, -1), 2, 2)
 
         # 편집 중 미리보기는 가벼워야 한다. 최종 렌더의 획/이중획/그림자/그라디언트까지
         # 따라가면 입력할 때마다 QPainterPath와 stroke draw가 반복되어 렉이 생긴다.
         # 여기서는 사용자가 편집 위치를 판단하는 데 필요한 최소 스타일만 반영한다:
         # 글자 크기, 색상, 폰트, 행간, 자간, 너비, 높이.
-        painter.setPen(QColor(getattr(self, '_inline_text_color', QColor('#000000'))))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        for idx, ch, r in layout.get('char_rects') or []:
-            if ch == '\n' or str(ch).isspace():
-                continue
-            self._draw_inline_preview_char(painter, str(ch), QRectF(r), font)
+        painted_final_like = False
+        try:
+            if self._is_vertical_writing() and layout.get('vertical_path_editor') and layout.get('char_paths'):
+                renderer = getattr(self, '_ysb_edit_renderer', None) or YSBInlineEditRenderer(self)
+                self._ysb_edit_renderer = renderer
+                painted_final_like = bool(renderer.paint_horizontal(painter, layout))
+            else:
+                painted_final_like = bool(self._paint_horizontal_final_renderer_preview(painter, layout))
+        except Exception:
+            painted_final_like = False
+
+        if not painted_final_like:
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            char_rects = list(layout.get('char_rects') or [])
+            i = 0
+            while i < len(char_rects):
+                idx, ch, r = char_rects[i]
+                if ch == '\n' or str(ch).isspace():
+                    i += 1
+                    continue
+                try:
+                    st = self._partial_style_for_index(idx) if int(idx) >= 0 else {}
+                except Exception:
+                    st = {}
+                draw_font = font
+                if st:
+                    try:
+                        draw_font = self._inline_font_for_partial_style(st)
+                    except Exception:
+                        draw_font = font
+                try:
+                    color = QColor(str(st.get('text_color') or getattr(self, '_inline_text_color', QColor('#000000')))) if isinstance(st, dict) else QColor(getattr(self, '_inline_text_color', QColor('#000000')))
+                    if not color.isValid():
+                        color = QColor(getattr(self, '_inline_text_color', QColor('#000000')))
+                except Exception:
+                    color = QColor(getattr(self, '_inline_text_color', QColor('#000000')))
+                run_chars = [x[1] for x in char_rects]
+                run_len = _long_mark_run_len(run_chars, i, 'vertical')
+                painter.setPen(color)
+                painter.setFont(draw_font)
+                if run_len >= 2:
+                    run_rect = QRectF(char_rects[i][2])
+                    for k in range(1, run_len):
+                        try:
+                            run_rect = run_rect.united(QRectF(char_rects[i + k][2]))
+                        except Exception:
+                            pass
+                    path = build_long_mark_run_path(run_rect, dict(st or {}), 'vertical')
+                    painter.save()
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.setBrush(QBrush(color))
+                    painter.drawPath(path)
+                    painter.restore()
+                    i += run_len
+                    continue
+                self._draw_inline_preview_char(painter, str(ch), QRectF(r), draw_font)
+                i += 1
+
+        if sel_b > sel_a:
+            try:
+                self._paint_inline_selection_overlay(painter, layout, sel_a, sel_b, font)
+            except Exception:
+                pass
 
         # IME 조합 중인 문자열은 이제 layout 단계에서 실제 본문 사이에 임시 삽입된다.
         # 여기서 별도로 overlay로 다시 그리면 중간 삽입 때 뒤 글자를 밀지 못하고
@@ -4528,91 +5230,18 @@ class InlineTextEditItem(QGraphicsObject):
 
 
     def set_initial_caret_from_scene_pos(self, scene_pos):
-        """Place the inline caret at the text position that was double-clicked.
-
-        Opening the direct editor used to move the caret to the end of the text,
-        even when the user double-clicked a specific word/letter.  Use the same
-        visual hit-test logic as normal clicks after the editor has been sized and
-        positioned, so centered/right-aligned horizontal text and vertical text both
-        land where the user clicked.
-        """
+        if self._vertical_editor and _ysb_text_input_set_initial_caret_from_scene_pos is not None:
+            if _ysb_text_input_set_initial_caret_from_scene_pos(self, scene_pos):
+                return
         try:
-            self.adjust_to_contents()
+            super().set_initial_caret_from_scene_pos(scene_pos)
         except Exception:
             pass
-        if self._vertical_editor:
-            try:
-                local = self.mapFromScene(QPointF(scene_pos))
-            except Exception:
-                local = QPointF(0, 0)
-            try:
-                caret = self._vertical_index_from_pos(local)
-            except Exception:
-                caret = len(self.toPlainText())
-            self._set_vertical_caret(caret, keep_anchor=False)
-            try:
-                self._inline_trace('INLINE_EDITOR_INITIAL_CARET_FROM_DOUBLE_CLICK', caret=int(getattr(self, '_v_caret_index', 0)), x=round(float(local.x()), 2), y=round(float(local.y()), 2))
-            except Exception:
-                pass
-            return
-
-        try:
-            if self._edit is None:
-                return
-            try:
-                local = self.mapFromScene(QPointF(scene_pos))
-            except Exception:
-                local = QPointF(0, 0)
-            cursor = self._edit.cursorForPosition(QPoint(int(round(local.x())), int(round(local.y()))))
-            cursor.clearSelection()
-            self._edit.setTextCursor(cursor)
-            try:
-                self._inline_trace('INLINE_EDITOR_WIDGET_INITIAL_CARET_FROM_DOUBLE_CLICK', caret=int(cursor.position()), x=round(float(local.x()), 2), y=round(float(local.y()), 2))
-            except Exception:
-                pass
-        except Exception:
-            try:
-                cursor = self.textCursor()
-                cursor.movePosition(QTextCursor.MoveOperation.End)
-                self.setTextCursor(cursor)
-            except Exception:
-                pass
 
     def mousePressEvent(self, event):
-        if self._vertical_editor and event.button() == Qt.MouseButton.LeftButton:
-            try:
-                self.setCursor(Qt.CursorShape.IBeamCursor)
-            except Exception:
-                pass
-            self.setFocus(Qt.FocusReason.MouseFocusReason)
-            keep = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
-            try:
-                local_pos = event.pos()
-            except Exception:
-                local_pos = QPointF(0, 0)
-            # 클릭 위치 계산 직전 최신 레이아웃을 보장한다. 직전 입력/리사이즈가
-            # 아직 queued adjust 상태이면 hit-test가 한 프레임 전 위치를 볼 수 있다.
-            try:
-                self.adjust_to_contents()
-            except Exception:
-                pass
-            caret = self._vertical_index_from_pos(local_pos)
-            self._set_vertical_caret(caret, keep_anchor=keep)
-            try:
-                self._inline_trace('INLINE_EDITOR_MOUSE_CARET_SET', caret=int(caret), x=round(float(local_pos.x()), 2), y=round(float(local_pos.y()), 2), keep=bool(keep))
-            except Exception:
-                pass
-            try:
-                self._v_mouse_press_pos = QPointF(local_pos)
-                self._v_mouse_press_caret = int(caret)
-            except Exception:
-                self._v_mouse_press_pos = None
-                self._v_mouse_press_caret = int(caret)
-            # Only Shift-drag or a real drag beyond threshold creates selection.
-            # Plain click/jitter must leave anchor == caret so the first typed glyph inserts.
-            self._vertical_drag_selecting = bool(keep)
-            event.accept()
-            return
+        if self._vertical_editor and _ysb_text_input_handle_mouse_press is not None:
+            if _ysb_text_input_handle_mouse_press(self, event):
+                return
         try:
             super().mousePressEvent(event)
         except Exception:
@@ -4651,38 +5280,18 @@ class InlineTextEditItem(QGraphicsObject):
             pass
 
     def mouseMoveEvent(self, event):
-        if self._vertical_editor and bool(event.buttons() & Qt.MouseButton.LeftButton):
-            keep = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
-            if not keep and not bool(getattr(self, '_vertical_drag_selecting', False)):
-                try:
-                    press = QPointF(getattr(self, '_v_mouse_press_pos', event.pos()))
-                    delta = QPointF(event.pos()) - press
-                    threshold = 4
-                    try:
-                        threshold = QApplication.startDragDistance()
-                    except Exception:
-                        pass
-                    if abs(float(delta.x())) + abs(float(delta.y())) < max(1, int(threshold)):
-                        event.accept()
-                        return
-                except Exception:
-                    event.accept()
-                    return
-                self._vertical_drag_selecting = True
-            self._set_vertical_caret(self._vertical_index_from_pos(event.pos()), keep_anchor=True)
-            event.accept()
-            return
+        if self._vertical_editor and _ysb_text_input_handle_mouse_move is not None:
+            if _ysb_text_input_handle_mouse_move(self, event):
+                return
         try:
             super().mouseMoveEvent(event)
         except Exception:
             pass
 
     def mouseReleaseEvent(self, event):
-        if self._vertical_editor:
-            self._vertical_drag_selecting = False
-            self._v_mouse_press_pos = None
-            event.accept()
-            return
+        if self._vertical_editor and _ysb_text_input_handle_mouse_release is not None:
+            if _ysb_text_input_handle_mouse_release(self, event):
+                return
         try:
             super().mouseReleaseEvent(event)
         except Exception:
@@ -4695,392 +5304,46 @@ class InlineTextEditItem(QGraphicsObject):
             except Exception:
                 pass
             return
-
-        if self._is_alt_modifier_guard_event(event):
-            event.accept()
-            return
-        try:
-            key = event.key()
-            mods = event.modifiers()
-        except Exception:
-            key = None
-            mods = Qt.KeyboardModifier.NoModifier
-
-        if key == Qt.Key.Key_Escape:
-            self.main_window.finish_inline_text_edit(commit=False)
-            event.accept()
-            return
-        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and mods & Qt.KeyboardModifier.ControlModifier:
-            try:
-                self._inline_trace('INLINE_EDITOR_CTRL_ENTER_COMMIT_REQUEST')
-            except Exception:
-                pass
-            self.main_window.finish_inline_text_edit(commit=True, commit_reason='ctrl_enter')
-            event.accept()
-            return
-        # Text-entry shortcuts such as Ctrl+1..0 special symbols belong to the
-        # inline editor, not to the toolbox/global shortcut layer.  Check them before
-        # generic Ctrl handling so they are inserted instead of being swallowed.
-        if self._handle_inline_text_input_shortcut(event):
-            return
-        if mods & Qt.KeyboardModifier.ControlModifier:
-            if key == Qt.Key.Key_Z and (mods & Qt.KeyboardModifier.ShiftModifier):
-                self.perform_inline_local_redo()
-                event.accept()
-                return
-            if key == Qt.Key.Key_Z:
-                self.perform_inline_local_undo()
-                event.accept()
-                return
-            if key == Qt.Key.Key_Y:
-                self.perform_inline_local_redo()
-                event.accept()
-                return
-            if key == Qt.Key.Key_A:
-                self._v_selection_anchor = 0
-                self._v_caret_index = len(self.toPlainText())
-                self.update()
-                event.accept()
-                return
-            if key in (Qt.Key.Key_C, Qt.Key.Key_X):
-                self._copy_direct_selection_to_plain_clipboard(cut=(key == Qt.Key.Key_X))
-                event.accept()
-                return
-            if key == Qt.Key.Key_V:
-                try:
-                    clip = QApplication.clipboard().text()
-                except Exception:
-                    clip = ''
-                if clip:
-                    self._replace_vertical_selection(clip)
-                event.accept()
-                return
-        keep = bool(mods & Qt.KeyboardModifier.ShiftModifier)
-
-        # Ctrl+A/drag처럼 편집기 내부 글자가 선택된 상태에서 방향키를 누르면
-        # 그 순간부터 '전체 선택/범위 선택'은 깨진 것으로 본다.
-        # Shift 없이 방향키를 누른 경우에는 먼저 선택 강조를 접고 caret만 남겨,
-        # 파란 선택 영역이 계속 남아 있는 상태를 막는다.
-        if key in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down) and not keep:
-            try:
-                if self._has_vertical_selection():
-                    a, b = self._selected_range()
-                    collapse_to = a if key in (Qt.Key.Key_Left, Qt.Key.Key_Up) else b
-                    self._set_vertical_caret(collapse_to, keep_anchor=False)
-                    try:
-                        self._inline_trace('INLINE_EDITOR_SELECTION_COLLAPSE_BY_ARROW',
-                                           key=int(key), caret=int(collapse_to),
-                                           selection_start=int(a), selection_end=int(b))
-                    except Exception:
-                        pass
-                    event.accept()
-                    return
-            except Exception:
-                pass
-
-        if key == Qt.Key.Key_Backspace:
-            self._delete_vertical_backward()
-            event.accept()
-            return
-        if key == Qt.Key.Key_Delete:
-            self._delete_vertical_forward()
-            event.accept()
-            return
-        if key == Qt.Key.Key_Space and not (mods & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)):
-            self._replace_vertical_selection(' ')
-            event.accept()
-            return
-        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            self._replace_vertical_selection('\n')
-            event.accept()
-            return
-        if key == Qt.Key.Key_Up:
-            if self._is_vertical_writing():
-                self._set_vertical_caret(self._v_caret_index - 1, keep_anchor=keep)
-            else:
-                self._move_horizontal_line(up=True, keep_anchor=keep)
-            event.accept()
-            return
-        if key == Qt.Key.Key_Down:
-            if self._is_vertical_writing():
-                self._set_vertical_caret(self._v_caret_index + 1, keep_anchor=keep)
-            else:
-                self._move_horizontal_line(up=False, keep_anchor=keep)
-            event.accept()
-            return
-        if key == Qt.Key.Key_Home:
-            text = self.toPlainText()
-            prev_nl = text.rfind('\n', 0, self._v_caret_index)
-            self._set_vertical_caret(prev_nl + 1, keep_anchor=keep)
-            event.accept()
-            return
-        if key == Qt.Key.Key_End:
-            text = self.toPlainText()
-            next_nl = text.find('\n', self._v_caret_index)
-            self._set_vertical_caret(len(text) if next_nl < 0 else next_nl, keep_anchor=keep)
-            event.accept()
-            return
-        if key in (Qt.Key.Key_Left, Qt.Key.Key_Right):
-            if self._is_vertical_writing():
-                self._move_vertical_column(left=(key == Qt.Key.Key_Left), keep_anchor=keep)
-            else:
-                delta = -1 if key == Qt.Key.Key_Left else 1
-                self._set_vertical_caret(self._v_caret_index + delta, keep_anchor=keep)
-            event.accept()
-            return
-
-        text = event.text()
-        if text and not (mods & Qt.KeyboardModifier.ControlModifier) and not (mods & Qt.KeyboardModifier.AltModifier):
-            # Key_Unknown(0) is often an IME composition key.  If there is an active
-            # preedit string, inputMethodEvent owns the text; inserting here can draw
-            # one duplicate/overlapped glyph until the next caret move.
-            try:
-                if int(key or 0) == 0 and str(getattr(self, '_v_preedit_text', '') or ''):
-                    event.accept()
-                    return
-            except Exception:
-                pass
-            self._replace_vertical_selection(text)
-            event.accept()
-            return
-        try:
-            super().keyPressEvent(event)
-        except Exception:
-            pass
+        if _ysb_text_input_handle_key_press is not None:
+            _ysb_text_input_handle_key_press(self, event)
+        return
 
     def _line_index_for_caret(self, lines, starts, pos):
-        try:
-            pos = int(pos)
-        except Exception:
-            pos = 0
-        current_line = 0
-        # A caret at the start of the next line is represented by the offset just
-        # after the previous newline.  The old check treated that offset as part
-        # of the previous line, so Up/Down from line starts skipped or inverted
-        # visual rows.  Keep end-of-line on the previous row, but start-of-line
-        # belongs to the current row.
-        for i, start in enumerate(starts):
-            try:
-                line_len = len(lines[i])
-            except Exception:
-                line_len = 0
-            start_i = int(start)
-            end = start_i + int(line_len)
-            if start_i <= pos <= end:
-                current_line = i
-                break
-        return current_line
+        return _ysb_text_input_line_index_for_caret(lines, starts, pos) if _ysb_text_input_line_index_for_caret is not None else 0
 
     def _horizontal_visual_rows(self):
-        """Return horizontal direct-editor rows sorted by what the user sees.
-
-        Text offsets are not enough for Up/Down movement: the offset immediately
-        after a newline is the start of the next visual row, and center/right
-        alignment shifts each row.  Build a visual row list from the layout
-        coordinates so target row selection follows the screen, not raw offsets.
-        """
-        try:
-            layout = self._layout_vertical_text()
-        except Exception:
-            return []
-        if not (layout or {}).get('horizontal_direct'):
-            return []
-        rows = []
-        for order, row in enumerate((layout or {}).get('columns') or []):
-            try:
-                line = str(row.get('line') or '')
-                start = int(row.get('start') or 0)
-                y0 = float(row.get('y0') or 0.0)
-                pitch = max(1.0, float(row.get('pitch') or row.get('line_h') or 1.0))
-                x0 = float(row.get('x') or 0.0)
-                rows.append({
-                    'visual_order': order,
-                    'line': line,
-                    'start': start,
-                    'length': len(line),
-                    'y': y0 + pitch / 2.0,
-                    'x': x0,
-                    'pitch': pitch,
-                })
-            except Exception:
-                continue
-        rows.sort(key=lambda r: (float(r.get('y', 0.0)), int(r.get('start', 0))))
-        return rows
+        return _ysb_text_input_horizontal_visual_rows(self) if _ysb_text_input_horizontal_visual_rows is not None else []
 
     def _nearest_visual_row_index_for_caret(self, rows, pos):
-        if not rows:
-            return 0
-        try:
-            pos = int(pos)
-        except Exception:
-            pos = 0
-        try:
-            p = self._inline_caret_point(pos)
-            py = float(p.y())
-            return min(range(len(rows)), key=lambda i: (abs(float(rows[i].get('y', 0.0)) - py), abs(int(rows[i].get('start', 0)) - pos)))
-        except Exception:
-            pass
-        for i, row in enumerate(rows):
-            start = int(row.get('start') or 0)
-            end = start + int(row.get('length') or 0)
-            if start <= pos <= end:
-                return i
-        return 0
+        return _ysb_text_input_nearest_visual_row_index_for_caret(self, rows, pos) if _ysb_text_input_nearest_visual_row_index_for_caret is not None else 0
 
     def _nearest_caret_in_line_by_axis(self, target_start, target_len, axis_value, axis='x'):
-        layout = self._layout_vertical_text()
-        caret_map = layout.get('caret_map') or {}
-        candidates = []
-        for off in range(0, int(target_len) + 1):
-            idx = int(target_start) + off
-            p = caret_map.get(idx)
-            if p is None:
-                continue
-            try:
-                v = float(p.x()) if axis == 'x' else float(p.y())
-                candidates.append((abs(v - float(axis_value)), off, idx))
-            except Exception:
-                continue
-        if candidates:
-            candidates.sort(key=lambda item: (item[0], item[1]))
-            return int(candidates[0][2])
-        return int(target_start) + min(max(0, int(target_len)), int(target_len))
+        return _ysb_text_input_nearest_caret_in_line_by_axis(self, target_start, target_len, axis_value, axis=axis) if _ysb_text_input_nearest_caret_in_line_by_axis is not None else int(target_start)
 
     def _move_horizontal_line(self, up=True, keep_anchor=False):
-        """Move Up/Down by visual X instead of raw character offset.
-
-        Center/right aligned lines do not share the same local start X.  Using the
-        raw offset makes a caret visually jump to the wrong column.  Keep the
-        desired X while moving vertically, like a normal text editor.  The target
-        row itself is selected from visual Y order, so caret positions at the
-        beginning of lines no longer get mistaken for the previous line.
-        """
-        text = self.toPlainText()
-        lines, starts = self._split_vertical_lines(text)
-        if not lines:
-            return
-        pos = int(getattr(self, '_v_caret_index', 0))
-        try:
-            desired_x = getattr(self, '_v_desired_caret_x', None)
-            if desired_x is None:
-                desired_x = float(self._inline_caret_point(pos).x())
-                self._v_desired_caret_x = desired_x
-        except Exception:
-            desired_x = float(self._inline_caret_point(pos).x())
-
-        rows = self._horizontal_visual_rows()
-        if rows:
-            current_row = self._nearest_visual_row_index_for_caret(rows, pos)
-            target_row = current_row + (-1 if up else 1)
-            if target_row < 0 or target_row >= len(rows):
-                self._set_vertical_caret(pos, keep_anchor=keep_anchor, preserve_desired=True)
-                return
-            row = rows[target_row]
-            target_start = int(row.get('start') or 0)
-            target_len = int(row.get('length') or 0)
-            target_pos = self._nearest_caret_in_line_by_axis(target_start, target_len, desired_x, axis='x')
-            try:
-                if bool(getattr(self, '_inline_caret_trace_enabled', False)):
-                    self._inline_trace('INLINE_EDITOR_CARET_VERTICAL_MOVE',
-                                       direction='up' if up else 'down',
-                                       current_offset=pos,
-                                       current_visual_row=current_row,
-                                       target_visual_row=target_row,
-                                       chosen_offset=target_pos,
-                                       desired_x=round(float(desired_x), 2),
-                                       row_count=len(rows))
-            except Exception:
-                pass
-            self._set_vertical_caret(target_pos, keep_anchor=keep_anchor, preserve_desired=True)
-            return
-
-        current_line = self._line_index_for_caret(lines, starts, pos)
-        target_line = current_line + (-1 if up else 1)
-        if target_line < 0 or target_line >= len(lines):
-            self._set_vertical_caret(pos, keep_anchor=keep_anchor, preserve_desired=True)
-            return
-        target_start = int(starts[target_line])
-        target_len = len(lines[target_line])
-        target_pos = self._nearest_caret_in_line_by_axis(target_start, target_len, desired_x, axis='x')
-        self._set_vertical_caret(target_pos, keep_anchor=keep_anchor, preserve_desired=True)
+        if _ysb_text_input_move_horizontal_line is not None:
+            _ysb_text_input_move_horizontal_line(self, up=up, keep_anchor=keep_anchor)
+        return
 
     def _move_vertical_column(self, left=True, keep_anchor=False):
-        """Move between vertical columns by visual Y instead of raw offset."""
-        text = self.toPlainText()
-        lines, starts = self._split_vertical_lines(text)
-        if not lines:
-            return
-        pos = int(getattr(self, '_v_caret_index', 0))
-        current_line = self._line_index_for_caret(lines, starts, pos)
-        target_line = current_line + (1 if left else -1)
-        if target_line < 0 or target_line >= len(lines):
-            self._set_vertical_caret(pos, keep_anchor=keep_anchor, preserve_desired=True)
-            return
-        try:
-            desired_y = getattr(self, '_v_desired_caret_y', None)
-            if desired_y is None:
-                desired_y = float(self._inline_caret_point(pos).y())
-                self._v_desired_caret_y = desired_y
-        except Exception:
-            desired_y = float(self._inline_caret_point(pos).y())
-        target_start = int(starts[target_line])
-        target_len = len(lines[target_line])
-        target_pos = self._nearest_caret_in_line_by_axis(target_start, target_len, desired_y, axis='y')
-        self._set_vertical_caret(target_pos, keep_anchor=keep_anchor, preserve_desired=True)
+        if _ysb_text_input_move_vertical_column is not None:
+            _ysb_text_input_move_vertical_column(self, left=left, keep_anchor=keep_anchor)
+        return
 
     def inputMethodEvent(self, event):
-        if not self._vertical_editor:
-            try:
-                super().inputMethodEvent(event)
-            except Exception:
-                pass
+        if self._vertical_editor and _ysb_text_input_process_input_method_event is not None:
+            _ysb_text_input_process_input_method_event(self, event)
             return
         try:
-            commit = event.commitString()
+            super().inputMethodEvent(event)
         except Exception:
-            commit = ''
-        try:
-            preedit = event.preeditString()
-        except Exception:
-            preedit = ''
-        preedit = str(preedit or '')
-        commit = str(commit or '')
-
-        # Ctrl+A / drag selection + Korean IME starts with a preedit-only frame.
-        # Even a single 초성 must immediately replace the selected text on screen,
-        # although it is not committed to the stored text yet.
-        replaced_selection_for_preedit = False
-        if preedit and not commit and self._has_vertical_selection():
-            replaced_selection_for_preedit = self._delete_selection_for_ime_preedit()
-
-        if commit:
-            suppress_commit_undo = bool(getattr(self, '_v_ime_selection_preedit_active', False))
-            self._replace_vertical_selection(commit,
-                                             push_undo=not suppress_commit_undo,
-                                             reason='ime-commit')
-            self._v_ime_selection_preedit_active = False
-        elif not preedit:
-            self._v_ime_selection_preedit_active = False
-
-        self._v_preedit_text = preedit
-        self._sync_direct_editor_after_text_change(
-            reason='ime-preedit-replace-selection' if replaced_selection_for_preedit else 'ime-preedit'
-        )
-        event.accept()
+            pass
 
     def inputMethodQuery(self, query):
-        if self._vertical_editor:
-            if query == Qt.InputMethodQuery.ImCursorRectangle:
-                return self._vertical_cursor_rect()
-            if query == Qt.InputMethodQuery.ImSurroundingText:
-                return self.toPlainText()
-            if query == Qt.InputMethodQuery.ImCursorPosition:
-                return int(getattr(self, '_v_caret_index', 0))
-            if query == Qt.InputMethodQuery.ImAnchorPosition:
-                return int(getattr(self, '_v_selection_anchor', getattr(self, '_v_caret_index', 0)))
-            if query == Qt.InputMethodQuery.ImCurrentSelection:
-                a, b = self._selected_range()
-                return self.toPlainText()[a:b]
+        if self._vertical_editor and _ysb_text_input_method_query is not None:
+            result = _ysb_text_input_method_query(self, query)
+            if result is not None:
+                return result
         try:
             return super().inputMethodQuery(query)
         except Exception:
@@ -5176,92 +5439,156 @@ class InlineTextEditItem(QGraphicsObject):
             return False
 
     def _insert_inline_symbol(self, symbol):
-        if self._vertical_editor:
-            selected = ''
-            a, b = self._selected_range()
-            if b > a:
-                selected = self.toPlainText()[a:b]
-            pair_map = {
-                "「」": ("「", "」"),
-                "『』": ("『", "』"),
-            }
-            if symbol in pair_map:
-                left, right = pair_map[symbol]
-                if selected:
-                    self._replace_vertical_selection(left + selected + right)
-                else:
-                    self._replace_vertical_selection(left + right)
-                    self._set_vertical_caret(max(0, self._v_caret_index - 1), keep_anchor=False)
-                return
-            self._replace_vertical_selection(symbol)
-            return
-        cursor = self.textCursor()
-        selected = cursor.selectedText()
-        pair_map = {
-            "「」": ("「", "」"),
-            "『』": ("『", "』"),
-        }
-        if symbol in pair_map:
-            left, right = pair_map[symbol]
-            if selected:
-                cursor.insertText(left + selected + right)
-            else:
-                cursor.insertText(left + right)
-                cursor.movePosition(QTextCursor.MoveOperation.Left, QTextCursor.MoveMode.MoveAnchor, 1)
-            self.setTextCursor(cursor)
-            self._schedule_adjust_to_contents(reason='symbol')
-            return
-        cursor.insertText(symbol)
-        self.setTextCursor(cursor)
-        self._schedule_adjust_to_contents(reason='symbol')
+        if _ysb_text_input_insert_inline_symbol is not None:
+            _ysb_text_input_insert_inline_symbol(self, symbol)
+        return
 
     def _handle_inline_text_input_shortcut(self, event):
-        for key, (_label, symbol) in TEXT_SYMBOLS.items():
-            if self._shortcut_matches(event, "text_" + key):
-                self._insert_inline_symbol(symbol)
-                event.accept()
-                return True
-        return False
+        return bool(_ysb_text_input_handle_inline_text_input_shortcut(self, event)) if _ysb_text_input_handle_inline_text_input_shortcut is not None else False
 
     def perform_inline_local_undo(self):
-        if self._vertical_editor:
-            try:
-                stack = getattr(self, '_v_undo_stack', [])
-                if not stack:
-                    return True
-                current = (self.toPlainText(), int(getattr(self, '_v_caret_index', 0)), int(getattr(self, '_v_selection_anchor', 0)))
-                self._v_redo_stack.append(current)
-                snap = stack.pop()
-                self._restore_vertical_snapshot(snap)
-            except Exception:
-                pass
-            return True
-        try:
-            self._edit.undo()
-        except Exception:
-            pass
-        self._schedule_adjust_to_contents(reason='undo')
-        return True
+        return bool(_ysb_text_input_perform_inline_local_undo(self)) if _ysb_text_input_perform_inline_local_undo is not None else False
 
     def perform_inline_local_redo(self):
-        if self._vertical_editor:
-            try:
-                stack = getattr(self, '_v_redo_stack', [])
-                if not stack:
-                    return True
-                current = (self.toPlainText(), int(getattr(self, '_v_caret_index', 0)), int(getattr(self, '_v_selection_anchor', 0)))
-                self._v_undo_stack.append(current)
-                snap = stack.pop()
-                self._restore_vertical_snapshot(snap)
-            except Exception:
-                pass
-            return True
+        return bool(_ysb_text_input_perform_inline_local_redo(self)) if _ysb_text_input_perform_inline_local_redo is not None else False
+
+    def _is_widget_descendant_of_any(self, widget, roots):
+        if widget is None:
+            return False
         try:
-            self._edit.redo()
+            for root in roots or []:
+                if root is None:
+                    continue
+                if widget is root:
+                    return True
+                try:
+                    if isinstance(widget, QWidget) and isinstance(root, QWidget) and root.isAncestorOf(widget):
+                        return True
+                except Exception:
+                    pass
+                try:
+                    parent = widget
+                    for _ in range(16):
+                        if parent is None:
+                            break
+                        if parent is root:
+                            return True
+                        parent = parent.parent() if hasattr(parent, 'parent') else None
+                except Exception:
+                    pass
+        except Exception:
+            return False
+        return False
+
+    def _inline_style_interface_widget_at_cursor(self):
+        """Return the right-side text style widget currently under the mouse.
+
+        Clicking the style interface while the inline editor is open must not commit
+        or destroy the editor.  Focus is allowed to leave the editor temporarily so
+        the button/combo/spinbox can receive the click, but the edit session remains
+        alive and style handlers can apply partial/whole inline style.
+        """
+        try:
+            widget = QApplication.widgetAt(QCursor.pos())
+        except Exception:
+            widget = None
+        if widget is None:
+            return None
+        mw = getattr(self, 'main_window', None)
+        if mw is None:
+            return None
+
+        allowed = []
+        try:
+            if hasattr(mw, '_inline_text_style_controls_allowed_widgets'):
+                allowed.extend(list(mw._inline_text_style_controls_allowed_widgets()))
         except Exception:
             pass
-        self._schedule_adjust_to_contents(reason='redo')
-        return True
+        # Fallback for builds where the allowed-widget helper is not available or
+        # misses an alias.  Keep this list tight: only right text/style controls,
+        # not the canvas, page tabs, output buttons, or random dialogs.
+        for attr in (
+            'cb_font', 'sb_font_size', 'btn_text_color',
+            'sb_strk', 'btn_stroke_color',
+            'sb_line_spacing', 'sb_letter_spacing', 'sb_char_width', 'sb_char_height',
+            'btn_bold', 'btn_italic', 'btn_strike',
+            'cb_item_text_preset', 'sb_text_opacity',
+            'final_item_font', 'final_item_size', 'final_item_stroke',
+            'btn_item_text_color', 'btn_item_stroke_color',
+        ):
+            try:
+                w = getattr(mw, attr, None)
+                if w is not None and w not in allowed:
+                    allowed.append(w)
+            except Exception:
+                pass
+
+        try:
+            for root in allowed:
+                if root is None:
+                    continue
+                if widget is root:
+                    return root
+                try:
+                    if isinstance(widget, QWidget) and isinstance(root, QWidget) and root.isAncestorOf(widget):
+                        return root
+                except Exception:
+                    pass
+                try:
+                    parent = widget
+                    for _ in range(16):
+                        if parent is None:
+                            break
+                        if parent is root:
+                            return root
+                        parent = parent.parent() if hasattr(parent, 'parent') else None
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return None
+
+    def _restore_inline_editor_focus_after_style_control(self, delay_ms=140):
+        """Refocus the inline editor after a style button click when safe.
+
+        We deliberately do not steal focus from an active modal color/font dialog.
+        The edit session is already preserved by _handle_child_focus_out(); this
+        refocus is only a convenience so typing can continue after toolbar buttons.
+        """
+        try:
+            delay_ms = max(0, int(delay_ms or 0))
+        except Exception:
+            delay_ms = 140
+
+        def _restore():
+            try:
+                if getattr(self.main_window, 'inline_text_editor', None) is not self:
+                    return
+                if getattr(self, '_closing', False):
+                    return
+                try:
+                    if QApplication.activeModalWidget() is not None:
+                        # Color/font dialogs must keep their own focus.  Try once more
+                        # later in case the dialog was very short-lived, then stop.
+                        if delay_ms < 900:
+                            self._restore_inline_editor_focus_after_style_control(delay_ms=900)
+                        return
+                except Exception:
+                    pass
+                self.setFocus(Qt.FocusReason.OtherFocusReason)
+                try:
+                    self._inline_trace('INLINE_EDITOR_FOCUS_RESTORED_AFTER_STYLE_CONTROL')
+                except Exception:
+                    pass
+            except RuntimeError:
+                return
+            except Exception:
+                pass
+
+        try:
+            QTimer.singleShot(delay_ms, _restore)
+        except Exception:
+            _restore()
 
     def _handle_child_focus_out(self):
         if getattr(self.main_window, "_app_is_closing", False):
@@ -5277,6 +5604,28 @@ class InlineTextEditItem(QGraphicsObject):
                 if edit_scene.contains(sp):
                     QTimer.singleShot(0, lambda: self.setFocus(Qt.FocusReason.MouseFocusReason))
                     return
+        except Exception:
+            pass
+        try:
+            style_widget = self._inline_style_interface_widget_at_cursor()
+            if style_widget is not None:
+                try:
+                    self._inline_trace(
+                        'INLINE_EDITOR_FOCUS_OUT_KEPT_FOR_STYLE_CONTROL',
+                        widget=type(style_widget).__name__,
+                        object_name=str(style_widget.objectName() or ''),
+                    )
+                except Exception:
+                    pass
+                # If this is a button/toggle, focus should come back to the editor
+                # after the click signal applies the style.  For spin/combo controls,
+                # leave focus alone so the user can adjust values normally.
+                try:
+                    if isinstance(style_widget, QAbstractButton):
+                        self._restore_inline_editor_focus_after_style_control(delay_ms=160)
+                except Exception:
+                    pass
+                return
         except Exception:
             pass
         self.main_window.finish_inline_text_edit(commit=True, commit_reason='focus_out')
@@ -5428,10 +5777,167 @@ class TextTableWidget(QTableWidget):
         insert_pos = max(0, min((insert_row - 1) - removed_before_target, len(remaining)))
         return remaining[:insert_pos] + moving + remaining[insert_pos:]
 
+    def _remember_text_cell_column_from_pos(self, pos):
+        """Remember the exact text column the user touched.
+
+        The table selects whole rows for layer operations, so currentColumn() can
+        later point at ID/X even when the user actually clicked the Original or
+        Translation text cell.  Ctrl+C must follow the user's last touched text
+        column instead of falling back to the translated-text column.
+        """
+        try:
+            col = int(self.columnAt(int(pos.x())))
+        except Exception:
+            col = -1
+        try:
+            row = int(self.rowAt(int(pos.y())))
+        except Exception:
+            row = -1
+        if row > 0 and col in (2, 3):
+            try:
+                self._ysb_last_text_copy_column = col
+            except Exception:
+                pass
+        try:
+            self._ysb_last_clicked_column = col
+            self._ysb_last_clicked_row = row
+        except Exception:
+            pass
+
+    def _event_is_select_all(self, event):
+        try:
+            if event.matches(QKeySequence.StandardKey.SelectAll):
+                return True
+        except Exception:
+            pass
+        try:
+            return (
+                event.key() == Qt.Key.Key_A
+                and bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+                and not bool(event.modifiers() & (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier))
+            )
+        except Exception:
+            return False
+
+    def _event_is_copy(self, event):
+        try:
+            if event.matches(QKeySequence.StandardKey.Copy):
+                return True
+        except Exception:
+            pass
+        try:
+            return (
+                event.key() == Qt.Key.Key_C
+                and bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+                and not bool(event.modifiers() & (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier))
+            )
+        except Exception:
+            return False
+
+    def _select_all_real_text_rows(self):
+        try:
+            if self.rowCount() <= 0:
+                return False
+            self.clearSelection()
+            model = self.model()
+            sm = self.selectionModel()
+            if model is None or sm is None:
+                return False
+            selection = QItemSelection()
+            last_col = max(0, self.columnCount() - 1)
+            first_real_row = None
+            for row in range(self.rowCount()):
+                try:
+                    id_item = self.item(row, 0)
+                    id_text = str(id_item.text() if id_item is not None else "").strip()
+                except Exception:
+                    id_text = ""
+                if id_text.upper() == "ALL" or not id_text:
+                    continue
+                selection.select(model.index(row, 0), model.index(row, last_col))
+                if first_real_row is None:
+                    first_real_row = row
+            if first_real_row is None:
+                return False
+            sm.select(selection, QItemSelectionModel.SelectionFlag.ClearAndSelect | QItemSelectionModel.SelectionFlag.Rows)
+            try:
+                col = int(getattr(self, '_ysb_last_text_copy_column', 3) or 3)
+                if col not in (2, 3):
+                    col = 3
+                sm.setCurrentIndex(model.index(first_real_row, col), QItemSelectionModel.SelectionFlag.NoUpdate)
+            except Exception:
+                pass
+            return True
+        except Exception:
+            return False
+
+    def _copy_selected_text_column_to_os_clipboard(self):
+        try:
+            col = int(getattr(self, '_ysb_last_text_copy_column', -1) or -1)
+        except Exception:
+            col = -1
+        if col not in (2, 3):
+            try:
+                col = int(self.currentColumn())
+            except Exception:
+                col = -1
+        if col not in (2, 3):
+            col = 3
+        try:
+            rows = sorted({idx.row() for idx in self.selectedIndexes() if idx.row() > 0})
+        except Exception:
+            rows = []
+        try:
+            cur = int(self.currentRow())
+            if cur > 0 and cur not in rows:
+                rows.append(cur)
+                rows.sort()
+        except Exception:
+            pass
+        rows = [r for r in rows if 0 < r < self.rowCount()]
+        if not rows:
+            return False
+        lines = []
+        for row in rows:
+            try:
+                item = self.item(row, col)
+            except Exception:
+                item = None
+            if item is None:
+                lines.append('')
+                continue
+            try:
+                value = item.data(Qt.ItemDataRole.UserRole)
+            except Exception:
+                value = None
+            if value is None:
+                try:
+                    value = item.text()
+                except Exception:
+                    value = ''
+            lines.append(str(value or ''))
+        try:
+            QApplication.clipboard().setText('\n'.join(lines))
+            return True
+        except Exception:
+            return False
+
+    def keyPressEvent(self, event):
+        if self._event_is_select_all(event):
+            if self._select_all_real_text_rows():
+                event.accept()
+                return
+        if self._event_is_copy(event):
+            if self._copy_selected_text_column_to_os_clipboard():
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
     def mousePressEvent(self, event):
         try:
             if event.button() == Qt.MouseButton.LeftButton:
                 pos = self._event_pos(event)
+                self._remember_text_cell_column_from_pos(pos)
                 row = self.rowAt(pos.y())
                 self._drag_start_pos = QPoint(pos)
                 self._row_drag_press_row = row if row > 0 else -1
@@ -5445,6 +5951,280 @@ class TextTableWidget(QTableWidget):
         except Exception:
             pass
         super().mousePressEvent(event)
+
+    def _audit_table_edit(self, event_name, **fields):
+        try:
+            parent = self.parent()
+            for _ in range(16):
+                if parent is None:
+                    break
+                audit = getattr(parent, 'audit_boundary_event', None)
+                if callable(audit):
+                    audit(str(event_name), **fields)
+                    return True
+                parent = parent.parent() if hasattr(parent, 'parent') else None
+        except Exception:
+            pass
+        return False
+
+    def _host_window_for_table(self):
+        try:
+            parent = self.parent()
+            for _ in range(16):
+                if parent is None:
+                    break
+                if hasattr(parent, 'data') and hasattr(parent, 'idx'):
+                    return parent
+                parent = parent.parent() if hasattr(parent, 'parent') else None
+        except Exception:
+            pass
+        return None
+
+    def _row_is_locked_text_object(self, row):
+        """Return True for object/rasterized rows that should not use table text editing.
+
+        Normal OCR text rows must remain editable even if a previous refresh or
+        text-box patch accidentally dropped ItemIsEditable from the cell flags.
+        """
+        try:
+            if row <= 0 or row >= self.rowCount():
+                return True
+            id_item = self.item(row, 0)
+            text_id = str(id_item.text() if id_item is not None else '').strip()
+            if not text_id or text_id.upper() == 'ALL':
+                return True
+        except Exception:
+            text_id = ''
+        try:
+            trans_item = self.item(row, 3)
+            if trans_item is not None and str(trans_item.text() or '').startswith('[객체]'):
+                return True
+        except Exception:
+            pass
+        try:
+            host = self._host_window_for_table()
+            if host is not None:
+                curr = (getattr(host, 'data', {}) or {}).get(getattr(host, 'idx', None)) or {}
+                for entry in curr.get('data') or []:
+                    if str(entry.get('id', '')).strip() == text_id:
+                        return bool(entry.get('rasterized_text'))
+        except Exception:
+            pass
+        return False
+
+    def _ensure_text_item_editable(self, row, col):
+        try:
+            if row <= 0 or row >= self.rowCount() or col not in (2, 3):
+                return None
+            if self._row_is_locked_text_object(row):
+                try:
+                    self._audit_table_edit('RIGHT_TABLE_DBLCLICK_EDIT_BLOCKED_LOCKED_ROW', row=int(row), col=int(col), throttle_ms=80)
+                except Exception:
+                    pass
+                return None
+            item = self.item(row, col)
+            if item is None:
+                item = QTableWidgetItem("")
+                self.setItem(row, col, item)
+            try:
+                flags = item.flags()
+            except Exception:
+                flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+            had_editable = bool(flags & Qt.ItemFlag.ItemIsEditable)
+            if not had_editable:
+                # Defensive repair: several refresh paths replace cells with a
+                # plain item or style-only item.  For normal text rows the table
+                # editor should be restored at the point of double-click instead
+                # of silently giving up.
+                try:
+                    item.setFlags(flags | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEditable)
+                    flags = item.flags()
+                except Exception:
+                    pass
+            if not bool(flags & Qt.ItemFlag.ItemIsEditable):
+                try:
+                    self._audit_table_edit('RIGHT_TABLE_DBLCLICK_EDIT_BLOCKED_FLAGS', row=int(row), col=int(col), flags=str(flags), throttle_ms=80)
+                except Exception:
+                    pass
+                return None
+            try:
+                if not had_editable:
+                    self._audit_table_edit('RIGHT_TABLE_DBLCLICK_EDITABLE_REPAIRED', row=int(row), col=int(col), throttle_ms=80)
+            except Exception:
+                pass
+            return item
+        except Exception as exc:
+            try:
+                self._audit_table_edit('RIGHT_TABLE_DBLCLICK_EDITABLE_CHECK_ERROR', row=int(row), col=int(col), error=repr(exc), throttle_ms=80)
+            except Exception:
+                pass
+            return None
+
+    def _select_row_keep_current_text_cell(self, row, col):
+        try:
+            model = self.model()
+            sm = self.selectionModel()
+            if model is None or sm is None:
+                self.setCurrentCell(row, col)
+                return
+            last_col = max(0, self.columnCount() - 1)
+            selection = QItemSelection()
+            selection.select(model.index(row, 0), model.index(row, last_col))
+            sm.select(selection, QItemSelectionModel.SelectionFlag.ClearAndSelect | QItemSelectionModel.SelectionFlag.Rows)
+            sm.setCurrentIndex(model.index(row, col), QItemSelectionModel.SelectionFlag.NoUpdate)
+        except Exception:
+            try:
+                self.setCurrentCell(row, col)
+            except Exception:
+                pass
+
+    def _find_text_cell_editor(self, row, col):
+        try:
+            rect = self.visualRect(self.model().index(row, col))
+        except Exception:
+            rect = QRect()
+        try:
+            widgets = list(self.viewport().findChildren(QWidget))
+        except Exception:
+            widgets = []
+        for widget in widgets:
+            try:
+                if not isinstance(widget, (QTextEdit, QPlainTextEdit, QLineEdit)):
+                    continue
+                if not widget.isVisible():
+                    continue
+                if rect.isValid() and not rect.adjusted(-4, -4, 4, 4).intersects(widget.geometry()):
+                    continue
+                return widget
+            except Exception:
+                continue
+        return None
+
+    def _begin_text_cell_edit_at_pos(self, pos):
+        """Open the original/translation cell editor from a real double-click.
+
+        The right text table uses whole-row selection and custom row dragging.
+        Relying only on Qt's default double-click edit trigger is fragile here:
+        the row-drag hint timer, focus-owner tracking, or SelectRows mode can
+        leave the table selected but never open the actual cell editor.
+        """
+        try:
+            idx = self.indexAt(pos)
+        except Exception:
+            idx = QModelIndex()
+        if idx is not None and idx.isValid():
+            row = int(idx.row())
+            col = int(idx.column())
+        else:
+            try:
+                row = int(self.rowAt(int(pos.y())))
+                col = int(self.columnAt(int(pos.x())))
+            except Exception:
+                return False
+        try:
+            self._audit_table_edit('RIGHT_TABLE_DBLCLICK_ENTER', row=int(row), col=int(col), throttle_ms=80)
+        except Exception:
+            pass
+        if row <= 0 or col not in (2, 3):
+            try:
+                self._audit_table_edit('RIGHT_TABLE_DBLCLICK_FALLBACK_TO_SUPER', row=int(row), col=int(col), throttle_ms=80)
+            except Exception:
+                pass
+            return False
+        item = self._ensure_text_item_editable(row, col)
+        if item is None:
+            return False
+        try:
+            self._remember_text_cell_column_from_pos(pos)
+        except Exception:
+            pass
+        try:
+            self._clear_row_drag_visuals()
+        except Exception:
+            pass
+        try:
+            self._ysb_text_cell_editor_opening_until = time.time() + 1.2
+        except Exception:
+            pass
+        try:
+            self.setFocus(Qt.FocusReason.MouseFocusReason)
+        except Exception:
+            pass
+        try:
+            self.setCurrentCell(row, col)
+        except Exception:
+            pass
+        try:
+            self._select_row_keep_current_text_cell(row, col)
+        except Exception:
+            pass
+
+        def _open_editor():
+            try:
+                if self.item(row, col) is not item:
+                    return
+                model_index = self.model().index(row, col)
+                try:
+                    self.setCurrentIndex(model_index)
+                except Exception:
+                    pass
+                opened = False
+                try:
+                    opened = bool(self.edit(model_index))
+                except Exception:
+                    opened = False
+                if not opened:
+                    try:
+                        self.editItem(item)
+                        opened = True
+                    except Exception:
+                        opened = False
+                editor = self._find_text_cell_editor(row, col)
+                if editor is not None:
+                    try:
+                        editor.setFocus(Qt.FocusReason.MouseFocusReason)
+                    except Exception:
+                        pass
+                try:
+                    self._audit_table_edit(
+                        'RIGHT_TABLE_DBLCLICK_EDITITEM_CALLED',
+                        row=int(row),
+                        col=int(col),
+                        opened=bool(opened),
+                        editor_type=type(editor).__name__ if editor is not None else '',
+                        focus_widget=type(QApplication.focusWidget()).__name__ if QApplication.focusWidget() is not None else '',
+                        throttle_ms=80,
+                    )
+                except Exception:
+                    pass
+            except Exception as exc:
+                try:
+                    self._audit_table_edit('RIGHT_TABLE_DBLCLICK_EDITITEM_ERROR', row=int(row), col=int(col), error=repr(exc), throttle_ms=80)
+                except Exception:
+                    pass
+
+        _open_editor()
+        try:
+            QTimer.singleShot(0, _open_editor)
+            QTimer.singleShot(35, _open_editor)
+        except Exception:
+            pass
+        return True
+
+    def mouseDoubleClickEvent(self, event):
+        try:
+            if event.button() == Qt.MouseButton.LeftButton:
+                pos = self._event_pos(event)
+                if self._begin_text_cell_edit_at_pos(pos):
+                    try:
+                        event.accept()
+                    except Exception:
+                        pass
+                    return
+                self._remember_text_cell_column_from_pos(pos)
+        except Exception:
+            pass
+        super().mouseDoubleClickEvent(event)
 
     def mouseMoveEvent(self, event):
         try:
@@ -5661,6 +6441,16 @@ def ysb_get_color_with_hex_focus(current, parent=None, title="색상 선택"):
         cur = QColor('#000000')
     dlg = QColorDialog(cur, parent)
     try:
+        dlg.setModal(True)
+        dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
+    except Exception:
+        pass
+    try:
+        if parent is not None:
+            setattr(parent, '_ysb_active_color_dialog', dlg)
+    except Exception:
+        pass
+    try:
         dlg.setWindowTitle(str(title or "색상 선택"))
     except Exception:
         pass
@@ -5675,15 +6465,34 @@ def ysb_get_color_with_hex_focus(current, parent=None, title="색상 선택"):
     except Exception:
         pass
     try:
-        QTimer.singleShot(0, lambda d=dlg: ysb_focus_color_dialog_hex_field(d))
-        QTimer.singleShot(80, lambda d=dlg: ysb_focus_color_dialog_hex_field(d))
+        def _activate_and_focus(d=dlg):
+            try:
+                d.raise_()
+            except Exception:
+                pass
+            try:
+                d.activateWindow()
+            except Exception:
+                pass
+            ysb_focus_color_dialog_hex_field(d)
+        QTimer.singleShot(0, _activate_and_focus)
+        QTimer.singleShot(80, _activate_and_focus)
+        QTimer.singleShot(180, _activate_and_focus)
     except Exception:
         pass
-    if dlg.exec() == QDialog.DialogCode.Accepted:
-        color = dlg.selectedColor()
-        if color.isValid():
-            return color
-    return QColor()
+    try:
+        accepted = dlg.exec() == QDialog.DialogCode.Accepted
+        if accepted:
+            color = dlg.selectedColor()
+            if color.isValid():
+                return color
+        return QColor()
+    finally:
+        try:
+            if parent is not None and getattr(parent, '_ysb_active_color_dialog', None) is dlg:
+                setattr(parent, '_ysb_active_color_dialog', None)
+        except Exception:
+            pass
 
 
 class TextAdvancedEffectDialog(QDialog):
@@ -6390,6 +7199,8 @@ class FontSelectDialog(QDialog):
     _extra_font_scan_done = False
     _extra_font_families = []
     _extra_font_ids = []
+    _imported_font_path_keys = set()
+    _imported_font_file_families = {}
 
     def __init__(self, current_family="", current_size=24, current_bold=False, current_italic=False, parent=None):
         super().__init__(parent)
@@ -6566,19 +7377,19 @@ class FontSelectDialog(QDialog):
         if not lang.startswith("en"):
             return translate_ui_text(text, self._ui_language)
         en = {
-            "폰트 불러오기": "Import Font",
-            "TTF, OTF, TTC 같은 폰트 파일을 불러옵니다.": "Import font files such as TTF, OTF, or TTC.",
-            "폰트 파일 선택": "Select Font File",
+            "폰트 불러오기": "Import Fonts",
+            "TTF, OTF, TTC 같은 폰트 파일을 불러옵니다.": "Import one or more font files such as TTF, OTF, TTC, or OTC.",
+            "폰트 파일 선택": "Select Font Files",
             "폰트 파일 (*.ttf *.otf *.ttc *.otc)": "Font Files (*.ttf *.otf *.ttc *.otc)",
             "폰트 불러오기 방식": "Import Font Mode",
             "프로그램에만 추가": "Add to this program only",
             "Windows에 설치": "Install to Windows",
-            "폰트를 어디에 추가할까요?": "Where should this font be added?",
+            "폰트를 어디에 추가할까요?": "Where should these fonts be added?",
             "폰트 불러오기 완료": "Font import complete",
-            "폰트를 불러왔습니다.": "The font has been imported.",
+            "폰트를 불러왔습니다.": "The font file(s) have been imported.",
             "추가된 글꼴": "Added font families",
             "폰트 불러오기 실패": "Font import failed",
-            "폰트 파일을 불러오지 못했습니다.": "Could not import the font file.",
+            "폰트 파일을 불러오지 못했습니다.": "Could not import the font file(s).",
             "Windows 설치는 Windows에서만 사용할 수 있습니다. 프로그램에만 추가합니다.": "Windows installation is only available on Windows. It will be added to this program only.",
         }
         return en.get(text, translate_ui_text(text, self._ui_language))
@@ -6593,7 +7404,92 @@ class FontSelectDialog(QDialog):
             return None
 
     @classmethod
+    def imported_font_dirs(cls, create_primary=False):
+        """Return every place where YSB may keep user-imported font files.
+
+        Earlier builds saved program-only fonts under the workspace cache
+        (Documents\\YSB_Translator\\cache\\imported_fonts), while portable/EXE
+        builds or manually copied packs can have an imported_fonts folder next
+        to the program root/executable.  The font dialog must load all of them
+        when it opens; otherwise copied fonts exist on disk but never enter
+        QFontDatabase.
+        """
+        dirs = []
+
+        def add_dir(path_obj, create=False):
+            try:
+                if path_obj is None:
+                    return
+                d = Path(path_obj).expanduser()
+                try:
+                    d = d.resolve()
+                except Exception:
+                    pass
+                if create:
+                    d.mkdir(parents=True, exist_ok=True)
+                if not d.exists() or not d.is_dir():
+                    return
+                key = os.path.normcase(os.path.abspath(os.fspath(d)))
+                if key not in seen:
+                    seen.add(key)
+                    dirs.append(d)
+            except Exception:
+                pass
+
+        seen = set()
+        try:
+            add_dir(get_cache_dir() / "imported_fonts", create=bool(create_primary))
+        except Exception:
+            pass
+        try:
+            add_dir(get_cache_dir().parent / "imported_fonts", create=False)
+        except Exception:
+            pass
+        try:
+            add_dir(APP_ROOT / "imported_fonts", create=False)
+        except Exception:
+            pass
+        try:
+            add_dir(Path.cwd() / "imported_fonts", create=False)
+        except Exception:
+            pass
+        try:
+            exe_dir = Path(sys.executable).resolve().parent
+            add_dir(exe_dir / "imported_fonts", create=False)
+        except Exception:
+            pass
+        try:
+            bundle_dir = getattr(sys, "_MEIPASS", None)
+            if bundle_dir:
+                add_dir(Path(bundle_dir) / "imported_fonts", create=False)
+        except Exception:
+            pass
+        return dirs
+
+    @classmethod
     def add_application_font_file(cls, path):
+        try:
+            path = Path(path)
+        except Exception:
+            pass
+        try:
+            key = os.path.normcase(os.path.abspath(os.fspath(path)))
+        except Exception:
+            key = str(path)
+        try:
+            known = getattr(cls, "_imported_font_path_keys", set())
+        except Exception:
+            known = set()
+        if key in known:
+            try:
+                # Already registered this file during the current session.
+                # Return cached application families instead of registering it again.
+                families = list(getattr(cls, "_imported_font_file_families", {}).get(key, []))
+                if families:
+                    return families
+            except Exception:
+                pass
+
         try:
             font_id = QFontDatabase.addApplicationFont(str(path))
         except Exception:
@@ -6608,21 +7504,106 @@ class FontSelectDialog(QDialog):
             families = [str(x) for x in QFontDatabase.applicationFontFamilies(int(font_id)) if str(x).strip()]
         except Exception:
             families = []
+        try:
+            cls._imported_font_path_keys = set(known) | {key}
+            cache = dict(getattr(cls, "_imported_font_file_families", {}))
+            cache[key] = list(families)
+            cls._imported_font_file_families = cache
+        except Exception:
+            pass
         if families:
             cls._extra_font_families = sorted(set(list(cls._extra_font_families) + families), key=lambda s: str(s).lower())
         return families
 
     @classmethod
-    def load_imported_program_fonts(cls):
-        d = cls.imported_font_dir()
-        if d is None:
-            return []
+    def official_imported_font_dir(cls):
+        """YSB 공식 프로그램 전용 폰트 폴더.
+
+        사용자가 [폰트 불러오기]로 가져온 파일은 반드시 이 폴더에 복사되고,
+        프로그램 시작/폰트창 열기/폰트 갱신 때 이 폴더를 다시 스캔한다.
+        """
+        return cls.imported_font_dir()
+
+    @classmethod
+    def discover_imported_font_files(cls):
+        """Return font files under YSB_Translator\\cache\\imported_fonts.
+
+        The official imported_fonts directory is the source of truth.  Keep the
+        legacy/portable paths as secondary read-only fallbacks, but always scan
+        the official cache directory first and scan recursively so subfolders or
+        copied font packs are not missed.
+        """
+        font_exts = {".ttf", ".otf", ".ttc", ".otc"}
+        result = []
+        seen = set()
+
+        def add_file(path_obj):
+            try:
+                p = Path(path_obj).expanduser()
+            except Exception:
+                return
+            try:
+                if not p.exists() or not p.is_file() or p.suffix.lower() not in font_exts:
+                    return
+            except Exception:
+                return
+            try:
+                key = os.path.normcase(os.path.abspath(os.fspath(p)))
+            except Exception:
+                key = str(p)
+            if key in seen:
+                return
+            seen.add(key)
+            result.append(p)
+
+        def scan_dir(dir_obj):
+            try:
+                d = Path(dir_obj).expanduser()
+            except Exception:
+                return
+            try:
+                if not d.exists() or not d.is_dir():
+                    return
+                for p in sorted(d.rglob("*"), key=lambda x: str(x).lower()):
+                    add_file(p)
+            except Exception:
+                pass
+
+        official = cls.official_imported_font_dir()
+        if official is not None:
+            scan_dir(official)
+
+        # 호환용 보조 경로. 공식 폴더가 우선이며, 여기서는 파일을 옮기지 않고 읽기만 한다.
+        try:
+            for d in cls.imported_font_dirs(create_primary=False):
+                try:
+                    if official is not None and os.path.normcase(os.path.abspath(os.fspath(d))) == os.path.normcase(os.path.abspath(os.fspath(official))):
+                        continue
+                except Exception:
+                    pass
+                scan_dir(d)
+        except Exception:
+            pass
+
+        return result
+
+    @classmethod
+    def load_imported_program_fonts(cls, force=False):
+        """Register every font file in YSB_Translator\\cache\\imported_fonts.
+
+        This intentionally rescans the directory each time the font dialog opens.
+        addApplicationFont() is still de-duplicated per path, but newly copied
+        files are picked up immediately without relying on stale font-list state.
+        """
         families = []
-        for path in sorted(d.glob("*")):
-            if path.suffix.lower() not in {".ttf", ".otf", ".ttc", ".otc"}:
-                continue
+        for path in cls.discover_imported_font_files():
             families.extend(cls.add_application_font_file(path))
-        return families
+        if families:
+            try:
+                cls._extra_font_families = sorted(set(list(cls._extra_font_families) + list(families)), key=lambda s: str(s).lower())
+            except Exception:
+                pass
+        return sorted({str(x) for x in families if str(x).strip()}, key=lambda s: str(s).lower())
 
     def copy_font_to_program(self, source_path):
         folder = self.imported_font_dir()
@@ -6674,14 +7655,15 @@ class FontSelectDialog(QDialog):
         return dst
 
     def import_font_file(self):
-        path, _filter = QFileDialog.getOpenFileName(
+        paths, _filter = QFileDialog.getOpenFileNames(
             self,
             self.font_import_text("폰트 파일 선택"),
             "",
             self.font_import_text("폰트 파일 (*.ttf *.otf *.ttc *.otc)"),
         )
-        if not path:
+        if not paths:
             return
+
         options = [self.font_import_text("프로그램에만 추가"), self.font_import_text("Windows에 설치")]
         choice, ok = QInputDialog.getItem(
             self,
@@ -6693,18 +7675,45 @@ class FontSelectDialog(QDialog):
         )
         if not ok:
             return
+
+        imported_paths = []
+        failed = []
         try:
-            if choice == self.font_import_text("Windows에 설치"):
-                if not sys.platform.startswith("win"):
-                    QMessageBox.information(self, self.font_import_text("폰트 불러오기 방식"), self.font_import_text("Windows 설치는 Windows에서만 사용할 수 있습니다. 프로그램에만 추가합니다."))
-                    dst = self.copy_font_to_program(path)
-                else:
-                    dst = self.install_font_to_windows_user(path)
-            else:
-                dst = self.copy_font_to_program(path)
-            families = self.add_application_font_file(dst)
+            for path in list(paths):
+                try:
+                    if choice == self.font_import_text("Windows에 설치"):
+                        if not sys.platform.startswith("win"):
+                            # Windows가 아니면 공식 imported_fonts 폴더로만 가져온다.
+                            dst = self.copy_font_to_program(path)
+                        else:
+                            dst = self.install_font_to_windows_user(path)
+                    else:
+                        # 공식 흐름: YSB_Translator\\cache\\imported_fonts 안으로 복사한다.
+                        dst = self.copy_font_to_program(path)
+                    imported_paths.append(Path(dst))
+                except Exception as item_exc:
+                    failed.append(f"{Path(path).name}: {item_exc}")
+
+            # 핵심: 개별 파일만 등록하고 끝내지 말고 공식 imported_fonts 폴더를 다시 스캔한다.
+            families = []
+            try:
+                families.extend(self.__class__.load_imported_program_fonts(force=True))
+            except Exception:
+                pass
+
+            # Windows 설치를 선택한 경우 공식 폴더 밖의 설치 경로도 즉시 등록한다.
+            for dst in imported_paths:
+                try:
+                    families.extend(self.add_application_font_file(dst))
+                except Exception:
+                    pass
+
+            families = sorted({str(x) for x in families if str(x).strip()}, key=lambda s: s.lower())
+            if not families and failed:
+                raise RuntimeError("\n".join(failed))
             if not families:
                 raise RuntimeError(self.font_import_text("폰트 파일을 불러오지 못했습니다."))
+
             try:
                 self.__class__._extra_font_scan_done = True
                 self.load_fonts()
@@ -6718,11 +7727,11 @@ class FontSelectDialog(QDialog):
                 self.on_font_selection_changed()
             except Exception:
                 pass
-            QMessageBox.information(
-                self,
-                self.font_import_text("폰트 불러오기 완료"),
-                f"{self.font_import_text('폰트를 불러왔습니다.')}\n{self.font_import_text('추가된 글꼴')}: {', '.join(families)}",
-            )
+
+            msg = f"{self.font_import_text('폰트를 불러왔습니다.')}\n{self.font_import_text('추가된 글꼴')}: {', '.join(families)}"
+            if failed:
+                msg += "\n\n" + "\n".join(failed)
+            QMessageBox.information(self, self.font_import_text("폰트 불러오기 완료"), msg)
         except Exception as exc:
             QMessageBox.warning(self, self.font_import_text("폰트 불러오기 실패"), f"{self.font_import_text('폰트 파일을 불러오지 못했습니다.')}\n{exc}")
 
@@ -7025,7 +8034,7 @@ class FontSelectDialog(QDialog):
         # addApplicationFont()로 등록한 패밀리는 QFontDatabase.families() 호출 시점에 따라
         # 바로 목록에 섞이지 않을 수 있으므로 반환값을 직접 목록에 합친다.
         try:
-            imported_families = self.__class__.load_imported_program_fonts()
+            imported_families = self.__class__.load_imported_program_fonts(force=True)
             if imported_families:
                 families.extend(list(imported_families))
         except Exception:
@@ -7220,6 +8229,10 @@ class FontSelectDialog(QDialog):
                 pass
             try:
                 families.extend(list(extra))
+            except Exception:
+                pass
+            try:
+                families.extend(list(self.__class__.load_imported_program_fonts(force=True)))
             except Exception:
                 pass
 

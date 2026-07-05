@@ -54,6 +54,7 @@ LITE_ENTRY = PROJECT_ROOT / "main_lite.py"
 LOCAL_ENTRY = PROJECT_ROOT / "main_local.py"
 LAUNCHER_ENTRY = PROJECT_ROOT / "ysb_launcher.py"
 YSB_PACKAGE_DIR = PROJECT_ROOT / "ysb"
+API_DIAGNOSTIC_TEST_ASSETS_DIR = YSB_PACKAGE_DIR / "test_assets" / "api_diagnostics"
 
 ASSETS_DIR = PROJECT_ROOT / "assets"
 GENERATED_ICON_DIR = BUILD_TOOLS_DIR / "_generated_icons"
@@ -437,6 +438,10 @@ def runtime_asset_args(include_logo: bool) -> list[str]:
     args: list[str] = []
     for f in files:
         args += ["--add-data", add_data_arg(f, "assets")]
+    if API_DIAGNOSTIC_TEST_ASSETS_DIR.exists():
+        args += ["--add-data", add_data_arg(API_DIAGNOSTIC_TEST_ASSETS_DIR, "ysb/test_assets/api_diagnostics")]
+    else:
+        log(f"[WARN] API diagnostic test assets folder not found, skipped: {API_DIAGNOSTIC_TEST_ASSETS_DIR}")
     return args
 
 

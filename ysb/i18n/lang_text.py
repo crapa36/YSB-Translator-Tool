@@ -46,6 +46,11 @@ def tr_shortcut(text, lang=LANG_KO, **kwargs):
 
 
 UI_KO_EN = {
+ '인페인팅 그룹 미리보기': 'Inpainting Group Preview',
+ '미리보기 나가기': 'Exit Preview',
+ '표시할 인페인팅 마스크 그룹이 없습니다.': 'No inpainting mask groups to display.',
+ '마스크 진단': 'Mask diagnostics',
+ '현재 마스크를 비콘으로 사용해 인페인팅 전송 그룹을 오버레이로 미리 봅니다.': 'Preview inpainting transfer groups as an overlay using the current mask as beacons.',
  '배경 가리기': 'Hide Background',
  '텍스트 넘침 검사': 'Text Overflow Check',
  '자동 텍스트 조정 중 실제 렌더된 텍스트가 이미지 캔버스 밖으로 나가지 못하게 검사합니다. 끄면 예전처럼 이미지 밖 넘침을 허용합니다.': 'During auto text adjustment, check that the actual rendered text does not overflow outside the image canvas. Turn this off to allow overflow like older builds.',
@@ -2335,6 +2340,11 @@ _WRITING_DIRECTION_KO_EN = {
     "세로쓰기": "Vertical",
     "새 텍스트 쓰기 방향": "New Text Writing Direction",
     "쓰기 방향 변경": "Change Writing Direction",
+    "부분 가로쓰기": "Partial Horizontal Writing",
+    "부분 가로쓰기 사용": "Use Partial Horizontal Writing",
+    "새 텍스트 부분 가로쓰기": "New Text Partial Horizontal Writing",
+    "부분 가로쓰기 변경": "Change Partial Horizontal Writing",
+    "세로쓰기 중 숫자, 영어, 일부 특문을 입력하면 부분 가로쓰기 모드로 자동 진입하고, 스페이스바로 탈출합니다.": "In vertical writing, entering numbers, English letters, or some symbols automatically enters partial horizontal writing mode. Press Space to exit it.",
     "텍스트 변형이 적용된 객체는 쓰기 방향을 변경할 수 없습니다.": "Writing direction cannot be changed for transformed text objects.",
     "현재 페이지 글꼴 프리셋의 기본 쓰기 방향을 선택합니다.": "Choose the default writing direction for this page font preset.",
     "개별 글꼴 프리셋에 포함할 쓰기 방향을 선택합니다.": "Choose the writing direction included in this item font preset.",
@@ -2442,6 +2452,21 @@ API_TR_KO_EN.update({
     'Flex API': 'Flex API',
     'Batch API': 'Batch API',
 })
+
+# Patch: LM Studio JSON compatibility test
+API_TR_KO_EN.update({
+    "LM Studio JSON 호환성 테스트": "LM Studio JSON Compatibility Test",
+    "현재 Base URL과 Model로 짧은 샘플 번역을 보내고, 응답이 YSB 자동 번역용 JSON 형식인지 검사합니다.": "Sends a short sample translation with the current Base URL and Model, then checks whether the response matches YSB's automatic translation JSON format.",
+    "테스트 중...": "Testing...",
+    "호환성 테스트 통과": "Compatibility test passed",
+    "이 모델은 YSB 자동 번역 JSON 형식으로 사용할 수 있습니다.": "This model can be used with YSB's automatic translation JSON format.",
+    "호환성 테스트 실패": "Compatibility test failed",
+    "이 모델은 YSB 자동 번역 JSON 형식과 맞지 않을 수 있습니다.": "This model may not match YSB's automatic translation JSON format.",
+    "reasoning/channel 토큰이 content에 섞였습니다.": "Reasoning/channel tokens were mixed into the content field.",
+    "응답 안에 JSON 블록은 있지만 앞뒤에 다른 텍스트가 붙어 있습니다.": "A JSON block exists in the response, but other text is attached before or after it.",
+    "응답 일부:": "Response excerpt:",
+})
+
 
 _GEMINI_DELAYED_TRANSLATION_KO_EN = {
     '청크': 'Chunk',
@@ -2641,3 +2666,67 @@ _RUNTIME_LOG_UI_PATCH_KO_EN = {
 }
 UI_KO_EN.update(_RUNTIME_LOG_UI_PATCH_KO_EN)
 UI_EN_KO.update({en: ko for ko, en in _RUNTIME_LOG_UI_PATCH_KO_EN.items()})
+
+# Patch: analysis box size option
+_ANALYSIS_BOX_SIZE_KO_EN = {
+    '분석 박스 크기': 'Analysis Box Size',
+    '분석도에 표시되는 텍스트 번호 박스와 외곽선 크기를 정합니다. 자동값은 페이지별 너비 기준, 수동값은 전 페이지 공통으로 적용됩니다.': 'Sets the text number box and outline sizes shown in the analysis view. Auto uses each page width; manual applies one shared value to all pages.',
+    '분석도에 표시되는 번호 박스와 외곽선 크기를 정합니다. 자동값은 페이지 너비를 기준으로 각 페이지에 맞춰 계산하고, 수동값은 모든 페이지와 앞으로 추가될 페이지에 같은 크기로 적용합니다.': 'Sets the number box and outline sizes shown in the analysis view. Auto is calculated per page from page width, while manual applies the same size to all current and future pages.',
+    '적용 방식': 'Apply Mode',
+    '자동값(페이지별 너비 기준)': 'Auto (per-page width based)',
+    '수동값(전 페이지 공통)': 'Manual (shared for all pages)',
+    '텍스트 번호 박스 크기': 'Text Number Box Size',
+    '분석 외곽선 크기': 'Analysis Outline Size',
+    '자동값을 선택하면 위 수동값은 저장되어 있다가 수동값으로 바꿀 때 다시 사용됩니다.': 'When Auto is selected, the manual values above are kept and reused when switching back to Manual.',
+}
+UI_KO_EN.update(_ANALYSIS_BOX_SIZE_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _ANALYSIS_BOX_SIZE_KO_EN.items()})
+SHORTCUT_TR_KO_EN.update({'분석 박스 크기': 'Analysis Box Size'})
+
+
+_BATCH_PROJECT_TEXT_EXPORT_KO_EN = {
+    '내보낼 텍스트가 없습니다.': 'There is no text to export.',
+    '프로젝트 통합 지문 추출': 'Combined project text export',
+    '프로젝트 통합 파일 추출': 'Export combined project TXT',
+    '선택한 페이지의 지문을 프로젝트 제목의 단일 TXT 파일로도 함께 추출합니다.': 'Also export the selected pages into one TXT file named after the project title.',
+    '기존 페이지별 TXT도 함께 생성됩니다.': 'Existing per-page TXT files are also created.',
+    '프로젝트 통합 파일': 'Combined project file',
+    '프로젝트 통합 지문 추출 완료': 'Combined project text export complete',
+    '프로젝트 통합 지문 추출 실패': 'Combined project text export failed',
+}
+UI_KO_EN.update(_BATCH_PROJECT_TEXT_EXPORT_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _BATCH_PROJECT_TEXT_EXPORT_KO_EN.items()})
+
+
+_API_DIAGNOSTICS_KO_EN = {
+    'API 응답 테스트': 'API Response Test',
+    '프로그램 적용 테스트': 'Program Apply Test',
+    'API 사전 점검': 'API Preflight Check',
+    '프로그램 내부 점검': 'Program Internal Check',
+    '실전 테스트': 'Practical Test',
+    '현재 입력값으로 실제 API 요청을 보내고 응답 수신·기본 파싱 여부를 검사합니다.': 'Sends a real API request with the current settings and checks response/parsing.',
+    'API 응답 결과를 YSB 내부 파서/디코더와 임시 파일 저장·재읽기 경로에 적용할 수 있는지 검사합니다.': 'Checks whether the API response can be parsed/decoded and saved/read through YSB.',
+    '실제 이미지/번역문/인페인팅 작업을 보내지 않고 토큰, URL, 모델명, 가벼운 연결·인증만 점검합니다.': 'Checks tokens, URLs, model names, and lightweight connection/auth without sending real images, translation text, or inpainting jobs.',
+    '외부 API를 호출하지 않고 mock 결과로 YSB 내부 파서/디코더, 한글·일본어 경로 저장·재읽기, 데이터 적용 경로를 점검합니다.': 'Checks YSB internal parsers/decoders, Korean/Japanese path save-read, and data application routes with mock results without calling external APIs.',
+    '내장 샘플 이미지/마스크/문장을 실제 provider에 보내 결과를 확인합니다. API 사용량 또는 비용이 발생할 수 있습니다.': 'Sends bundled sample images, masks, or text to the real provider and checks the result. API usage or cost may occur.',
+    '테스트 중...': 'Testing...',
+    '진단 로그': 'Diagnostic log',
+    '원인/결과': 'Cause/result',
+    '응답 일부': 'Response excerpt',
+}
+UI_KO_EN.update(_API_DIAGNOSTICS_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _API_DIAGNOSTICS_KO_EN.items()})
+API_TR_KO_EN.update(_API_DIAGNOSTICS_KO_EN)
+
+
+# Patch: text number box visibility shortcut / paint-mode horizontal wheel scroll
+_TEXT_NUMBER_BOX_VISIBILITY_KO_EN = {
+    '텍스트 넘버 박스 숨기기/표시': 'Hide/Show Text Number Boxes',
+    '텍스트 넘버 박스': 'Text Number Boxes',
+    '화면 가로 이동': 'Horizontal View Scroll',
+}
+UI_KO_EN.update(_TEXT_NUMBER_BOX_VISIBILITY_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _TEXT_NUMBER_BOX_VISIBILITY_KO_EN.items()})
+SHORTCUT_TR_KO_EN.update({
+    '텍스트 넘버 박스 숨기기/표시': 'Hide/Show Text Number Boxes',
+})

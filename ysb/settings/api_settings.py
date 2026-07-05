@@ -7,8 +7,11 @@ from PyQt6.QtWidgets import (
     QGroupBox, QRadioButton, QButtonGroup, QComboBox, QFileDialog,
     QFrame, QWidget, QScrollArea, QTabWidget, QSpinBox
 )
+from PyQt6.QtCore import QObject, QRunnable, QThreadPool, pyqtSignal
 
 from ysb.core.cache_utils import get_cache_file
+from ysb.core.lm_studio_compat import run_lm_studio_json_compatibility_test
+from ysb.core.api_diagnostics import run_api_diagnostic
 
 CACHE_FILE_NAME = "api_cache.json"
 
@@ -260,7 +263,7 @@ class ApiSettings:
     stable_inpaint_exclude_sfx_ocr_candidates: bool = False
     gemini_inpaint_exclude_sfx_ocr_candidates: bool = False
     local_lama_exclude_sfx_ocr_candidates: bool = False
-    gemini_inpaint_model: str = "gemini-2.5-flash-image"
+    gemini_inpaint_model: str = "gemini-3.1-flash-image"
     gemini_inpaint_prompt: str = (
         "Remove the text only inside the white mask area and reconstruct the original manga background. "
         "Keep all characters, panel borders, screentones, line art, and unmasked areas unchanged. "
@@ -301,6 +304,12 @@ class ApiSettingsStore:
             legacy_inpaint_provider = str(base.get("selected_inpaint_provider", "") or "").lower()
             if legacy_inpaint_provider.startswith("local_"):
                 base["selected_inpaint_provider"] = "local_lama" if local_enabled else "replicate_lama"
+
+
+            # Stable Diffusion Inpainting은 Replicate API 예제가 version hash가 붙은 ref를 사용한다.
+            # 구버전 캐시에 owner/model만 남아 있으면 실전 prediction에서 404가 날 수 있으므로 자동 보정한다.
+            if str(base.get("stable_inpaint_model", "") or "").strip() == "stability-ai/stable-diffusion-inpainting":
+                base["stable_inpaint_model"] = "stability-ai/stable-diffusion-inpainting:95b7223104132402a9ae91cc677285bc5eb997834bd2349fa486f53910fd68b3"
 
             # v1.6 이전 캐시는 replicate_api_token 하나를 LaMa/Stable이 공유했다.
             # 새 구조에서는 두 토큰을 분리하되, 기존 사용자가 바로 깨지지 않도록 최초 로드 시 양쪽에 복사한다.
@@ -416,10 +425,11 @@ def apply_settings_to_config(settings: ApiSettings):
         Config.STABLE_INPAINT_WAIT_SECONDS = max(0, int(getattr(settings, "stable_inpaint_wait_seconds", 3) or 0))
         Config.LOCAL_LAMA_WAIT_SECONDS = max(0, int(getattr(settings, "local_lama_wait_seconds", 0) or 0))
         Config.LOCAL_LAMA_DEVICE = (getattr(settings, "local_lama_device", "auto") or "auto").strip() or "auto"
-        gemini_inpaint_model = settings.gemini_inpaint_model.strip() or "gemini-2.5-flash-image"
-        # The old preview model was shut down; auto-migrate old cache values.
-        if gemini_inpaint_model == "gemini-2.5-flash-image":
-            gemini_inpaint_model = "gemini-2.5-flash-image"
+        gemini_inpaint_model = settings.gemini_inpaint_model.strip() or "gemini-3.1-flash-image"
+        # Old/experimental image model names are no longer reliable.  Auto-migrate
+        # them to the current image editing default so existing caches do not fail.
+        if gemini_inpaint_model in ("gemini-2.5-flash-image", "gemini-2.5-flash-image-preview", "gemini-2.0-flash-exp-image-generation"):
+            gemini_inpaint_model = "gemini-3.1-flash-image"
         Config.GEMINI_INPAINT_MODEL = gemini_inpaint_model
         Config.GEMINI_INPAINT_PROMPT = settings.gemini_inpaint_prompt.strip() or (
             "Remove the text only inside the white mask area and reconstruct the original manga background. "
@@ -431,6 +441,72 @@ def apply_settings_to_config(settings: ApiSettings):
             _os.environ["REPLICATE_API_TOKEN"] = Config.REPLICATE_API_TOKEN
     except Exception:
         pass
+
+
+
+
+class LmStudioCompatSignals(QObject):
+    finished = pyqtSignal(dict)
+
+
+class LmStudioCompatRunnable(QRunnable):
+    def __init__(self, base_url: str, model: str, api_key: str):
+        super().__init__()
+        self.base_url = base_url
+        self.model = model
+        self.api_key = api_key
+        self.signals = LmStudioCompatSignals()
+
+    def run(self):
+        try:
+            result = run_lm_studio_json_compatibility_test(
+                self.base_url,
+                self.model,
+                self.api_key,
+                timeout=45,
+            )
+        except Exception as exc:
+            result = {
+                "ok": False,
+                "level": "error",
+                "reason": f"LM Studio 호환성 테스트 중 오류가 발생했습니다: {exc}",
+            }
+        self.signals.finished.emit(result)
+
+
+class ApiDiagnosticSignals(QObject):
+    finished = pyqtSignal(dict)
+
+
+class ApiDiagnosticRunnable(QRunnable):
+    def __init__(self, settings_payload: dict, category: str, provider: str, test_kind: str):
+        super().__init__()
+        self.settings_payload = dict(settings_payload or {})
+        self.category = str(category or "")
+        self.provider = str(provider or "")
+        self.test_kind = str(test_kind or "response")
+        self.signals = ApiDiagnosticSignals()
+
+    def run(self):
+        try:
+            result = run_api_diagnostic(
+                self.settings_payload,
+                self.category,
+                self.provider,
+                self.test_kind,
+            )
+        except Exception as exc:
+            result = {
+                "ok": False,
+                "category": self.category,
+                "provider": self.provider,
+                "test_kind": self.test_kind,
+                "detail": f"API 진단 실행 중 오류가 발생했습니다: {exc}",
+                "steps": [],
+                "log_path": "",
+            }
+        self.signals.finished.emit(result)
+
 
 
 class ApiSettingsDialog(QDialog):
@@ -452,6 +528,8 @@ class ApiSettingsDialog(QDialog):
         self.combos = {}
         self.buttons = {}
         self.button_groups = {}
+        self._provider_categories = {}
+        self._api_diag_buttons = {}
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
@@ -553,7 +631,7 @@ class ApiSettingsDialog(QDialog):
                     ],
                 },
             ])
-        self._add_api_section(ocr_content_layout, "OCR", ocr_cards, "selected_ocr_provider")
+        self._add_api_section(ocr_content_layout, "OCR", ocr_cards, "selected_ocr_provider", category="ocr")
 
         inpaint_cards = [
             {"_category": True, "title": "API 기반 모델", "description": "외부 API를 사용하는 인페인팅 모델입니다. API 키가 필요합니다."},
@@ -580,7 +658,7 @@ class ApiSettingsDialog(QDialog):
                 "provider": "gemini_inpaint",
                 "title": "Gemini Image Inpainting",
                 "fields": [
-                    ("Model", "gemini_inpaint_model", False, "gemini-2.5-flash-image"),
+                    ("Model", "gemini_inpaint_model", False, "gemini-3.1-flash-image"),
                     ("Prompt", "gemini_inpaint_prompt", False, "Remove text inside the white mask and reconstruct the manga background"),
                     ("API Key", "gemini_api_key", True, "Gemini API Key (shared with translation)"),
                 ],
@@ -599,7 +677,7 @@ class ApiSettingsDialog(QDialog):
                     ],
                 },
             ])
-        self._add_api_section(inpaint_content_layout, tr_api("인페인팅", self._ui_language), inpaint_cards, "selected_inpaint_provider")
+        self._add_api_section(inpaint_content_layout, tr_api("인페인팅", self._ui_language), inpaint_cards, "selected_inpaint_provider", category="inpaint")
 
         self._add_api_section(trans_content_layout, tr_api("번역", self._ui_language), [
             {
@@ -682,7 +760,7 @@ class ApiSettingsDialog(QDialog):
                     ("API Key", "lm_studio_api_key", True, "비워도 됨 / optional"),
                 ],
             },
-        ], "selected_translation_provider")
+        ], "selected_translation_provider", category="translation")
 
         ocr_content_layout.addStretch(1)
         inpaint_content_layout.addStretch(1)
@@ -725,7 +803,7 @@ class ApiSettingsDialog(QDialog):
         # 새 카드형 UI에서는 굵은 구분선 대신 섹션 카드 자체의 여백/외곽선으로 구분한다.
         return
 
-    def _add_api_section(self, parent_layout, section_title, cards, selected_attr):
+    def _add_api_section(self, parent_layout, section_title, cards, selected_attr, category=""):
         block = QFrame(self)
         block.setObjectName("SettingsBlock")
         block_layout = QVBoxLayout(block)
@@ -874,6 +952,44 @@ class ApiSettingsDialog(QDialog):
                         grid.addWidget(edit, r, 1)
                 self.edits.setdefault(key, []).append(edit)
             item_layout.addLayout(grid)
+
+            if (not settings_only) and provider:
+                try:
+                    self._provider_categories[str(provider)] = str(category or "")
+                    diag_row = QHBoxLayout()
+                    diag_row.setContentsMargins(0, 2, 0, 0)
+                    diag_row.setSpacing(8)
+                    response_btn = QPushButton(tr_api("API 사전 점검", self._ui_language), item)
+                    response_btn.setToolTip(tr_api("실제 이미지/번역문/인페인팅 작업을 보내지 않고 토큰, URL, 모델명, 가벼운 연결·인증만 점검합니다.", self._ui_language))
+                    response_btn.clicked.connect(lambda _=False, p=str(provider), c=str(category or ""): self.run_api_diagnostic_test(c, p, "response"))
+                    apply_btn = QPushButton(tr_api("프로그램 내부 점검", self._ui_language), item)
+                    apply_btn.setToolTip(tr_api("외부 API를 호출하지 않고 mock 결과로 YSB 내부 파서/디코더, 한글·일본어 경로 저장·재읽기, 데이터 적용 경로를 점검합니다.", self._ui_language))
+                    apply_btn.clicked.connect(lambda _=False, p=str(provider), c=str(category or ""): self.run_api_diagnostic_test(c, p, "apply"))
+                    practical_btn = QPushButton(tr_api("실전 테스트", self._ui_language), item)
+                    practical_btn.setToolTip(tr_api("내장 샘플 이미지/마스크/문장을 실제 provider에 보내 결과를 확인합니다. API 사용량 또는 비용이 발생할 수 있습니다.", self._ui_language))
+                    practical_btn.clicked.connect(lambda _=False, p=str(provider), c=str(category or ""): self.run_api_diagnostic_test(c, p, "practical"))
+                    self._api_diag_buttons[(str(provider), "response")] = response_btn
+                    self._api_diag_buttons[(str(provider), "apply")] = apply_btn
+                    self._api_diag_buttons[(str(provider), "practical")] = practical_btn
+                    diag_row.addWidget(response_btn)
+                    diag_row.addWidget(apply_btn)
+                    diag_row.addWidget(practical_btn)
+                    diag_row.addStretch(1)
+                    item_layout.addLayout(diag_row)
+                except Exception:
+                    pass
+
+            if provider == "lm_studio":
+                lm_test_row = QHBoxLayout()
+                lm_test_row.setContentsMargins(0, 2, 0, 0)
+                lm_test_row.setSpacing(8)
+                lm_test_btn = QPushButton(tr_api("LM Studio JSON 호환성 테스트", self._ui_language), item)
+                lm_test_btn.setToolTip(tr_api("현재 Base URL과 Model로 짧은 샘플 번역을 보내고, 응답이 YSB 자동 번역용 JSON 형식인지 검사합니다.", self._ui_language))
+                lm_test_btn.clicked.connect(self.test_lm_studio_json_compatibility)
+                self._lm_studio_test_button = lm_test_btn
+                lm_test_row.addWidget(lm_test_btn)
+                lm_test_row.addStretch(1)
+                item_layout.addLayout(lm_test_row)
             block_layout.addWidget(item)
             if (not settings_only) and radio is not None and provider == selected_value:
                 radio.setChecked(True)
@@ -882,6 +998,145 @@ class ApiSettingsDialog(QDialog):
             group.buttons()[0].setChecked(True)
 
         parent_layout.addWidget(block)
+
+    def run_api_diagnostic_test(self, category: str, provider: str, test_kind: str):
+        settings_payload = asdict(self.get_settings())
+        key = (str(provider), str(test_kind))
+        btn = self._api_diag_buttons.get(key)
+        if btn is not None:
+            btn.setEnabled(False)
+            btn.setText(tr_api("테스트 중...", self._ui_language))
+        worker = ApiDiagnosticRunnable(settings_payload, category, provider, test_kind)
+        worker.signals.finished.connect(self._on_api_diagnostic_test_done)
+        self._api_diag_worker = worker
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_api_diagnostic_test_done(self, result: dict):
+        provider = str(result.get("provider") or "")
+        test_kind = str(result.get("test_kind") or "response")
+        btn = self._api_diag_buttons.get((provider, test_kind))
+        if btn is not None:
+            btn.setEnabled(True)
+            btn.setText(tr_api("API 사전 점검" if test_kind == "response" else ("실전 테스트" if test_kind == "practical" else "프로그램 내부 점검"), self._ui_language))
+        try:
+            self._api_diag_worker = None
+        except Exception:
+            pass
+
+        ok = bool(result.get("ok"))
+        title = tr_api("API 사전 점검" if test_kind == "response" else ("실전 테스트" if test_kind == "practical" else "프로그램 내부 점검"), self._ui_language)
+        category = str(result.get("category") or "")
+        detail = str(result.get("detail") or "")
+        summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+        failed_stage = str(result.get("failed_stage") or summary.get("failed_stage") or "")
+        request_sent = result.get("request_sent", summary.get("request_sent", None))
+        result_kind = str(result.get("result_kind") or summary.get("result_kind") or "")
+        lines = [
+            f"{title}: {'통과' if ok else '실패'}",
+            f"provider: {provider}",
+            f"category: {category}",
+        ]
+        if failed_stage:
+            lines.append(f"failed_stage: {failed_stage}")
+        if request_sent is not None:
+            lines.append(f"request_sent: {bool(request_sent)}")
+        if result_kind:
+            lines.append(f"result_kind: {result_kind}")
+        lines.append("")
+        for step in result.get("steps") or []:
+            if not isinstance(step, dict):
+                continue
+            mark = "✅" if step.get("ok") else "❌"
+            name = str(step.get("name") or "")
+            d = str(step.get("detail") or "")
+            lines.append(f"{mark} {name}")
+            if d:
+                lines.append(f"  {d[:900]}")
+        if detail:
+            lines.append("")
+            lines.append("원인/결과:")
+            lines.append(detail[:1200])
+        log_path = str(result.get("log_path") or "")
+        if log_path:
+            lines.append("")
+            lines.append("진단 로그:")
+            lines.append(log_path)
+        excerpt = str(result.get("data_excerpt") or "")
+        if excerpt:
+            lines.append("")
+            lines.append("응답 일부:")
+            lines.append(excerpt[:700])
+
+        message = "\n".join(lines)
+        if ok:
+            QMessageBox.information(self, title, message)
+        else:
+            QMessageBox.warning(self, title, message)
+
+
+    def test_lm_studio_json_compatibility(self):
+        base_url = self._first_edit_text("lm_studio_base_url") or "http://localhost:1234/v1"
+        model = self._first_edit_text("lm_studio_model")
+        api_key = self._first_edit_text("lm_studio_api_key")
+        btn = getattr(self, "_lm_studio_test_button", None)
+        if btn is not None:
+            btn.setEnabled(False)
+            btn.setText(tr_api("테스트 중...", self._ui_language))
+        worker = LmStudioCompatRunnable(base_url, model, api_key)
+        worker.signals.finished.connect(self._on_lm_studio_json_compatibility_test_done)
+        self._lm_studio_test_worker = worker
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_lm_studio_json_compatibility_test_done(self, result: dict):
+        btn = getattr(self, "_lm_studio_test_button", None)
+        if btn is not None:
+            btn.setEnabled(True)
+            btn.setText(tr_api("LM Studio JSON 호환성 테스트", self._ui_language))
+        try:
+            self._lm_studio_test_worker = None
+        except Exception:
+            pass
+
+        ok = bool(result.get("ok"))
+        level = str(result.get("level") or ("ok" if ok else "error"))
+        reason = str(result.get("reason") or "")
+        chat_url = str(result.get("chat_url") or "")
+        raw_excerpt = str(result.get("raw_excerpt") or "")
+        item_count = result.get("item_count")
+
+        lines = []
+        if ok:
+            lines.append(tr_api("호환성 테스트 통과", self._ui_language))
+            lines.append(tr_api("이 모델은 YSB 자동 번역 JSON 형식으로 사용할 수 있습니다.", self._ui_language))
+            if item_count:
+                lines.append(f"items: {item_count}")
+        else:
+            lines.append(tr_api("호환성 테스트 실패", self._ui_language))
+            lines.append(tr_api("이 모델은 YSB 자동 번역 JSON 형식과 맞지 않을 수 있습니다.", self._ui_language))
+            if result.get("has_reasoning_marker"):
+                lines.append(tr_api("reasoning/channel 토큰이 content에 섞였습니다.", self._ui_language))
+            if result.get("recoverable_json_found"):
+                lines.append(tr_api("응답 안에 JSON 블록은 있지만 앞뒤에 다른 텍스트가 붙어 있습니다.", self._ui_language))
+        if reason:
+            lines.append("")
+            lines.append(reason)
+        if chat_url:
+            lines.append("")
+            lines.append(f"URL: {chat_url}")
+        if raw_excerpt:
+            lines.append("")
+            lines.append(tr_api("응답 일부:", self._ui_language))
+            lines.append(raw_excerpt[:500])
+
+        title = tr_api("LM Studio JSON 호환성 테스트", self._ui_language)
+        message = "\n".join(lines)
+        if ok and level != "warning":
+            QMessageBox.information(self, title, message)
+        elif ok:
+            QMessageBox.warning(self, title, message)
+        else:
+            QMessageBox.warning(self, title, message)
+
 
     def browse_json_file(self, edit: QLineEdit):
         path, _ = QFileDialog.getOpenFileName(
@@ -1031,7 +1286,7 @@ class ApiSettingsDialog(QDialog):
             stable_inpaint_exclude_sfx_ocr_candidates=bool(getattr(self.settings, "stable_inpaint_exclude_sfx_ocr_candidates", False)),
             gemini_inpaint_exclude_sfx_ocr_candidates=bool(getattr(self.settings, "gemini_inpaint_exclude_sfx_ocr_candidates", False)),
             local_lama_exclude_sfx_ocr_candidates=bool(getattr(self.settings, "local_lama_exclude_sfx_ocr_candidates", False)),
-            gemini_inpaint_model=self._first_edit_text("gemini_inpaint_model") or "gemini-2.5-flash-image",
+            gemini_inpaint_model=self._first_edit_text("gemini_inpaint_model") or "gemini-3.1-flash-image",
             gemini_inpaint_prompt=self._first_edit_text("gemini_inpaint_prompt") or (
                 "Remove the text only inside the white mask area and reconstruct the original manga background. "
                 "Keep all characters, panel borders, screentones, line art, and unmasked areas unchanged. "

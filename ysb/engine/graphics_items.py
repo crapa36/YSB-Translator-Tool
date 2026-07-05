@@ -16,11 +16,21 @@ except Exception:
 try:
     from ysb.engines.japanese_text.qt_layout import (
         build_japanese_vertical_text_path as _build_japanese_vertical_text_path,
+        tokenize_vertical_text as _tokenize_vertical_text,
         vertical_space_advance as _vertical_space_advance,
     )
 except Exception:
     _build_japanese_vertical_text_path = None
+    _tokenize_vertical_text = None
     _vertical_space_advance = None
+try:
+    from ysb.engines.text_layout.vertical_layout_engine import build_vertical_text_layout as _ysb_build_vertical_text_layout
+except Exception:
+    _ysb_build_vertical_text_layout = None
+try:
+    from ysb.engines.text_layout.horizontal_layout_engine import build_horizontal_text_layout as _ysb_build_horizontal_text_layout
+except Exception:
+    _ysb_build_horizontal_text_layout = None
 
 
 # Photoshop의 Faux Italic 느낌에 맞춘 합성 기울임 강도.
@@ -894,15 +904,19 @@ def _fallback_vertical_effective_char_gap(base_cell_h, raw_gap=0.0):
     return raw + safe
 
 
-def build_typesetting_vertical_text_path(lines, font, align="center", line_height=None, letter_spacing=0):
+def build_typesetting_vertical_text_path(lines, font, align="center", line_height=None, letter_spacing=0, base_style=None):
     """Build a vertical-writing QPainterPath without mutating source text.
 
-    The primary path uses the Japanese vertical typesetting engine imported from
-    the sample generator.  It treats quote marks, ellipsis, punctuation, latin
-    runs, and short digit runs as vertical-layout tokens instead of stacking every
-    character as a full cell.  If that helper is unavailable, the old simple
+    The primary path is the canonical qt_layout vertical renderer.  The editor,
+    canvas refresh, and export route plain vertical text through this same helper
+    so Japanese/Korean punctuation and merged long-mark runs are measured once and
+    drawn from the same path.  If that helper is unavailable, the old simple
     one-glyph-per-cell fallback below is still kept for startup safety.
     """
+    try:
+        partial_horizontal_enabled = bool((base_style or {}).get('partial_horizontal_writing_enabled', True))
+    except Exception:
+        partial_horizontal_enabled = True
     if _build_japanese_vertical_text_path is not None:
         try:
             return _build_japanese_vertical_text_path(
@@ -911,11 +925,13 @@ def build_typesetting_vertical_text_path(lines, font, align="center", line_heigh
                 align=align,
                 line_height=line_height,
                 letter_spacing=letter_spacing,
-                latin_mode="auto",
-                digit_mode="auto",
+                latin_mode="auto" if partial_horizontal_enabled else "upright",
+                digit_mode="auto" if partial_horizontal_enabled else "upright",
                 punctuation_mode="japanese_vertical",
                 random_key="ysb_vertical_text",
                 vertical_char_spacing=letter_spacing,
+                base_style=base_style,
+                partial_horizontal_enabled=partial_horizontal_enabled,
             )
         except Exception:
             # Keep the legacy renderer as a no-crash fallback.  Rendering quality
@@ -956,30 +972,70 @@ def build_typesetting_vertical_text_path(lines, font, align="center", line_heigh
         col_path = QPainterPath()
         cursor_y = 0.0
         glyph_rects = []
-        for ch in glyphs:
+        idx = 0
+        base_style_for_special = {'font_size': int(path_font.pixelSize() if path_font.pixelSize() > 0 else fm.height())}
+        base_family_for_special = path_font.family()
+        base_size_for_special = int(path_font.pixelSize() if path_font.pixelSize() > 0 else fm.height())
+        while idx < len(glyphs):
+            ch = glyphs[idx]
+            run_len = _long_mark_run_len(glyphs, idx, 'vertical')
+            if run_len >= 2:
+                run_h = 0.0
+                run_w = max(1.0, float(tight_cell_w))
+                for k in range(run_len):
+                    adv_k, metric_h_k, _font_k, _fm_k = _horizontal_special_metrics(glyphs[idx + k], base_style_for_special, base_family_for_special, base_size_for_special)
+                    run_h += adv_k
+                    run_w = max(run_w, metric_h_k)
+                run_slot = QRectF(-run_w / 2.0, cursor_y, run_w, max(1.0, run_h))
+                run_path = build_long_mark_run_path(run_slot, base_style_for_special, 'vertical')
+                if not run_path.isEmpty():
+                    col_path.addPath(run_path)
+                glyph_rects.append(run_path.boundingRect())
+                cursor_y += max(1.0, run_h)
+                if idx + run_len < len(glyphs):
+                    cursor_y += float(vertical_letter_gap)
+                idx += run_len
+                continue
+
+            next_ch = glyphs[idx + 1] if idx + 1 < len(glyphs) else ''
             if str(ch).isspace():
                 cursor_y += _fallback_vertical_space_advance(ch, line_height, vertical_letter_gap)
+                idx += 1
                 continue
-            glyph_path = QPainterPath()
-            glyph_path.addText(0, 0, path_font, ch)
+            if _special_writing_char_kind(ch, 'vertical'):
+                adv_v, metric_w_v, _sf, _sfm = _horizontal_special_metrics(ch, base_style_for_special, base_family_for_special, base_size_for_special)
+                special_slot = QRectF(-metric_w_v / 2.0, cursor_y, metric_w_v, adv_v)
+            else:
+                special_slot = QRectF(-max(1.0, tight_cell_w) / 2.0, cursor_y, max(1.0, tight_cell_w), max(1.0, tight_cell_h))
+            glyph_path = build_special_writing_char_path(ch, special_slot, base_style_for_special, 'vertical')
             glyph_rect = glyph_path.boundingRect()
-            if glyph_rect.isNull() or glyph_rect.width() <= 0 or glyph_rect.height() <= 0:
-                glyph_rect = QRectF(0, -fm.ascent(), max(1, fm.horizontalAdvance(ch)), max(1, tight_cell_h))
-            dx = -glyph_rect.center().x()
-            dy = cursor_y - glyph_rect.top()
-            tr = QTransform()
-            tr.translate(dx, dy)
-            mapped_glyph = tr.map(glyph_path)
+            if glyph_path.isEmpty():
+                glyph_path = QPainterPath()
+                glyph_path.addText(0, 0, path_font, ch)
+                glyph_rect = glyph_path.boundingRect()
+                if glyph_rect.isNull() or glyph_rect.width() <= 0 or glyph_rect.height() <= 0:
+                    glyph_rect = QRectF(0, -fm.ascent(), max(1, fm.horizontalAdvance(ch)), max(1, tight_cell_h))
+                dx = -glyph_rect.center().x()
+                dy = cursor_y - glyph_rect.top()
+                tr = QTransform()
+                tr.translate(dx, dy)
+                mapped_glyph = tr.map(glyph_path)
+            else:
+                mapped_glyph = glyph_path
+                glyph_rect = mapped_glyph.boundingRect()
             if not mapped_glyph.isEmpty():
                 col_path.addPath(mapped_glyph)
             mapped_rect = QRectF(glyph_rect)
-            mapped_rect.translate(dx, dy)
             glyph_rects.append(mapped_rect)
             try:
-                adv_y = max(float(tight_cell_h), float(glyph_rect.height()))
+                if _special_writing_char_kind(ch, 'vertical'):
+                    adv_y = max(1.0, float(special_slot.height()))
+                else:
+                    adv_y = max(float(tight_cell_h), float(glyph_rect.height()))
             except Exception:
                 adv_y = float(tight_cell_h)
             cursor_y += adv_y + float(vertical_letter_gap)
+            idx += 1
 
         if italic_requested and not col_path.isEmpty():
             shear = QTransform()
@@ -1034,7 +1090,942 @@ def build_typesetting_vertical_text_path(lines, font, align="center", line_heigh
     return path, line_rects
 
 
-def build_typesetting_text_path(lines, font, align="center", line_height=None, letter_spacing=0, writing_direction="horizontal"):
+def _normalize_partial_style_runs(style_runs, text_len=None):
+    """Normalize per-character style runs stored on a text data dict.
+
+    Schema: [{'start': int, 'end': int, 'style': {'text_color': '#...', ...}}, ...]
+    Runs are intentionally simple and optional; unsupported/empty runs are ignored.
+    """
+    try:
+        n = int(text_len) if text_len is not None else None
+    except Exception:
+        n = None
+    out = []
+    if not isinstance(style_runs, (list, tuple)):
+        return out
+    supported = {
+        'font_family', 'font_size', 'text_color', 'stroke_color', 'stroke_width',
+        'bold', 'italic', 'strike',
+        # Partial typesetting metrics.  These are intentionally allowed per run:
+        # line_spacing affects the whole visual line that contains the run,
+        # letter_spacing affects spacing after chars inside the run,
+        # char_width/char_height scale glyph paths and advances for that run.
+        'line_spacing', 'letter_spacing', 'char_width', 'char_height',
+    }
+    for run in style_runs:
+        if not isinstance(run, dict):
+            continue
+        try:
+            start = int(run.get('start', 0) or 0)
+            end = int(run.get('end', 0) or 0)
+        except Exception:
+            continue
+        if n is not None:
+            start = max(0, min(n, start))
+            end = max(0, min(n, end))
+        if end <= start:
+            continue
+        style = run.get('style')
+        if not isinstance(style, dict):
+            style = {k: run.get(k) for k in supported if k in run}
+        clean = {}
+        for k, v in style.items():
+            if k not in supported:
+                continue
+            if v is None:
+                continue
+            clean[k] = copy.deepcopy(v)
+        if not clean:
+            continue
+        out.append({'start': start, 'end': end, 'style': clean})
+    out.sort(key=lambda r: (int(r.get('start', 0)), int(r.get('end', 0))))
+    return out
+
+
+def _style_for_char_index(style_runs, index, base_style):
+    style = dict(base_style or {})
+    try:
+        idx = int(index)
+    except Exception:
+        return style
+    for run in style_runs or []:
+        try:
+            if int(run.get('start', 0)) <= idx < int(run.get('end', 0)):
+                st = run.get('style') or {}
+                if isinstance(st, dict):
+                    style.update(st)
+        except Exception:
+            continue
+    return style
+
+
+def _styled_font_from_style(style, fallback_family, fallback_size):
+    try:
+        family = str(style.get('font_family') or fallback_family or '')
+    except Exception:
+        family = str(fallback_family or '')
+    try:
+        size = int(style.get('font_size') or fallback_size or 24)
+    except Exception:
+        size = int(fallback_size or 24)
+    font = QFont(family)
+    font.setPixelSize(max(1, size))
+    _apply_readable_bold_to_font(font, bool(style.get('bold', False)))
+    font.setItalic(bool(style.get('italic', False)))
+    return font
+
+
+LONG_MARK_CHARS = set("ㅡー─━—―－-–﹘﹣ー")
+VERTICAL_LONG_MARK_CHARS = set("│｜丨ㅣ┃┆┇")
+VERTICAL_ELLIPSIS_CHARS = set(("…", "⋯", "⋮"))
+
+
+def _is_long_mark_char(ch):
+    return str(ch or "") in LONG_MARK_CHARS
+
+
+def _is_vertical_long_mark_char(ch):
+    return str(ch or "") in VERTICAL_LONG_MARK_CHARS
+
+
+def _is_vertical_ellipsis_char(ch):
+    return str(ch or "") in VERTICAL_ELLIPSIS_CHARS
+
+
+def _special_writing_char_kind(ch, writing_direction='horizontal'):
+    ch = str(ch or '')
+    direction = _normalize_typesetting_writing_direction(writing_direction)
+    if direction == 'vertical':
+        if _is_vertical_ellipsis_char(ch):
+            return 'v_ellipsis'
+        if _is_long_mark_char(ch) or _is_vertical_long_mark_char(ch):
+            return 'v_long'
+    else:
+        if _is_long_mark_char(ch):
+            return 'h_long'
+    return ''
+
+
+def _same_long_mark_pair(ch, next_ch):
+    ch = str(ch or "")
+    next_ch = str(next_ch or "")
+    return bool(ch and next_ch and ch == next_ch and _is_long_mark_char(ch))
+
+
+def _same_special_long_pair(ch, next_ch, writing_direction='horizontal'):
+    ch = str(ch or '')
+    next_ch = str(next_ch or '')
+    if not ch or not next_ch or ch != next_ch:
+        return False
+    return _special_writing_char_kind(ch, writing_direction) in ('h_long', 'v_long')
+
+
+def _same_mergeable_special_pair(ch, next_ch):
+    ch = str(ch or '')
+    next_ch = str(next_ch or '')
+    if not ch or not next_ch:
+        return False
+    return (
+        (_is_long_mark_char(ch) and _is_long_mark_char(next_ch))
+        or (_is_vertical_long_mark_char(ch) and _is_vertical_long_mark_char(next_ch))
+    )
+
+
+def _is_horizontal_long_mark_run_char(ch):
+    return _is_long_mark_char(ch)
+
+
+def _is_vertical_long_mark_run_char(ch):
+    return _is_long_mark_char(ch) or _is_vertical_long_mark_char(ch)
+
+
+def _long_mark_run_len(chars, start, writing_direction='horizontal'):
+    try:
+        chars = list(chars or [])
+        start = int(start)
+    except Exception:
+        return 0
+    if start < 0 or start >= len(chars):
+        return 0
+    first = str(chars[start] or '')
+    if writing_direction == 'vertical':
+        if not _is_vertical_long_mark_run_char(first):
+            return 0
+        def _is_run_char(c):
+            return _is_vertical_long_mark_run_char(c)
+    else:
+        if not _is_horizontal_long_mark_run_char(first):
+            return 0
+        def _is_run_char(c):
+            return _is_horizontal_long_mark_run_char(c)
+    n = 1
+    i = start + 1
+    # Treat all adjacent long-mark class characters as one run.  OCR/translation
+    # often mixes ㅡ/―/ー/─ while the user visually expects one continuous mark.
+    while i < len(chars) and _is_run_char(str(chars[i] or '')):
+        n += 1
+        i += 1
+    return n
+
+
+def _long_mark_thickness_from_rect(rr, style=None, writing_direction='horizontal'):
+    """Horizontal-canonical long-mark thickness.
+
+    Even for vertical writing, special marks are treated as the horizontal mark
+    rotated 90 degrees.  Therefore the thickness rule is always the horizontal
+    one: it is based on the canonical horizontal slot height, not on a separate
+    vertical formula.
+    """
+    st = dict(style or {})
+    try:
+        font_size = max(1.0, float(st.get('font_size', 24) or 24))
+    except Exception:
+        font_size = 24.0
+    # Stroke/outline is applied by the painter.  Do not include stroke_width in
+    # the fill bar thickness, otherwise vertical long marks become double-thick
+    # compared with the horizontal glyph.
+    return max(1.2, min(float(rr.height()) * 0.18, max(font_size * 0.075, 1.2)))
+
+
+def _horizontal_long_mark_path_in_rect(rect, style=None, overshoot=False):
+    rr = QRectF(rect)
+    path = QPainterPath()
+    if rr.isNull() or rr.width() <= 0 or rr.height() <= 0:
+        return path
+    thickness = _long_mark_thickness_from_rect(rr, style, 'horizontal')
+    extra = min(float(rr.width()) * 0.18, thickness * 0.9) if overshoot else 0.0
+    bar = QRectF(
+        rr.left() - extra,
+        rr.center().y() - thickness / 2.0,
+        rr.width() + extra * 2.0,
+        thickness,
+    )
+    radius = max(0.5, thickness / 2.0)
+    path.addRoundedRect(bar, radius, radius)
+    return path
+
+
+def _horizontal_ellipsis_path_in_rect(rect, style=None):
+    rr = QRectF(rect)
+    path = QPainterPath()
+    if rr.isNull() or rr.width() <= 0 or rr.height() <= 0:
+        return path
+    dot_d = max(1.5, min(float(rr.height()) * 0.44, float(rr.width()) / 5.2))
+    gap = max(1.0, min(float(rr.width()) * 0.12, dot_d * 0.75))
+    total = dot_d * 3.0 + gap * 2.0
+    start_x = rr.center().x() - total / 2.0
+    start_y = rr.center().y() - dot_d / 2.0
+    for i in range(3):
+        path.addEllipse(QRectF(start_x + i * (dot_d + gap), start_y, dot_d, dot_d))
+    return path
+
+
+def _rotate_horizontal_path_to_vertical_slot(path, horizontal_rect, target_rect):
+    if path is None or path.isEmpty():
+        return QPainterPath()
+    hr = QRectF(horizontal_rect)
+    trr = QRectF(target_rect)
+    tr = QTransform()
+    tr.translate(trr.center().x(), trr.center().y())
+    tr.rotate(90)
+    tr.translate(-hr.center().x(), -hr.center().y())
+    return tr.map(path)
+
+
+def _horizontal_canonical_rect_for_vertical_slot(slot_rect):
+    rr = QRectF(slot_rect)
+    # Width becomes vertical length after rotation; height becomes vertical column width.
+    return QRectF(0.0, 0.0, max(1.0, rr.height()), max(1.0, rr.width()))
+
+
+def build_long_mark_run_path(slot_rect, style=None, writing_direction='horizontal'):
+    """Build one continuous path for a whole repeated long-mark run.
+
+    A vertical long mark is not a separately designed vertical bar.  It is the
+    same horizontal mark path rotated into the vertical slot, so thickness,
+    radius, and end-cap feel match horizontal writing.
+    """
+    rr = QRectF(slot_rect)
+    if rr.isNull() or rr.width() <= 0 or rr.height() <= 0:
+        return QPainterPath()
+    direction = _normalize_typesetting_writing_direction(writing_direction)
+    if direction == 'vertical':
+        hrect = _horizontal_canonical_rect_for_vertical_slot(rr)
+        hpath = _horizontal_long_mark_path_in_rect(hrect, style, overshoot=False)
+        return _rotate_horizontal_path_to_vertical_slot(hpath, hrect, rr)
+    return _horizontal_long_mark_path_in_rect(rr, style, overshoot=False)
+
+
+def build_special_writing_char_path(ch, slot_rect, style=None, writing_direction='horizontal'):
+    rr = QRectF(slot_rect)
+    if rr.isNull() or rr.width() <= 0 or rr.height() <= 0:
+        return QPainterPath()
+    kind = _special_writing_char_kind(ch, writing_direction)
+    if not kind:
+        return QPainterPath()
+    if kind == 'h_long':
+        return _horizontal_long_mark_path_in_rect(rr, style, overshoot=True)
+    if kind == 'v_long':
+        hrect = _horizontal_canonical_rect_for_vertical_slot(rr)
+        hpath = _horizontal_long_mark_path_in_rect(hrect, style, overshoot=True)
+        return _rotate_horizontal_path_to_vertical_slot(hpath, hrect, rr)
+    if kind == 'v_ellipsis':
+        hrect = _horizontal_canonical_rect_for_vertical_slot(rr)
+        hpath = _horizontal_ellipsis_path_in_rect(hrect, style)
+        return _rotate_horizontal_path_to_vertical_slot(hpath, hrect, rr)
+    return QPainterPath()
+
+
+def _horizontal_special_metrics(ch, style, fallback_family, fallback_size):
+    """Return horizontal-writing metrics for a special mark.
+
+    For vertical writing, long marks are the horizontal mark rotated.  So the
+    vertical advance must be the horizontal advance, and the vertical column width
+    must be the horizontal line/font height.  This avoids using vertical slot size
+    as a fake horizontal rect.
+    """
+    st = dict(style or {})
+    font = _styled_font_from_style(st, fallback_family, fallback_size)
+    path_font = QFont(font)
+    path_font.setItalic(False)
+    fm = QFontMetrics(path_font)
+    sx = _style_scale_factor(st, 'char_width', 100)
+    sy = _style_scale_factor(st, 'char_height', 100)
+    try:
+        adv = max(1.0, float(fm.horizontalAdvance(str(ch))) * sx)
+    except Exception:
+        try:
+            adv = max(1.0, float(fm.boundingRect(str(ch)).width()) * sx)
+        except Exception:
+            adv = max(1.0, float(fallback_size) * sx)
+    try:
+        metric_h = max(1.0, float(fm.height()) * sy)
+    except Exception:
+        metric_h = max(1.0, float(fallback_size + 4) * sy)
+    return adv, metric_h, font, fm
+
+
+def _style_int_value(style, key, default=0):
+    try:
+        return int(round(float((style or {}).get(key, default))))
+    except Exception:
+        try:
+            return int(default)
+        except Exception:
+            return 0
+
+
+def _style_scale_factor(style, key, default_pct=100):
+    try:
+        pct = clamp_text_char_scale((style or {}).get(key, default_pct), default_pct)
+    except Exception:
+        pct = default_pct
+    try:
+        return max(0.01, float(pct) / 100.0)
+    except Exception:
+        return max(0.01, float(default_pct or 100) / 100.0)
+
+
+def _style_letter_spacing_value(style, default_spacing=0):
+    return _style_int_value(style, 'letter_spacing', default_spacing)
+
+
+def _style_line_spacing_pct_value(style, default_pct=100):
+    try:
+        return clamp_text_line_spacing((style or {}).get('line_spacing', default_pct), default_pct)
+    except Exception:
+        return default_pct
+
+
+def _style_run_signature(style):
+    """Paint grouping signature for partial styled paths.
+
+    Defaults are normalized so metadata like letter_spacing=0 or char_width=100
+    does not force vertical text into the fallback renderer when it is visually
+    identical to the base item style.
+    """
+    st = dict(style or {})
+    defaults = {
+        'stroke_width': 0,
+        'bold': False,
+        'italic': False,
+        'strike': False,
+        'line_spacing': 100,
+        'letter_spacing': 0,
+        'char_width': 100,
+        'char_height': 100,
+    }
+    for k, v in defaults.items():
+        st.setdefault(k, v)
+    keys = (
+        'font_family', 'font_size', 'text_color', 'stroke_color', 'stroke_width',
+        'bold', 'italic', 'strike', 'line_spacing', 'letter_spacing',
+        'char_width', 'char_height',
+    )
+    return tuple((k, str(st.get(k, ''))) for k in keys)
+
+
+def _vertical_runs_have_visible_difference(runs, text_len, base_style):
+    """Return True only when partial style runs really change vertical rendering.
+
+    The inline editor may leave style-run metadata even when every character still
+    matches the base item style.  In that case falling back to the per-character
+    vertical renderer makes punctuation/long marks look different from the main
+    qt_layout renderer.  Route those visually-identical runs through qt_layout.
+    """
+    if not runs:
+        return False
+    try:
+        n = max(0, int(text_len or 0))
+    except Exception:
+        n = 0
+    base_sig = _style_run_signature(base_style or {})
+    if n <= 0:
+        return False
+    for idx in range(n):
+        try:
+            st = _style_for_char_index(runs, idx, base_style)
+            if _style_run_signature(st) != base_sig:
+                return True
+        except Exception:
+            return True
+    return False
+
+
+def _cursor_step_after_char(ch, next_ch, advance, style, default_letter_spacing=0):
+    """Return pen movement after a char.
+
+    Same repeated long mark characters are intentionally overlapped and ignore
+    tracking.  This makes sequences like ㅡㅡㅡ / ーーー / --- render as one
+    connected dash-like glyph group instead of separate outlined characters.
+    """
+    try:
+        adv = max(1.0, float(advance))
+    except Exception:
+        adv = 1.0
+    # Repeated long marks are now handled as a run token before this function is
+    # called.  Do not shrink advance here; shrinking produced overlaid seams.
+    return adv + float(_style_letter_spacing_value(style, default_letter_spacing))
+
+
+
+def _line_char_path_for_style(ch, x, y, style, fallback_family, fallback_size):
+    font = _styled_font_from_style(style, fallback_family, fallback_size)
+    italic_requested = bool(font.italic())
+    path_font = QFont(font)
+    path_font.setItalic(False)
+    raw = QPainterPath()
+    sx = _style_scale_factor(style, 'char_width', 100)
+    sy = _style_scale_factor(style, 'char_height', 100)
+    if ch and not str(ch).isspace():
+        try:
+            fm = QFontMetrics(path_font)
+            adv = max(1.0, float(fm.horizontalAdvance(str(ch))) * sx)
+            metric_h = max(1.0, float(fm.height()) * sy)
+            slot_rect = QRectF(float(x), -float(fm.ascent()) * sy, adv, metric_h)
+            raw = build_special_writing_char_path(ch, slot_rect, style, 'horizontal')
+        except Exception:
+            raw = QPainterPath()
+        if raw.isEmpty():
+            raw.addText(0, 0, path_font, str(ch))
+            if italic_requested and not raw.isEmpty():
+                shear = QTransform()
+                shear.shear(FAUX_ITALIC_SHEAR, 0.0)
+                raw = shear.map(raw)
+            if not raw.isEmpty():
+                tr = QTransform()
+                tr.translate(float(x), float(y))
+                tr.scale(float(sx), float(sy))
+                raw = tr.map(raw)
+    return raw, font
+
+
+
+def build_typesetting_vertical_styled_text_paths(text, style_runs, base_font, base_style, align="center", line_height=None, letter_spacing=0):
+    """Build vertical text paths with partial style runs.
+
+    The normal vertical renderer is path-based and handles punctuation/layout, but the
+    older partial-style helper intentionally skipped vertical writing.  That made the
+    inline editor and the final canvas disagree whenever a vertical text selection got
+    a font/color/style run.  For vertical text we prefer correctness/consistency over
+    the advanced Japanese token pipeline and build a per-character fallback path that
+    still respects per-run font, stroke and fill.
+    """
+    text = _strip_object_display_prefix(text)
+    runs = _normalize_partial_style_runs(style_runs, len(text))
+    # Canonical route:
+    # - no partial style
+    # - or style-run metadata exists but every visible character still matches
+    #   the base item style
+    #
+    # In both cases the editor/canvas/export must use qt_layout.py, not the
+    # simpler per-character fallback.  This keeps long-mark merging and vertical
+    # punctuation placement identical across display routes.
+    if not _vertical_runs_have_visible_difference(runs, len(text), base_style):
+        lines = text.split('\n') if text.strip() else ['']
+        path, line_rects = build_typesetting_text_path(lines, base_font, align, line_height, letter_spacing, 'vertical', base_style=base_style)
+        return path, line_rects, []
+
+    # Refactored mixed-style vertical path.  The old fallback below is kept only
+    # as a no-crash fallback.  This route lets the final canvas share the same
+    # vertical token rules as the editor: hanging quotes, punctuation offsets,
+    # ellipsis rotation and long-mark thickness.
+    if _ysb_build_vertical_text_layout is not None:
+        try:
+            lines = text.split('\n') if text.strip() else ['']
+            starts = []
+            pos = 0
+            for line in lines:
+                starts.append(pos)
+                pos += len(line) + 1
+            def _style_provider(idx):
+                return _style_for_char_index(runs, int(idx), base_style)
+            layout = _ysb_build_vertical_text_layout(
+                lines,
+                base_font,
+                align=align,
+                line_height=line_height,
+                letter_spacing=letter_spacing,
+                style_provider=_style_provider,
+                line_starts=starts,
+                base_style=base_style,
+                partial_horizontal_enabled=bool((base_style or {}).get('partial_horizontal_writing_enabled', True)),
+            )
+            styled_entries = []
+            for slot in layout.get('char_slots') or []:
+                try:
+                    idx = int(slot.get('display_index', 0))
+                    st = _style_for_char_index(runs, idx, base_style)
+                    path0 = slot.get('path') or QPainterPath()
+                    if not path0.isEmpty():
+                        styled_entries.append({'path': path0, 'style': dict(st or {}), 'index': idx, 'char': slot.get('char')})
+                except Exception:
+                    pass
+            return layout.get('path') or QPainterPath(), layout.get('line_rects') or [], styled_entries
+        except Exception:
+            pass
+
+    align = (align or 'center').lower()
+    if align not in ('left', 'center', 'right'):
+        align = 'center'
+    try:
+        letter_spacing = int(letter_spacing or 0)
+    except Exception:
+        letter_spacing = 0
+
+    try:
+        fallback_family = str(base_font.family())
+    except Exception:
+        fallback_family = str((base_style or {}).get('font_family') or '')
+    try:
+        fallback_size = int(base_font.pixelSize() if base_font.pixelSize() > 0 else (base_style or {}).get('font_size', 24))
+    except Exception:
+        fallback_size = int((base_style or {}).get('font_size', 24) or 24)
+
+    base_font_no_italic = QFont(base_font)
+    base_font_no_italic.setItalic(False)
+    base_fm = QFontMetrics(base_font_no_italic)
+    nominal_line_h = max(1.0, float(base_fm.lineSpacing()))
+    if line_height is None:
+        line_height = base_fm.lineSpacing()
+    try:
+        line_height = int(line_height)
+    except Exception:
+        line_height = int(base_fm.lineSpacing())
+    line_factor = max(0.01, abs(float(line_height) / nominal_line_h))
+
+    columns = text.split('\n') if text.strip() else ['']
+    if not columns:
+        columns = ['']
+
+    aggregate = QPainterPath()
+    line_rects = []
+    styled_entries = []
+    column_paths = []
+    column_rects_raw = []
+    max_col_width = 1.0
+    global_index = 0
+
+    for line_no, line in enumerate(columns):
+        line = str(line or '')
+        col_path = QPainterPath()
+        glyph_entries = []
+        cursor_y = 0.0
+        max_line_cell_w = 1.0
+
+        vertical_chars = list(_line_to_vertical_glyphs(line))
+        j = 0
+        while j < len(vertical_chars):
+            ch = vertical_chars[j]
+            style = _style_for_char_index(runs, global_index, base_style)
+            font = _styled_font_from_style(style, fallback_family, fallback_size)
+            italic_requested = bool(font.italic())
+            path_font = QFont(font)
+            path_font.setItalic(False)
+            fm = QFontMetrics(path_font)
+            tight_cell_w, tight_cell_h = _fallback_vertical_tight_cell_metrics(path_font, fm)
+            sx = _style_scale_factor(style, 'char_width', 100)
+            sy = _style_scale_factor(style, 'char_height', 100)
+            tight_cell_w = max(1.0, float(tight_cell_w) * sx)
+            tight_cell_h = max(1.0, float(tight_cell_h) * sy)
+            vertical_letter_gap = _fallback_vertical_effective_char_gap(tight_cell_h, _style_letter_spacing_value(style, letter_spacing))
+            max_line_cell_w = max(max_line_cell_w, float(tight_cell_w))
+            # Real mixed partial-style text cannot use the uniform qt_layout path,
+            # so this fallback still performs the same render-only long-mark
+            # grouping locally.  Source text remains character-editable.
+            run_len = _long_mark_run_len(vertical_chars, j, 'vertical')
+
+            if run_len >= 2:
+                run_h = 0.0
+                run_entries = []
+                run_w = 1.0
+                for k in range(run_len):
+                    idx = global_index + k
+                    ch_k = vertical_chars[j + k]
+                    st_k = _style_for_char_index(runs, idx, base_style)
+                    adv_k, metric_h_k, _font_k, _fm_k = _horizontal_special_metrics(ch_k, st_k, fallback_family, fallback_size)
+                    run_h += adv_k
+                    run_w = max(run_w, metric_h_k)
+                    run_entries.append((idx, ch_k, st_k, adv_k, metric_h_k))
+                run_style = dict(run_entries[0][2] or {})
+                # target vertical slot: width is the horizontal font height, height is
+                # the sum of horizontal advances.  This is literally the horizontal
+                # long mark rotated into the column.
+                run_slot = QRectF(-run_w / 2.0, cursor_y, run_w, max(1.0, run_h))
+                run_path = build_long_mark_run_path(run_slot, run_style, 'vertical')
+                if not run_path.isEmpty():
+                    col_path.addPath(run_path)
+                for k, (idx, ch_k, st_k, adv_k, _metric_h) in enumerate(run_entries):
+                    glyph_entries.append({'path': run_path if k == 0 else QPainterPath(), 'style': dict(st_k or {}), 'index': idx, 'char': ch_k, 'special_run_master': k == 0, 'special_run_len': run_len})
+                cursor_y += max(1.0, run_h)
+                next_after = vertical_chars[j + run_len] if j + run_len < len(vertical_chars) else ''
+                if next_after:
+                    cursor_y += float(vertical_letter_gap)
+                max_line_cell_w = max(max_line_cell_w, run_w)
+                global_index += run_len
+                j += run_len
+                continue
+
+            next_ch = vertical_chars[j + 1] if j + 1 < len(vertical_chars) else ''
+
+            if str(ch).isspace():
+                cursor_y += _fallback_vertical_space_advance(ch, line_height, vertical_letter_gap)
+                global_index += 1
+                j += 1
+                continue
+
+            if _special_writing_char_kind(ch, 'vertical'):
+                adv_v, metric_w_v, _sf, _sfm = _horizontal_special_metrics(ch, style, fallback_family, fallback_size)
+                special_slot = QRectF(-metric_w_v / 2.0, cursor_y, metric_w_v, adv_v)
+                max_line_cell_w = max(max_line_cell_w, metric_w_v)
+            else:
+                special_slot = QRectF(-max(1.0, tight_cell_w) / 2.0, cursor_y, max(1.0, tight_cell_w), max(1.0, tight_cell_h))
+            glyph_path = build_special_writing_char_path(ch, special_slot, style, 'vertical')
+            glyph_rect = glyph_path.boundingRect()
+            if glyph_path.isEmpty():
+                glyph_path = QPainterPath()
+                glyph_path.addText(0, 0, path_font, str(ch))
+                if italic_requested and not glyph_path.isEmpty():
+                    shear = QTransform()
+                    shear.shear(FAUX_ITALIC_SHEAR, 0.0)
+                    glyph_path = shear.map(glyph_path)
+                if not glyph_path.isEmpty() and (abs(sx - 1.0) > 0.001 or abs(sy - 1.0) > 0.001):
+                    scale_tr = QTransform()
+                    scale_tr.scale(float(sx), float(sy))
+                    glyph_path = scale_tr.map(glyph_path)
+                glyph_rect = glyph_path.boundingRect()
+                if glyph_rect.isNull() or glyph_rect.width() <= 0 or glyph_rect.height() <= 0:
+                    glyph_rect = QRectF(0, -fm.ascent() * sy, max(1.0, fm.horizontalAdvance(str(ch)) * sx), max(1.0, tight_cell_h))
+                dx = -glyph_rect.center().x()
+                dy = cursor_y - glyph_rect.top()
+                tr = QTransform()
+                tr.translate(dx, dy)
+                mapped_glyph = tr.map(glyph_path)
+            else:
+                mapped_glyph = glyph_path
+                glyph_rect = mapped_glyph.boundingRect()
+            if not mapped_glyph.isEmpty():
+                col_path.addPath(mapped_glyph)
+                glyph_entries.append({'path': mapped_glyph, 'style': dict(style or {}), 'index': global_index, 'char': ch})
+            try:
+                if _special_writing_char_kind(ch, 'vertical'):
+                    adv_y = max(1.0, float(special_slot.height()))
+                else:
+                    adv_y = max(float(tight_cell_h), float(glyph_rect.height()))
+            except Exception:
+                adv_y = float(tight_cell_h)
+            cursor_y += adv_y + float(vertical_letter_gap)
+            global_index += 1
+            j += 1
+
+        col_rect = col_path.boundingRect()
+        if col_rect.isNull() or col_rect.width() <= 0 or col_rect.height() <= 0:
+            col_rect = QRectF(0, 0, max(1.0, max_line_cell_w), max(1.0, nominal_line_h))
+        column_paths.append((col_path, glyph_entries))
+        column_rects_raw.append(QRectF(col_rect))
+        max_col_width = max(max_col_width, float(col_rect.width()), float(max_line_cell_w))
+        if line_no < len(columns) - 1:
+            global_index += 1
+
+    column_step = max(1.0, max_col_width * line_factor)
+    total_width = column_step * max(0, len(column_paths) - 1) + max_col_width
+
+    for idx, (col_path, glyph_entries) in enumerate(column_paths):
+        col_rect = column_rects_raw[idx]
+        col_center_x = (total_width / 2.0) - (idx * column_step) - (max_col_width / 2.0)
+        dx = col_center_x - col_rect.center().x()
+        dy = -col_rect.top()
+        tr = QTransform()
+        tr.translate(dx, dy)
+        if not col_path.isEmpty():
+            mapped = tr.map(col_path)
+            aggregate.addPath(mapped)
+            mapped_rect = mapped.boundingRect()
+        else:
+            mapped_rect = QRectF(col_rect)
+            mapped_rect.translate(dx, dy)
+        line_rects.append(QRectF(mapped_rect))
+        for entry in glyph_entries:
+            ep = entry.get('path')
+            if ep is None or ep.isEmpty():
+                continue
+            styled_entries.append({'path': tr.map(ep), 'style': dict(entry.get('style') or {}), 'index': entry.get('index'), 'char': entry.get('char')})
+
+    return aggregate, line_rects, styled_entries
+
+
+def build_typesetting_styled_text_paths(text, style_runs, base_font, base_style, align='center', line_height=None, letter_spacing=0, writing_direction='horizontal'):
+    """Build an aggregate path plus per-style sub paths for simple partial styling.
+
+    Partial font-size/height can make one visual row taller than the rows around it.
+    Layout must therefore be two-pass: first measure every row, then place each row
+    inside its own band.  The old one-pass baseline layout let a taller second row
+    grow upward into the previous row while only pushing the following rows down.
+    """
+    if _normalize_typesetting_writing_direction(writing_direction) == 'vertical':
+        return build_typesetting_vertical_styled_text_paths(text, style_runs, base_font, base_style, align, line_height, letter_spacing)
+    text = _strip_object_display_prefix(text)
+    runs = _normalize_partial_style_runs(style_runs, len(text))
+    if not runs:
+        lines = text.split('\n') if text.strip() else ['']
+        path, line_rects = build_typesetting_text_path(lines, base_font, align, line_height, letter_spacing, writing_direction, base_style=base_style)
+        return path, line_rects, []
+    if _normalize_typesetting_writing_direction(writing_direction) == 'horizontal' and _ysb_build_horizontal_text_layout is not None:
+        try:
+            lines = text.split('\n') if text.strip() else ['']
+            starts = []
+            pos = 0
+            for line in lines:
+                starts.append(pos)
+                pos += len(line) + 1
+            def _style_provider(idx):
+                return _style_for_char_index(runs, int(idx), base_style)
+            layout = _ysb_build_horizontal_text_layout(
+                lines,
+                base_font,
+                align=align,
+                line_height=line_height,
+                letter_spacing=letter_spacing,
+                style_provider=_style_provider,
+                line_starts=starts,
+                base_style=base_style,
+            )
+            styled_entries = []
+            for slot in layout.get('char_slots') or []:
+                try:
+                    idx = int(slot.get('display_index', 0))
+                    st = _style_for_char_index(runs, idx, base_style)
+                    path0 = slot.get('path') or QPainterPath()
+                    if not path0.isEmpty():
+                        styled_entries.append({'path': path0, 'style': dict(st or {}), 'index': idx, 'char': slot.get('char')})
+                except Exception:
+                    pass
+            return layout.get('path') or QPainterPath(), layout.get('line_rects') or [], styled_entries
+        except Exception:
+            pass
+
+    align = (align or 'center').lower()
+    if align not in ('left', 'center', 'right'):
+        align = 'center'
+    try:
+        letter_spacing = int(letter_spacing or 0)
+    except Exception:
+        letter_spacing = 0
+    try:
+        fallback_family = str(base_font.family())
+    except Exception:
+        fallback_family = str((base_style or {}).get('font_family') or '')
+    try:
+        fallback_size = int(base_font.pixelSize() if base_font.pixelSize() > 0 else (base_style or {}).get('font_size', 24))
+    except Exception:
+        fallback_size = int((base_style or {}).get('font_size', 24) or 24)
+    if line_height is None:
+        try:
+            line_height = QFontMetrics(base_font).lineSpacing()
+        except Exception:
+            line_height = fallback_size + 4
+    try:
+        line_height = int(line_height)
+    except Exception:
+        line_height = fallback_size + 4
+    try:
+        base_line_spacing = max(1.0, float(QFontMetrics(base_font).lineSpacing()))
+    except Exception:
+        base_line_spacing = max(1.0, float(fallback_size + 4))
+    try:
+        line_spacing_pct = clamp_text_line_spacing((base_style or {}).get('line_spacing', 100), 100)
+    except Exception:
+        line_spacing_pct = 100
+
+    def _styled_horizontal_line_height(style):
+        try:
+            f = _styled_font_from_style(style, fallback_family, fallback_size)
+            raw = float(QFontMetrics(f).lineSpacing())
+            sy = _style_scale_factor(style, 'char_height', 100)
+            pct = _style_line_spacing_pct_value(style, line_spacing_pct)
+            base_ratio = float(line_height) / float(base_line_spacing)
+            if 'line_spacing' in (style or {}):
+                return max(float(line_height), float(text_line_height_from_percent(raw * sy, pct)))
+            return max(float(line_height), raw * sy * base_ratio)
+        except Exception:
+            return float(line_height)
+
+    lines = text.split('\n') if text.strip() else ['']
+    global_index = 0
+    measured_lines = []
+
+    # Pass 1: build glyph paths at local baseline 0 and measure each row band.
+    for line_no, line in enumerate(lines):
+        char_entries = []
+        cursor_x = 0.0
+        line_path = QPainterPath()
+        row_line_height = float(line_height)
+        line_chars = list(str(line or ''))
+        j = 0
+        while j < len(line_chars):
+            ch = line_chars[j]
+            style = _style_for_char_index(runs, global_index, base_style)
+            row_line_height = max(row_line_height, _styled_horizontal_line_height(style))
+            run_len = _long_mark_run_len(line_chars, j, 'horizontal')
+            if run_len >= 2:
+                run_width = 0.0
+                run_entries = []
+                run_path = QPainterPath()
+                for k in range(run_len):
+                    idx = global_index + k
+                    ch_k = line_chars[j + k]
+                    st_k = _style_for_char_index(runs, idx, base_style)
+                    font_k = _styled_font_from_style(st_k, fallback_family, fallback_size)
+                    try:
+                        fm_k = QFontMetrics(font_k)
+                        adv_k = max(1.0, float(fm_k.horizontalAdvance(str(ch_k))) * _style_scale_factor(st_k, 'char_width', 100))
+                    except Exception:
+                        adv_k = max(1.0, float(fallback_size) * _style_scale_factor(st_k, 'char_width', 100))
+                    run_entries.append((idx, ch_k, st_k, adv_k))
+                    run_width += adv_k
+                run_style = dict(run_entries[0][2] or {})
+                try:
+                    fm0 = QFontMetrics(_styled_font_from_style(run_style, fallback_family, fallback_size))
+                    metric_h = max(1.0, float(fm0.height()) * _style_scale_factor(run_style, 'char_height', 100))
+                    top_y = -float(fm0.ascent()) * _style_scale_factor(run_style, 'char_height', 100)
+                except Exception:
+                    metric_h = max(1.0, float(fallback_size) * 1.2)
+                    top_y = -float(fallback_size)
+                run_slot = QRectF(cursor_x, top_y, max(1.0, run_width), metric_h)
+                run_path = build_long_mark_run_path(run_slot, run_style, 'horizontal')
+                if not run_path.isEmpty():
+                    line_path.addPath(run_path)
+                # Keep per-character selection/caret data but paint only the first entry.
+                offset_x = cursor_x
+                for k, (idx, ch_k, st_k, adv_k) in enumerate(run_entries):
+                    entry_path = run_path if k == 0 else QPainterPath()
+                    char_entries.append({'index': idx, 'path': entry_path, 'style': st_k, 'char': ch_k, 'special_run_master': k == 0, 'special_run_len': run_len})
+                    offset_x += adv_k
+                cursor_x += max(1.0, run_width)
+                next_after = line_chars[j + run_len] if j + run_len < len(line_chars) else ''
+                if next_after:
+                    cursor_x += float(_style_letter_spacing_value(run_style, letter_spacing))
+                global_index += run_len
+                j += run_len
+                continue
+
+            ch_path, ch_font = _line_char_path_for_style(ch, cursor_x, 0.0, style, fallback_family, fallback_size)
+            try:
+                fm = QFontMetrics(ch_font)
+                advance = float(fm.horizontalAdvance(str(ch))) * _style_scale_factor(style, 'char_width', 100)
+            except Exception:
+                advance = float(fallback_size) * _style_scale_factor(style, 'char_width', 100)
+            char_entries.append({'index': global_index, 'path': ch_path, 'style': style, 'char': ch})
+            if not ch_path.isEmpty():
+                line_path.addPath(ch_path)
+            next_ch = line_chars[j + 1] if j + 1 < len(line_chars) else ''
+            cursor_x += _cursor_step_after_char(ch, next_ch, advance, style, letter_spacing)
+            global_index += 1
+            j += 1
+        line_rect = line_path.boundingRect()
+        if line_rect.isNull() or line_rect.width() <= 0 or line_rect.height() <= 0:
+            try:
+                fm = QFontMetrics(base_font)
+                line_rect = QRectF(0, -fm.ascent(), 1, max(1, fm.height()))
+            except Exception:
+                line_rect = QRectF(0, -fallback_size, 1, max(1, fallback_size + 4))
+        # The row band must at least contain the actual ink height.  This makes the
+        # growth from a larger partial font size split around that row instead of
+        # intruding only into the row above.
+        try:
+            row_line_height = max(float(row_line_height), float(line_rect.height()))
+        except Exception:
+            pass
+        measured_lines.append({
+            'line_no': line_no,
+            'line_path': line_path,
+            'line_rect': QRectF(line_rect),
+            'row_height': float(max(1.0, row_line_height)),
+            'char_entries': char_entries,
+        })
+        if line_no < len(lines) - 1:
+            global_index += 1
+
+    aggregate = QPainterPath()
+    line_rects = []
+    styled_entries = []
+    current_y = 0.0
+
+    # Pass 2: place each line centered in its own measured row band.
+    for info in measured_lines:
+        line_path = info.get('line_path') or QPainterPath()
+        line_rect = QRectF(info.get('line_rect') or QRectF())
+        row_line_height = float(info.get('row_height') or line_height)
+        if align == 'left':
+            dx = -line_rect.left()
+        elif align == 'right':
+            dx = -line_rect.right()
+        else:
+            dx = -line_rect.center().x()
+        try:
+            dy = float(current_y) + float(row_line_height) / 2.0 - float(line_rect.center().y())
+        except Exception:
+            dy = float(current_y)
+        tr = QTransform()
+        tr.translate(dx, dy)
+        mapped_line_path = tr.map(line_path) if not line_path.isEmpty() else QPainterPath()
+        if not mapped_line_path.isEmpty():
+            aggregate.addPath(mapped_line_path)
+            mapped_rect = mapped_line_path.boundingRect()
+        else:
+            mapped_rect = QRectF(line_rect)
+            mapped_rect.translate(dx, dy)
+        line_rects.append(QRectF(mapped_rect))
+        for entry in info.get('char_entries') or []:
+            path = entry.get('path')
+            if path is None or path.isEmpty():
+                continue
+            styled_entries.append({'path': tr.map(path), 'style': dict(entry.get('style') or {}), 'index': entry.get('index'), 'char': entry.get('char')})
+        current_y += float(row_line_height)
+    return aggregate, line_rects, styled_entries
+
+
+def build_typesetting_text_path(lines, font, align="center", line_height=None, letter_spacing=0, writing_direction="horizontal", base_style=None):
     """Build a QPainterPath with manual tracking and faux italic support.
 
     Qt/QPainterPath does not reliably synthesize Photoshop-style font effects for
@@ -1052,7 +2043,21 @@ def build_typesetting_text_path(lines, font, align="center", line_height=None, l
         # 세로쓰기에서는 align 값을 좌/중/우가 아니라 위/중/아래 정렬로 해석한다.
         # path 내부의 가로 정렬은 항상 중앙으로 고정하고, 실제 위/중/아래 배치는
         # TypesettingItem의 rect 배치 단계에서 처리한다.
-        return build_typesetting_vertical_text_path(lines, font, "center", line_height, letter_spacing)
+        return build_typesetting_vertical_text_path(lines, font, "center", line_height, letter_spacing, base_style=base_style)
+
+    if _ysb_build_horizontal_text_layout is not None:
+        try:
+            layout = _ysb_build_horizontal_text_layout(
+                [str(line or '') for line in (lines or [''])],
+                font,
+                align=align,
+                line_height=line_height,
+                letter_spacing=letter_spacing,
+                base_style=base_style or {},
+            )
+            return layout.get('path') or QPainterPath(), layout.get('line_rects') or []
+        except Exception:
+            pass
 
     align = (align or "center").lower()
     if align not in ("left", "center", "right"):
@@ -1084,19 +2089,48 @@ def build_typesetting_text_path(lines, font, align="center", line_height=None, l
         line_path = QPainterPath()
 
         if line:
-            if letter_spacing == 0:
+            has_long_overlap = any(_long_mark_run_len(list(line), i, 'horizontal') >= 2 for i in range(0, len(line)))
+            has_special_char = any(bool(_special_writing_char_kind(ch, 'horizontal')) for ch in str(line or ''))
+            if letter_spacing == 0 and not has_long_overlap and not has_special_char:
                 # Build at baseline 0 first.  This lets us apply faux italic per
                 # line without shifting lower lines sideways.
                 line_path.addText(0, 0, path_font, line)
             else:
                 cursor_x = 0.0
-                for ch in line:
-                    line_path.addText(cursor_x, 0, path_font, ch)
+                chars = list(line)
+                i = 0
+                while i < len(chars):
+                    ch = chars[i]
+                    run_len = _long_mark_run_len(chars, i, 'horizontal')
+                    if run_len >= 2:
+                        run_width = 0.0
+                        for k in range(run_len):
+                            try:
+                                run_width += max(1.0, float(fm.horizontalAdvance(chars[i + k])))
+                            except Exception:
+                                run_width += max(1.0, float(fm.boundingRect(chars[i + k]).width()))
+                        slot_rect = QRectF(cursor_x, -float(fm.ascent()), max(1.0, run_width), max(1.0, float(fm.height())))
+                        run_path = build_long_mark_run_path(slot_rect, {'font_size': int(path_font.pixelSize() if path_font.pixelSize() > 0 else fm.height())}, 'horizontal')
+                        if not run_path.isEmpty():
+                            line_path.addPath(run_path)
+                        cursor_x += max(1.0, run_width)
+                        if i + run_len < len(chars):
+                            cursor_x += float(letter_spacing)
+                        i += run_len
+                        continue
                     try:
-                        advance = fm.horizontalAdvance(ch)
+                        advance = max(1.0, float(fm.horizontalAdvance(ch)))
                     except Exception:
-                        advance = fm.boundingRect(ch).width()
-                    cursor_x += float(advance) + float(letter_spacing)
+                        advance = max(1.0, float(fm.boundingRect(ch).width()))
+                    slot_rect = QRectF(cursor_x, -float(fm.ascent()), advance, max(1.0, float(fm.height())))
+                    special_path = build_special_writing_char_path(ch, slot_rect, {'font_size': int(path_font.pixelSize() if path_font.pixelSize() > 0 else fm.height())}, 'horizontal')
+                    if special_path.isEmpty():
+                        line_path.addText(cursor_x, 0, path_font, ch)
+                    else:
+                        line_path.addPath(special_path)
+                    next_ch = chars[i + 1] if i + 1 < len(chars) else ''
+                    cursor_x += _cursor_step_after_char(ch, next_ch, float(advance), {}, letter_spacing)
+                    i += 1
 
         if italic_requested and not line_path.isEmpty():
             # Photoshop can fake italic even for fonts without an italic face.
@@ -1206,7 +2240,25 @@ class TypesettingItem(QGraphicsPathItem):
         sy = char_height_pct / 100.0
 
         writing_direction = _normalize_typesetting_writing_direction(data.get('writing_direction', 'horizontal'))
-        path, line_rects = build_typesetting_text_path(lines, font, item_align, line_height, letter_spacing, writing_direction)
+        base_run_style = {
+            'font_family': item_font_family,
+            'font_size': item_font_size,
+            'text_color': item_text_color,
+            'stroke_color': item_stroke_color,
+            'stroke_width': item_stroke,
+            'bold': bool(data.get('bold', False)),
+            'italic': bool(data.get('italic', False)),
+            'strike': bool(data.get('strike', False)),
+            'line_spacing': line_spacing_pct,
+            'letter_spacing': letter_spacing,
+            'char_width': char_width_pct,
+            'char_height': char_height_pct,
+            'partial_horizontal_writing_enabled': _bool_value(data.get('partial_horizontal_writing_enabled'), True),
+        }
+        partial_runs = data.get('partial_style_runs') or data.get('style_runs') or []
+        path, line_rects, self._styled_text_paths = build_typesetting_styled_text_paths(
+            text, partial_runs, font, base_run_style, item_align, line_height, letter_spacing, writing_direction
+        )
 
         if data.get('strike', False):
             for line_rect in line_rects:
@@ -1217,6 +2269,10 @@ class TypesettingItem(QGraphicsPathItem):
             tr = QTransform()
             tr.scale(sx, sy)
             path = tr.map(path)
+            try:
+                self._styled_text_paths = [dict(entry, path=tr.map(entry.get('path'))) for entry in (getattr(self, '_styled_text_paths', []) or []) if entry.get('path') is not None]
+            except Exception:
+                self._styled_text_paths = []
 
         skew_x = _int_value(data.get('skew_x', 0), 0, -100, 100) / 100.0
         skew_y = _int_value(data.get('skew_y', 0), 0, -100, 100) / 100.0
@@ -1224,6 +2280,10 @@ class TypesettingItem(QGraphicsPathItem):
             tr = QTransform()
             tr.shear(skew_x, skew_y)
             path = tr.map(path)
+            try:
+                self._styled_text_paths = [dict(entry, path=tr.map(entry.get('path'))) for entry in (getattr(self, '_styled_text_paths', []) or []) if entry.get('path') is not None]
+            except Exception:
+                self._styled_text_paths = []
 
         trap_left = _int_value(data.get('trap_left', 0), 0, -95, 95)
         trap_right = _int_value(data.get('trap_right', 0), 0, -95, 95)
@@ -1231,12 +2291,16 @@ class TypesettingItem(QGraphicsPathItem):
         trap_bottom = _int_value(data.get('trap_bottom', 0), 0, -95, 95)
         if trap_left or trap_right or trap_top or trap_bottom:
             path = _apply_trapezoid_transform_to_path(path, trap_left, trap_right, trap_top, trap_bottom)
+            # Partial style paths are intentionally kept on the simple path for now.
+            # Advanced geometric warps remain whole-object operations.
+            self._styled_text_paths = []
 
         arc_handles = _arc_handles_from_data(data)
         if arc_handles:
             path = _warp_path_by_arc_handles(path, arc_handles)
+            self._styled_text_paths = []
 
-        if self._synthetic_bold_width > 0:
+        if self._synthetic_bold_width > 0 and not getattr(self, '_styled_text_paths', None):
             path = _expand_path_for_synthetic_bold(path, self._synthetic_bold_width)
             # path 자체가 확장됐으므로 paint 단계 중복 faux-bold는 끈다.
             self._synthetic_bold_width = 0.0
@@ -1332,6 +2396,31 @@ class TypesettingItem(QGraphicsPathItem):
         )
         self._local_text_area_rect = QRectF(self._strict_local_text_work_rect)
 
+        # ocr_source_rect 기반 로컬 work rect 별도 보존.
+        # data['rect']가 글리프 bounds로 커진 이후에도 원본 OCR 범위를 기억하기 위해
+        # 렌더링 시점마다 ocr_source_rect → 로컬 좌표로 변환해서 보존함.
+        # 원본 OCR rect 보존용. visual guide box는 더 이상 이 값으로 클램프하지 않는다.
+        try:
+            _src = data.get('ocr_source_rect')
+            if _src is not None and len(_src) >= 4:
+                self._ocr_source_local_rect = QRectF(
+                    float(_src[0]) - float(self.pos().x()),
+                    float(_src[1]) - float(self.pos().y()),
+                    max(1.0, float(_src[2])),
+                    max(1.0, float(_src[3])),
+                )
+            else:
+                # ocr_source_rect 없으면 현재 work rect를 기준으로 최초 1회 세팅
+                if getattr(self, '_ocr_source_local_rect', None) is None:
+                    self._ocr_source_local_rect = QRectF(self._strict_local_text_work_rect)
+                    # data에도 백업해서 다음 렌더링에 쓸 수 있게
+                    data['ocr_source_rect'] = [
+                        float(final_x), float(final_y),
+                        float(rect_w), float(rect_h),
+                    ]
+        except Exception:
+            self._ocr_source_local_rect = None
+
         # 텍스트 변형: 회전은 실제 글자 영역의 중앙을 기준으로 한다.
         try:
             self.setTransformOriginPoint(self.transform_rect().center())
@@ -1388,6 +2477,64 @@ class TypesettingItem(QGraphicsPathItem):
             self.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
         except Exception:
             pass
+
+    def ysb_text_item_interaction_allowed(self):
+        """Return True only when the active tool should let text items receive clicks.
+
+        Text/rasterized text items live above the paint/mask layers.  If they keep
+        accepting mouse events while brush, eraser, magic-wand, region or raster-erase
+        tools are active, the first click can select/move the text object instead of
+        reaching the tool below it.  Text objects are interactive only in final-result
+        move mode or final text mode.
+        """
+        try:
+            main = getattr(self, "main_window", None)
+            if main is None or getattr(main, "cb_mode", None) is None:
+                return True
+            if int(main.cb_mode.currentIndex()) != 4:
+                return False
+            mode = getattr(getattr(main, "view", None), "draw_mode", None)
+            return mode is None or mode == "final_text"
+        except Exception:
+            return True
+
+    def set_tool_interaction_enabled(self, enabled=True):
+        """Enable/disable mouse selection for this text item without changing visibility."""
+        enabled = bool(enabled)
+        try:
+            self.setAcceptedMouseButtons(Qt.MouseButton.LeftButton | Qt.MouseButton.RightButton if enabled else Qt.MouseButton.NoButton)
+        except Exception:
+            pass
+        try:
+            self.setFlag(self.GraphicsItemFlag.ItemIsSelectable, enabled)
+            self.setFlag(self.GraphicsItemFlag.ItemIsMovable, enabled)
+            self.setFlag(self.GraphicsItemFlag.ItemSendsGeometryChanges, True)
+        except Exception:
+            pass
+        try:
+            if not enabled:
+                self.setSelected(False)
+                self._raster_drag_scene_press = None
+                self._raster_drag_item_press = None
+                self._manual_text_drag_scene_press = None
+                self._manual_text_drag_item_press = None
+                self._ctrl_select_press = False
+                self._ctrl_drag_duplicate_pending = False
+                self._ctrl_drag_duplicate_active = False
+                self._transform_action = None
+                self._skew_action = None
+                self._trapezoid_action = None
+                self._arc_action = None
+        except Exception:
+            pass
+        try:
+            if not enabled:
+                self.unsetCursor()
+            elif getattr(self, "_is_rasterized_text", False) or self.data.get("rasterized_text"):
+                self.setCursor(Qt.CursorShape.SizeAllCursor)
+        except Exception:
+            pass
+        return enabled
 
     def _guide_scale(self):
         """Scale editor-only text guide boxes/handles by image resolution."""
@@ -1577,7 +2724,25 @@ class TypesettingItem(QGraphicsPathItem):
         sx = char_width_pct / 100.0
         sy = char_height_pct / 100.0
         writing_direction = _normalize_typesetting_writing_direction(data.get('writing_direction', 'horizontal'))
-        path, line_rects = build_typesetting_text_path(lines, font, item_align, line_height, letter_spacing, writing_direction)
+        base_run_style = {
+            'font_family': item_font_family,
+            'font_size': item_font_size,
+            'text_color': item_text_color,
+            'stroke_color': item_stroke_color,
+            'stroke_width': item_stroke,
+            'bold': bool(data.get('bold', False)),
+            'italic': bool(data.get('italic', False)),
+            'strike': bool(data.get('strike', False)),
+            'line_spacing': line_spacing_pct,
+            'letter_spacing': letter_spacing,
+            'char_width': char_width_pct,
+            'char_height': char_height_pct,
+            'partial_horizontal_writing_enabled': _bool_value(data.get('partial_horizontal_writing_enabled'), True),
+        }
+        partial_runs = data.get('partial_style_runs') or data.get('style_runs') or []
+        path, line_rects, self._styled_text_paths = build_typesetting_styled_text_paths(
+            text, partial_runs, font, base_run_style, item_align, line_height, letter_spacing, writing_direction
+        )
 
         if data.get('strike', False):
             for line_rect in line_rects:
@@ -1588,6 +2753,10 @@ class TypesettingItem(QGraphicsPathItem):
             tr = QTransform()
             tr.scale(sx, sy)
             path = tr.map(path)
+            try:
+                self._styled_text_paths = [dict(entry, path=tr.map(entry.get('path'))) for entry in (getattr(self, '_styled_text_paths', []) or []) if entry.get('path') is not None]
+            except Exception:
+                self._styled_text_paths = []
 
         skew_x = _int_value(data.get('skew_x', 0), 0, -100, 100) / 100.0
         skew_y = _int_value(data.get('skew_y', 0), 0, -100, 100) / 100.0
@@ -1595,6 +2764,10 @@ class TypesettingItem(QGraphicsPathItem):
             tr = QTransform()
             tr.shear(skew_x, skew_y)
             path = tr.map(path)
+            try:
+                self._styled_text_paths = [dict(entry, path=tr.map(entry.get('path'))) for entry in (getattr(self, '_styled_text_paths', []) or []) if entry.get('path') is not None]
+            except Exception:
+                self._styled_text_paths = []
 
         trap_left = _int_value(data.get('trap_left', 0), 0, -95, 95)
         trap_right = _int_value(data.get('trap_right', 0), 0, -95, 95)
@@ -1602,12 +2775,16 @@ class TypesettingItem(QGraphicsPathItem):
         trap_bottom = _int_value(data.get('trap_bottom', 0), 0, -95, 95)
         if trap_left or trap_right or trap_top or trap_bottom:
             path = _apply_trapezoid_transform_to_path(path, trap_left, trap_right, trap_top, trap_bottom)
+            # Partial style paths are intentionally kept on the simple path for now.
+            # Advanced geometric warps remain whole-object operations.
+            self._styled_text_paths = []
 
         arc_handles = _arc_handles_from_data(data)
         if arc_handles:
             path = _warp_path_by_arc_handles(path, arc_handles)
+            self._styled_text_paths = []
 
-        if self._synthetic_bold_width > 0:
+        if self._synthetic_bold_width > 0 and not getattr(self, '_styled_text_paths', None):
             path = _expand_path_for_synthetic_bold(path, self._synthetic_bold_width)
             self._synthetic_bold_width = 0.0
 
@@ -1698,6 +2875,31 @@ class TypesettingItem(QGraphicsPathItem):
             rect_h,
         )
         self._local_text_area_rect = QRectF(self._strict_local_text_work_rect)
+
+        # ocr_source_rect 기반 로컬 work rect 별도 보존.
+        # data['rect']가 글리프 bounds로 커진 이후에도 원본 OCR 범위를 기억하기 위해
+        # 렌더링 시점마다 ocr_source_rect → 로컬 좌표로 변환해서 보존함.
+        # 원본 OCR rect 보존용. visual guide box는 더 이상 이 값으로 클램프하지 않는다.
+        try:
+            _src = data.get('ocr_source_rect')
+            if _src is not None and len(_src) >= 4:
+                self._ocr_source_local_rect = QRectF(
+                    float(_src[0]) - float(self.pos().x()),
+                    float(_src[1]) - float(self.pos().y()),
+                    max(1.0, float(_src[2])),
+                    max(1.0, float(_src[3])),
+                )
+            else:
+                # ocr_source_rect 없으면 현재 work rect를 기준으로 최초 1회 세팅
+                if getattr(self, '_ocr_source_local_rect', None) is None:
+                    self._ocr_source_local_rect = QRectF(self._strict_local_text_work_rect)
+                    # data에도 백업해서 다음 렌더링에 쓸 수 있게
+                    data['ocr_source_rect'] = [
+                        float(final_x), float(final_y),
+                        float(rect_w), float(rect_h),
+                    ]
+        except Exception:
+            self._ocr_source_local_rect = None
 
         try:
             self.setTransformOriginPoint(self.transform_rect().center())
@@ -2447,6 +3649,13 @@ class TypesettingItem(QGraphicsPathItem):
             pad = max(pad, min(10.0, max(3.0, font_size * 0.035)))
         if pad > 0:
             rect = rect.adjusted(-pad, -pad, pad, pad)
+
+        # Do not clamp the visible guide box back to the original OCR/source rect.
+        # This rectangle is intentionally the actual rendered glyph path plus only
+        # stroke/effect/minimum safety padding.  Clamping it to the saved OCR rect
+        # makes decorative/vertical text boxes look large or get cut in confusing
+        # ways, and the viewer selection code now uses the same text_area_rect()
+        # for manual/text-anchored items so the red guide box and hit area match.
         return rect
 
     def text_area_rect(self):
@@ -2553,15 +3762,41 @@ class TypesettingItem(QGraphicsPathItem):
             pass
         return self._data_text_local_rect_no_rotation()
 
+    def interaction_hit_rect(self):
+        """Local rectangle used for every text interaction hit-test.
+
+        The clickable/selectable/editable area must be the same rectangle that the
+        user sees as the red work guide.  Older OCR/work data can remain larger
+        than the visually adjusted guide after text editing, so selection, move,
+        and double-click editing must not read data['rect'] directly here.
+        """
+        try:
+            if bool(getattr(self, '_is_rasterized_text', False)) or bool((self.data or {}).get('rasterized_text')):
+                rr = getattr(self, '_raster_rect', None)
+                if rr is not None and not rr.isNull() and rr.width() > 0 and rr.height() > 0:
+                    return QRectF(rr)
+        except Exception:
+            pass
+        try:
+            area = self.text_area_rect()
+            if area is not None and not area.isNull() and area.width() > 0 and area.height() > 0:
+                return QRectF(area)
+        except Exception:
+            pass
+        try:
+            return QRectF(self.strict_text_work_rect())
+        except Exception:
+            return QRectF()
+
     def text_hit_rect(self):
         """Local rectangle used only for selection/click hit testing.
 
-        Hit detection must stay inside the saved OCR/work text rectangle.  The
-        rendered glyph path, visual text_area_rect(), font metrics, stroke/shadow/
-        glow overflow, and previous cursor repaint padding are intentionally
-        excluded here.
+        This now follows interaction_hit_rect(), which is intentionally identical
+        to the visible red work guide.  Keeping this as a wrapper preserves older
+        call sites while preventing the old, oversized OCR/data rect from becoming
+        clickable after the guide has visually shrunk.
         """
-        return QRectF(self.strict_text_work_rect())
+        return QRectF(self.interaction_hit_rect())
 
     def text_content_scene_rect(self):
         """실제 글자가 차지하는 영역. 직접 편집 시작 위치/영역 계산에 쓴다."""
@@ -2631,9 +3866,9 @@ class TypesettingItem(QGraphicsPathItem):
         return out.adjusted(-pad, -pad, pad, pad)
 
     def shape(self):
-        # 클릭 판정은 실제 글자 선이나 시각 bounds가 아니라 저장된 OCR/텍스트 박스만 따른다.
-        # text_area_rect()는 화면 가이드용으로 visual bounds를 반환할 수 있으므로 shape()에도
-        # 넣지 않는다. 넣는 순간 Qt 기본 hit-test가 글자 여백/효과 영역을 다시 잡아버린다.
+        # 클릭 판정은 실제 글자 선이나 낡은 data['rect']가 아니라 현재 빨간 작업 박스만 따른다.
+        # boundingRect()는 렌더링 클리핑 방지를 위해 넓게 유지하더라도, shape()는 사용자
+        # 상호작용 영역이므로 text_hit_rect()/interaction_hit_rect()만 넣는다.
         s = QPainterPath()
         hit_area = self.text_hit_rect()
         if not hit_area.isNull():
@@ -2913,6 +4148,75 @@ class TypesettingItem(QGraphicsPathItem):
                 )
         except Exception:
             pass
+
+        styled_paths = list(getattr(self, '_styled_text_paths', []) or [])
+        if styled_paths:
+            def _flush_group(group_entries):
+                if not group_entries:
+                    return
+                try:
+                    group_path = QPainterPath()
+                    st = dict(group_entries[0].get('style') or {})
+                    for ge in group_entries:
+                        gp = ge.get('path')
+                        if gp is None or gp.isEmpty():
+                            continue
+                        group_path = gp if group_path.isEmpty() else group_path.united(gp)
+                    if group_path.isEmpty():
+                        return
+                    try:
+                        sw = max(0.0, float(st.get('stroke_width', self.data.get('stroke_width', self.pen_stroke.widthF())) or 0.0))
+                    except Exception:
+                        sw = float(self.pen_stroke.widthF() or 0.0)
+                    if sw > 0:
+                        run_stroke = QPen(_qcolor(st.get('stroke_color') or self.data.get('stroke_color') or '#FFFFFF', '#FFFFFF'), sw)
+                        run_stroke.setCapStyle(Qt.PenCapStyle.RoundCap)
+                        run_stroke.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+                        if not _fill_path_outline(painter, group_path, run_stroke.brush(), run_stroke.widthF(), use_mask=export_mask_stroke):
+                            painter.setPen(run_stroke)
+                            painter.setBrush(Qt.BrushStyle.NoBrush)
+                            painter.drawPath(group_path)
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.setBrush(QBrush(_qcolor(st.get('text_color') or self.data.get('text_color') or '#000000', '#000000')))
+                    painter.drawPath(group_path)
+                    if bool(st.get('strike', False)):
+                        rr = group_path.boundingRect()
+                        if rr.width() > 0 and rr.height() > 0:
+                            pen = QPen(_qcolor(st.get('text_color') or self.data.get('text_color') or '#000000', '#000000'), max(1.0, float((st.get('font_size') or self.data.get('font_size') or 20)) * 0.075))
+                            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+                            painter.setPen(pen)
+                            y = rr.center().y()
+                            painter.drawLine(QPointF(rr.left(), y), QPointF(rr.right(), y))
+                except Exception:
+                    pass
+
+            group = []
+            prev_entry = None
+            for entry in styled_paths:
+                try:
+                    run_path = entry.get('path')
+                    if run_path is None or run_path.isEmpty():
+                        continue
+                    merge = False
+                    if prev_entry is not None:
+                        merge = (
+                            _same_mergeable_special_pair(prev_entry.get('char'), entry.get('char'))
+                            and _style_run_signature(prev_entry.get('style') or {}) == _style_run_signature(entry.get('style') or {})
+                        )
+                    if merge:
+                        group.append(entry)
+                    else:
+                        _flush_group(group)
+                        group = [entry]
+                    prev_entry = entry
+                except Exception:
+                    _flush_group(group)
+                    group = []
+                    prev_entry = None
+                    continue
+            _flush_group(group)
+            painter.restore()
+            return
 
         if synthetic_bold_width > 0:
             # 합성 볼드는 글자 내부를 두껍게 만드는 용도다. 획보다 나중에 그리면
@@ -3344,7 +4648,11 @@ class TypesettingItem(QGraphicsPathItem):
         # 단, 최종 텍스트 도구(final_text)는 "새 텍스트 만들기"와
         # "기존 텍스트 선택/이동"을 같이 해야 실제 식질 동선이 자연스럽다.
         draw_mode = getattr(getattr(main, "view", None), "draw_mode", None) if main is not None else None
-        if main is not None and draw_mode is not None and draw_mode != 'final_text':
+        if not self.ysb_text_item_interaction_allowed():
+            try:
+                self.setSelected(False)
+            except Exception:
+                pass
             event.ignore()
             return
 
@@ -3355,8 +4663,10 @@ class TypesettingItem(QGraphicsPathItem):
         try:
             if event.button() == Qt.MouseButton.LeftButton:
                 local_press = QPointF(event.pos())
-                strict_hit = self.text_hit_rect() if callable(getattr(self, 'text_hit_rect', None)) else QRectF()
-                inside_strict_text = bool(strict_hit is not None and (not strict_hit.isNull()) and strict_hit.contains(local_press))
+                # Use the same visible red work box as double-click editing and
+                # viewer selection.  Old OCR/data rects can be wider than the
+                # currently visible guide and must not remain clickable.
+                inside_strict_text = self._text_work_box_contains_local_pos(local_press)
                 transform_action = None
                 try:
                     if self.data.get('_skew_mode', False):
@@ -3373,14 +4683,17 @@ class TypesettingItem(QGraphicsPathItem):
                     try:
                         if main is not None and hasattr(main, 'audit_boundary_event'):
                             main.audit_boundary_event(
-                                'TEXT_HIT_REJECT_OUTSIDE_OCR_RECT',
+                                'TEXT_HIT_REJECT_OUTSIDE_INTERACTION_RECT',
                                 text_id=str((self.data or {}).get('id')),
                                 local_x=round(float(local_press.x()), 2),
                                 local_y=round(float(local_press.y()), 2),
                             )
                     except Exception:
                         pass
-                    event.ignore()
+                    # Consume this event as a complete no-op.  If we ignore it,
+                    # Qt may continue routing through a broad item/bounding path and
+                    # select or drag the text anyway.
+                    event.accept()
                     return
         except Exception:
             pass
@@ -3544,6 +4857,51 @@ class TypesettingItem(QGraphicsPathItem):
 
         super().mousePressEvent(event)
 
+    def _text_work_box_contains_local_pos(self, local_pos):
+        """Return True only when local_pos is inside the interaction hit box.
+
+        This is the final item-level hit gate shared by press selection and
+        double-click editing.  It deliberately uses interaction_hit_rect(), the
+        same source as shape(), viewer click selection, and window selection.
+        """
+        try:
+            area = self.interaction_hit_rect() if callable(getattr(self, 'interaction_hit_rect', None)) else self.text_area_rect()
+            if area is None or area.isNull() or area.width() <= 0 or area.height() <= 0:
+                return False
+            return bool(QRectF(area).contains(QPointF(local_pos)))
+        except Exception:
+            return False
+
+    def _text_edit_double_click_allowed_at(self, local_pos):
+        """Return True only when a double-click is inside the visible text work box."""
+        return self._text_work_box_contains_local_pos(local_pos)
+
+    def _clear_selection_after_rejected_text_hit(self, reason='outside_text_work_box'):
+        """Clear any selection caused by the first click of an outside double-click.
+
+        Qt's double-click sequence starts with a normal mouse press.  If that
+        press selected this item before the double-click is rejected, the final
+        state must still behave as if the outside double-click was completely
+        ignored.
+        """
+        try:
+            main = getattr(self, 'main_window', None)
+            if main is not None and hasattr(main, 'clear_final_text_selection_safely'):
+                main.clear_final_text_selection_safely(reason=reason)
+                return
+        except Exception:
+            pass
+        try:
+            scene = self.scene()
+            if scene is not None:
+                scene.clearSelection()
+        except Exception:
+            pass
+        try:
+            self.setSelected(False)
+        except Exception:
+            pass
+
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             main = getattr(self, "main_window", None)
@@ -3552,7 +4910,11 @@ class TypesettingItem(QGraphicsPathItem):
                 # 최종 텍스트 도구(final_text)에서는 기존 텍스트 영역 더블클릭도
                 # "새 텍스트 생성"이 아니라 "기존 텍스트 직접 수정"으로 들어가야 한다.
                 # 브러시/마스크/요술봉 같은 다른 도구 모드에서는 기존처럼 아이템 더블클릭을 넘기지 않는다.
-                if draw_mode is not None and draw_mode != 'final_text':
+                if not self.ysb_text_item_interaction_allowed():
+                    try:
+                        self.setSelected(False)
+                    except Exception:
+                        pass
                     event.ignore()
                     return
 
@@ -3716,6 +5078,17 @@ class TypesettingItem(QGraphicsPathItem):
                     event.accept()
                     return
                 # 변형 모드에서는 더블클릭으로 텍스트 편집에 들어가지 않는다.
+                event.accept()
+                return
+
+            # A double-click that lands outside the red text work box must not
+            # open inline editing, even if Qt delivered the event through the
+            # item's wider glyph/shape/bounding area.
+            if not self._text_edit_double_click_allowed_at(event.pos()):
+                # Treat outside-work-box double-clicks as a complete no-op.
+                # The first press in Qt's double-click sequence may already have
+                # selected the item, so clear selection here as the final gate.
+                self._clear_selection_after_rejected_text_hit(reason='outside_text_work_box_double_click')
                 event.accept()
                 return
 

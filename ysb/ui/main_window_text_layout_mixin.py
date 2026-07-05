@@ -45,8 +45,48 @@ class MainWindowTextLayoutMixin:
         direction = self.normalize_writing_direction(value)
         return self.tr_ui("세로쓰기") if direction == "vertical" else self.tr_ui("가로쓰기")
 
+    def normalize_partial_horizontal_writing_enabled(self, value=None, default=True):
+        """Normalize the per-text partial horizontal writing toggle.
+
+        This is intentionally default-ON for old projects so existing vertical text
+        keeps the behavior it already had before the option was exposed.
+        """
+        if value is None:
+            return bool(default)
+        if isinstance(value, str):
+            text = value.strip().lower()
+            if text in ("0", "false", "off", "no", "n", "아니오", "끔", "꺼짐"):
+                return False
+            if text in ("1", "true", "on", "yes", "y", "예", "켬", "켜짐"):
+                return True
+        return bool(value)
+
+    def partial_horizontal_writing_label(self, enabled=None):
+        return "ON" if self.normalize_partial_horizontal_writing_enabled(enabled, True) else "OFF"
+
     def current_default_writing_direction(self):
         return self.normalize_writing_direction(getattr(self, "default_writing_direction", "horizontal"))
+
+    def current_default_partial_horizontal_writing_enabled(self):
+        return self.normalize_partial_horizontal_writing_enabled(
+            getattr(self, "default_partial_horizontal_writing_enabled", True),
+            True,
+        )
+
+    def set_default_partial_horizontal_writing_enabled(self, enabled, announce=True):
+        enabled = self.normalize_partial_horizontal_writing_enabled(enabled, True)
+        self.default_partial_horizontal_writing_enabled = bool(enabled)
+        try:
+            self.app_options["default_partial_horizontal_writing_enabled"] = bool(enabled)
+            save_app_options(self.app_options)
+        except Exception:
+            pass
+        try:
+            if announce:
+                self.log(f"↔️ {self.tr_ui('새 텍스트 부분 가로쓰기')}: {self.partial_horizontal_writing_label(enabled)}")
+        except Exception:
+            pass
+        return bool(enabled)
 
     def set_default_writing_direction(self, direction, announce=True):
         direction = self.normalize_writing_direction(direction)
@@ -68,6 +108,23 @@ class MainWindowTextLayoutMixin:
             item["writing_direction"] = self.normalize_writing_direction(item.get("writing_direction", "horizontal"))
             return item["writing_direction"]
         return "horizontal"
+
+    def ensure_text_partial_horizontal_writing_enabled(self, item):
+        if isinstance(item, dict):
+            item["partial_horizontal_writing_enabled"] = self.normalize_partial_horizontal_writing_enabled(
+                item.get("partial_horizontal_writing_enabled", True),
+                True,
+            )
+            return bool(item["partial_horizontal_writing_enabled"])
+        return True
+
+    def text_item_partial_horizontal_writing_enabled(self, item):
+        if isinstance(item, dict):
+            return self.normalize_partial_horizontal_writing_enabled(item.get("partial_horizontal_writing_enabled", True), True)
+        data = getattr(item, "data", None)
+        if isinstance(data, dict):
+            return self.text_item_partial_horizontal_writing_enabled(data)
+        return True
 
     def text_item_writing_direction(self, item):
         if isinstance(item, dict):
@@ -154,7 +211,63 @@ class MainWindowTextLayoutMixin:
             pass
         return True
 
-    def add_writing_direction_submenu(self, menu, *, current_direction="horizontal", enabled=True, on_horizontal=None, on_vertical=None):
+    def set_text_items_partial_horizontal_writing_enabled(self, data_items, enabled=None, *, reason="부분 가로쓰기 변경", announce=True):
+        items = [d for d in list(data_items or []) if isinstance(d, dict) and not d.get("rasterized_text")]
+        if not items:
+            return False
+        blocked = [d for d in items if self.is_text_writing_direction_change_blocked(d)]
+        editable = [d for d in items if d not in blocked]
+        if blocked and not editable:
+            self.show_writing_direction_blocked_message()
+            return False
+        if not editable:
+            return False
+        if enabled is None:
+            enabled = not all(self.text_item_partial_horizontal_writing_enabled(d) for d in editable)
+        enabled = self.normalize_partial_horizontal_writing_enabled(enabled, True)
+        changed = [d for d in editable if self.text_item_partial_horizontal_writing_enabled(d) != enabled]
+        if not changed:
+            return False
+        try:
+            self.undo_text_checkpoint(reason)
+        except Exception:
+            pass
+        ids = []
+        for d in changed:
+            d["partial_horizontal_writing_enabled"] = bool(enabled)
+            if d.get("id") is not None:
+                ids.append(d.get("id"))
+        try:
+            self.finalize_text_change(ids=ids, fields=["partial_horizontal_writing_enabled"], reason=reason, delay_ms=900)
+        except Exception:
+            try:
+                self.mark_active_page_dirty("text")
+                self.schedule_deferred_auto_save_project(900)
+            except Exception:
+                pass
+        if ids:
+            try:
+                self.reselect_text_items(ids)
+            except Exception:
+                pass
+        if blocked:
+            self.show_writing_direction_blocked_message()
+        try:
+            if announce:
+                state = "ON" if enabled else "OFF"
+                self.log(f"↔️ {self.tr_ui('부분 가로쓰기')}: {state} ({len(changed)}개)")
+        except Exception:
+            pass
+        return True
+
+    def toggle_selected_partial_horizontal_writing_quick(self):
+        try:
+            items = self.selected_text_data_items()
+        except Exception:
+            items = []
+        return self.set_text_items_partial_horizontal_writing_enabled(items, None)
+
+    def add_writing_direction_submenu(self, menu, *, current_direction="horizontal", enabled=True, on_horizontal=None, on_vertical=None, partial_horizontal_enabled=None, partial_horizontal_available=True, on_partial_horizontal=None):
         sub = menu.addMenu(self.tr_ui("쓰기 방향"))
         act_h = sub.addAction(self.tr_ui("가로쓰기"))
         act_v = sub.addAction(self.tr_ui("세로쓰기"))
@@ -164,26 +277,50 @@ class MainWindowTextLayoutMixin:
         current_direction = self.normalize_writing_direction(current_direction)
         act_h.setChecked(current_direction == "horizontal")
         act_v.setChecked(current_direction == "vertical")
+        sub.addSeparator()
+        act_partial = sub.addAction(self.tr_ui("부분 가로쓰기 사용"))
+        act_partial.setCheckable(True)
+        if partial_horizontal_enabled is None:
+            partial_horizontal_enabled = True
+        act_partial.setChecked(self.normalize_partial_horizontal_writing_enabled(partial_horizontal_enabled, True))
+        act_partial.setEnabled(bool(enabled) and bool(partial_horizontal_available))
+        try:
+            if hasattr(self, 'configure_text_context_shortcut_action'):
+                self.configure_text_context_shortcut_action(
+                    act_partial,
+                    "text_partial_horizontal_toggle",
+                    "세로쓰기 중 숫자, 영어, 일부 특문을 입력하면 부분 가로쓰기 모드로 자동 진입하고, 스페이스바로 탈출합니다.",
+                )
+        except Exception:
+            pass
+        try:
+            act_partial.setToolTip(self.tr_ui("세로쓰기 중 숫자, 영어, 일부 특문을 입력하면 부분 가로쓰기 모드로 자동 진입하고, 스페이스바로 탈출합니다."))
+        except Exception:
+            pass
         if not enabled:
             try:
                 sub.setToolTipsVisible(True)
                 tip = self.tr_ui("텍스트 변형이 적용된 객체는 쓰기 방향을 변경할 수 없습니다.")
                 act_h.setToolTip(tip)
                 act_v.setToolTip(tip)
+                act_partial.setToolTip(tip)
             except Exception:
                 pass
         if callable(on_horizontal):
             act_h.triggered.connect(lambda checked=False: on_horizontal())
         if callable(on_vertical):
             act_v.triggered.connect(lambda checked=False: on_vertical())
-        return sub, act_h, act_v
+        if callable(on_partial_horizontal):
+            act_partial.triggered.connect(lambda checked=False: on_partial_horizontal(bool(checked)))
+        return sub, act_h, act_v, act_partial
 
     def show_final_text_tool_context_menu(self, global_pos):
         menu = QMenu(self)
-        _sub, act_h, act_v = self.add_writing_direction_submenu(
+        _sub, act_h, act_v, act_partial = self.add_writing_direction_submenu(
             menu,
             current_direction=self.current_default_writing_direction(),
             enabled=True,
+            partial_horizontal_enabled=self.current_default_partial_horizontal_writing_enabled(),
         )
         chosen = menu.exec(global_pos)
         if chosen == act_h:
@@ -191,6 +328,9 @@ class MainWindowTextLayoutMixin:
             self.activate_final_text_tool_after_direction_menu()
         elif chosen == act_v:
             self.set_default_writing_direction('vertical')
+            self.activate_final_text_tool_after_direction_menu()
+        elif chosen == act_partial:
+            self.set_default_partial_horizontal_writing_enabled(bool(act_partial.isChecked()))
             self.activate_final_text_tool_after_direction_menu()
 
     def activate_final_text_tool_after_direction_menu(self):
@@ -1104,7 +1244,12 @@ class MainWindowTextLayoutMixin:
             return False
 
         selected = self.selected_text_items()
-        if selected and self.cb_mode.currentIndex() == 4:
+        inline_item = None
+        try:
+            inline_item = self._active_inline_text_style_item()
+        except Exception:
+            inline_item = None
+        if (selected or inline_item is not None) and self.cb_mode.currentIndex() == 4:
             self.apply_style_to_selected(preset_name=name, record_undo=record_undo, **subset)
             if from_combo and hasattr(self, "cb_item_text_preset"):
                 self._item_preset_signal_lock = True
@@ -1118,7 +1263,7 @@ class MainWindowTextLayoutMixin:
             # 글꼴 프리셋은 Undo 경계가 아니라 일반 Undo 스택에 포함한다.
             return True
 
-        self.log("⚠️ 개별 글꼴 프리셋을 적용할 텍스트를 최종화면에서 선택하세요.")
+        self.log("⚠️ 개별 글꼴 프리셋을 적용할 텍스트를 최종화면에서 선택하거나 텍스트를 직접 수정 중이어야 합니다.")
         self.set_item_preset_combo_custom()
         return False
 
@@ -4465,7 +4610,7 @@ class MainWindowTextLayoutMixin:
         push_current()
         return lines or ['']
 
-    def _auto_compact_wrapped_lines_fill_empty_space(self, item, lines, family, size, stroke=0, max_w=1, max_h=1, overlap_checker=None):
+    def _auto_compact_wrapped_lines_fill_empty_space(self, item, lines, family, size, stroke=0, max_w=1, max_h=1, overlap_checker=None, source_text=None):
         """1차 자동 줄내림 뒤에 남은 빈공간을 어절 단위로 채운다.
 
         1차 배치는 OCR 영역을 넘기지 않는 쪽으로 보수적으로 동작한다. 그 결과
@@ -4491,6 +4636,40 @@ class MainWindowTextLayoutMixin:
             # 어절 단위가 기본이다. 공백이 없는 긴 한 덩어리는 억지로 글자 단위 분해하지 않는다.
             parts = re.findall(r'\S+', str(line or '').strip())
             return parts or []
+
+        source_probe = re.sub(r'\s+', ' ', str(source_text or '').strip()) if source_text is not None else ''
+
+        def _join_token_for_compact(prev_line, token):
+            """다음 줄 첫 조각을 올릴 때 원래 한 단어였으면 공백 없이 붙인다.
+
+            split_to_line_count 단계에서 에이스가 -> 에이 / 스가처럼 나뉜 조각을
+            빈공간 압축 단계가 다시 붙일 때 '에이 스가'라는 인공 공백을 만들면 안 된다.
+            원문 probe 안에 마지막 토큰+이동 토큰이 공백 없이 존재할 때만 무공백 결합한다.
+            """
+            prev = str(prev_line or '').rstrip()
+            tok = str(token or '').strip()
+            if not prev:
+                return tok
+            last_parts = re.findall(r'\S+', prev)
+            last = last_parts[-1] if last_parts else ''
+            if last and tok and source_probe and ((last + tok) in source_probe):
+                return prev + tok
+            return (prev + ' ' + tok).strip()
+
+        def _compact_visual_guard(candidate_line, current_lines):
+            """빈공간 압축이 한 줄을 과하게 무겁게 만들지 않도록 막는다.
+
+            이 단계는 '남은 빈칸 조금 메우기'이지, 줄내림을 다시 공격적으로 합치는 단계가 아니다.
+            따라서 후보 줄의 시각 길이가 기존 줄들 중 가장 긴 줄보다 커지면 보류한다.
+            특문 길이는 korean_linebreak_rules.visual_len() 기준을 그대로 따른다.
+            """
+            try:
+                base_lengths = [max(1, int(ko_linebreak_rules.visual_len(x))) for x in (current_lines or []) if str(x or '').strip()]
+                if not base_lengths:
+                    return True
+                return int(ko_linebreak_rules.visual_len(candidate_line)) <= max(base_lengths)
+            except Exception:
+                return True
 
         try:
             allow_w_ratio = max(1.0, float(getattr(ko_linebreak_rules, 'HARD_WIDTH_LIMIT_RATIO', 1.10) or 1.10))
@@ -4527,7 +4706,9 @@ class MainWindowTextLayoutMixin:
                     if not nxt:
                         break
                     token = nxt[0]
-                    trial_line = (str(current[i] or '').rstrip() + ' ' + token).strip() if str(current[i] or '').strip() else token
+                    trial_line = _join_token_for_compact(current[i], token)
+                    if not _compact_visual_guard(trial_line, current):
+                        break
                     rest = ' '.join(nxt[1:]).strip()
                     candidate = list(current)
                     candidate[i] = trial_line
@@ -4667,6 +4848,7 @@ class MainWindowTextLayoutMixin:
                     max_w=max_w,
                     max_h=max_h,
                     overlap_checker=_overlap_or_boundary,
+                    source_text=raw_text,
                 )
             except Exception as exc:
                 compacted, changed, diag = lines, False, {'error': repr(exc)}
@@ -6169,6 +6351,7 @@ class MainWindowTextLayoutMixin:
                     max_w=max_w,
                     max_h=max_h,
                     overlap_checker=candidate_text_overlap_info,
+                    source_text=source_text,
                 )
             if line_compacted:
                 chosen_lines = list(compacted_lines or chosen_lines)
@@ -11480,6 +11663,10 @@ class MainWindowTextLayoutMixin:
                 'align': getattr(self, 'default_align', 'center'),
             })
         try:
+            item.setdefault('partial_horizontal_writing_enabled', self.current_default_partial_horizontal_writing_enabled() if hasattr(self, 'current_default_partial_horizontal_writing_enabled') else True)
+        except Exception:
+            item.setdefault('partial_horizontal_writing_enabled', True)
+        try:
             self.audit_boundary_event(
                 'TEXT_PLAIN_CLIPBOARD_STYLE_APPLIED',
                 font_family=str(item.get('font_family', '')),
@@ -11798,8 +11985,38 @@ class MainWindowTextLayoutMixin:
         ) != QMessageBox.StandardButton.Yes:
             return False
         selected_ids = [d.get('id') for d in data_items]
-        self.undo_text_checkpoint('텍스트 객체 변환')
+        object_fields = [
+            'rasterized_text', 'raster_png', 'raster_w', 'raster_h',
+            'rect', 'x_off', 'y_off', 'rotation', 'manual_text_rect',
+            'text_anchor_mode', 'object_source_text',
+            '_transform_mode', '_skew_mode', '_trapezoid_mode', '_arc_mode',
+        ]
+
+        def _snapshot_fields(item):
+            out = {}
+            for field_name in object_fields:
+                try:
+                    exists = field_name in item
+                    value = copy.deepcopy(item.get(field_name))
+                except Exception:
+                    exists = field_name in item
+                    value = item.get(field_name)
+                out[field_name] = {'exists': bool(exists), 'value': value}
+            return out
+
+        before_by_id = {}
+        for d in data_items:
+            try:
+                before_by_id[str(d.get('id'))] = _snapshot_fields(d)
+            except Exception:
+                pass
+
+        use_command_undo = bool(hasattr(self, 'get_undo_manager') and self.get_undo_manager() is not None)
+        if not use_command_undo:
+            self.undo_text_checkpoint('텍스트 객체 변환')
+
         converted = 0
+        converted_items = []
         for d in data_items:
             payload = self.render_text_data_item_to_raster_png(d)
             if not payload or not payload.get('png'):
@@ -11820,6 +12037,62 @@ class MainWindowTextLayoutMixin:
             d.pop('_arc_mode', None)
             d['object_source_text'] = self.strip_object_display_prefix_for_data(d.get('translated_text') or '')
             converted += 1
+            converted_items.append(d)
+
+        if converted_items and use_command_undo:
+            try:
+                from ysb.core.command_undo import FieldChange, UndoCommand
+                page_idx = int(getattr(self, 'idx', 0) or 0)
+                changes = []
+                target_ids = []
+                for d in converted_items:
+                    sid = str(d.get('id'))
+                    if not sid:
+                        continue
+                    target_ids.append(sid)
+                    before_values = before_by_id.get(sid) or {}
+                    after_values = _snapshot_fields(d)
+                    for field_name in object_fields:
+                        b = before_values.get(field_name, {'exists': field_name in d, 'value': None})
+                        a = after_values.get(field_name, {'exists': field_name in d, 'value': None})
+                        changed = bool(b.get('exists')) != bool(a.get('exists'))
+                        if not changed:
+                            try:
+                                changed = b.get('value') != a.get('value')
+                            except Exception:
+                                changed = True
+                        if not changed:
+                            continue
+                        changes.append(FieldChange(
+                            target_id=sid,
+                            field=field_name,
+                            before=copy.deepcopy(b.get('value')),
+                            after=copy.deepcopy(a.get('value')),
+                            component_type='text_object_conversion',
+                            page_idx=page_idx,
+                            meta={
+                                'before_missing': not bool(b.get('exists')),
+                                'after_missing': not bool(a.get('exists')),
+                            },
+                        ))
+                if changes:
+                    command = UndoCommand(
+                        reason='텍스트 객체 변환',
+                        page_idx=page_idx,
+                        component_type='text_object_conversion',
+                        target_ids=target_ids,
+                        changes=changes,
+                        merge_key='text_object_conversion:%s:%s' % (page_idx, ','.join(target_ids)),
+                        meta={'structural_text_rebuild': True, 'fields': object_fields},
+                    )
+                    mgr = self.get_undo_manager()
+                    if mgr is not None and hasattr(mgr, 'push_command'):
+                        mgr.push_command(command, clear_redo=True, source='텍스트 객체 변환')
+            except Exception as e:
+                try:
+                    self.audit_boundary_event('TEXT_OBJECT_CONVERSION_UNDO_COMMAND_ERROR', error=repr(e), throttle_ms=120)
+                except Exception:
+                    pass
         if not converted:
             self.log("⚠️ 객체 변환에 실패했습니다.")
             return False
@@ -12130,10 +12403,11 @@ class MainWindowTextLayoutMixin:
         self.configure_text_context_shortcut_action(act_effect, "text_effect_gradient")
         act_effect.setEnabled(bool(editable_text_items))
         writing_menu_enabled = bool(editable_text_items) and not any(self.is_text_writing_direction_change_blocked(d) for d in editable_text_items)
-        _wd_sub, act_wd_h, act_wd_v = self.add_writing_direction_submenu(
+        _wd_sub, act_wd_h, act_wd_v, act_wd_partial = self.add_writing_direction_submenu(
             menu,
             current_direction=self.text_item_writing_direction(editable_text_items[0] if editable_text_items else None),
             enabled=writing_menu_enabled,
+            partial_horizontal_enabled=all(self.text_item_partial_horizontal_writing_enabled(d) for d in editable_text_items) if editable_text_items else True,
         )
         transform_menu = menu.addMenu(self.tr_ui("텍스트 변형"))
         transform_menu.setEnabled(bool(editable_text_items))
@@ -12179,6 +12453,8 @@ class MainWindowTextLayoutMixin:
             self.set_text_items_writing_direction(editable_text_items, 'horizontal')
         elif chosen == act_wd_v:
             self.set_text_items_writing_direction(editable_text_items, 'vertical')
+        elif chosen == act_wd_partial:
+            self.set_text_items_partial_horizontal_writing_enabled(editable_text_items, bool(act_wd_partial.isChecked()))
         elif chosen == act_skew:
             self.toggle_text_skew_mode(text_item.data)
         elif chosen == act_trapezoid:
@@ -12492,10 +12768,11 @@ class MainWindowTextLayoutMixin:
         self.configure_text_context_shortcut_action(act_effect, "text_effect_gradient")
         act_effect.setEnabled(bool(editable_text_items))
         writing_menu_enabled = bool(editable_text_items) and not any(self.is_text_writing_direction_change_blocked(d) for d in editable_text_items)
-        _wd_sub, act_wd_h, act_wd_v = self.add_writing_direction_submenu(
+        _wd_sub, act_wd_h, act_wd_v, act_wd_partial = self.add_writing_direction_submenu(
             menu,
             current_direction=self.text_item_writing_direction(editable_text_items[0] if editable_text_items else None),
             enabled=writing_menu_enabled,
+            partial_horizontal_enabled=all(self.text_item_partial_horizontal_writing_enabled(d) for d in editable_text_items) if editable_text_items else True,
         )
         act_skew = menu.addAction(self.tr_ui("평행사변형 변형"))
         self.configure_text_context_shortcut_action(act_skew, "text_skew_toggle")
@@ -12521,6 +12798,8 @@ class MainWindowTextLayoutMixin:
             self.set_text_items_writing_direction(editable_text_items, 'horizontal')
         elif chosen == act_wd_v:
             self.set_text_items_writing_direction(editable_text_items, 'vertical')
+        elif chosen == act_wd_partial:
+            self.set_text_items_partial_horizontal_writing_enabled(editable_text_items, bool(act_wd_partial.isChecked()))
         elif chosen == act_skew:
             self.toggle_text_skew_mode(editable_text_items[0] if editable_text_items else None)
         elif chosen == act_trapezoid:

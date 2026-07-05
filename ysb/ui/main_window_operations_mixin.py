@@ -3,6 +3,7 @@ import time
 from ysb.ui.main_window_support import *
 from ysb.ui.gemini_delayed_translation import GeminiDelayedTranslationController, GeminiDelayedTranslationDialog
 from ysb.utils.runtime_logger import append_log, make_log_path, memory_text, numpy_shape_text
+from ysb.core.inpaint_grouping import build_inpaint_mask_groups
 
 
 class MainWindowOperationsMixin:
@@ -2024,6 +2025,18 @@ class MainWindowOperationsMixin:
                     except Exception:
                         pass
                     widget.setParent(None)
+            exit_btn = None
+            if bool(getattr(self, "_inpaint_group_preview_active", False)):
+                try:
+                    exit_btn = self._ensure_inpaint_group_preview_exit_button()
+                except Exception:
+                    exit_btn = None
+            if exit_btn is not None:
+                try:
+                    right_layout.addWidget(exit_btn)
+                    exit_btn.show()
+                except Exception:
+                    pass
             if effect_cb is not None:
                 try:
                     right_layout.addWidget(effect_cb)
@@ -2203,6 +2216,12 @@ class MainWindowOperationsMixin:
                 self._shared_add_label(self.tr_ui("원본 조각을 현재 최종결과 위에 다시 덧씌웁니다."))
                 add_widget(getattr(self, "btn_original_restore_apply", None))
                 populated = True
+            elif draw_mode == "inpaint_group_preview":
+                groups = getattr(self, "_inpaint_group_preview_groups", []) or []
+                self._shared_add_label(self.tr_ui("인페인팅 그룹 미리보기"))
+                self._shared_add_label(self.tr_ui("그룹") + f" {len(groups)}" + self.tr_ui("개"))
+                self._shared_add_label(self.tr_ui("주황 외곽선/노란 영역이 실제 인페인팅 전송 단위입니다."))
+                populated = True
             elif draw_mode == "ocr_region_select":
                 self._shared_add_label(self.tr_ui("OCR 분석 영역"))
                 add_widget(getattr(self, "btn_ocr_region_rect", None))
@@ -2275,6 +2294,11 @@ class MainWindowOperationsMixin:
                 be = getattr(view, "brush_engine", None)
                 if be is not None and bool(getattr(be, "active", False)):
                     remaining = max(remaining, 900)
+        except Exception:
+            pass
+        try:
+            if getattr(self, "_work_cache_image_delta_active_keys", None) or getattr(self, "_view_layer_save_active_keys", None):
+                remaining = max(remaining, 1200)
         except Exception:
             pass
         try:
@@ -3472,6 +3496,11 @@ class MainWindowOperationsMixin:
             pass
         self.view.draw_mode = m
         try:
+            if hasattr(self.view, "refresh_text_item_interaction_for_tool_mode"):
+                self.view.refresh_text_item_interaction_for_tool_mode(m, reason="set_tool")
+        except Exception:
+            pass
+        try:
             if hasattr(self.view, "sync_drag_mode_from_operation"):
                 self.view.sync_drag_mode_from_operation()
             else:
@@ -3522,6 +3551,14 @@ class MainWindowOperationsMixin:
             self.view.area_paint_points = []
         if m != 'raster_erase' and hasattr(self.view, "clear_raster_erase_preview"):
             self.view.clear_raster_erase_preview()
+        if m != 'inpaint_group_preview':
+            try:
+                if hasattr(self.view, "clear_inpaint_group_preview_overlay"):
+                    self.view.clear_inpaint_group_preview_overlay()
+                self._inpaint_group_preview_active = False
+                self._inpaint_group_preview_groups = []
+            except Exception:
+                pass
 
         self.update_final_paint_option_bar_visibility()
         try:
@@ -3558,6 +3595,8 @@ class MainWindowOperationsMixin:
             self.log("🔎 도구: OCR 분석 영역 지정")
         elif m == 'quick_ocr':
             self.log("🔎 도구: 빠른 OCR 영역 선택")
+        elif m == 'inpaint_group_preview':
+            self.log("🧩 인페인팅 그룹 미리보기")
         elif m is None:
             self.log("✋ 도구: 이동")
 
@@ -4904,6 +4943,11 @@ class MainWindowOperationsMixin:
             }
         curr_page = self.data[self.idx]
         try:
+            if hasattr(self, "_apply_pending_work_cache_image_delta_payload_for_page"):
+                self._apply_pending_work_cache_image_delta_payload_for_page(self.idx, reason="page_load")
+        except Exception:
+            pass
+        try:
             self.sync_text_effect_preview_checkbox_for_current_page()
         except Exception:
             try:
@@ -4919,7 +4963,7 @@ class MainWindowOperationsMixin:
                 self.idx,
                 include_ori=True,
                 include_heavy=bool(current_mode == 4 or curr_page.get('use_inpainted_as_source') or curr_page.get('clean_path') or curr_page.get('working_source_path') or curr_page.get('final_paint_path') or curr_page.get('final_paint_above_path')),
-                include_masks=bool(current_mode in (2, 3)),
+                include_masks=bool(current_mode in (2, 3) or getattr(self, "_inpaint_group_preview_active", False)),
             )
         except Exception:
             if curr_page.get('ori') is None and not curr_page.get('use_inpainted_as_source'):
@@ -4929,7 +4973,7 @@ class MainWindowOperationsMixin:
                 self.trim_page_image_cache(keep_indices=[self.idx])
             except Exception:
                 pass
-            if current_mode in (2, 3):
+            if current_mode in (2, 3) or bool(getattr(self, "_inpaint_group_preview_active", False)):
                 try:
                     self.ensure_page_masks_loaded(self.idx)
                     self.touch_page_mask_cache(self.idx)
@@ -4948,6 +4992,11 @@ class MainWindowOperationsMixin:
             self.mode_chg(self.cb_mode.currentIndex())
         finally:
             self.is_page_loading = prev_loading
+        try:
+            if bool(getattr(self, "_inpaint_group_preview_active", False)):
+                self.refresh_inpaint_group_preview_for_current_page(silent=True)
+        except Exception:
+            pass
         try:
             self.schedule_progressive_page_load(self.idx)
         except Exception:
@@ -7858,6 +7907,291 @@ class MainWindowOperationsMixin:
             self.translation_worker = None
             self.end_busy_state("번역")
 
+    def _ensure_inpaint_group_preview_exit_button(self):
+        btn = getattr(self, "btn_inpaint_group_preview_exit", None)
+        if btn is None:
+            btn = QPushButton(self.tr_ui("미리보기 나가기"), self)
+            btn.setObjectName("InpaintGroupPreviewExitButton")
+            btn.setFixedHeight(26)
+            btn.setMinimumWidth(106)
+            btn.clicked.connect(self.exit_inpaint_group_preview)
+            self.btn_inpaint_group_preview_exit = btn
+            try:
+                btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            except Exception:
+                pass
+        try:
+            btn.setText(self.tr_ui("미리보기 나가기"))
+        except Exception:
+            pass
+        return btn
+
+    def _normalize_inpaint_group_preview_mask(self, mask):
+        if mask is None:
+            return None
+        try:
+            if getattr(mask, "ndim", 2) == 3:
+                mask = cv2.cvtColor(mask, cv2.COLOR_RGB2GRAY)
+            else:
+                mask = mask.copy()
+            return mask.astype(np.uint8, copy=False)
+        except Exception:
+            return None
+
+    def _preview_mask_nonzero_count(self, mask):
+        try:
+            norm = self._normalize_inpaint_group_preview_mask(mask)
+            if norm is None:
+                return 0
+            return int(np.count_nonzero(norm))
+        except Exception:
+            return 0
+
+    def _rect_beacon_mask_from_current_data(self, curr, base_shape):
+        """Last-resort preview beacon mask from OCR/text rectangles.
+
+        This is used only for the preview overlay when saved inpainting masks are
+        missing or not loaded yet.  Real inpainting still uses the actual mask
+        path/payload; this fallback only prevents the preview from becoming a
+        dead end when a page has boxes but its mask arrays were evicted from RAM.
+        """
+        try:
+            h, w = base_shape[:2]
+        except Exception:
+            return None
+        if h <= 0 or w <= 0:
+            return None
+        out = np.zeros((int(h), int(w)), dtype=np.uint8)
+        used = 0
+        for item in curr.get('data', []) or []:
+            if not isinstance(item, dict):
+                continue
+            if not bool(item.get('use_inpaint', True)):
+                continue
+            rect = item.get('rect')
+            if rect and len(rect) >= 4:
+                try:
+                    rx, ry, rw, rh = [int(round(float(v))) for v in rect[:4]]
+                    x1 = max(0, min(int(w), rx))
+                    y1 = max(0, min(int(h), ry))
+                    x2 = max(0, min(int(w), rx + max(1, rw)))
+                    y2 = max(0, min(int(h), ry + max(1, rh)))
+                    if x2 > x1 and y2 > y1:
+                        out[y1:y2, x1:x2] = 255
+                        used += 1
+                        continue
+                except Exception:
+                    pass
+            pts = item.get('vertices_list') or item.get('vertices')
+            if pts:
+                try:
+                    arr = np.array(pts, dtype=np.int32).reshape((-1, 1, 2))
+                    cv2.fillPoly(out, [arr], 255)
+                    used += 1
+                except Exception:
+                    pass
+        return out if used > 0 and int(np.count_nonzero(out)) > 0 else None
+
+    def _current_inpaint_group_preview_mask(self):
+        try:
+            page_idx = int(getattr(self, "idx", 0) or 0)
+        except Exception:
+            page_idx = 0
+        try:
+            if hasattr(self, "ensure_page_runtime_loaded"):
+                self.ensure_page_runtime_loaded(page_idx, include_ori=False, include_heavy=False, include_masks=True)
+            elif hasattr(self, "ensure_page_masks_loaded"):
+                self.ensure_page_masks_loaded(page_idx)
+        except Exception:
+            pass
+        try:
+            curr = self.data.get(page_idx) if isinstance(getattr(self, "data", None), dict) else None
+        except Exception:
+            curr = None
+        if not curr:
+            return None
+        try:
+            if hasattr(self, "ensure_page_masks_loaded"):
+                self.ensure_page_masks_loaded(page_idx, keys=("mask_inpaint", "mask_inpaint_off", "mask_merge", "mask_merge_off"))
+        except Exception:
+            pass
+
+        diagnostics = []
+
+        def accept_mask(label, candidate):
+            norm = self._normalize_inpaint_group_preview_mask(candidate)
+            pixels = self._preview_mask_nonzero_count(norm)
+            diagnostics.append(f"{label}={pixels}")
+            if norm is not None and pixels > 0:
+                try:
+                    self._inpaint_group_preview_mask_source = label
+                    self._inpaint_group_preview_mask_diagnostics = ", ".join(diagnostics)
+                except Exception:
+                    pass
+                return norm
+            return None
+
+        # 1) First try the exact inpainting payload for the current toggle state.
+        try:
+            _data, payload_mask = self.build_inpainting_payload_for_current_toggle(curr)
+            accepted = accept_mask("payload", payload_mask)
+            if accepted is not None:
+                return accepted
+        except Exception as e:
+            diagnostics.append(f"payload_error={type(e).__name__}")
+
+        # 2) If payload clipping produced an empty mask, fall back to the raw
+        # saved/current mask.  The preview should not disappear just because the
+        # checkbox/rect clipping step cannot build a nonzero payload yet.
+        toggle_on = bool(getattr(self, "mask_toggle_enabled", True))
+        primary_keys = ("mask_inpaint", "mask_inpaint_off") if toggle_on else ("mask_inpaint_off", "mask_inpaint")
+        for key in primary_keys:
+            accepted = accept_mask(key, curr.get(key))
+            if accepted is not None:
+                return accepted
+
+        # 3) Diagnostic-only fallback: if only analysis/merge masks are loaded,
+        # use them for the preview overlay so the user can still inspect grouping.
+        # Actual inpainting execution remains tied to mask_inpaint/mask_inpaint_off.
+        for key in ("mask_merge", "mask_merge_off"):
+            accepted = accept_mask(key, curr.get(key))
+            if accepted is not None:
+                return accepted
+
+        # 4) Last resort for old/partial project states: build preview beacons
+        # from OCR/text rectangles when any image-sized mask gives us dimensions.
+        base_shape = None
+        for key in ("mask_inpaint", "mask_inpaint_off", "mask_merge", "mask_merge_off"):
+            m = self._normalize_inpaint_group_preview_mask(curr.get(key))
+            if m is not None:
+                base_shape = m.shape
+                break
+        if base_shape is None:
+            try:
+                if curr.get('ori') is not None:
+                    base_shape = curr.get('ori').shape[:2]
+            except Exception:
+                base_shape = None
+        if base_shape is not None:
+            accepted = accept_mask("text_rect_beacon", self._rect_beacon_mask_from_current_data(curr, base_shape))
+            if accepted is not None:
+                return accepted
+
+        try:
+            self._inpaint_group_preview_mask_source = None
+            self._inpaint_group_preview_mask_diagnostics = ", ".join(diagnostics)
+            if hasattr(self, "log"):
+                self.log("⚠️ 인페인팅 그룹 미리보기 마스크 없음: " + ", ".join(diagnostics))
+        except Exception:
+            pass
+        return None
+
+    def _bbox_gap_distance(self, a, b):
+        ax1, ay1, ax2, ay2 = a
+        bx1, by1, bx2, by2 = b
+        dx = max(0, max(bx1 - ax2, ax1 - bx2))
+        dy = max(0, max(by1 - ay2, ay1 - by2))
+        return max(dx, dy)
+
+    def _padded_bbox(self, bbox, pad, w, h):
+        x1, y1, x2, y2 = [int(v) for v in bbox]
+        return (
+            max(0, x1 - int(pad)),
+            max(0, y1 - int(pad)),
+            min(int(w), x2 + int(pad)),
+            min(int(h), y2 + int(pad)),
+        )
+
+    def build_inpaint_group_preview_regions(self, mask, max_side=2800):
+        """Build mask-beacon based inpainting crop groups for preview.
+
+        The mask determines the beacons.  Components are packed from top to
+        bottom into the largest possible padded crop groups that fit inside the
+        requested max-side work canvas.  This is intentionally shared with the
+        future real grouped inpainting path through ysb.core.inpaint_grouping.
+        """
+        try:
+            return build_inpaint_mask_groups(mask, max_work_side=max_side)
+        except Exception:
+            return []
+
+    def refresh_inpaint_group_preview_for_current_page(self, *, silent=True):
+        """Rebuild preview overlay for the current page while staying in preview mode.
+
+        Inpaint group preview is a mode, not a one-shot drawing.  When the user
+        moves to another page, the same mode must remain active and the overlay
+        must be recalculated from that page's mask beacons.
+        """
+        mask = self._current_inpaint_group_preview_mask()
+        groups = self.build_inpaint_group_preview_regions(mask, max_side=2800)
+        self._inpaint_group_preview_groups = groups or []
+        self._inpaint_group_preview_active = True
+        try:
+            view = getattr(self, "view", None)
+            if view is not None:
+                if groups:
+                    view.draw_inpaint_group_preview_regions(groups)
+                elif hasattr(view, "clear_inpaint_group_preview_overlay"):
+                    view.clear_inpaint_group_preview_overlay()
+                view.draw_mode = "inpaint_group_preview"
+                if hasattr(view, "sync_drag_mode_from_operation"):
+                    view.sync_drag_mode_from_operation()
+        except Exception:
+            pass
+        try:
+            self.refresh_shared_option_bar()
+        except Exception:
+            pass
+        try:
+            src = str(getattr(self, "_inpaint_group_preview_mask_source", "") or "")
+            diag = str(getattr(self, "_inpaint_group_preview_mask_diagnostics", "") or "")
+            if groups:
+                extra = f" source={src}" if src else ""
+                if diag:
+                    extra += f" diag=({diag})"
+                self.log(f"🧩 인페인팅 그룹 미리보기 갱신: {len(groups)}개 그룹" + extra)
+            elif not silent:
+                detail = self.tr_ui("표시할 인페인팅 마스크 그룹이 없습니다.")
+                if diag:
+                    detail = detail + "\n" + self.tr_ui("마스크 진단") + ": " + diag
+                QMessageBox.information(self, self.tr_ui("인페인팅 그룹 미리보기"), detail)
+            else:
+                self.log("🧩 인페인팅 그룹 미리보기 갱신: 0개 그룹" + (f" diag=({diag})" if diag else ""))
+        except Exception:
+            pass
+        return groups
+
+    def show_inpaint_group_preview(self):
+        groups = self.refresh_inpaint_group_preview_for_current_page(silent=False)
+        if not groups:
+            return
+
+    def exit_inpaint_group_preview(self):
+        self._inpaint_group_preview_active = False
+        self._inpaint_group_preview_groups = []
+        try:
+            self._inpaint_group_preview_mask_source = None
+            self._inpaint_group_preview_mask_diagnostics = ""
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "view") and hasattr(self.view, "clear_inpaint_group_preview_overlay"):
+                self.view.clear_inpaint_group_preview_overlay()
+            if getattr(getattr(self, "view", None), "draw_mode", None) == "inpaint_group_preview":
+                self.view.draw_mode = None
+                if hasattr(self.view, "sync_drag_mode_from_operation"):
+                    self.view.sync_drag_mode_from_operation()
+        except Exception:
+            pass
+        try:
+            self.refresh_shared_option_bar()
+        except Exception:
+            pass
+        try:
+            self.log("↩️ 인페인팅 그룹 미리보기 종료")
+        except Exception:
+            pass
+
     def clip_mask_to_checked_text_boxes(self, mask, data):
         """
         페인팅 마스크 토글 ON 전용:
@@ -8063,93 +8397,25 @@ class MainWindowOperationsMixin:
         return "cancel"
 
     def _prepare_single_inpaint_request_with_resize_prompt(self, page_idx, input_path, inpaint_mask):
-        plan = self._inspect_inpaint_resize_plan(input_path, self._get_current_inpaint_provider())
-        if not plan:
-            return input_path, inpaint_mask, True
-        decision = self._ask_single_inpaint_resize(page_idx, plan)
-        if decision == "cancel":
-            self.log("↩️ 인페인팅 리사이즈 취소")
-            return input_path, inpaint_mask, False
-        if decision != "resize":
-            self.log("ℹ️ 인페인팅은 원본 해상도로 그대로 진행합니다.")
-            return input_path, inpaint_mask, True
-        new_path, new_mask = self._write_resized_inpaint_request(page_idx, input_path, inpaint_mask, plan)
-        return new_path, new_mask, True
+        """Legacy compatibility shim.
+
+        인페인팅은 이제 전체 페이지를 LaMa 권장 해상도에 맞춰 리사이즈하지 않는다.
+        실제 실행은 미리보기와 동일한 마스크-비콘 그룹 crop 단위로만 수행하므로,
+        전체 웹툰 페이지 높이가 크다는 이유로 리사이즈 선택창을 띄우면 안 된다.
+        """
+        return input_path, inpaint_mask, True
 
     def _ask_batch_inpaint_resize(self, selected_page_indices):
-        provider = self._get_current_inpaint_provider()
-        limits = self._get_inpaint_resize_limits(provider)
+        """Legacy compatibility shim for old batch preflight.
+
+        그룹 인페인팅에서는 페이지 전체가 아니라 각 그룹 crop이 LaMa 입력 단위다.
+        따라서 선택 페이지 전체 해상도 기준 리사이즈 옵션/경고창은 사용하지 않는다.
+        """
         self._batch_inpaint_resize_policy = None
-        if not limits:
-            return True
-
-        overs = []
-        for page_idx in list(selected_page_indices or []):
-            try:
-                input_path = self.get_inpainting_input_path(int(page_idx))
-            except Exception:
-                input_path = None
-            plan = self._inspect_inpaint_resize_plan(input_path, provider)
-            if plan:
-                plan["page_idx"] = int(page_idx)
-                overs.append(plan)
-
-        if not overs:
-            return True
-
-        preview_lines = []
-        for plan in overs[:6]:
-            preview_lines.append(
-                f"- {int(plan.get('page_idx', 0)) + 1}{self.tr_ui('페이지')}: "
-                f"{int(plan.get('orig_width', 0))}x{int(plan.get('orig_height', 0))} → "
-                f"{int(plan.get('target_width', 0))}x{int(plan.get('target_height', 0))}"
-            )
-        if len(overs) > 6:
-            preview_lines.append(self.tr_ui("외 추가 페이지가 있습니다.").format(count=len(overs) - 6))
-
-        provider_label = str(limits.get("provider_label") or "LaMa")
-        warn_text = f"장변 {int(limits.get('warn_max_side', 0)):,}px / {float(int(limits.get('warn_max_pixels', 0))/1_000_000.0):.1f}MP"
-        detail = (
-            f"{self.tr_ui('기준 초과 페이지')}: {len(overs)}\n"
-            f"{self.tr_ui('권장 기준')}: {provider_label} · {warn_text}\n\n"
-            + "\n".join(preview_lines)
-        )
-
-        msg = QMessageBox(self)
-        msg.setIcon(QMessageBox.Icon.Warning)
-        msg.setWindowTitle(self.tr_ui("일괄 인페인팅 해상도 확인"))
-        msg.setText(self.tr_ui("선택한 페이지 중 일부가 LaMa 권장 해상도를 넘습니다."))
-        msg.setInformativeText(detail)
-        cb = QCheckBox(self.tr_ui("선택한 전체 페이지에 같은 기준으로 적용"), msg)
-        cb.setChecked(True)
-        msg.setCheckBox(cb)
-        resize_btn = msg.addButton(self.tr_ui("리사이즈 후 진행"), QMessageBox.ButtonRole.AcceptRole)
-        keep_btn = msg.addButton(self.tr_ui("그대로 진행"), QMessageBox.ButtonRole.ActionRole)
-        cancel_btn = msg.addButton(self.tr_ui("취소"), QMessageBox.ButtonRole.RejectRole)
-        msg.setDefaultButton(resize_btn)
-        msg.exec()
-        clicked = msg.clickedButton()
-        if clicked == cancel_btn:
-            self.log("↩️ 인페인팅 리사이즈 취소")
-            return False
-        if clicked == keep_btn:
-            self.log("ℹ️ 일괄 인페인팅은 원본 해상도로 그대로 진행합니다.")
-            return True
-
-        if cb.isChecked():
-            apply_indices = [int(i) for i in selected_page_indices or []]
-        else:
-            apply_indices = [int(plan.get("page_idx", -1)) for plan in overs]
-        self._batch_inpaint_resize_policy = {
-            "enabled": True,
-            "provider": provider,
-            "target_max_side": int(limits.get("target_max_side", 0) or 0),
-            "target_max_pixels": int(limits.get("target_max_pixels", 0) or 0),
-            "warn_max_side": int(limits.get("warn_max_side", 0) or 0),
-            "warn_max_pixels": int(limits.get("warn_max_pixels", 0) or 0),
-            "page_indices": [int(i) for i in apply_indices if int(i) >= 0],
-        }
-        self.log(f"↘️ 일괄 인페인팅 리사이즈 적용 예정: {len(overs)}페이지 감지")
+        try:
+            self.log("ℹ️ 인페인팅은 그룹 crop 기준으로 실행하므로 전체 페이지 리사이즈 확인을 건너뜁니다.")
+        except Exception:
+            pass
         return True
 
     def run_inpainting(self):
@@ -8194,12 +8460,6 @@ class MainWindowOperationsMixin:
 
         inpaint_mask = self.normalize_inpaint_mask_to_input_image(input_path, inpaint_mask)
 
-        original_input_path = str(input_path)
-        input_path, inpaint_mask, proceed_inpaint = self._prepare_single_inpaint_request_with_resize_prompt(page_idx, input_path, inpaint_mask)
-        if not proceed_inpaint:
-            return
-        cleanup_input_path = str(input_path) if str(input_path) != original_input_path else None
-
         if not mask_toggle_enabled and inpaint_mask is None:
             self.log("⚠️ OFF 페인팅 마스크가 없습니다. 마스크 OFF 상태에서는 직접 칠한 마스크가 필요합니다.")
             return
@@ -8208,15 +8468,26 @@ class MainWindowOperationsMixin:
             self.log("⚠️ 인페인팅 마스크가 비어 있습니다.")
             return
 
+        # 실제 인페인팅도 미리보기와 같은 마스크-비콘 2800 패킹 그룹만 사용한다.
+        # 전체 페이지를 리사이즈해서 한 번에 보내지 않고, 그룹 crop 단위로 LaMa에 전달한다.
+        try:
+            inpaint_groups = build_inpaint_mask_groups(inpaint_mask, max_work_side=2800)
+        except Exception:
+            inpaint_groups = []
+        if not inpaint_groups:
+            self.log("⚠️ 인페인팅 마스크 그룹이 없습니다.")
+            return
+
         if not self.run_local_cuda_preflight_or_alert("inpaint"):
             return
 
         self.log(f"🧾 인페인팅 입력: {input_path}")
+        self.log(f"🧩 인페인팅 그룹: {len(inpaint_groups)}개")
         self._long_task_cancel_requested = False
         self._inpaint_target_page_idx = page_idx
-        self.prepare_task_progress_overlay("인페인팅", f"현재 작업: {page_idx + 1}페이지 인페인팅 준비 중", total=100, cancellable=True)
+        self.prepare_task_progress_overlay("인페인팅", f"현재 작업: {page_idx + 1}페이지 인페인팅 그룹 준비 중\n전체 그룹: {len(inpaint_groups)}개", total=100, cancellable=True)
         self.begin_busy_state("인페인팅")
-        self.iw = InpaintWorker(self.engine, input_path, inpaint_data, inpaint_mask, page_idx=page_idx, cleanup_path=cleanup_input_path)
+        self.iw = GroupedInpaintWorker(self.engine, input_path, inpaint_data, inpaint_mask, page_idx=page_idx, groups=inpaint_groups, max_work_side=2800)
         self._active_task_worker = self.iw
         self.iw.log.connect(lambda msg: self.handle_long_task_message(msg))
         if hasattr(self.iw, "failed"):
@@ -8527,11 +8798,17 @@ class MainWindowOperationsMixin:
         same_page = (page_idx == int(getattr(self, "idx", -1) or -1))
         try:
             self._audit_inpaint_result_event("INPAINT_RESULT_WORK_CACHE_SAVE_BEGIN", page_idx=page_idx, same_page=same_page)
+            queued = False
             if hasattr(self, 'flush_workspace_image_pages'):
-                self.flush_workspace_image_pages([page_idx], reason='inpaint_result', release_non_current=not same_page)
+                queued = bool(self.flush_workspace_image_pages([page_idx], reason='inpaint_result', release_non_current=not same_page))
             else:
                 self.save_changed_page_without_ui_commit(page_idx)
-            self._audit_inpaint_result_event("INPAINT_RESULT_WORK_CACHE_SAVE_DONE", page_idx=page_idx, same_page=same_page)
+            self._audit_inpaint_result_event(
+                "INPAINT_RESULT_WORK_CACHE_SAVE_ENQUEUED" if queued else "INPAINT_RESULT_WORK_CACHE_SAVE_DONE",
+                page_idx=page_idx,
+                same_page=same_page,
+                queued=bool(queued),
+            )
         except Exception as e:
             try:
                 self.log(f"⚠️ 인페인팅 결과 workspace 저장 실패({page_idx + 1}p): {e}")
@@ -8880,10 +9157,9 @@ class MainWindowOperationsMixin:
                     curr_data['data'][data_index][key] = new_text
                     item.setData(Qt.ItemDataRole.UserRole, new_text)
                     if col == 3:
-                        try:
-                            self.shrink_text_rect_to_content(curr_data['data'][data_index])
-                        except Exception:
-                            pass
+                        # 우측 표 번역문 수정은 텍스트 내용만 바꾼다.
+                        # OCR/작업 영역 rect는 자동 줄내림 기준이므로 자동 shrink 하지 않는다.
+                        pass
                     if self.cb_mode.currentIndex() == 4:
                         try:
                             if target_id is not None:
@@ -9089,12 +9365,18 @@ class MainWindowOperationsMixin:
             and not getattr(self, "_skip_mode_paint_commit", False)
             and self.last_mode == 4
         ):
-            curr = self.data.get(self.idx)
-            if curr is not None and hasattr(self.view, "get_final_paint_png_bytes"):
-                curr['final_paint'] = self.view.get_final_paint_png_bytes()
-                if hasattr(self.view, "get_final_paint_above_png_bytes"):
-                    curr['final_paint_above'] = self.view.get_final_paint_above_png_bytes()
-                self.schedule_deferred_auto_save_project()
+            # 탭 이동 순간에 전체 final_paint QPixmap을 PNG로 인코딩하면 UI가 멈춘다.
+            # 현재 레이어는 view-layer save queue가 QImage snapshot만 뜬 뒤 worker에서 저장한다.
+            try:
+                if hasattr(self, "schedule_deferred_view_layer_commit"):
+                    self.schedule_deferred_view_layer_commit("final_paint", delay_ms=180)
+                else:
+                    self.schedule_deferred_auto_save_project()
+            except Exception:
+                try:
+                    self.schedule_deferred_auto_save_project()
+                except Exception:
+                    pass
 
         # 사용자가 작업 탭을 바꾸면 브러시/지우개/요술봉/텍스트 입력 같은 도구는
         # 새 탭에서 그대로 이어지면 오작동하기 쉽다. 탭 이동은 항상 이동 모드로 정리한다.
@@ -10615,6 +10897,37 @@ class MainWindowOperationsMixin:
             name = f"page{page_no:03d}"
         return f"{page_no}p - {name}"
 
+    def batch_export_output_basename(self, page_idx):
+        """일괄 출력 진행창에 표시할 실제 Result 출력 파일명.
+
+        소스 페이지명은 095-vert.jpg처럼 원본 확장자를 가진다.
+        그러나 출력은 사용자가 선택한 PNG/JPG/WebP 형식으로 저장되므로,
+        진행창에서는 원본 파일명이 아니라 실제 출력 대상 파일명을 보여줘야 한다.
+        """
+        try:
+            output_stem = self.output_display_stem(int(page_idx))
+            return os.path.basename(str(self.output_result_file_path(output_stem)))
+        except Exception:
+            try:
+                stem = safe_page_file_stem(self.output_display_stem(int(page_idx)), f"page{int(page_idx) + 1:03d}")
+            except Exception:
+                try:
+                    stem = f"page{int(page_idx) + 1:03d}"
+                except Exception:
+                    stem = "page"
+            try:
+                ext = output_image_extension(self.current_output_image_format())
+            except Exception:
+                ext = ".png"
+            return f"Result_{stem}{ext}"
+
+    def batch_export_page_display_label(self, page_idx):
+        try:
+            page_no = int(page_idx) + 1
+        except Exception:
+            page_no = 0
+        return f"{page_no}p - {self.batch_export_output_basename(page_idx)}"
+
     def wait_for_batch_preview(self, delay_ms=None):
         try:
             QApplication.processEvents()
@@ -10651,7 +10964,13 @@ class MainWindowOperationsMixin:
         status = str(status or "done").lower()
         if status not in ("done", "skipped", "failed"):
             status = "done"
-        entry = {"index": page_idx, "label": self.batch_page_display_label(page_idx), "message": str(message or "")}
+        label = self.batch_page_display_label(page_idx)
+        try:
+            if str(result.get("mode") or "").lower() == "export":
+                label = self.batch_export_page_display_label(page_idx)
+        except Exception:
+            pass
+        entry = {"index": page_idx, "label": label, "message": str(message or "")}
         result.setdefault(status, []).append(entry)
         if message:
             result.setdefault("messages", []).append(entry)
@@ -10772,7 +11091,14 @@ class MainWindowOperationsMixin:
             pass
         lines = [f"선택 페이지 진행: {current}/{total}"]
         if page_idx is not None:
-            lines.append(f"현재 페이지: {self.batch_page_display_label(page_idx)}")
+            try:
+                is_export_mode = str(getattr(self, "current_batch_mode", "") or "").lower() == "export"
+            except Exception:
+                is_export_mode = False
+            if is_export_mode:
+                lines.append(f"현재 페이지: {self.batch_export_page_display_label(page_idx)}")
+            else:
+                lines.append(f"현재 페이지: {self.batch_page_display_label(page_idx)}")
         else:
             lines.append("현재 페이지: 대기 중")
         done = len((getattr(self, "_batch_result", {}) or {}).get("done") or [])
@@ -11240,7 +11566,8 @@ class MainWindowOperationsMixin:
                 if i >= len(self.paths):
                     continue
                 path = self.paths[i]
-                base_name = os.path.basename(str(path or f"page{i + 1:03d}.png"))
+                source_base_name = os.path.basename(str(path or f"page{i + 1:03d}.png"))
+                base_name = self.batch_export_output_basename(i)
                 prefix = f"[{seq_no + 1}/{total} | {i + 1}p]"
                 try:
                     self._batch_total = total
@@ -11248,7 +11575,7 @@ class MainWindowOperationsMixin:
                     self._batch_current_page_idx = i
                     self.update_task_progress_overlay(current=seq_no, total=total, detail=self.batch_progress_detail(title, seq_no, total, i, f"출력 중: {base_name}"))
                     _keep_export_progress_on_top()
-                    self.log(f"{prefix} 출력: {base_name}")
+                    self.log(f"{prefix} 출력: {base_name} (원본: {source_base_name})")
                     try:
                         if hasattr(self, 'audit_boundary_event'):
                             self.audit_boundary_event(
@@ -11258,6 +11585,7 @@ class MainWindowOperationsMixin:
                                 seq=seq_no + 1,
                                 total=total,
                                 base_name=base_name,
+                                source_base_name=source_base_name,
                             )
                     except Exception:
                         pass
@@ -11453,7 +11781,8 @@ class MainWindowOperationsMixin:
         dialog = QDialog(self)
         dialog.setWindowTitle(self.tr_ui(title))
         dialog.setModal(True)
-        dialog.resize(440, 220 if include_current_page else 190)
+        dialog_extra_h = 34 if str(mode or "") == "extract_text" else 0
+        dialog.resize(440, (220 if include_current_page else 190) + dialog_extra_h)
 
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(16, 16, 16, 16)
@@ -11491,6 +11820,19 @@ class MainWindowOperationsMixin:
         note.setStyleSheet("color: #8ea0b8;")
         layout.addWidget(note)
 
+        project_combined_cb = None
+        if str(mode or "") == "extract_text":
+            project_combined_cb = QCheckBox(self.tr_ui("프로젝트 통합 지문 추출"), dialog)
+            try:
+                project_combined_cb.setToolTip(self.tr_ui("선택한 페이지의 지문을 프로젝트 제목의 단일 TXT 파일로도 함께 추출합니다."))
+            except Exception:
+                pass
+            try:
+                project_combined_cb.setChecked(bool(getattr(self, "_batch_extract_project_combined", False)))
+            except Exception:
+                pass
+            layout.addWidget(project_combined_cb)
+
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dialog)
         try:
             buttons.button(QDialogButtonBox.StandardButton.Ok).setText(self.tr_ui("확인"))
@@ -11510,9 +11852,9 @@ class MainWindowOperationsMixin:
             rb_current.toggled.connect(sync_enabled)
 
         if rb_current is not None:
-            result = {"accepted": False, "indices": [current_idx], "label": self.tr_ui("현재 페이지")}
+            result = {"accepted": False, "indices": [current_idx], "label": self.tr_ui("현재 페이지"), "project_combined": False}
         else:
-            result = {"accepted": False, "indices": list(range(total_pages)), "label": self.tr_ui("전체 페이지")}
+            result = {"accepted": False, "indices": list(range(total_pages)), "label": self.tr_ui("전체 페이지"), "project_combined": False}
 
         def on_accept():
             try:
@@ -11526,6 +11868,8 @@ class MainWindowOperationsMixin:
                 else:
                     result["indices"] = list(range(total_pages))
                     result["label"] = self.tr_ui("전체 페이지")
+                if project_combined_cb is not None:
+                    result["project_combined"] = bool(project_combined_cb.isChecked())
                 result["accepted"] = True
                 dialog.accept()
             except Exception as e:
@@ -11535,7 +11879,17 @@ class MainWindowOperationsMixin:
         buttons.rejected.connect(dialog.reject)
 
         if dialog.exec() != QDialog.DialogCode.Accepted or not result.get("accepted"):
+            if str(mode or "") == "extract_text":
+                try:
+                    self._batch_extract_project_combined = False
+                except Exception:
+                    pass
             return None, None
+        if str(mode or "") == "extract_text":
+            try:
+                self._batch_extract_project_combined = bool(result.get("project_combined", False))
+            except Exception:
+                pass
         return result["indices"], result["label"]
 
     def run_batch(self, mode):
@@ -11605,23 +11959,12 @@ class MainWindowOperationsMixin:
 
         self._batch_inpaint_resize_policy = None
         if mode == "inpaint":
-            inpaint_ctx = self.macro_batch_preflight_context_for_mode(mode) if hasattr(self, "macro_batch_preflight_context_for_mode") else {}
-            if getattr(self, "macro_running", False) and (
-                bool((inpaint_ctx or {}).get("inpaint_resize_checked"))
-                or bool(getattr(self, "_macro_preflight_inpaint_resize_checked", False))
-            ):
-                policy = (inpaint_ctx or {}).get("inpaint_resize_policy", None)
-                if not isinstance(policy, dict):
-                    policy = getattr(self, "_macro_preflight_inpaint_resize_policy", None)
-                self._batch_inpaint_resize_policy = copy.deepcopy(policy) if isinstance(policy, dict) else None
-                try:
-                    self.log("🧩 [Macro] 인페인팅 리사이즈 정책 재사용")
-                except Exception:
-                    pass
-            else:
-                if not self._ask_batch_inpaint_resize(selected_page_indices):
-                    self.log(f"↩️ {title} 취소")
-                    return
+            # 그룹 인페인팅은 페이지 전체 리사이즈 프리플라이트를 쓰지 않는다.
+            # 미리보기와 같은 2800 패킹 그룹 crop이 실제 LaMa 입력 단위다.
+            try:
+                self.log("🧩 [Batch] 인페인팅은 그룹 crop 기준으로 진행합니다. 전체 페이지 리사이즈 확인은 건너뜁니다.")
+            except Exception:
+                pass
         try:
             self._batch_return_page_idx = int(self.idx)
             self._batch_return_mode_idx = int(self.cb_mode.currentIndex()) if hasattr(self, "cb_mode") else 0
@@ -12795,6 +13138,24 @@ class MainWindowOperationsMixin:
         except Exception:
             return False
         try:
+            if hasattr(self, '_ysb_modal_dialog_owns_keyboard') and self._ysb_modal_dialog_owns_keyboard(None):
+                try:
+                    self.audit_boundary_event('TEXT_CLIPBOARD_SHORTCUT_REJECTED', action=action, reason='modal_dialog_keyboard_owner', phase=phase, throttle_ms=120)
+                except Exception:
+                    pass
+                return False
+        except Exception:
+            pass
+        try:
+            if hasattr(self, '_right_text_table_owns_focus') and self._right_text_table_owns_focus(None):
+                try:
+                    self.audit_boundary_event('TEXT_CLIPBOARD_SHORTCUT_REJECTED', action=action, reason='right_text_table_focus', phase=phase, throttle_ms=80)
+                except Exception:
+                    pass
+                return False
+        except Exception:
+            pass
+        try:
             if self._inline_text_editor_is_active():
                 return False
         except Exception:
@@ -13373,6 +13734,9 @@ class MainWindowOperationsMixin:
                 return
             if self._event_matches_shortcut(event, "text_rasterize"):
                 self.rasterize_selected_text_quick()
+                return
+            if self._event_matches_shortcut(event, "text_partial_horizontal_toggle"):
+                self.toggle_selected_partial_horizontal_writing_quick()
                 return
             if self._event_matches_shortcut(event, "item_font_select"):
                 self.open_font_select_dialog()

@@ -1231,6 +1231,12 @@ QCheckBox, QRadioButton { color:#E0DADF; spacing:9px; }
                 self.open_analysis_mask_settings_dialog,
             ),
             (
+                "분석 박스 크기",
+                "분석도에 표시되는 텍스트 번호 박스와 외곽선 크기를 정합니다. 자동값은 페이지별 너비 기준, 수동값은 전 페이지 공통으로 적용됩니다.",
+                "설정",
+                self.open_analysis_box_size_dialog,
+            ),
+            (
                 "단축키 통합 관리",
                 "작업, 일괄 처리, 텍스트 입력, 옵션 기능에 연결된 단축키를 한곳에서 바꿉니다. 충돌 확인과 비활성화도 여기서 처리합니다.",
                 "관리",
@@ -1584,6 +1590,8 @@ QCheckBox, QRadioButton { color:#E0DADF; spacing:9px; }
         menu.addAction(self.actions["option_translation_prompt"])
         menu.addAction(self.actions["option_glossary"])
         menu.addAction(self.actions["option_analysis_mask_settings"])
+        if "work_text_number_width" in self.actions:
+            menu.addAction(self.actions["work_text_number_width"])
         if "option_mask_color_settings" in self.actions:
             menu.addAction(self.actions["option_mask_color_settings"])
         menu.addAction(self.actions["option_ocr_analysis_regions"])
@@ -1835,10 +1843,11 @@ QCheckBox, QRadioButton { color:#E0DADF; spacing:9px; }
         work_menu.addAction(self.actions["paint_reanalyze"])
         work_menu.addAction(self.actions["work_translate"])
         work_menu.addAction(self.actions["work_inpaint"])
+        if "work_inpaint_group_preview" in self.actions:
+            work_menu.addAction(self.actions["work_inpaint_group_preview"])
         work_menu.addSeparator()
 
         work_menu.addSection(self.tr_ui("텍스트 수정류"))
-        work_menu.addAction(self.actions["work_extract_text"])
         work_menu.addAction(self.actions["work_import_translation"])
         work_menu.addAction(self.actions["work_clear_translation"])
         work_menu.addAction(self.actions["work_clean_text"])
@@ -1858,8 +1867,9 @@ QCheckBox, QRadioButton { color:#E0DADF; spacing:9px; }
 
         work_menu.addSection(self.tr_ui("기타 동작"))
         work_menu.addAction(self.actions["work_quick_ocr"])
-        work_menu.addAction(self.actions["work_text_number_width"])
         work_menu.addAction(self.actions["work_reset_text_rects"])
+        if "work_toggle_text_number_boxes" in self.actions:
+            work_menu.addAction(self.actions["work_toggle_text_number_boxes"])
         work_menu.addSeparator()
         work_menu.addAction(self.actions["work_output_preview"])
 
@@ -1921,6 +1931,8 @@ QCheckBox, QRadioButton { color:#E0DADF; spacing:9px; }
         option_menu.addAction(self.actions["option_item_text_preset_settings"])
         option_menu.addSeparator()
         option_menu.addAction(self.actions["option_analysis_mask_settings"])
+        if "work_text_number_width" in self.actions:
+            option_menu.addAction(self.actions["work_text_number_width"])
         if "option_mask_color_settings" in self.actions:
             option_menu.addAction(self.actions["option_mask_color_settings"])
         option_menu.addAction(self.actions["option_ocr_analysis_regions"])
@@ -3172,13 +3184,16 @@ QCheckBox, QRadioButton { color:#E0DADF; spacing:9px; }
 
         self.tab = TextTableWidget(0, 4)
         self.tab.setHorizontalHeaderLabels(["ID", "X", "원문", "번역"])
-        self.tab.setItemDelegateForColumn(
-            3,
-            MultilineDelegate(
-                self.tab,
-                shortcut_getter=self.get_special_shortcuts,
-                linebreak_getter=self.get_linebreak_shortcut,
-            )
+        right_text_delegate = MultilineDelegate(
+            self.tab,
+            shortcut_getter=self.get_special_shortcuts,
+            linebreak_getter=self.get_linebreak_shortcut,
+        )
+        self.tab.setItemDelegateForColumn(2, right_text_delegate)
+        self.tab.setItemDelegateForColumn(3, right_text_delegate)
+        self.tab.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked
+            | QAbstractItemView.EditTrigger.EditKeyPressed
         )
         self.tab.itemChanged.connect(self.on_table_item_changed)
         self.tab.itemSelectionChanged.connect(self.on_table_selection_changed)
@@ -3324,7 +3339,7 @@ QCheckBox, QRadioButton { color:#E0DADF; spacing:9px; }
             getattr(self, 'page_tab_bar', None), getattr(self, 'btn_page_tab_menu', None),
         ]
         self.page_required_action_keys = [
-            'work_analyze', 'work_quick_ocr', 'paint_reanalyze', 'work_translate', 'work_inpaint', 'final_paint_to_background',
+            'work_analyze', 'work_quick_ocr', 'paint_reanalyze', 'work_translate', 'work_inpaint', 'work_inpaint_group_preview', 'final_paint_to_background',
             'batch_analyze', 'batch_reanalyze', 'batch_translate', 'batch_inpaint', 'work_page_prev', 'work_page_next', 'work_page_list', 'work_page_full_name',
         ]
         self.update_color_button_styles()
@@ -3795,9 +3810,10 @@ QCheckBox, QRadioButton { color:#E0DADF; spacing:9px; }
             "paint_reanalyze": "재분석",
             "work_quick_ocr": "빠른 OCR 설정",
             "quick_ocr_execute": "빠른 OCR 실행",
-            "work_text_number_width": "텍스트 넘버 크기 변경",
+            "work_text_number_width": "분석 박스 크기",
             "work_translate": "번역",
             "work_inpaint": "인페인팅",
+            "work_inpaint_group_preview": "인페인팅 그룹 미리보기",
             "work_import_clean_background": "클린본 불러오기",
             "work_inpaint_source": "배경을 원본으로 쓰기",
             "work_restore_original_source": "원본으로 돌아가기",

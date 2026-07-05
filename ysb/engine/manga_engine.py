@@ -15,6 +15,9 @@ import subprocess
 import shutil
 from pathlib import Path
 from openai import OpenAI
+from ysb.core.lm_studio_compat import parse_translation_items_strict, strip_json_code_fence
+from ysb.core.api_diagnostics import call_gemini_inpaint_api, extract_gemini_image_bytes
+from ysb.core.project_store import imwrite_unicode
 from ysb.core.text_style_limits import clamp_text_line_spacing, clamp_text_char_scale, text_line_height_from_percent
 try:
     from PIL import Image, ImageDraw, ImageFont, ImageFilter
@@ -117,7 +120,7 @@ class Config:
     STABLE_INPAINT_WAIT_SECONDS = 3
     LOCAL_LAMA_WAIT_SECONDS = 0
     LOCAL_LAMA_DEVICE = "auto"
-    GEMINI_INPAINT_MODEL = "gemini-2.5-flash-image"
+    GEMINI_INPAINT_MODEL = "gemini-3.1-flash-image"
     GEMINI_INPAINT_PROMPT = (
         "Remove the text only inside the white mask area and reconstruct the original manga background. "
         "Keep all characters, panel borders, screentones, line art, and unmasked areas unchanged. "
@@ -2483,10 +2486,11 @@ class MangaProcessEngine:
         img_bgr 일부 영역을 임시 파일로 저장해서 CLOVA OCR 호출.
         OCR 좌표는 원본 이미지 기준 좌표로 보정해서 반환.
         """
-        temp_path = f"temp_ocr_tile_{uuid.uuid4().hex}.jpg"
+        temp_path = os.path.join(tempfile.gettempdir(), f"temp_ocr_tile_{uuid.uuid4().hex}.jpg")
 
         try:
-            cv2.imwrite(temp_path, img_bgr)
+            if not imwrite_unicode(temp_path, np.ascontiguousarray(img_bgr)):
+                raise ValueError("OCR 임시 이미지 저장 실패")
 
             provider = str(getattr(Config, "OCR_PROVIDER", "clova") or "clova").lower()
 
@@ -3493,7 +3497,8 @@ class MangaProcessEngine:
 
             except Exception as e:
                 print(f"Chunk Translate Error: {e}")
-                if "API 키가 비어" in str(e):
+                err_text = str(e)
+                if "API 키가 비어" in err_text or "YSB JSON 형식과 호환되지" in err_text or "reasoning/channel" in err_text:
                     raise
 
                 # 청크 실패 시 한 줄씩 재시도
@@ -3503,7 +3508,8 @@ class MangaProcessEngine:
                         final_results.extend(one_result)
                     except Exception as e2:
                         print(f"Single Translate Error: {e2}")
-                        if "API 키가 비어" in str(e2):
+                        err_text2 = str(e2)
+                        if "API 키가 비어" in err_text2 or "YSB JSON 형식과 호환되지" in err_text2 or "reasoning/channel" in err_text2:
                             raise
                         final_results.append(one_text)
 
@@ -3779,23 +3785,20 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
 
         content = r.choices[0].message.content.strip()
 
-        if content.startswith("```json"):
-            content = content[7:]
-        if content.startswith("```"):
-            content = content[3:]
-        if content.endswith("```"):
-            content = content[:-3]
-
-        parsed = json.loads(content.strip())
-
-        # 정상 형식: {"items": [...]}
-        if isinstance(parsed, dict):
-            items = parsed.get("items", [])
-        # 혹시 리스트로 튀어나온 경우도 방어
-        elif isinstance(parsed, list):
-            items = parsed
+        if provider == "lm_studio":
+            items = parse_translation_items_strict(content)
         else:
-            raise ValueError("번역 응답 JSON 형식이 올바르지 않습니다.")
+            content, _had_code_fence = strip_json_code_fence(content)
+            parsed = json.loads(content.strip())
+
+            # 정상 형식: {"items": [...]}
+            if isinstance(parsed, dict):
+                items = parsed.get("items", [])
+            # 혹시 리스트로 튀어나온 경우도 방어
+            elif isinstance(parsed, list):
+                items = parsed
+            else:
+                raise ValueError("번역 응답 JSON 형식이 올바르지 않습니다.")
 
         by_id = {}
 
@@ -4402,110 +4405,56 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
         return bio.getvalue()
 
     def _call_gemini_inpaint(self, image_path, mask_img):
-        """Gemini image model을 이용한 테스트용 인페인팅.
+        """Gemini image model based inpainting / image editing.
 
-        Gemini는 LaMa처럼 별도 mask 파라미터를 가진 전용 인페인팅 API가 아니라,
-        원본 이미지 + 마스크 이미지 + 프롬프트를 함께 주고 이미지 편집 결과를 받는 방식이다.
-        그래서 결과 품질은 모델/프롬프트/원본에 따라 달라질 수 있다.
+        Current Gemini image-editing docs use the Interactions API.  Use that
+        path first, and fall back to legacy generateContent with responseModalities
+        for older deployments.  The response parser accepts both shapes.
         """
-        import base64
-
         key = str(getattr(Config, "GEMINI_API_KEY", "") or "").strip()
         if not key:
             raise ValueError("Gemini API Key가 비어있습니다.")
 
-        model = str(getattr(Config, "GEMINI_INPAINT_MODEL", "") or "gemini-2.5-flash-image").strip()
-        # gemini-2.5-flash-image-preview has been shut down; keep old cache/config from breaking.
-        if model == "gemini-2.5-flash-image-preview":
-            model = "gemini-2.5-flash-image"
+        model = str(getattr(Config, "GEMINI_INPAINT_MODEL", "") or "gemini-3.1-flash-image").strip()
+        if model in ("gemini-2.5-flash-image", "gemini-2.5-flash-image-preview", "gemini-2.0-flash-exp-image-generation"):
+            model = "gemini-3.1-flash-image"
         prompt = str(getattr(Config, "GEMINI_INPAINT_PROMPT", "") or "").strip()
-        if not prompt:
-            prompt = (
-                "Remove the text only inside the white mask area and reconstruct the original manga background. "
-                "Keep all characters, panel borders, screentones, line art, and unmasked areas unchanged. "
-                "Return only the edited full image."
-            )
 
-        def _file_part(path):
-            ext = os.path.splitext(str(path))[1].lower()
-            mime = "image/png"
-            if ext in (".jpg", ".jpeg"):
-                mime = "image/jpeg"
-            elif ext == ".webp":
-                mime = "image/webp"
-            with open(path, "rb") as f:
-                data = base64.b64encode(f.read()).decode("ascii")
-            return {"inlineData": {"mimeType": mime, "data": data}}
+        img_array = np.fromfile(str(image_path), np.uint8)
+        base_img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+        if base_img is None or base_img.size <= 0:
+            raise ValueError(f"Gemini 인페인팅용 원본 이미지를 읽을 수 없습니다: {image_path}")
 
-        ok, mask_png = cv2.imencode(".png", mask_img)
-        if not ok:
-            raise ValueError("Gemini 인페인팅용 마스크 PNG 생성 실패")
-        mask_part = {
-            "inlineData": {
-                "mimeType": "image/png",
-                "data": base64.b64encode(mask_png.tobytes()).decode("ascii"),
-            }
-        }
-
-        instruction = (
-            prompt
-            + "\n\nThe first image is the source manga page. The second image is a black-and-white mask. "
-            + "White pixels mark the exact area to edit. Black pixels must remain unchanged. "
-            + "Return a full-size edited image, not a crop."
-        )
-
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-        payload = {
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [
-                        {"text": instruction},
-                        _file_part(image_path),
-                        mask_part,
-                    ],
-                }
-            ],
-            "generationConfig": {
-                "temperature": 0.1,
-            },
-        }
-
-        r = requests.post(url, params={"key": key}, json=payload, timeout=180)
-        if r.status_code != 200:
-            err_text = r.text[:800]
-            try:
-                err = r.json().get("error", {})
-                msg = str(err.get("message", "") or err_text)
-                code = int(err.get("code", r.status_code) or r.status_code)
-            except Exception:
-                msg = err_text
-                code = r.status_code
-            if code == 404 and "gemini-2.5-flash-image-preview" in msg:
-                raise ValueError(
-                    "Gemini Inpaint Error: 404 / gemini-2.5-flash-image-preview 모델은 더 이상 사용할 수 없습니다. "
-                    "API 설정의 Gemini 인페인팅 모델을 gemini-2.5-flash-image로 바꿔주세요. "
-                    f"원문: {msg[:400]}"
-                )
-            raise ValueError(f"Gemini Inpaint Error: {code} / {msg[:500]}")
-
-        data = r.json()
-        parts = []
         try:
-            parts = data.get("candidates", [])[0].get("content", {}).get("parts", []) or []
-        except Exception:
-            parts = []
+            mask_arr = np.asarray(mask_img)
+            if mask_arr.ndim == 3:
+                mask_arr = cv2.cvtColor(mask_arr, cv2.COLOR_BGR2GRAY)
+            mask_arr = np.where(mask_arr > 0, 255, 0).astype(np.uint8)
+        except Exception as e:
+            raise ValueError(f"Gemini 인페인팅용 마스크 정규화 실패: {e}")
 
-        text_notes = []
-        for part in parts:
-            inline = part.get("inlineData") or part.get("inline_data") or {}
-            image_b64 = inline.get("data")
-            if image_b64:
-                return base64.b64decode(image_b64)
-            if part.get("text"):
-                text_notes.append(str(part.get("text") or ""))
+        if mask_arr.shape[:2] != base_img.shape[:2]:
+            try:
+                mask_arr = cv2.resize(mask_arr, (base_img.shape[1], base_img.shape[0]), interpolation=cv2.INTER_NEAREST)
+            except Exception as e:
+                raise ValueError(f"Gemini 인페인팅용 마스크 크기 보정 실패: {e}")
 
-        raise ValueError("Gemini 인페인팅 이미지 응답이 비어있습니다. " + " ".join(text_notes)[:300])
+        try:
+            resp = call_gemini_inpaint_api(key, model, base_img, mask_arr, prompt, timeout=180)
+            image_bytes = resp.get("image_bytes")
+            if not image_bytes:
+                raise ValueError("Gemini 인페인팅 이미지 응답이 비어있습니다.")
+            try:
+                print(
+                    "YSB_GEMINI_INPAINT_DONE "
+                    f"api={resp.get('api')} model={resp.get('model')} source={resp.get('source')} "
+                    f"attempts={resp.get('attempts')}"
+                )
+            except Exception:
+                pass
+            return image_bytes
+        except Exception as e:
+            raise ValueError(f"Gemini Inpaint Error: {e}")
 
     def _normalize_stable_model_name(self, model_name):
         model_name = str(model_name or "").strip()
@@ -4552,8 +4501,9 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
         if not model_name:
             raise ValueError("Stable Diffusion 인페인팅 모델명이 비어있습니다.")
         prompt = str(getattr(Config, "STABLE_INPAINT_PROMPT", "") or "remove text and restore the original background")
-        temp_mask = f"temp_mask_stable_{uuid.uuid4().hex}.png"
-        cv2.imwrite(temp_mask, mask_img)
+        temp_mask = os.path.join(tempfile.gettempdir(), f"temp_mask_stable_{uuid.uuid4().hex}.png")
+        if not imwrite_unicode(temp_mask, np.ascontiguousarray(mask_img)):
+            raise ValueError("Stable 인페인팅용 임시 마스크 파일을 저장하지 못했습니다.")
 
         def _run_with_input(extra_input):
             with open(image_path, "rb") as img_file, open(temp_mask, "rb") as mask_file:
@@ -4615,11 +4565,107 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
             pass
 
         def _write_temp_mask(mask_arr):
-            temp_mask_path = os.path.join(tempfile.gettempdir(), f"temp_mask_lama_{uuid.uuid4().hex}.png")
-            ok = cv2.imwrite(temp_mask_path, mask_arr)
-            if not ok or not os.path.exists(temp_mask_path):
-                raise ValueError("LaMa 임시 마스크 파일을 저장하지 못했습니다.")
-            return temp_mask_path
+            temp_dir = tempfile.gettempdir()
+            temp_mask_path = os.path.join(temp_dir, f"temp_mask_lama_{uuid.uuid4().hex}.png")
+            debug = {
+                "stage": "begin",
+                "temp_dir": str(temp_dir),
+                "temp_mask_path": str(temp_mask_path),
+                "temp_dir_exists": False,
+                "temp_dir_writable_probe": False,
+                "mask_shape": "",
+                "mask_dtype": "",
+                "mask_nonzero": -1,
+                "mask_min": "",
+                "mask_max": "",
+                "mask_contiguous": False,
+                "cv2_imwrite_ok": False,
+                "exists_after_imwrite": False,
+                "size_after_imwrite": -1,
+                "fallback_imencode_ok": False,
+                "exists_after_fallback": False,
+                "size_after_fallback": -1,
+                "error": "",
+            }
+            try:
+                debug["temp_dir_exists"] = bool(os.path.isdir(temp_dir))
+            except Exception as e:
+                debug["temp_dir_exists_error"] = repr(e)
+            probe_path = None
+            try:
+                probe_path = os.path.join(temp_dir, f"ysb_lama_temp_probe_{uuid.uuid4().hex}.tmp")
+                with open(probe_path, "wb") as f:
+                    f.write(b"ysb-temp-probe")
+                debug["temp_dir_writable_probe"] = bool(os.path.exists(probe_path))
+            except Exception as e:
+                debug["temp_dir_writable_error"] = repr(e)
+            finally:
+                if probe_path:
+                    try:
+                        if os.path.exists(probe_path):
+                            os.remove(probe_path)
+                    except Exception:
+                        pass
+            try:
+                debug["mask_shape"] = str(getattr(mask_arr, "shape", ""))
+                debug["mask_dtype"] = str(getattr(mask_arr, "dtype", ""))
+                debug["mask_contiguous"] = bool(getattr(mask_arr, "flags", {}).get("C_CONTIGUOUS", False)) if hasattr(getattr(mask_arr, "flags", None), "__getitem__") else bool(np.ascontiguousarray(mask_arr).flags["C_CONTIGUOUS"])
+                try:
+                    debug["mask_nonzero"] = int(cv2.countNonZero(mask_arr))
+                except Exception:
+                    debug["mask_nonzero"] = int(np.count_nonzero(mask_arr))
+                try:
+                    debug["mask_min"] = str(np.min(mask_arr))
+                    debug["mask_max"] = str(np.max(mask_arr))
+                except Exception:
+                    pass
+            except Exception as e:
+                debug["mask_info_error"] = repr(e)
+            try:
+                safe_mask = np.ascontiguousarray(mask_arr)
+                ok = cv2.imwrite(temp_mask_path, safe_mask)
+                debug["cv2_imwrite_ok"] = bool(ok)
+                debug["exists_after_imwrite"] = bool(os.path.exists(temp_mask_path))
+                if debug["exists_after_imwrite"]:
+                    try:
+                        debug["size_after_imwrite"] = int(os.path.getsize(temp_mask_path))
+                    except Exception:
+                        pass
+                if ok and debug["exists_after_imwrite"] and int(debug.get("size_after_imwrite") or 0) > 0:
+                    debug["stage"] = "imwrite_ok"
+                    self._last_lama_temp_mask_debug = debug
+                    print(f"YSB_LAMA_TEMP_MASK_DEBUG {debug}")
+                    return temp_mask_path
+            except Exception as e:
+                debug["cv2_imwrite_error"] = repr(e)
+
+            # OpenCV imwrite can fail on some Windows unicode/temp paths.  Use
+            # imencode + ndarray.tofile as a unicode-path-safe fallback and keep
+            # the detailed debug payload for the single_inpaint log.
+            try:
+                ok, buf = cv2.imencode(".png", np.ascontiguousarray(mask_arr))
+                debug["fallback_imencode_ok"] = bool(ok)
+                if ok:
+                    buf.tofile(temp_mask_path)
+                debug["exists_after_fallback"] = bool(os.path.exists(temp_mask_path))
+                if debug["exists_after_fallback"]:
+                    try:
+                        debug["size_after_fallback"] = int(os.path.getsize(temp_mask_path))
+                    except Exception:
+                        pass
+                if ok and debug["exists_after_fallback"] and int(debug.get("size_after_fallback") or 0) > 0:
+                    debug["stage"] = "fallback_tofile_ok"
+                    self._last_lama_temp_mask_debug = debug
+                    print(f"YSB_LAMA_TEMP_MASK_DEBUG {debug}")
+                    return temp_mask_path
+            except Exception as e:
+                debug["fallback_error"] = repr(e)
+
+            debug["stage"] = "failed"
+            debug["error"] = "LaMa temporary mask write failed"
+            self._last_lama_temp_mask_debug = debug
+            print(f"YSB_LAMA_TEMP_MASK_DEBUG {debug}")
+            raise ValueError("LaMa 임시 마스크 파일을 저장하지 못했습니다.")
 
         def _write_oom_resized_request(src_path, src_mask, *, max_side, max_pixels):
             img_arr = cv2.imdecode(np.fromfile(str(src_path), np.uint8), cv2.IMREAD_COLOR)
@@ -5036,12 +5082,51 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
                 seen.add(key)
                 _remove_same_stem_variants(folder, stem, "")
 
+        WEBP_MAX_SIDE_PX = 16383
+
+        def _webp_size_exceeds_limit(img):
+            try:
+                w, h = img.size
+                return int(w) > WEBP_MAX_SIDE_PX or int(h) > WEBP_MAX_SIDE_PX
+            except Exception:
+                return False
+
+        def _fallback_output_path(path, fmt):
+            fmt = _norm_fmt(fmt)
+            root, _ext = os.path.splitext(str(path or ""))
+            return f"{root}{_ext_for_fmt(fmt)}"
+
+        def _safe_log_export_fallback(original_path, fallback_path, size):
+            try:
+                self._emit_progress_log(
+                    "⚠️ WebP 최대 크기(16383px)를 초과해 PNG로 자동 출력합니다: "
+                    f"{os.path.basename(str(original_path or ''))} -> {os.path.basename(str(fallback_path or ''))} "
+                    f"({int(size[0])}x{int(size[1])})"
+                )
+            except Exception:
+                try:
+                    print(
+                        "[YSB_EXPORT_WEBP_FALLBACK]",
+                        str(original_path),
+                        "->",
+                        str(fallback_path),
+                        str(size),
+                    )
+                except Exception:
+                    pass
+
         def _save_pil_for_output(img, path, fmt, quality):
             fmt = _norm_fmt(fmt)
             q = _quality(quality)
             out = img
+            actual_path = path
+            actual_fmt = fmt
+            if fmt == "webp" and _webp_size_exceeds_limit(out):
+                actual_fmt = "png"
+                actual_path = _fallback_output_path(path, actual_fmt)
+                _safe_log_export_fallback(path, actual_path, getattr(out, "size", (0, 0)))
             params = {}
-            if fmt == "jpg":
+            if actual_fmt == "jpg":
                 if out.mode in ("RGBA", "LA") or (out.mode == "P" and "transparency" in getattr(out, "info", {})):
                     bg = Image.new("RGB", out.size, (255, 255, 255))
                     try:
@@ -5052,13 +5137,22 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
                 else:
                     out = out.convert("RGB")
                 params.update({"quality": q, "subsampling": 0, "optimize": True})
-            elif fmt == "webp":
+            elif actual_fmt == "webp":
                 if out.mode == "P":
                     out = out.convert("RGBA")
                 params.update({"quality": q, "method": 6})
             else:
                 params.update({"optimize": True})
-            out.save(path, _pil_fmt(fmt), **params)
+            try:
+                out.save(actual_path, _pil_fmt(actual_fmt), **params)
+            except ValueError as e:
+                if actual_fmt == "webp" and "WebP limit" in str(e):
+                    fallback_path = _fallback_output_path(path, "png")
+                    _safe_log_export_fallback(path, fallback_path, getattr(out, "size", (0, 0)))
+                    out.save(fallback_path, _pil_fmt("png"), optimize=True)
+                    return fallback_path, "png"
+                raise
+            return actual_path, actual_fmt
 
         output_fmt = _norm_fmt(output_image_format)
         clean_fmt = _norm_fmt(clean_image_format)
@@ -5099,7 +5193,8 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
         if bg_img is None:
             bg_img = _load_pil_image(img_path)
         if bg_img is not None:
-            _save_pil_for_output(bg_img, clean_img_path, clean_fmt, clean_quality)
+            clean_img_path, clean_fmt = _save_pil_for_output(bg_img, clean_img_path, clean_fmt, clean_quality)
+            clean_img_name = os.path.basename(clean_img_path)
 
         def _font_candidates_for_js(name):
             raw = str(name or '').strip()
@@ -5459,7 +5554,8 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
                 result_img.alpha_composite(layer, (int(round(tx)), int(round(ty))))
                 result_img = result_img.convert("RGB")
 
-            _save_pil_for_output(result_img, result_img_path, output_fmt, output_quality)
+            result_img_path, output_fmt = _save_pil_for_output(result_img, result_img_path, output_fmt, output_quality)
+            result_img_name = os.path.basename(result_img_path)
 
 
         json_str = json.dumps(layers_list, ensure_ascii=False)

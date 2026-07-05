@@ -178,6 +178,7 @@ class MuleImageViewer(QGraphicsView):
         self.ocr_region_checkpoint_indexes = []
         self.ocr_region_preview_item = None
         self.ocr_region_overlay_items = []
+        self.inpaint_group_preview_items = []
         self.is_ocr_region_drawing = False
 
         self.quick_ocr_start = None
@@ -957,27 +958,50 @@ class MuleImageViewer(QGraphicsView):
         This affects only editor overlays such as analysis boxes, OCR regions,
         magic-wand outlines, selection rectangles and preview borders.
         It must not be used for real text stroke / mask / paint output.
+
+        Webtoon pages can be extremely tall while keeping a normal page width.
+        Scaling guide UI from max(width, height) makes outlines and number boxes
+        far too large on those pages, so automatic guide scaling is based on
+        image width only.
         """
         try:
             rect = self.scene.sceneRect()
             w = float(rect.width())
-            h = float(rect.height())
-            if w <= 1 or h <= 1:
+            if w <= 1:
                 base_item = getattr(self, "_layer_base_item", None)
                 if base_item is not None and not base_item.pixmap().isNull():
                     w = float(base_item.pixmap().width())
-                    h = float(base_item.pixmap().height())
-            if w <= 1 or h <= 1:
+            if w <= 1:
                 items_rect = self.scene.itemsBoundingRect()
                 w = float(items_rect.width())
-                h = float(items_rect.height())
-            scale = max(w / self.GUIDE_BASE_W, h / self.GUIDE_BASE_H)
+            scale = w / self.GUIDE_BASE_W
             return max(1.0, min(float(scale), self.GUIDE_SCALE_MAX))
         except Exception:
             return 1.0
 
+    def analysis_box_manual_size_enabled(self):
+        try:
+            return str(getattr(self.main, "analysis_box_size_mode", "auto") or "auto").lower() == "manual"
+        except Exception:
+            return False
+
+    def analysis_number_box_size(self):
+        try:
+            base = max(1, int(getattr(self.main, "analysis_number_box_width", 40) or 40))
+        except Exception:
+            base = 40
+        if self.analysis_box_manual_size_enabled():
+            return max(1, int(base))
+        try:
+            return max(1, int(round(float(base) * self.ui_visual_scale())))
+        except Exception:
+            return max(1, int(base))
+
     def ui_pen_width(self, base=2.0, minimum=1.0):
         try:
+            if self.analysis_box_manual_size_enabled():
+                manual = max(1.0, float(getattr(self.main, "analysis_outline_width", base) or base))
+                return max(float(minimum), manual)
             return max(float(minimum), float(base) * self.ui_visual_scale())
         except Exception:
             return float(base or minimum or 1.0)
@@ -1148,6 +1172,67 @@ class MuleImageViewer(QGraphicsView):
             except Exception:
                 pass
         return cleared
+
+    def text_item_mouse_interaction_allowed_for_mode(self, mode=None):
+        try:
+            if mode is None:
+                mode = getattr(self, "draw_mode", None)
+            return (
+                getattr(self.main, "cb_mode", None) is not None
+                and int(self.main.cb_mode.currentIndex()) == 4
+                and (mode is None or mode == "final_text")
+            )
+        except Exception:
+            return False
+
+    def refresh_text_item_interaction_for_tool_mode(self, mode=None, reason="tool_mode"):
+        """Keep text/raster text objects click-through outside move/final_text modes."""
+        try:
+            if mode is None:
+                mode = getattr(self, "draw_mode", None)
+            allowed = bool(self.text_item_mouse_interaction_allowed_for_mode(mode))
+            scene = self.scene
+            if scene is None:
+                return 0
+            changed = 0
+            selected_cleared = False
+            for item in list(scene.items()):
+                try:
+                    if not isinstance(item, TypesettingItem) or getattr(item, "is_paste_preview", False):
+                        continue
+                    if hasattr(item, "set_tool_interaction_enabled"):
+                        item.set_tool_interaction_enabled(allowed)
+                    else:
+                        item.setAcceptedMouseButtons(Qt.MouseButton.LeftButton | Qt.MouseButton.RightButton if allowed else Qt.MouseButton.NoButton)
+                        item.setFlag(item.GraphicsItemFlag.ItemIsSelectable, allowed)
+                        item.setFlag(item.GraphicsItemFlag.ItemIsMovable, allowed)
+                        if not allowed:
+                            item.setSelected(False)
+                    changed += 1
+                    if not allowed:
+                        selected_cleared = True
+                except Exception:
+                    continue
+            if selected_cleared and getattr(self.main, "on_scene_selection_changed", None):
+                try:
+                    self.main.on_scene_selection_changed()
+                except Exception:
+                    pass
+            try:
+                if getattr(self.main, "audit_boundary_event", None):
+                    self.main.audit_boundary_event(
+                        "TEXT_ITEM_INTERACTION_MODE_SYNC",
+                        mode=str(mode) if mode is not None else "move",
+                        allowed=bool(allowed),
+                        count=int(changed),
+                        reason=str(reason or ""),
+                        throttle_ms=80,
+                    )
+            except Exception:
+                pass
+            return changed
+        except Exception:
+            return 0
 
     def _brush_cursor_preview_is_suspended(self):
         """Return True while view/undo navigation should not repaint the size ring."""
@@ -1407,6 +1492,11 @@ class MuleImageViewer(QGraphicsView):
                 pass
 
             self._active_tool_cursor_key = key
+            try:
+                if force or key_changed:
+                    self.refresh_text_item_interaction_for_tool_mode(mode, reason='cursor_tool_change')
+            except Exception:
+                pass
 
             if mode in ("draw", "erase"):
                 self._apply_tool_cursor_to_view(self._make_tool_cursor("eraser" if mode == "erase" else "brush"))
@@ -1727,43 +1817,54 @@ class MuleImageViewer(QGraphicsView):
                     return item
         return None
 
-    def _text_item_click_rect_contains(self, item, scene_pos):
-        """Return True when scene_pos is inside the OCR/work hit rect of a text item.
+    def _text_item_saved_work_polygon(self, item):
+        """Return the current text interaction polygon in scene coordinates.
 
-        This deliberately does not ask QGraphicsScene/items()/shape() because the
-        visible OCR box and Qt's path-based hit-test can drift apart after direct
-        text editing.  For YSB text objects the click target is the saved OCR/work
-        rectangle; the actual text bounds are used separately when opening the
-        inline editor.
+        This must match TypesettingItem.interaction_hit_rect(), which is the same
+        rectangle used by the red guide box, item shape(), click selection, move,
+        and double-click editing.  Do not read data['rect'] directly here; older
+        OCR/work rects can remain larger than the currently visible adjusted box.
         """
         try:
             if item is None or not isinstance(item, TypesettingItem):
-                return False
+                return None
             if getattr(item, "is_paste_preview", False):
-                return False
+                return None
             try:
                 if hasattr(item, "isVisible") and not item.isVisible():
-                    return False
+                    return None
             except Exception:
                 pass
-            # Strict hit-test: only the item-owned OCR/work text rectangle is
-            # clickable.  Do not union rendered glyph bounds, stroke/effect bounds,
-            # or QGraphicsItem.shape(), because those can extend outside the text
-            # area and make neighboring blank space grab the text object.
-            if callable(getattr(item, "text_hit_rect", None)):
-                local_rect = item.text_hit_rect()
-            else:
-                local_rect = item.text_area_rect() if callable(getattr(item, "text_area_rect", None)) else None
+
+            try:
+                if hasattr(item, "interaction_hit_rect"):
+                    local_rect = item.interaction_hit_rect()
+                else:
+                    local_rect = item.text_area_rect()
+            except Exception:
+                local_rect = None
             if local_rect is None or local_rect.isNull() or local_rect.width() <= 0 or local_rect.height() <= 0:
+                return None
+            return item.mapToScene(QRectF(local_rect))
+        except Exception:
+            return None
+
+    def _text_item_click_rect_contains(self, item, scene_pos):
+        """Return True only inside the text selection guide polygon.
+
+        This uses _text_item_saved_work_polygon(), so untouched OCR items remain
+        strict OCR/work-rect hits, while manual/text-anchored items follow the
+        same tight red guide box drawn by TypesettingItem.paint().  Qt's broad
+        glyph/sceneBoundingRect hit-test is still deliberately ignored.
+        """
+        try:
+            poly = self._text_item_saved_work_polygon(item)
+            if poly is None or poly.count() <= 0:
                 return False
-            # Strong strict-hit: do not reduce the mapped OCR/work rectangle to
-            # an axis-aligned boundingRect.  With rotation/skew that bounding box
-            # can include blank corner space outside the actual text box.
-            hit_poly = item.mapToScene(QRectF(local_rect))
             hit_path = QPainterPath()
-            hit_path.addPolygon(hit_poly)
+            hit_path.addPolygon(poly)
             hit_path.closeSubpath()
-            return bool(hit_path.contains(scene_pos))
+            return bool(hit_path.contains(QPointF(scene_pos)))
         except Exception:
             return False
 
@@ -2072,28 +2173,45 @@ class MuleImageViewer(QGraphicsView):
         except Exception:
             return []
 
+    def _cad_text_item_work_polygon(self, item):
+        """Return the scene-space guide polygon used for text selection.
+
+        Both click selection and left-to-right window selection use the same
+        polygon as _text_item_saved_work_polygon().  Untouched OCR rows stay on
+        the strict OCR/work rect, while manual/text-anchored rows follow the red
+        guide box from TypesettingItem.text_area_rect().
+        """
+        return self._text_item_saved_work_polygon(item)
+
     def _cad_text_item_hit_path(self, item):
         """CAD 텍스트 선택용 절대 hit path.
 
-        텍스트 클릭/누적선택/드래그 시작은 무조건 OCR/텍스트 작업 박스 안에서만
-        허용한다.  transform_rect(), sceneBoundingRect(), glyph path, 획/그림자/글로우,
-        편집기 repaint padding은 여기서 절대 쓰지 않는다.
+        텍스트 클릭/누적선택/드래그 시작은 화면의 빨간 작업 박스와 같은 polygon 안에서만
+        허용한다.  transform_rect(), sceneBoundingRect(), Qt shape 같은 넓은 fallback은
+        여기서 절대 쓰지 않는다.
         """
         path = QPainterPath()
         try:
-            if item is None or not isinstance(item, TypesettingItem):
+            poly = self._cad_text_item_work_polygon(item)
+            if poly is None or poly.count() <= 0:
                 return path
-            if getattr(item, "is_paste_preview", False):
-                return path
-            rect = item.text_hit_rect() if callable(getattr(item, "text_hit_rect", None)) else QRectF()
-            if rect is None or rect.isNull() or rect.width() <= 0 or rect.height() <= 0:
-                return path
-            poly = item.mapToScene(QRectF(rect))
             path.addPolygon(poly)
             path.closeSubpath()
         except Exception:
             return QPainterPath()
         return path
+
+    def _cad_selection_rect_contains_work_polygon(self, sel_rect, poly):
+        """True when the selection rectangle fully covers the OCR/work polygon."""
+        try:
+            if poly is None or poly.count() <= 0:
+                return False
+            for i in range(poly.count()):
+                if not sel_rect.contains(poly.at(i)):
+                    return False
+            return True
+        except Exception:
+            return False
 
     def _cad_text_item_rect(self, item):
         """CAD 영역 선택용 bounding rect.
@@ -2307,14 +2425,10 @@ class MuleImageViewer(QGraphicsView):
                 if crossing:
                     ok = sel_path.intersects(hit_path)
                 else:
-                    # 좌->우 window 선택은 strict OCR/work polygon 전체가 선택 사각형 안에
-                    # 들어올 때만 선택한다. glyph/시각 bounds는 절대 보지 않는다.
-                    ok = True
-                    poly = item.mapToScene(QRectF(item.text_hit_rect()))
-                    for i in range(poly.count()):
-                        if not sel_rect.contains(poly.at(i)):
-                            ok = False
-                            break
+                    # 좌->우 window 선택은 빨간 작업 박스 polygon 전체가 선택 사각형 안에
+                    # 들어올 때만 선택한다. 클릭 판정과 드래그 판정이 같은 기준을 본다.
+                    poly = self._cad_text_item_work_polygon(item)
+                    ok = self._cad_selection_rect_contains_work_polygon(sel_rect, poly)
                 if ok:
                     out.append(item)
             except Exception:
@@ -3861,7 +3975,9 @@ class MuleImageViewer(QGraphicsView):
         if img is None:
             self._clear_background_hidden_helper_refs()
             self.clear_brush_cursor_preview()
+            self.clear_inpaint_group_preview_overlay()
             self.scene.clear()
+            self.inpaint_group_preview_items = []
             self._clear_background_hidden_helper_refs()
             self._layer_base_key = None
             self._layer_base_item = None
@@ -3913,7 +4029,9 @@ class MuleImageViewer(QGraphicsView):
 
         self._clear_background_hidden_helper_refs()
         self.clear_brush_cursor_preview()
+        self.clear_inpaint_group_preview_overlay()
         self.scene.clear()
+        self.inpaint_group_preview_items = []
         self._clear_background_hidden_helper_refs()
         self.user_mask_item = None
         self.final_paint_item = None
@@ -4030,7 +4148,9 @@ class MuleImageViewer(QGraphicsView):
         """
         self._clear_background_hidden_helper_refs()
         self.clear_brush_cursor_preview()
+        self.clear_inpaint_group_preview_overlay()
         self.scene.clear()
+        self.inpaint_group_preview_items = []
         self._clear_background_hidden_helper_refs()
         self.user_mask_item = None
         self.final_paint_item = None
@@ -4103,7 +4223,9 @@ class MuleImageViewer(QGraphicsView):
         """2.3.1 안정 방식: 마스크 화면도 통째로 다시 만든다."""
         self._clear_background_hidden_helper_refs()
         self.clear_brush_cursor_preview()
+        self.clear_inpaint_group_preview_overlay()
         self.scene.clear()
+        self.inpaint_group_preview_items = []
         self._clear_background_hidden_helper_refs()
         self.user_mask_item = None
         self.final_paint_item = None
@@ -4236,11 +4358,36 @@ class MuleImageViewer(QGraphicsView):
         self.final_paint_above_item.setZValue(80)
         self.final_paint_above_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
 
+    def copy_final_paint_layer_qimage(self, above=False):
+        """Return a detached QImage snapshot of a final paint layer.
+
+        QPixmap/QGraphicsItem must stay on the UI thread, but PNG encoding and
+        file I/O can run in a worker once this detached QImage copy is made.
+        """
+        item = self.final_paint_above_item if above else self.final_paint_item
+        if not item:
+            return None
+        try:
+            return item.pixmap().toImage().convertToFormat(QImage.Format.Format_ARGB32).copy()
+        except Exception:
+            return None
+
+    def copy_user_mask_qimage(self):
+        """Return a detached QImage snapshot of the visible user mask overlay."""
+        if not self.user_mask_item:
+            return None
+        try:
+            return self.user_mask_item.pixmap().toImage().convertToFormat(QImage.Format.Format_ARGB32).copy()
+        except Exception:
+            return None
+
     def get_final_paint_layer_png_bytes(self, above=False):
         item = self.final_paint_above_item if above else self.final_paint_item
         if not item:
             return None
-        qimg = item.pixmap().toImage().convertToFormat(QImage.Format.Format_ARGB32)
+        qimg = self.copy_final_paint_layer_qimage(above=above)
+        if qimg is None or qimg.isNull():
+            return None
         # 완전 투명 레이어면 저장하지 않는다.
         w, h = qimg.width(), qimg.height()
         ptr = qimg.bits()
@@ -4265,8 +4412,8 @@ class MuleImageViewer(QGraphicsView):
 
 
     def draw_static_boxes(self, data):
-        base_w = int(round(self.ui_handle_size(int(getattr(self.main, "analysis_number_box_width", 40) or 40), minimum=20)))
-        font_size = max(8, int(base_w * 0.40))
+        base_w = int(self.analysis_number_box_size())
+        font_size = max(1, int(base_w * 0.40))
         font = QFont("Arial", font_size, QFont.Weight.Bold)
 
         visible_items = [d for d in data]
@@ -4290,8 +4437,8 @@ class MuleImageViewer(QGraphicsView):
             self.scene.addItem(rect_item)
 
             id_str = str(d.get('id', ''))
-            bg_w = max(20, base_w + (len(id_str) - 1) * max(8, int(base_w * 0.4)))
-            bg_h = max(18, int(base_w * 0.9))
+            bg_w = max(1, base_w + (len(id_str) - 1) * max(1, int(base_w * 0.4)))
+            bg_h = max(1, int(base_w * 0.9))
 
             bx, by = x, y - bg_h
             if by < 0:
@@ -4303,6 +4450,9 @@ class MuleImageViewer(QGraphicsView):
             else:
                 brush_bg = QBrush(QColor(100, 100, 100))
                 text_color = Qt.GlobalColor.white
+
+            if bool(getattr(self.main, "text_number_boxes_hidden", False)):
+                continue
 
             handle_item = ToggleBoxItem(
                 [bx, by, bg_w, bg_h],
@@ -4409,6 +4559,10 @@ class MuleImageViewer(QGraphicsView):
                     )
             except Exception:
                 pass
+        try:
+            self.refresh_text_item_interaction_for_tool_mode(reason='draw_movable_texts')
+        except Exception:
+            pass
         try:
             if getattr(self, 'main', None) is not None and hasattr(self.main, 'audit_boundary_event'):
                 scene_text_ids = []
@@ -5288,6 +5442,86 @@ class MuleImageViewer(QGraphicsView):
                 self.ocr_region_overlay_items.append(label_bg)
                 self.ocr_region_overlay_items.append(text)
 
+    def clear_inpaint_group_preview_overlay(self):
+        if not hasattr(self, "inpaint_group_preview_items"):
+            self.inpaint_group_preview_items = []
+        # scene.clear()/base-image rebuild may delete the C++ QGraphicsItems
+        # underneath the Python wrappers.  Detach the list first and only remove
+        # items that are still alive and still attached to this scene.  This
+        # prevents preview-mode page changes from touching stale wrappers.
+        items = list(self.inpaint_group_preview_items or [])
+        self.inpaint_group_preview_items = []
+        for item in items:
+            try:
+                if not self._qgraphics_item_is_alive(item):
+                    continue
+                if item.scene() is self.scene:
+                    self.scene.removeItem(item)
+            except Exception:
+                pass
+
+    def draw_inpaint_group_preview_regions(self, groups):
+        """Draw mask-group based inpainting crop preview overlays.
+
+        Groups are passed as normalized final crop rectangles.  The mask is the
+        beacon, but the displayed rectangle is the actual image area that would
+        be sent to the inpainting backend after context padding.
+        """
+        self.clear_inpaint_group_preview_overlay()
+        if not groups:
+            return
+        w, h = self._scene_rect_bounds()
+        orange_pen = QPen(QColor(255, 132, 0, 245), self.ui_pen_width(4), Qt.PenStyle.SolidLine)
+        fill_brush = QBrush(QColor(255, 236, 64, 58))
+        label_brush = QBrush(QColor(255, 236, 64, 235))
+        label_font = QFont("Arial", self.ui_font_size(12), QFont.Weight.Bold)
+        for group in groups or []:
+            if not isinstance(group, dict):
+                continue
+            r = group.get("rect_norm") or []
+            if len(r) < 4:
+                continue
+            try:
+                x1, y1, x2, y2 = [float(v) for v in r[:4]]
+            except Exception:
+                continue
+            rect = QRectF(x1 * w, y1 * h, (x2 - x1) * w, (y2 - y1) * h).normalized()
+            if rect.width() < 1 or rect.height() < 1:
+                continue
+            box = self.scene.addRect(rect, orange_pen, fill_brush)
+            box.setZValue(88)
+            box.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            try:
+                self._set_layer_tag(box, "inpaint_group_preview")
+            except Exception:
+                pass
+            self.inpaint_group_preview_items.append(box)
+
+            label_text = str(group.get("index") or group.get("group") or "?")
+            text_item = self.scene.addText(label_text, label_font)
+            text_item.setDefaultTextColor(Qt.GlobalColor.black)
+            br = text_item.boundingRect()
+            pad_x, pad_y = self.ui_pad(6.0), self.ui_pad(2.5)
+            label_rect = QRectF(
+                rect.left(),
+                rect.top(),
+                max(br.width() + pad_x * 2, self.ui_pad(22.0)),
+                br.height() + pad_y * 2,
+            )
+            label_bg = self.scene.addRect(label_rect, QPen(Qt.PenStyle.NoPen), label_brush)
+            label_bg.setZValue(89)
+            label_bg.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            text_item.setPos(label_rect.left() + pad_x, label_rect.top() + pad_y)
+            text_item.setZValue(90)
+            text_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            try:
+                self._set_layer_tag(label_bg, "inpaint_group_preview")
+                self._set_layer_tag(text_item, "inpaint_group_preview")
+            except Exception:
+                pass
+            self.inpaint_group_preview_items.append(label_bg)
+            self.inpaint_group_preview_items.append(text_item)
+
     def clear_magic_wand_preview(self):
         if not hasattr(self, "magic_preview_items"):
             self.magic_preview_items = []
@@ -5568,10 +5802,10 @@ class MuleImageViewer(QGraphicsView):
             return None
 
         try:
-            base_w = int(getattr(self.main, "analysis_number_box_width", 40) or 40)
+            base_w = int(self.analysis_number_box_size())
         except Exception:
             base_w = 40
-        bg_h = max(18, int(base_w * 0.9))
+        bg_h = max(1, int(base_w * 0.9))
 
         x0 = float(scene_pos.x())
         y0 = float(scene_pos.y())
@@ -5589,7 +5823,7 @@ class MuleImageViewer(QGraphicsView):
 
             # 번호 라벨 박스. draw_static_boxes와 같은 계산을 사용한다.
             id_str = str(d.get('id', ''))
-            bg_w = max(20, base_w + (len(id_str) - 1) * max(8, int(base_w * 0.4)))
+            bg_w = max(1, base_w + (len(id_str) - 1) * max(1, int(base_w * 0.4)))
             bx, by = x, y - bg_h
             if by < 0:
                 by = y
@@ -7076,9 +7310,60 @@ class MuleImageViewer(QGraphicsView):
                 self.main.note_ui_interaction_activity(1200)
         except Exception:
             pass
-        wheel_zoom_requested = bool(e.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)) or self.is_cad_operation_mode()
+        mods = e.modifiers()
+        ctrl_pressed = bool(mods & Qt.KeyboardModifier.ControlModifier)
+        alt_pressed = bool(mods & Qt.KeyboardModifier.AltModifier)
+
+        if ctrl_pressed and not alt_pressed and not self.is_cad_operation_mode():
+            # 그림판 방식: Ctrl+휠은 확대/축소가 아니라 가로 스크롤로 사용한다.
+            # Alt+휠은 기존 확대/축소 조작으로 유지하고, CAD 방식은 일반 휠 확대/축소를 유지한다.
+            try:
+                if hasattr(self.main, "begin_coalesced_view_undo"):
+                    self.main.begin_coalesced_view_undo("화면 가로 이동", delay_ms=500)
+            except Exception:
+                pass
+            self._begin_view_interaction_fast_path('horizontal_scroll', delay_ms=160)
+            ad = e.angleDelta()
+            pd = e.pixelDelta()
+            delta_y = int(ad.y())
+            delta_x = int(ad.x())
+            pixel_y = int(pd.y()) if not pd.isNull() else 0
+            pixel_x = int(pd.x()) if not pd.isNull() else 0
+            raw_delta = pixel_y or pixel_x or delta_y or delta_x
+            hbar = self.horizontalScrollBar()
+            if not pd.isNull() and (pixel_y or pixel_x):
+                amount = int(raw_delta)
+            else:
+                try:
+                    step = max(40, int(hbar.singleStep()) * 8)
+                except Exception:
+                    step = 120
+                amount = int((float(raw_delta) / 120.0) * float(step)) if raw_delta else 0
+            if amount:
+                hbar.setValue(int(hbar.value()) - int(amount))
+            self._view_fast_path_log(
+                'VIEW_FAST_PATH_HORIZONTAL_SCROLL',
+                source='ctrl_wheel',
+                raw_delta=int(raw_delta),
+                amount=int(amount),
+                delta_y=int(delta_y),
+                delta_x=int(delta_x),
+                pixel_y=int(pixel_y),
+                pixel_x=int(pixel_x),
+            )
+            try:
+                if hasattr(self.main, "remember_current_view_state"):
+                    self.main.remember_current_view_state()
+                if hasattr(self.main, "schedule_source_compare_sync"):
+                    self.main.schedule_source_compare_sync(180)
+            except Exception:
+                pass
+            e.accept()
+            return
+
+        wheel_zoom_requested = bool(alt_pressed) or self.is_cad_operation_mode()
         if wheel_zoom_requested:
-            # 그림판 방식: Ctrl+휠 또는 Alt+휠 확대/축소.
+            # 그림판 방식: Alt+휠 확대/축소.
             # CAD 방식: 일반 휠만 굴려도 확대/축소. Alt+휠은 기존 도구 단축키와 충돌하지 않는
             # 보기 전용 조작으로 유지한다.
             # 연속 휠 입력은 하나의 Ctrl+Z 단계가 되도록 coalesce한다.

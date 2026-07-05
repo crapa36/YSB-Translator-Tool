@@ -160,6 +160,10 @@ LIGHT_INLINE_PUNCTUATION = ".,、。·・･!！?？~〜"
 LIGHT_PUNCTUATION = ''.join(dict.fromkeys(LIGHT_OPEN_PUNCTUATION + LIGHT_CLOSE_PUNCTUATION + LIGHT_INLINE_PUNCTUATION))
 LIGHT_PUNCT_GROUP_SIZE = 3
 
+# 말줄임표/감탄부호가 길게 붙은 감정 꼬리는 본문과 분리할 수 있다.
+# 예: 안에서...!?!? -> 안에서 / ...!?!?
+EMOTION_TAIL_PUNCT_VISUAL_LEN_MIN = 2
+
 # 무거운 특문: 실제 글자 하나처럼 취급한다.
 HEAVY_SYMBOLS = "…―—–│┃｜♡♥♪♫♬★☆※→←↑↓↔↕"
 
@@ -189,6 +193,12 @@ NO_SPLIT_COMPACT_LEN_MAX = 3
 # 예: 좋을까, 해야, 뭐야 같은 짧은 어절은 글자가 조금 작아져도 통째 보존한다.
 # 단, 뒤에 붙은 무거운 장식 특문(♥/♪ 등)은 별도 줄로 내려갈 수 있다.
 SHORT_WORD_PRESERVE_LEN_MAX = 3
+
+# 3글자 본체 + 1글자 조사 형태의 짧은 어절은 통째 보존한다.
+# 예: 에이스가, 수영부에 같은 4칸 이하 어절은 에이/스가처럼 쪼개면
+# 이후 줄 압축 단계에서 에이 스가처럼 단어가 벌어질 수 있으므로 먼저 보호한다.
+SHORT_STEM_PARTICLE_WORD_PRESERVE_BODY_LEN_MAX = 3
+SHORT_STEM_PARTICLE_WORD_PRESERVE_TOTAL_LEN_MAX = 4
 
 # 4글자 이상 공백 없는 긴 어절은 세로형 박스에서 내부 분할할 수 있다.
 # 단, 끝 조각은 2글자 이상으로 남겨서 찍어두자~ -> 찍어 / 두자~처럼 보정한다.
@@ -277,6 +287,9 @@ BADNESS_SINGLE_HANGUL_LINE = 0.35
 # 3글자 이하 완성 어절 본체가 줄 경계에서 찢기는 경우.
 # hard 어미와 같은 금지급 감점으로 보되, 긴 공백 없는 단어의 3글자 분할은 이 규칙 대상이 아니다.
 BADNESS_SPLIT_SHORT_WORD = ABSOLUTE_BADNESS
+# 긴 어절을 줄 경계에서 쪼갤 수는 있지만, 쪼개진 머리/꼬리를 다른 어절과
+# 같은 줄에 섞으면 단어가 끊겨 보인다. 예: 수영부 에이 / 스가 되어.
+BADNESS_SPLIT_WORD_MIXED_LINE = 8.0
 # 이전 이름 호환.
 BADNESS_SPLIT_PROTECTED_SUFFIX = BADNESS_SPLIT_FUNCTION_UNIT
 
@@ -781,6 +794,10 @@ def _split_korean_suffix_units(chunk: str, max_plain_part_len: int | None = None
     protected = _sorted_tokens(tuple(dict.fromkeys(ABSOLUTE_NO_SPLIT_UNITS + _dynamic_no_split_units_for_chunk(s))))
 
     core, punct = _split_core_and_trailing_light_punctuation(s)
+    if _should_split_trailing_emotion_punctuation(core, punct):
+        return _split_korean_suffix_units(core, max_plain_part_len=max_plain_part_len) + [punct]
+    if _is_short_stem_particle_word(s):
+        return [s]
     has_protected_unit = any(tok and tok in core for tok in protected)
     # 보호 어미/기능 단위가 없는 긴 무공백 어절은 조사/어미를 한 글자씩 뜯기 전에
     # 먼저 전체 어절 기준의 "끝 2글자 tail" 규칙을 적용한다.
@@ -855,7 +872,10 @@ def _attach_light_punctuation(units: List[str]) -> List[str]:
                 pending_open += unit
                 continue
             if out:
-                out[-1] += unit
+                if _should_split_trailing_emotion_punctuation(out[-1], unit):
+                    out.append(unit)
+                else:
+                    out[-1] += unit
                 continue
             pending_open += unit
             continue
@@ -882,6 +902,46 @@ def _split_core_and_trailing_light_punctuation(text: object) -> Tuple[str, str]:
         cut -= 1
     return s[:cut], s[cut:]
 
+
+
+
+def _should_split_trailing_emotion_punctuation(core: object, punct: object) -> bool:
+    """길게 붙은 감정 문장부호를 본문과 분리할지 판단한다.
+
+    나...처럼 짧은 독백 꼬리는 앞 글자에 붙이고,
+    안에서...!?!?처럼 본문+긴 감정 꼬리는 안에서 / ...!?!?로 분리할 수 있게 한다.
+    """
+    c = str(core or '')
+    p = str(punct or '')
+    if not c or not p:
+        return False
+    if visual_len(c) < 2:
+        return False
+    return visual_len(p) >= EMOTION_TAIL_PUNCT_VISUAL_LEN_MIN
+
+def _is_short_stem_particle_word(text: object) -> bool:
+    """3글자 본체 + 1글자 조사형 짧은 어절인지 판단한다.
+
+    에이스가/수영부에처럼 본체는 3칸 이하이고 마지막이 soft 조사인 경우는
+    아이스크림 같은 긴 명사와 달리 통째 보존하는 편이 더 안전하다.
+    """
+    core, _punct = _split_core_and_trailing_light_punctuation(text)
+    core = str(core or '')
+    if not core:
+        return False
+    total_len = visual_len(core)
+    if total_len <= SHORT_WORD_PRESERVE_LEN_MAX:
+        return True
+    if total_len > SHORT_STEM_PARTICLE_WORD_PRESERVE_TOTAL_LEN_MAX:
+        return False
+    for tok in _sorted_tokens(SOFT_ATTACH_LEFT_PARTICLES + ("는",)):
+        if not tok or len(tok) != 1:
+            continue
+        if core.endswith(tok) and len(core) > len(tok):
+            stem = core[:-len(tok)]
+            if 0 < visual_len(stem) <= SHORT_STEM_PARTICLE_WORD_PRESERVE_BODY_LEN_MAX:
+                return True
+    return False
 
 def _split_long_core_with_tail(text: object, *, min_tail_len: int = LONG_WORD_MIN_TAIL_LEN) -> List[str]:
     """4글자 이상 긴 무공백 어절을 끝 2글자 꼬리 중심으로 2조각으로 나눈다.
@@ -1003,6 +1063,11 @@ def _piece_is_heavy_symbol_only(piece: object) -> bool:
     return bool(s) and all(is_heavy_symbol(ch) for ch in s)
 
 
+def _piece_is_decoration_only(piece: object) -> bool:
+    s = str(piece or '').strip()
+    return bool(s) and all((is_light_punctuation(ch) or is_heavy_symbol(ch)) for ch in s)
+
+
 def _short_word_body_end(pieces: Sequence[str]) -> int:
     """3글자 이하 어절 보존에서 본체로 볼 끝 위치를 반환한다.
 
@@ -1011,7 +1076,7 @@ def _short_word_body_end(pieces: Sequence[str]) -> int:
     """
     end = len(list(pieces or []))
     items = list(pieces or [])
-    while end > 0 and _piece_is_heavy_symbol_only(items[end - 1]):
+    while end > 0 and _piece_is_decoration_only(items[end - 1]):
         end -= 1
     return end
 
@@ -1182,6 +1247,50 @@ def make_units_for_target(text: object, target_lines: int) -> List[str]:
     return [u.text for u in _make_break_units(text, target_lines=target_lines) if u.text]
 
 
+
+
+def _split_word_mixed_line_badness(lines: Sequence[Sequence[_BreakUnit]]) -> float:
+    """긴 어절이 줄 경계에서 쪼개질 때 다른 어절과 섞이는 후보를 감점한다.
+
+    아이스/크림처럼 한 단어만 깔끔하게 두 줄로 나뉘는 것은 허용할 수 있다.
+    하지만 수영부 에이 / 스가 되어처럼 쪼개진 단어 조각이 앞뒤 다른 어절과
+    섞이면, 줄내림을 다시 압축할 때 에이 스가 같은 인공 공백이 생기기 쉽다.
+    """
+    clean_lines = [list(line or []) for line in (lines or []) if _units_text(line)]
+    if len(clean_lines) <= 1:
+        return 0.0
+    bad = 0.0
+
+    def _word_ids(line: Sequence[_BreakUnit]) -> set[int]:
+        out = set()
+        for unit in line or []:
+            try:
+                wid = int(getattr(unit, 'word_index', -1))
+            except Exception:
+                wid = -1
+            if wid >= 0:
+                out.add(wid)
+        return out
+
+    for idx in range(len(clean_lines) - 1):
+        left = clean_lines[idx]
+        right = clean_lines[idx + 1]
+        if not left or not right:
+            continue
+        try:
+            l_wid = int(getattr(left[-1], 'word_index', -1))
+            r_wid = int(getattr(right[0], 'word_index', -1))
+        except Exception:
+            continue
+        if l_wid < 0 or l_wid != r_wid:
+            continue
+        left_ids = _word_ids(left)
+        right_ids = _word_ids(right)
+        # 한쪽 줄에 다른 어절이 섞이면 분할 조각이 단어처럼 보이지 않는다.
+        if len(left_ids) > 1 or len(right_ids) > 1:
+            bad += BADNESS_SPLIT_WORD_MIXED_LINE
+    return bad
+
 def _linebreak_candidate_score(lines: Sequence[Sequence[_BreakUnit]], *, box_ratio: float | None, target_lines: int, total_len: int) -> float:
     """줄 형상 후보 점수. 낮을수록 좋다.
 
@@ -1213,7 +1322,7 @@ def _linebreak_candidate_score(lines: Sequence[Sequence[_BreakUnit]], *, box_rat
         if st[-1:] in LIGHT_OPEN_PUNCTUATION:
             edge_punct_cost += 1.0
 
-    badness_cost = _linebreak_badness_for_units(lines) + _short_word_split_badness(lines)
+    badness_cost = _linebreak_badness_for_units(lines) + _short_word_split_badness(lines) + _split_word_mixed_line_badness(lines)
 
     shape_cost = 0.0
     if box_ratio is not None:

@@ -23,6 +23,7 @@ from ysb.utils.runtime_logger import (
     memory_text,
     numpy_shape_text,
 )
+from ysb.core.inpaint_grouping import build_inpaint_mask_groups
 
 
 def _log_output_event_enabled(event_name, default=True):
@@ -1296,6 +1297,240 @@ def _build_inpainting_payload(mask_toggle_enabled, curr_data):
     return [], _copy_mask(curr_data.get('mask_inpaint_off'))
 
 
+def _current_inpaint_provider_info():
+    try:
+        from ysb.engine.manga_engine import Config
+        provider = str(getattr(Config, "INPAINT_PROVIDER", "replicate_lama") or "replicate_lama").strip().lower()
+    except Exception:
+        provider = "replicate_lama"
+    if provider == "replicate_stable":
+        return provider, "Stable Diffusion"
+    if provider == "gemini_inpaint":
+        return provider, "Gemini"
+    if provider == "local_lama":
+        return provider, "LOCAL LaMa"
+    return provider, "LaMa"
+
+
+def _normalize_inpaint_mask_array(mask, width, height):
+    if mask is None:
+        return None
+    try:
+        arr = np.asarray(mask)
+        if arr.size <= 0:
+            return None
+        if arr.ndim == 3:
+            if arr.shape[2] >= 4:
+                alpha = arr[:, :, 3]
+                rgb_gray = cv2.cvtColor(arr[:, :, :3], cv2.COLOR_RGB2GRAY)
+                gray = np.maximum(rgb_gray, alpha)
+            else:
+                gray = cv2.cvtColor(arr[:, :, :3], cv2.COLOR_RGB2GRAY)
+        else:
+            gray = arr.astype(np.uint8, copy=False)
+        if gray.shape[1] != int(width) or gray.shape[0] != int(height):
+            gray = cv2.resize(gray, (int(width), int(height)), interpolation=cv2.INTER_NEAREST)
+        _thr, bin_mask = cv2.threshold(gray.astype(np.uint8, copy=False), 0, 255, cv2.THRESH_BINARY)
+        if int(np.count_nonzero(bin_mask)) <= 0:
+            return None
+        return bin_mask
+    except Exception:
+        return None
+
+
+def _encode_png_bytes(image):
+    try:
+        ok, buf = cv2.imencode('.png', image, [int(cv2.IMWRITE_PNG_COMPRESSION), 6])
+        if not ok:
+            return b''
+        return bytes(buf.tobytes())
+    except Exception:
+        return b''
+
+
+def _decode_inpaint_result_image(img_data):
+    try:
+        arr = np.frombuffer(bytes(img_data or b''), dtype=np.uint8)
+        if arr.size <= 0:
+            return None
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if img is None or getattr(img, 'size', 0) <= 0:
+            return None
+        return img
+    except Exception:
+        return None
+
+
+def _compose_group_result(base_img, result_crop, mask_crop):
+    """Composite only the mask and a small feather area back into the original crop.
+
+    LaMa sees the padded context crop, but the paste-back area stays mask-led so
+    clean background outside the mask is not unexpectedly replaced.
+    """
+    if base_img is None or result_crop is None or mask_crop is None:
+        return base_img
+    try:
+        h, w = base_img.shape[:2]
+        if h <= 0 or w <= 0:
+            return base_img
+        if result_crop.shape[1] != w or result_crop.shape[0] != h:
+            result_crop = cv2.resize(result_crop, (w, h), interpolation=cv2.INTER_CUBIC)
+        if mask_crop.ndim == 3:
+            gray = cv2.cvtColor(mask_crop, cv2.COLOR_RGB2GRAY)
+        else:
+            gray = mask_crop.astype(np.uint8, copy=False)
+        if gray.shape[1] != w or gray.shape[0] != h:
+            gray = cv2.resize(gray, (w, h), interpolation=cv2.INTER_NEAREST)
+        _thr, bin_mask = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY)
+        if int(np.count_nonzero(bin_mask)) <= 0:
+            return base_img
+        # A small feather reduces crop seam artifacts without letting the whole
+        # context crop overwrite the original page.
+        short_side = max(1, min(w, h))
+        dilate_px = max(3, min(21, int(round(short_side * 0.012))))
+        if dilate_px % 2 == 0:
+            dilate_px += 1
+        kernel = np.ones((dilate_px, dilate_px), np.uint8)
+        soft = cv2.dilate(bin_mask, kernel, iterations=1)
+        blur_px = max(3, min(31, dilate_px * 2 + 1))
+        if blur_px % 2 == 0:
+            blur_px += 1
+        soft = cv2.GaussianBlur(soft, (blur_px, blur_px), 0)
+        alpha = (soft.astype(np.float32) / 255.0)[:, :, None]
+        out = (result_crop.astype(np.float32) * alpha + base_img.astype(np.float32) * (1.0 - alpha))
+        return np.clip(out, 0, 255).astype(np.uint8)
+    except Exception:
+        return result_crop if result_crop is not None else base_img
+
+
+def _execute_grouped_inpainting(
+    engine,
+    source_path,
+    data,
+    inpaint_mask,
+    *,
+    page_idx=-1,
+    groups=None,
+    max_work_side=2800,
+    log_path=None,
+    progress_emit=None,
+    prefix='',
+    cancel_check=None,
+):
+    """Run LaMa by mask-beacon groups and return one full-page PNG byte payload.
+
+    This is the real execution counterpart of the preview overlay: the exact
+    group list is built from the mask, each padded group rect is cropped, LaMa is
+    called per crop, and only the mask/feather area is composed back.
+    """
+    provider, provider_name = _current_inpaint_provider_info()
+    src_img = _imread_unicode(str(source_path))
+    if src_img is None:
+        raise ValueError(f"이미지를 읽을 수 없습니다: {source_path}")
+    h, w = src_img.shape[:2]
+    bin_mask = _normalize_inpaint_mask_array(inpaint_mask, w, h)
+    if bin_mask is None:
+        raise ValueError("인페인팅 마스크가 비어 있습니다.")
+
+    if groups is None:
+        groups = build_inpaint_mask_groups(bin_mask, max_work_side=int(max_work_side or 2800))
+    groups = list(groups or [])
+    if not groups:
+        raise ValueError("인페인팅 마스크 그룹이 없습니다.")
+
+    total = len(groups)
+    if progress_emit:
+        progress_emit(0, f"현재 작업: 인페인팅 그룹 준비 완료\n전체 그룹: {total}개")
+    if log_path:
+        append_log(log_path, "GROUPED INPAINT START", page_idx=page_idx, groups=total, source_size=f"{w}x{h}", mask=numpy_shape_text(bin_mask), mask_nonzero=int(np.count_nonzero(bin_mask)), memory=memory_text())
+
+    import tempfile
+    import shutil
+    temp_dir = tempfile.mkdtemp(prefix="ysb_group_inpaint_")
+    composed = src_img.copy()
+    try:
+        for order, group in enumerate(groups, 1):
+            if cancel_check and cancel_check():
+                raise RuntimeError("인페인팅 작업이 취소되었습니다.")
+            rect = group.get('rect') or group.get('bbox') or []
+            if len(rect) < 4:
+                continue
+            x1, y1, x2, y2 = [int(round(float(v))) for v in rect[:4]]
+            x1 = max(0, min(w - 1, x1))
+            y1 = max(0, min(h - 1, y1))
+            x2 = max(x1 + 1, min(w, x2))
+            y2 = max(y1 + 1, min(h, y2))
+            crop = composed[y1:y2, x1:x2].copy()
+            mask_crop = bin_mask[y1:y2, x1:x2].copy()
+            mask_nonzero = int(np.count_nonzero(mask_crop))
+            if mask_nonzero <= 0:
+                if log_path:
+                    append_log(log_path, "GROUPED INPAINT SKIP EMPTY", page_idx=page_idx, group=order, total=total, rect=f"{x1},{y1},{x2},{y2}", memory=memory_text())
+                continue
+
+            pct_start = int(round(((order - 1) / max(1, total)) * 100))
+            if progress_emit:
+                progress_emit(pct_start, f"현재 작업: {provider_name} 인페인팅 실행 중\n그룹 {order}/{total} · {x2-x1}x{y2-y1}")
+            if log_path:
+                append_log(log_path, "GROUPED INPAINT GROUP ENTER", page_idx=page_idx, group=order, total=total, rect=f"{x1},{y1},{x2},{y2}", size=f"{x2-x1}x{y2-y1}", mask_nonzero=mask_nonzero, memory=memory_text())
+
+            crop_path = os.path.join(temp_dir, f"page_{int(page_idx)+1:04d}_group_{order:03d}.png")
+            if not _imwrite_unicode(crop_path, crop):
+                raise ValueError(f"그룹 crop 이미지를 저장하지 못했습니다: {crop_path}")
+
+            def _tee_group_progress(msg):
+                if not progress_emit:
+                    return
+                text = str(msg or '').strip()
+                if not text:
+                    return
+                try:
+                    if text.startswith('YSB_PROGRESS|'):
+                        _tag, sub_pct, sub_detail = text.split('|', 2)
+                        sub_pct = max(0, min(100, int(float(sub_pct))))
+                        mapped = int(round(((order - 1) + (sub_pct / 100.0)) / max(1, total) * 100))
+                        progress_emit(mapped, sub_detail)
+                    else:
+                        progress_emit(pct_start, text)
+                except Exception:
+                    try:
+                        progress_emit(pct_start, text)
+                    except Exception:
+                        pass
+
+            stream = _ProgressTeeStream(sys.__stdout__, _tee_group_progress)
+            err_stream = _ProgressTeeStream(sys.__stderr__, _tee_group_progress)
+            with contextlib.redirect_stdout(stream), contextlib.redirect_stderr(err_stream):
+                result = engine.execute_inpainting(crop_path, [], mask_crop)
+            if not result:
+                raise WorkerResultValidationError(f"{provider_name} 그룹 {order}/{total} 인페인팅 결과가 비어 있습니다.")
+            img_data = _download_replicate_output(result)
+            validate_inpaint_result_or_raise(provider, img_data, engine)
+            result_crop = _decode_inpaint_result_image(img_data)
+            if result_crop is None:
+                raise WorkerResultValidationError(f"그룹 {order}/{total} 인페인팅 결과 이미지를 디코딩할 수 없습니다.")
+            composed_crop = _compose_group_result(composed[y1:y2, x1:x2], result_crop, mask_crop)
+            composed[y1:y2, x1:x2] = composed_crop
+
+            pct_done = int(round((order / max(1, total)) * 100))
+            if progress_emit:
+                progress_emit(pct_done, f"현재 작업: 인페인팅 그룹 완료\n그룹 {order}/{total} 완료 ({pct_done}%)")
+            if log_path:
+                append_log(log_path, "GROUPED INPAINT GROUP DONE", page_idx=page_idx, group=order, total=total, percent=pct_done, bytes=len(img_data or b''), memory=memory_text())
+
+        encoded = _encode_png_bytes(composed)
+        if not encoded:
+            raise WorkerResultValidationError("그룹 인페인팅 결과 PNG 인코딩에 실패했습니다.")
+        if log_path:
+            append_log(log_path, "GROUPED INPAINT DONE", page_idx=page_idx, groups=total, bytes=len(encoded or b''), memory=memory_text())
+        return encoded, groups
+    finally:
+        try:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+
 class UniversalBatchWorker(QThread):
     progress = pyqtSignal(str)
     # page index, mode
@@ -1804,37 +2039,36 @@ class UniversalBatchWorker(QThread):
                     source_path = self._write_bg_clean_as_source(i, curr_data, path)
                     self.progress.emit(f"{prefix} 2/5 입력 이미지/마스크 준비")
                     append_log(self.batch_log_path, "INPAINT SOURCE READY", index=i, source_path=source_path, memory=memory_text())
-                    source_path, inpaint_mask, resize_note = _prepare_resized_inpaint_request(
-                        self.project_dir,
-                        i,
-                        source_path,
-                        inpaint_mask,
-                        (self.batch_inpaint_resize_policy or {}).get('provider'),
-                        self.batch_inpaint_resize_policy,
-                    )
-                    if resize_note:
-                        temp_cleanup_path = source_path
-                        self.progress.emit(f"{prefix} {resize_note}")
-                        append_log(self.batch_log_path, "INPAINT RESIZE READY", index=i, source_path=source_path, mask=numpy_shape_text(inpaint_mask), memory=memory_text())
-                    append_log(self.batch_log_path, "INPAINT REQUEST", index=i, source_path=source_path, resized=bool(resize_note), memory=memory_text())
-                    self.progress.emit(f"{prefix} 현재 작업: 인페인팅 실행 중")
-                    res_url = self.engine.execute_inpainting(
+
+                    # 인페인팅은 항상 미리보기와 같은 마스크-비콘 그룹 방식으로 실행한다.
+                    # 전체 페이지 리사이즈/타일 분할이 아니라, 2800px 작업 캔버스 안에 패킹된 그룹 crop만 LaMa에 보낸다.
+                    append_log(self.batch_log_path, "GROUPED INPAINT REQUEST", index=i, source_path=source_path, resized=False, memory=memory_text())
+                    self.progress.emit(f"{prefix} 현재 작업: 인페인팅 그룹 계산 중")
+
+                    def _batch_group_progress(percent, detail):
+                        try:
+                            detail_text = str(detail or '').replace('현재 작업: ', '', 1)
+                            self.progress.emit(f"{prefix} {detail_text}")
+                        except Exception:
+                            pass
+
+                    bg_bytes, used_groups = _execute_grouped_inpainting(
+                        self.engine,
                         source_path,
                         inpaint_data,
-                        inpaint_mask
+                        inpaint_mask,
+                        page_idx=i,
+                        max_work_side=2800,
+                        log_path=self.batch_log_path,
+                        progress_emit=_batch_group_progress,
+                        prefix=prefix,
+                        cancel_check=lambda: not bool(getattr(self, 'is_running', True)),
                     )
 
-                    append_log(self.batch_log_path, "INPAINT RESPONSE", index=i, has_result=bool(res_url), memory=memory_text())
-                    if res_url:
-                        self.progress.emit(f"{prefix} 현재 작업: 인페인팅 결과 수신/디코딩 중")
-                        append_log(self.batch_log_path, "INPAINT DOWNLOAD ENTER", index=i, result_type=type(res_url).__name__, memory=memory_text())
-                        bg_bytes = _download_replicate_output(res_url)
-                        validate_inpaint_result_or_raise(self.inpaint_provider, bg_bytes, self.engine)
-                        append_log(self.batch_log_path, "INPAINT DOWNLOAD DONE", index=i, bytes=format_bytes(len(bg_bytes or b'')), memory=memory_text())
-
+                    append_log(self.batch_log_path, "GROUPED INPAINT RESPONSE", index=i, groups=len(used_groups or []), bytes=format_bytes(len(bg_bytes or b'')), memory=memory_text())
+                    if bg_bytes:
                         curr_data['bg_clean'] = bg_bytes
                         payload = {'bg_clean': bg_bytes}
-
                         self.progress.emit(f"{prefix} 현재 작업: 인페인팅 결과 반영 대기")
                     else:
                         payload = {'_batch_status': 'failed', '_batch_message': '인페인팅 결과 없음'}
@@ -2103,6 +2337,26 @@ class InpaintWorker(QThread):
                 provider = "unknown"
                 provider_name = "인페인팅"
             append_log(self.inpaint_log_path, "SINGLE INPAINT PROVIDER", page_idx=self.page_idx, provider=provider, provider_name=provider_name, memory=memory_text())
+            try:
+                temp_dir = os.environ.get("TMP") or os.environ.get("TEMP") or ""
+                py_temp_dir = ""
+                try:
+                    import tempfile
+                    py_temp_dir = tempfile.gettempdir()
+                except Exception:
+                    py_temp_dir = ""
+                append_log(
+                    self.inpaint_log_path,
+                    "SINGLE INPAINT TEMP_ENV",
+                    page_idx=self.page_idx,
+                    temp_env=temp_dir,
+                    tempfile_gettempdir=py_temp_dir,
+                    temp_dir_exists=os.path.isdir(py_temp_dir) if py_temp_dir else False,
+                    temp_dir_writable=os.access(py_temp_dir, os.W_OK) if py_temp_dir else False,
+                    memory=memory_text(),
+                )
+            except Exception:
+                pass
             self.log.emit(f"YSB_PROGRESS|8|현재 작업: 인페인팅 런타임 확인 중\n엔진: {provider_name}")
             self.log.emit("YSB_PROGRESS|20|현재 작업: 이미지와 마스크 준비 완료")
             self.log.emit(f"YSB_PROGRESS|35|현재 작업: {provider_name} 인페인팅 실행 중")
@@ -2145,6 +2399,12 @@ class InpaintWorker(QThread):
                 self.failed.emit(self.page_idx, msg)
         except Exception as e:
             append_log(self.inpaint_log_path, "SINGLE INPAINT EXCEPTION", page_idx=self.page_idx, error=repr(e), memory=memory_text())
+            try:
+                lama_debug = getattr(self.engine, "_last_lama_temp_mask_debug", None)
+                if isinstance(lama_debug, dict) and lama_debug:
+                    append_log(self.inpaint_log_path, "SINGLE INPAINT LAMA_TEMP_MASK_DEBUG", page_idx=self.page_idx, **lama_debug, memory=memory_text())
+            except Exception:
+                pass
             append_block(self.inpaint_log_path, "TRACEBACK", exception_text(e))
             err_msg = format_inpaint_failure_message(e, provider, provider_name)
             self.log.emit(f"YSB_PROGRESS|100|오류: {err_msg}")
@@ -2153,6 +2413,117 @@ class InpaintWorker(QThread):
             if _cleanup_temp_inpaint_request(self.cleanup_path):
                 append_log(self.inpaint_log_path, "SINGLE INPAINT TEMP CLEANUP", page_idx=self.page_idx, path=self.cleanup_path, memory=memory_text())
                 self.log.emit(f"🧹 임시 인페인팅 입력 정리: {os.path.basename(self.cleanup_path)}")
+
+
+class GroupedInpaintWorker(QThread):
+    finished = pyqtSignal(int, object)
+    failed = pyqtSignal(int, str)
+    log = pyqtSignal(str)
+
+    def __init__(self, engine, path, data, mask, page_idx=-1, groups=None, max_work_side=2800):
+        super().__init__()
+        self.engine = engine
+        self.path = path
+        self.data = _copy_data_list(data)
+        self.mask = _copy_mask(mask)
+        self.groups = copy.deepcopy(groups or [])
+        try:
+            self.page_idx = int(page_idx)
+        except Exception:
+            self.page_idx = -1
+        self.max_work_side = int(max_work_side or 2800)
+        self.inpaint_log_path = make_log_path("single_inpaint")
+        self.cancel_requested = False
+
+    def stop(self):
+        self.cancel_requested = True
+
+    def run(self):
+        provider = "unknown"
+        provider_name = "인페인팅"
+        try:
+            _log_path_image_summary(self.inpaint_log_path, "GROUPED SINGLE INPAINT START", self.path)
+            provider, provider_name = _current_inpaint_provider_info()
+            try:
+                mask_nonzero = int(np.count_nonzero(self.mask)) if self.mask is not None else 0
+            except Exception:
+                mask_nonzero = -1
+            append_log(
+                self.inpaint_log_path,
+                "GROUPED SINGLE INPAINT CONTEXT",
+                page_idx=self.page_idx,
+                provider=provider,
+                provider_name=provider_name,
+                groups_hint=len(self.groups or []),
+                mask=numpy_shape_text(self.mask),
+                mask_nonzero=mask_nonzero,
+                data_count=len(self.data or []),
+                max_work_side=self.max_work_side,
+                memory=memory_text(),
+            )
+            self.log.emit(f"YSB_PROGRESS|0|현재 작업: 인페인팅 그룹 계산 중")
+
+            def _emit_group_progress(percent, detail):
+                try:
+                    pct = max(0, min(100, int(percent)))
+                except Exception:
+                    pct = 0
+                self.log.emit(f"YSB_PROGRESS|{pct}|{detail}")
+
+            img_data, used_groups = _execute_grouped_inpainting(
+                self.engine,
+                self.path,
+                self.data,
+                self.mask,
+                page_idx=self.page_idx,
+                groups=(self.groups or None),
+                max_work_side=self.max_work_side,
+                log_path=self.inpaint_log_path,
+                progress_emit=_emit_group_progress,
+                cancel_check=lambda: bool(getattr(self, 'cancel_requested', False)),
+            )
+
+            if img_data:
+                try:
+                    info = getattr(self.engine, "_last_local_lama_device_info", None)
+                    if isinstance(info, dict) and info:
+                        append_log(
+                            self.inpaint_log_path,
+                            "GROUPED SINGLE INPAINT LOCAL_LAMA_DEVICE",
+                            page_idx=self.page_idx,
+                            requested=info.get("requested_device"),
+                            resolved=info.get("resolved_device"),
+                            model_device=info.get("model_device"),
+                            cuda_available=info.get("cuda_available"),
+                            cuda_device_count=info.get("cuda_device_count"),
+                            cuda_device_name=info.get("cuda_device_name"),
+                            torch_version=info.get("torch_version"),
+                            torch_cuda_build=info.get("torch_cuda_build"),
+                            worker_python=info.get("worker_python"),
+                            reason=info.get("reason"),
+                            memory=memory_text(),
+                        )
+                except Exception:
+                    pass
+                self.log.emit(f"YSB_PROGRESS|100|현재 작업: 인페인팅 결과를 화면에 반영할 준비 중\n전체 그룹: {len(used_groups or [])}개")
+                self.finished.emit(self.page_idx, img_data)
+            else:
+                msg = f"{provider_name} 인페인팅 결과가 비어 있습니다. 작업은 완료로 처리하지 않습니다."
+                append_log(self.inpaint_log_path, "GROUPED SINGLE INPAINT EMPTY_RESULT", page_idx=self.page_idx, memory=memory_text())
+                self.log.emit(f"YSB_PROGRESS|100|오류: {msg}")
+                self.failed.emit(self.page_idx, msg)
+        except Exception as e:
+            append_log(self.inpaint_log_path, "GROUPED SINGLE INPAINT EXCEPTION", page_idx=self.page_idx, error=repr(e), memory=memory_text())
+            try:
+                lama_debug = getattr(self.engine, "_last_lama_temp_mask_debug", None)
+                if isinstance(lama_debug, dict) and lama_debug:
+                    append_log(self.inpaint_log_path, "GROUPED SINGLE INPAINT LAMA_TEMP_MASK_DEBUG", page_idx=self.page_idx, **lama_debug, memory=memory_text())
+            except Exception:
+                pass
+            append_block(self.inpaint_log_path, "TRACEBACK", exception_text(e))
+            err_msg = format_inpaint_failure_message(e, provider, provider_name)
+            self.log.emit(f"YSB_PROGRESS|100|오류: {err_msg}")
+            self.failed.emit(self.page_idx, err_msg)
 
 
 class TranslationWorker(QThread):

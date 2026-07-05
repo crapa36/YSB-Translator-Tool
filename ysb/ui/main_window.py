@@ -195,6 +195,21 @@ class MainWindow(MainWindowInteractionMixin, MainWindowCloudMixin, MainWindowSet
         except Exception:
             self.engine_boundary_audit = None
         try:
+            imported_font_families = FontSelectDialog.load_imported_program_fonts(force=True)
+            try:
+                self.audit_boundary_event(
+                    "IMPORTED_FONT_STARTUP_SCAN",
+                    family_count=len(imported_font_families or []),
+                    families=", ".join(list(imported_font_families or [])[:20]),
+                )
+            except Exception:
+                pass
+        except Exception as exc:
+            try:
+                self.audit_boundary_event("IMPORTED_FONT_STARTUP_SCAN_FAIL", error=str(exc))
+            except Exception:
+                pass
+        try:
             self.page_image_cache_limit = max(1, int(self.app_options.get("page_image_cache_limit", self.page_image_cache_limit) or self.page_image_cache_limit))
         except Exception:
             self.page_image_cache_limit = 3
@@ -215,7 +230,18 @@ class MainWindow(MainWindowInteractionMixin, MainWindowCloudMixin, MainWindowSet
         if self.ui_theme not in (THEME_DARK, THEME_LIGHT):
             self.ui_theme = THEME_DARK
         self.ui_language = normalize_ui_language(self.app_options.get(UI_LANGUAGE_KEY, LANG_KO))
-        self.analysis_number_box_width = int(self.app_options.get("analysis_number_box_width", 40) or 40)
+        self.analysis_box_size_mode = str(self.app_options.get("analysis_box_size_mode", "auto") or "auto").lower()
+        if self.analysis_box_size_mode not in ("auto", "manual"):
+            self.analysis_box_size_mode = "auto"
+        try:
+            self.analysis_number_box_width = max(1, int(self.app_options.get("analysis_number_box_width", 40) or 40))
+        except Exception:
+            self.analysis_number_box_width = 40
+        try:
+            self.analysis_outline_width = max(1, int(self.app_options.get("analysis_outline_width", 2) or 2))
+        except Exception:
+            self.analysis_outline_width = 2
+        self.text_number_boxes_hidden = bool(self.app_options.get("text_number_boxes_hidden", False))
         self.page_tab_display_name_mode = normalize_page_display_mode(self.app_options.get(PAGE_TAB_DISPLAY_MODE_KEY, DEFAULT_PAGE_DISPLAY_MODE))
         self.output_display_name_mode = normalize_page_display_mode(self.app_options.get(OUTPUT_DISPLAY_MODE_KEY, DEFAULT_PAGE_DISPLAY_MODE))
         self.output_image_format = normalize_output_image_format(self.app_options.get(OUTPUT_IMAGE_FORMAT_KEY, DEFAULT_OUTPUT_IMAGE_FORMAT))
@@ -305,6 +331,10 @@ class MainWindow(MainWindowInteractionMixin, MainWindowCloudMixin, MainWindowSet
             self.default_writing_direction = self.normalize_writing_direction(self.app_options.get("default_writing_direction", "horizontal"))
         except Exception:
             self.default_writing_direction = "horizontal"
+        try:
+            self.default_partial_horizontal_writing_enabled = self.normalize_partial_horizontal_writing_enabled(self.app_options.get("default_partial_horizontal_writing_enabled", True), True)
+        except Exception:
+            self.default_partial_horizontal_writing_enabled = True
         self.final_paint_color = "#FFFFFF"
         self.final_paint_above_text = False
         self.final_paint_opacity = 100

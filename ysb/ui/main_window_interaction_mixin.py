@@ -87,13 +87,24 @@ class MainWindowInteractionMixin:
                 self.setProperty(prop, None)
         except Exception:
             pass
-        make_action("work_text_number_width", "텍스트 넘버 크기 변경", self.open_text_number_width_dialog)
+        make_action("work_text_number_width", "분석 박스 크기", self.open_analysis_box_size_dialog)
+        make_action("work_toggle_text_number_boxes", "텍스트 넘버 박스 숨기기/표시", self.toggle_text_number_boxes_hidden)
         make_action("work_translate", "번역", self.trans)
         make_action("work_inpaint", "인페인팅", self.run_inpainting)
+        make_action("work_inpaint_group_preview", "인페인팅 그룹 미리보기", self.show_inpaint_group_preview)
         make_action("work_import_clean_background", "클린본 불러오기", self.import_clean_background)
         make_action("work_inpaint_source", "배경을 원본으로 쓰기", self.use_inpainted_as_source)
         make_action("work_restore_original_source", "원본으로 돌아가기", self.restore_original_source)
         make_action("work_extract_text", "지문 추출", self.extract_text_current)
+        try:
+            # 현재 페이지 단독 지문 추출은 작업 메뉴/단축키에서 제거하고,
+            # 일괄 지문 추출 하나로 통합한다. 구버전 매크로/설정 참조 방지를 위해
+            # 액션 객체만 숨김/비활성 상태로 남긴다.
+            self.actions["work_extract_text"].setVisible(False)
+            self.actions["work_extract_text"].setEnabled(False)
+            self.actions["work_extract_text"].setShortcut(QKeySequence())
+        except Exception:
+            pass
         make_action("work_import_translation", "번역문 불러오기", self.import_translation_current)
         make_action("work_clear_translation", "번역문 내용 지우기", self.clear_translation_current)
         make_action("work_clean_text", "텍스트 정리", self.clean_text_current)
@@ -556,20 +567,491 @@ class MainWindowInteractionMixin:
     def is_editing_table_text_cell(self):
         """우측 텍스트 테이블의 원문/번역 셀을 편집 중인지 확인한다."""
         try:
-            fw = QApplication.focusWidget()
-            if fw is None or not hasattr(self, "tab") or self.tab is None:
+            return self._focused_right_text_table_editor() is not None
+        except Exception:
+            return False
+
+    def _right_text_table_contains_object(self, target):
+        """Return True when target belongs to the right text table/viewport."""
+        try:
+            tab = getattr(self, "tab", None)
+            if tab is None or target is None:
                 return False
-            if not (fw is self.tab or self.tab.isAncestorOf(fw)):
-                return False
-            if not self.is_text_input_widget(fw):
-                return False
-            # 현재 편집기가 열린 셀 좌표를 확인한다. 원문/번역 칸이면 Delete는 행 삭제가 아니라 글자 삭제여야 한다.
-            idx = self.tab.currentIndex()
-            if idx.isValid() and idx.column() in (2, 3):
+            if target is tab:
                 return True
+            try:
+                if isinstance(target, QWidget) and tab.isAncestorOf(target):
+                    return True
+            except Exception:
+                pass
+            try:
+                vp = tab.viewport()
+            except Exception:
+                vp = None
+            if vp is not None:
+                try:
+                    if target is vp:
+                        return True
+                except Exception:
+                    pass
+                try:
+                    if isinstance(target, QWidget) and vp.isAncestorOf(target):
+                        return True
+                except Exception:
+                    pass
+            # QObject parent chain fallback.  Some delegate editors/key events are
+            # delivered through helper objects that are not direct QWidget children.
+            try:
+                p = target
+                for _ in range(12):
+                    if p is None:
+                        break
+                    if p is tab or p is vp:
+                        return True
+                    p = p.parent() if hasattr(p, 'parent') else None
+            except Exception:
+                pass
+            return False
+        except Exception:
+            return False
+
+    def _set_text_shortcut_owner(self, owner, reason='', obj=None, ttl_ms=8000):
+        """Remember which text work area should own global Ctrl shortcuts.
+
+        QWidget focus is not reliable here: selecting a row in the right text
+        table can also select the matching canvas text object, and the canvas
+        focus-restoration path can immediately pull focus back to the final
+        view.  Shortcut ownership must therefore follow the user's last clicked
+        work area, not only QApplication.focusWidget().
+        """
+        try:
+            self._ysb_text_shortcut_owner = str(owner or '')
+            self._ysb_text_shortcut_owner_at = time.time()
+            self._ysb_text_shortcut_owner_ttl_ms = int(ttl_ms or 8000)
+            try:
+                self.audit_boundary_event(
+                    'TEXT_SHORTCUT_OWNER_SET',
+                    owner=str(owner or ''),
+                    reason=str(reason or ''),
+                    obj_type=type(obj).__name__ if obj is not None else '',
+                    focus_widget=type(QApplication.focusWidget()).__name__ if QApplication.focusWidget() is not None else '',
+                    throttle_ms=80,
+                )
+            except Exception:
+                pass
             return True
         except Exception:
             return False
+
+    def _right_text_shortcut_owner_active(self, window_ms=None):
+        try:
+            if str(getattr(self, '_ysb_text_shortcut_owner', '') or '') != 'right_table':
+                return False
+            last = float(getattr(self, '_ysb_text_shortcut_owner_at', 0.0) or 0.0)
+            if last <= 0:
+                return False
+            ttl = int(window_ms if window_ms is not None else getattr(self, '_ysb_text_shortcut_owner_ttl_ms', 8000) or 8000)
+            return (time.time() - last) * 1000.0 <= float(ttl)
+        except Exception:
+            return False
+
+    def _active_plain_input_is_outside_right_table(self, obj=None):
+        """Avoid stealing Ctrl+A/C from unrelated option/search line edits."""
+        candidates = []
+        try:
+            fw = QApplication.focusWidget()
+        except Exception:
+            fw = None
+        for target in (obj, fw):
+            if target is not None:
+                candidates.append(target)
+            try:
+                line = self.current_single_line_input_widget(target)
+                if line is not None:
+                    candidates.append(line)
+            except Exception:
+                pass
+        seen = set()
+        for target in candidates:
+            try:
+                ident = id(target)
+                if ident in seen:
+                    continue
+                seen.add(ident)
+            except Exception:
+                pass
+            try:
+                if not self.is_text_input_widget(target):
+                    continue
+            except Exception:
+                continue
+            try:
+                if self._right_text_table_contains_object(target):
+                    continue
+            except Exception:
+                pass
+            return True
+        return False
+
+    def _remember_right_text_table_shortcut_owner_from_event(self, obj, event):
+        """Track user intent for the right text table before focus can bounce."""
+        try:
+            et = event.type()
+            if et not in (
+                QEvent.Type.MouseButtonPress,
+                QEvent.Type.MouseButtonRelease,
+                QEvent.Type.MouseButtonDblClick,
+                QEvent.Type.FocusIn,
+            ):
+                return False
+            if not self._right_text_table_contains_object(obj):
+                return False
+            tab = getattr(self, 'tab', None)
+            if tab is None:
+                return False
+            # Remember the clicked column as early as possible.  With row
+            # selection enabled currentColumn() often points to ID/style columns,
+            # while the user's visible intent is the original/translation cell
+            # they just clicked.
+            try:
+                idx = None
+                pos = None
+                if hasattr(event, 'position'):
+                    try:
+                        pos = event.position().toPoint()
+                    except Exception:
+                        pos = None
+                if pos is None and hasattr(event, 'pos'):
+                    try:
+                        pos = event.pos()
+                    except Exception:
+                        pos = None
+                if pos is not None:
+                    try:
+                        vp = tab.viewport()
+                    except Exception:
+                        vp = None
+                    if obj is tab:
+                        idx = tab.indexAt(pos)
+                    elif vp is not None and (obj is vp or (isinstance(obj, QWidget) and vp.isAncestorOf(obj))):
+                        if obj is not vp and isinstance(obj, QWidget):
+                            try:
+                                pos = obj.mapTo(vp, pos)
+                            except Exception:
+                                pass
+                        idx = tab.indexAt(pos)
+                if idx is not None and idx.isValid():
+                    try:
+                        col = int(idx.column())
+                        if col in (2, 3):
+                            tab._ysb_last_text_copy_column = col
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            self._set_text_shortcut_owner('right_table', reason='right_text_table_event', obj=obj, ttl_ms=12000)
+            try:
+                # When the event belongs to the delegate editor itself, do not
+                # return focus to the table.  The right-table shortcut owner must
+                # be remembered, but QTextEdit/QLineEdit must keep keyboard focus
+                # or the cell editor closes immediately and double-click editing
+                # looks completely broken.
+                if self.is_text_input_widget(obj) and self._right_text_table_contains_object(obj):
+                    try:
+                        self.audit_boundary_event(
+                            'RIGHT_TEXT_TABLE_EDITOR_FOCUS_PRESERVED',
+                            obj_type=type(obj).__name__ if obj is not None else '',
+                            focus_widget=type(QApplication.focusWidget()).__name__ if QApplication.focusWidget() is not None else '',
+                            throttle_ms=80,
+                        )
+                    except Exception:
+                        pass
+                    return True
+            except Exception:
+                pass
+            try:
+                # During the brief double-click editor-open window, MouseButtonDblClick
+                # and the following FocusIn/MouseRelease events should not bounce
+                # focus back to TextTableWidget before Qt creates the delegate editor.
+                opening_until = float(getattr(tab, '_ysb_text_cell_editor_opening_until', 0.0) or 0.0)
+                if opening_until > 0.0 and time.time() <= opening_until and et in (
+                    QEvent.Type.MouseButtonDblClick,
+                    QEvent.Type.FocusIn,
+                    QEvent.Type.MouseButtonRelease,
+                ):
+                    try:
+                        self.audit_boundary_event(
+                            'RIGHT_TEXT_TABLE_EDIT_OPENING_FOCUS_BOUNCE_SKIPPED',
+                            event_type=str(et),
+                            focus_widget=type(QApplication.focusWidget()).__name__ if QApplication.focusWidget() is not None else '',
+                            throttle_ms=80,
+                        )
+                    except Exception:
+                        pass
+                    return True
+            except Exception:
+                pass
+            try:
+                tab.setFocus(Qt.FocusReason.MouseFocusReason if et != QEvent.Type.FocusIn else Qt.FocusReason.OtherFocusReason)
+            except Exception:
+                pass
+            return True
+        except Exception:
+            return False
+
+    def _right_text_table_editor_clipboard_action_from_event(self, event):
+        """Return the clipboard action that must stay inside the live table editor."""
+        try:
+            if event.matches(QKeySequence.StandardKey.SelectAll):
+                return 'select_all'
+        except Exception:
+            pass
+        try:
+            if event.matches(QKeySequence.StandardKey.Copy):
+                return 'copy'
+        except Exception:
+            pass
+        try:
+            if event.matches(QKeySequence.StandardKey.Paste):
+                return 'paste'
+        except Exception:
+            pass
+        try:
+            if event.matches(QKeySequence.StandardKey.Cut):
+                return 'cut'
+        except Exception:
+            pass
+        try:
+            if not bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+                return ''
+            if bool(event.modifiers() & (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier)):
+                return ''
+            key = event.key()
+            if key == Qt.Key.Key_A:
+                return 'select_all'
+            if key == Qt.Key.Key_C:
+                return 'copy'
+            if key == Qt.Key.Key_V and not bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier):
+                return 'paste'
+            if key == Qt.Key.Key_X:
+                return 'cut'
+        except Exception:
+            pass
+        return ''
+
+    def _run_right_text_table_editor_clipboard_action(self, editor, action):
+        """Execute Ctrl+A/C/V/X inside the active right-table cell editor only."""
+        if editor is None or not action:
+            return False
+        try:
+            if action == 'select_all':
+                editor.selectAll()
+            elif action == 'copy':
+                editor.copy()
+            elif action == 'paste':
+                try:
+                    if hasattr(editor, 'isReadOnly') and editor.isReadOnly():
+                        return False
+                except Exception:
+                    pass
+                editor.paste()
+            elif action == 'cut':
+                try:
+                    if hasattr(editor, 'isReadOnly') and editor.isReadOnly():
+                        return False
+                except Exception:
+                    pass
+                editor.cut()
+            else:
+                return False
+            try:
+                self._set_text_shortcut_owner('right_table', reason='right_text_table_editor_clipboard', obj=editor, ttl_ms=12000)
+            except Exception:
+                pass
+            try:
+                self.audit_boundary_event(
+                    'RIGHT_TEXT_TABLE_EDITOR_CLIPBOARD_HANDLED',
+                    action=str(action),
+                    editor=type(editor).__name__ if editor is not None else '',
+                    focus_widget=type(QApplication.focusWidget()).__name__ if QApplication.focusWidget() is not None else '',
+                    throttle_ms=80,
+                )
+            except Exception:
+                pass
+            return True
+        except Exception as exc:
+            try:
+                self.audit_boundary_event(
+                    'RIGHT_TEXT_TABLE_EDITOR_CLIPBOARD_ERROR',
+                    action=str(action),
+                    editor=type(editor).__name__ if editor is not None else '',
+                    error=repr(exc),
+                    throttle_ms=80,
+                )
+            except Exception:
+                pass
+            return False
+
+    def _route_right_text_table_shortcut_by_owner(self, obj, event):
+        """Handle right-table Ctrl shortcuts even if focus bounced to canvas."""
+        try:
+            et = event.type()
+            if et not in (QEvent.Type.ShortcutOverride, QEvent.Type.KeyPress):
+                return False
+        except Exception:
+            return False
+
+        def _accept():
+            try:
+                event.accept()
+            except Exception:
+                pass
+            return True
+
+        editor_action = self._right_text_table_editor_clipboard_action_from_event(event)
+        if editor_action:
+            try:
+                editor = self._focused_right_text_table_editor(obj)
+            except Exception:
+                editor = None
+            if editor is not None:
+                try:
+                    self.audit_boundary_event(
+                        'RIGHT_TEXT_TABLE_EDITOR_CLIPBOARD_ROUTE',
+                        action=str(editor_action),
+                        phase='ShortcutOverride' if et == QEvent.Type.ShortcutOverride else 'KeyPress',
+                        editor=type(editor).__name__ if editor is not None else '',
+                        focus_widget=type(QApplication.focusWidget()).__name__ if QApplication.focusWidget() is not None else '',
+                        throttle_ms=80,
+                    )
+                except Exception:
+                    pass
+                if et == QEvent.Type.ShortcutOverride:
+                    return _accept()
+                if self._run_right_text_table_editor_clipboard_action(editor, editor_action):
+                    return _accept()
+                return False
+
+        try:
+            is_copy = bool(event.matches(QKeySequence.StandardKey.Copy))
+        except Exception:
+            try:
+                is_copy = event.key() == Qt.Key.Key_C and bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+            except Exception:
+                is_copy = False
+        is_select_all = self._event_matches_select_all_shortcut(event)
+        if not (is_copy or is_select_all):
+            return False
+        try:
+            if not (self._right_text_table_owns_focus(obj) or self._right_text_shortcut_owner_active()):
+                return False
+        except Exception:
+            return False
+        try:
+            if not self._right_text_table_owns_focus(obj) and self._active_plain_input_is_outside_right_table(obj):
+                return False
+        except Exception:
+            pass
+        try:
+            self.audit_boundary_event(
+                'TEXT_SHORTCUT_FOCUS_SNAPSHOT',
+                key='A' if is_select_all else 'C',
+                phase='ShortcutOverride' if et == QEvent.Type.ShortcutOverride else 'KeyPress',
+                owner=str(getattr(self, '_ysb_text_shortcut_owner', '') or ''),
+                owner_active=bool(self._right_text_shortcut_owner_active()),
+                obj_type=type(obj).__name__ if obj is not None else '',
+                focus_widget=type(QApplication.focusWidget()).__name__ if QApplication.focusWidget() is not None else '',
+                tab_has_focus=bool(getattr(getattr(self, 'tab', None), 'hasFocus', lambda: False)()),
+                current_row=int(getattr(getattr(self, 'tab', None), 'currentRow', lambda: -1)()),
+                current_col=int(getattr(getattr(self, 'tab', None), 'currentColumn', lambda: -1)()),
+                throttle_ms=80,
+            )
+        except Exception:
+            pass
+
+        if et == QEvent.Type.ShortcutOverride:
+            return _accept()
+        if is_select_all:
+            ok = self._select_all_right_text_table_rows()
+            try:
+                self._set_text_shortcut_owner('right_table', reason='right_text_table_select_all', obj=obj, ttl_ms=12000)
+            except Exception:
+                pass
+            try:
+                self.audit_boundary_event('RIGHT_TEXT_TABLE_SELECT_ALL_HANDLED', ok=bool(ok), route='owner', throttle_ms=80)
+            except Exception:
+                pass
+            return _accept()
+        if is_copy:
+            try:
+                if self.is_editing_table_text_cell() and self._copy_focused_right_text_table_editor_to_clipboard(obj):
+                    return _accept()
+            except Exception:
+                pass
+            if self._copy_right_text_table_column_to_clipboard():
+                return _accept()
+        return False
+
+    def _focused_right_text_table_editor(self, obj=None):
+        """Return the live editor widget for the right text table, if any.
+
+        Original cells use Qt's default QLineEdit, while translated cells use the
+        custom QTextEdit delegate.  Both must own Ctrl+C/Ctrl+A while editing;
+        otherwise the final-canvas text-object clipboard can steal the shortcut.
+        """
+        try:
+            tab = getattr(self, "tab", None)
+            if tab is None:
+                return None
+            candidates = []
+            if obj is not None:
+                candidates.append(obj)
+            try:
+                fw = QApplication.focusWidget()
+            except Exception:
+                fw = None
+            if fw is not None:
+                candidates.append(fw)
+            for target in candidates:
+                if target is None:
+                    continue
+                editor = None
+                try:
+                    if isinstance(target, (QLineEdit, QTextEdit, QPlainTextEdit)):
+                        editor = target
+                except Exception:
+                    editor = None
+                if editor is None:
+                    try:
+                        if isinstance(target, QAbstractSpinBox):
+                            editor = target.lineEdit()
+                    except Exception:
+                        editor = None
+                if editor is None:
+                    try:
+                        line = self.current_single_line_input_widget(target)
+                        if line is not None:
+                            editor = line
+                    except Exception:
+                        editor = None
+                if editor is None:
+                    continue
+                try:
+                    if editor is tab or tab.isAncestorOf(editor):
+                        return editor
+                except Exception:
+                    pass
+                # Some Qt item editors are parented to the viewport, not directly
+                # to the table object in a way isAncestorOf() always catches.
+                try:
+                    vp = tab.viewport()
+                    if vp is not None and (editor is vp or vp.isAncestorOf(editor)):
+                        return editor
+                except Exception:
+                    pass
+            return None
+        except Exception:
+            return None
 
     def install_global_input_filter(self):
         """메인 윈도우 키 입력을 안전하게 정리한다.
@@ -1603,24 +2085,217 @@ class MainWindowInteractionMixin:
             return False
 
     def _block_global_action_during_inline_text_edit(self, key=None):
-        """Block application/toolbox shortcuts while the inline text editor is active.
+        """Block unsafe global shortcuts while the inline text editor is active.
 
-        The inline editor owns text-input shortcuts (symbols, copy/paste, undo/redo,
-        Ctrl+Enter, Esc, IME, etc.).  QAction shortcuts such as tools, style changes,
-        page movement, macro actions, and item presets must not fire while the user is
-        typing inside a text object.
+        Text styling controls are intentionally allowed while editing so a selected
+        character range can receive a partial style run.  Layout/position actions
+        such as alignment remain blocked because they change the text box as a whole.
         """
         if not self._inline_text_editor_is_active():
+            return False
+        key_s = str(key or "")
+        allowed_style_keys = {
+            "item_text_preset", "item_font_select", "item_font_inc", "item_font_dec",
+            "item_stroke_inc", "item_stroke_dec", "item_text_color", "item_stroke_color",
+            "item_bold_toggle", "item_italic_toggle", "item_strike_toggle",
+            "text_font_size", "text_stroke_size",
+        }
+        if key_s in allowed_style_keys:
+            try:
+                self.audit_boundary_event(
+                    "INLINE_EDITOR_GLOBAL_STYLE_ACTION_ALLOWED",
+                    action_key=key_s,
+                    throttle_ms=80,
+                )
+            except Exception:
+                pass
             return False
         try:
             self.audit_boundary_event(
                 "INLINE_EDITOR_GLOBAL_ACTION_BLOCKED",
-                action_key=str(key or ""),
+                action_key=key_s,
                 throttle_ms=80,
             )
         except Exception:
             pass
         return True
+
+    def _ysb_widget_or_parent_is_input_control(self, target):
+        """True when a QWidget target belongs to an input/control that must own keys.
+
+        Canvas/inline-editor global shortcuts are intentionally aggressive, but
+        once a normal interface editor has focus (spin boxes, line edits, editable
+        combos, dialog fields, etc.) Ctrl+C/Ctrl+V and typed numbers must belong
+        to that widget only.
+        """
+        try:
+            if target is None:
+                return False
+            # Direct text editors.
+            if self.is_text_input_widget(target):
+                return True
+        except Exception:
+            pass
+        try:
+            if isinstance(target, (QAbstractSpinBox, QComboBox, QFontComboBox, QKeySequenceEdit)):
+                return True
+        except Exception:
+            pass
+        try:
+            line = self.current_single_line_input_widget(target)
+            if line is not None:
+                return True
+        except Exception:
+            pass
+        try:
+            p = target
+            for _ in range(10):
+                if p is None:
+                    break
+                try:
+                    if self.is_text_input_widget(p):
+                        return True
+                except Exception:
+                    pass
+                try:
+                    if isinstance(p, (QAbstractSpinBox, QComboBox, QFontComboBox, QKeySequenceEdit)):
+                        return True
+                except Exception:
+                    pass
+                p = p.parent() if hasattr(p, 'parent') else None
+        except Exception:
+            pass
+        return False
+
+    def _ysb_interface_input_owns_keyboard(self, obj=None):
+        """Return True when the current UI input widget should own keyboard input.
+
+        This is stricter than the old stale-focus override: if a visible interface
+        input/control currently has focus, canvas object copy/paste and inline
+        editor key forwarding must not steal Ctrl+C/Ctrl+V from it.
+        """
+        candidates = []
+        try:
+            fw = QApplication.focusWidget()
+        except Exception:
+            fw = None
+        for target in (obj, fw):
+            if target is None:
+                continue
+            candidates.append(target)
+            try:
+                line = self.current_single_line_input_widget(target)
+                if line is not None:
+                    candidates.append(line)
+            except Exception:
+                pass
+        seen = set()
+        for target in candidates:
+            try:
+                ident = id(target)
+                if ident in seen:
+                    continue
+                seen.add(ident)
+            except Exception:
+                pass
+            try:
+                if not isinstance(target, QWidget):
+                    continue
+            except Exception:
+                continue
+            try:
+                if not target.isVisible() or not target.isEnabled():
+                    continue
+            except Exception:
+                pass
+            try:
+                if self._ysb_widget_or_parent_is_input_control(target):
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def _ysb_modal_dialog_owns_keyboard(self, obj=None):
+        """Return True while a child modal dialog, especially QColorDialog, owns keys.
+
+        Inline text editing installs an app-wide key filter so canvas shortcuts do
+        not leak while editing.  When a color palette/dialog is open from the style
+        controls, Ctrl+C/Ctrl+V must belong to the dialog's HEX/input fields, not to
+        the inline editor or final-canvas text clipboard.
+        """
+        dialogs = []
+        try:
+            modal = QApplication.activeModalWidget()
+            if modal is not None:
+                dialogs.append(modal)
+        except Exception:
+            pass
+        try:
+            popup = QApplication.activePopupWidget()
+            if popup is not None and popup not in dialogs:
+                dialogs.append(popup)
+        except Exception:
+            pass
+        try:
+            marked = getattr(self, '_ysb_active_color_dialog', None)
+            if marked is not None and marked not in dialogs:
+                dialogs.append(marked)
+        except Exception:
+            pass
+        try:
+            aw = QApplication.activeWindow()
+            if aw is not None and aw is not self and isinstance(aw, QDialog) and aw not in dialogs:
+                dialogs.append(aw)
+        except Exception:
+            pass
+        if not dialogs:
+            return False
+
+        targets = []
+        if obj is not None:
+            targets.append(obj)
+        try:
+            fw = QApplication.focusWidget()
+            if fw is not None:
+                targets.append(fw)
+        except Exception:
+            pass
+
+        for dlg in dialogs:
+            if dlg is None:
+                continue
+            try:
+                # A marked/active QColorDialog must fully own keyboard shortcuts
+                # even if Qt has not updated focusWidget yet.
+                if isinstance(dlg, QColorDialog):
+                    return True
+            except Exception:
+                pass
+            for target in targets:
+                if target is None:
+                    continue
+                try:
+                    if target is dlg:
+                        return True
+                except Exception:
+                    pass
+                try:
+                    if isinstance(target, QWidget) and isinstance(dlg, QWidget):
+                        if target.window() is dlg or dlg.isAncestorOf(target):
+                            return True
+                except Exception:
+                    pass
+                try:
+                    p = target
+                    for _ in range(16):
+                        if p is None:
+                            break
+                        if p is dlg:
+                            return True
+                        p = p.parent() if hasattr(p, 'parent') else None
+                except Exception:
+                    pass
+        return False
 
     def _inline_text_edit_event_filter(self, obj, event):
         if not self._inline_text_editor_is_active():
@@ -1631,6 +2306,36 @@ class MainWindowInteractionMixin:
         editor = getattr(self, "inline_text_editor", None)
         if editor is None:
             return False
+        try:
+            if self._ysb_modal_dialog_owns_keyboard(obj):
+                try:
+                    self.audit_boundary_event("INLINE_EDITOR_SHORTCUT_PASSTHROUGH_MODAL_DIALOG", obj_type=type(obj).__name__ if obj is not None else '', throttle_ms=120)
+                except Exception:
+                    pass
+                return False
+        except Exception:
+            pass
+        try:
+            if self._ysb_interface_input_owns_keyboard(obj):
+                try:
+                    self.audit_boundary_event(
+                        "INLINE_EDITOR_SHORTCUT_PASSTHROUGH_INTERFACE_INPUT",
+                        obj_type=type(obj).__name__ if obj is not None else '',
+                        focus_widget=type(QApplication.focusWidget()).__name__ if QApplication.focusWidget() is not None else '',
+                        throttle_ms=80,
+                    )
+                except Exception:
+                    pass
+                # ShortcutOverride must be accepted so WindowShortcut/global actions
+                # do not fire, but the following KeyPress still belongs to the input.
+                if et == QEvent.Type.ShortcutOverride:
+                    try:
+                        event.accept()
+                    except Exception:
+                        pass
+                return False
+        except Exception:
+            pass
 
         # Consume ShortcutOverride so WindowShortcut QAction/global tool shortcuts do
         # not activate.  Return False for widget-based fallback editors so their own
@@ -1773,28 +2478,315 @@ class MainWindowInteractionMixin:
                 pass
         return False
 
+    def _right_text_table_owns_focus(self, obj=None):
+        """True when the event belongs to the right-side OCR/original/translation table."""
+        try:
+            tab = getattr(self, "tab", None)
+            if tab is None:
+                return False
+            candidates = []
+            if obj is not None:
+                candidates.append(obj)
+            try:
+                fw = QApplication.focusWidget()
+            except Exception:
+                fw = None
+            if fw is not None:
+                candidates.append(fw)
+            try:
+                vp = tab.viewport()
+            except Exception:
+                vp = None
+            for target in candidates:
+                if target is None:
+                    continue
+                try:
+                    if target is tab or tab.isAncestorOf(target):
+                        return True
+                except Exception:
+                    pass
+                try:
+                    if vp is not None and (target is vp or vp.isAncestorOf(target)):
+                        return True
+                except Exception:
+                    pass
+            try:
+                if self._focused_right_text_table_editor(obj) is not None:
+                    return True
+            except Exception:
+                pass
+            return False
+        except Exception:
+            return False
+
+    def _event_matches_select_all_shortcut(self, event):
+        try:
+            if event.matches(QKeySequence.StandardKey.SelectAll):
+                return True
+        except Exception:
+            pass
+        try:
+            return (
+                event.key() == Qt.Key.Key_A
+                and bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+                and not bool(event.modifiers() & (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier))
+            )
+        except Exception:
+            return False
+
+    def _select_all_focused_table_editor_text(self, obj=None):
+        try:
+            fw = self._focused_right_text_table_editor(obj) or QApplication.focusWidget()
+        except Exception:
+            fw = None
+        if fw is None:
+            return False
+        try:
+            if isinstance(fw, QLineEdit):
+                fw.selectAll()
+                return True
+        except Exception:
+            pass
+        try:
+            if isinstance(fw, (QTextEdit, QPlainTextEdit)):
+                cur = fw.textCursor()
+                cur.select(QTextCursor.SelectionType.Document)
+                fw.setTextCursor(cur)
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _right_text_editor_plain_text(self, editor):
+        try:
+            if isinstance(editor, QLineEdit):
+                if editor.hasSelectedText():
+                    return str(editor.selectedText() or "")
+                return str(editor.text() or "")
+        except Exception:
+            pass
+        try:
+            if isinstance(editor, (QTextEdit, QPlainTextEdit)):
+                cur = editor.textCursor()
+                if cur is not None and cur.hasSelection():
+                    return str(cur.selectedText() or "").replace('\u2029', '\n')
+                if isinstance(editor, QPlainTextEdit):
+                    return str(editor.toPlainText() or "")
+                return str(editor.toPlainText() or "")
+        except Exception:
+            pass
+        return ""
+
+    def _copy_focused_right_text_table_editor_to_clipboard(self, obj=None):
+        editor = self._focused_right_text_table_editor(obj)
+        if editor is None:
+            return False
+        text = self._right_text_editor_plain_text(editor)
+        try:
+            QApplication.clipboard().setText(str(text or ""))
+        except Exception:
+            return False
+        try:
+            if hasattr(self, 'make_text_clipboard_item_from_plain_text'):
+                item = self.make_text_clipboard_item_from_plain_text(str(text or ""))
+                self.text_clipboard = [item] if item else []
+                self.text_clipboard_is_plain = True
+                self.text_paste_pending = False
+        except Exception:
+            pass
+        try:
+            self.audit_boundary_event(
+                'RIGHT_TEXT_TABLE_EDITOR_COPY_HANDLED',
+                editor=type(editor).__name__,
+                text_len=len(str(text or "")),
+                throttle_ms=80,
+            )
+        except Exception:
+            pass
+        return True
+
+    def _copy_right_text_table_column_to_clipboard(self):
+        """Copy visible right-table text from the current text column.
+
+        The table uses row selection for layer operations.  Qt's default Ctrl+C
+        therefore copies row/index data poorly, and the final-canvas text-object
+        clipboard can steal Ctrl+C while the Final tab is active.  When the user
+        has the right table focused, Ctrl+C should copy the text of the current
+        column: original column copies original text, translation column copies
+        translation text.
+        """
+        try:
+            tab = getattr(self, "tab", None)
+            if tab is None:
+                return False
+            col = -1
+            try:
+                remembered = int(getattr(tab, '_ysb_last_text_copy_column', -1) or -1)
+                if remembered in (2, 3):
+                    col = remembered
+            except Exception:
+                col = -1
+            if col not in (2, 3):
+                try:
+                    col = int(tab.currentColumn())
+                except Exception:
+                    col = -1
+            if col not in (2, 3):
+                try:
+                    idx = tab.currentIndex()
+                    if idx.isValid() and idx.column() in (2, 3):
+                        col = int(idx.column())
+                except Exception:
+                    pass
+            if col not in (2, 3):
+                # Row selection may leave currentColumn() on ID/X.  Keep the
+                # old safe default only when the user has not actually touched
+                # an original/translation cell.
+                col = 3
+
+            try:
+                rows = sorted({i.row() for i in tab.selectedIndexes() if i.row() > 0})
+            except Exception:
+                rows = []
+            try:
+                cur_row = int(tab.currentRow())
+                if cur_row > 0 and cur_row not in rows:
+                    rows.append(cur_row)
+                    rows.sort()
+            except Exception:
+                pass
+            rows = [r for r in rows if 0 < r < tab.rowCount()]
+            if not rows:
+                return False
+
+            lines = []
+            for row in rows:
+                try:
+                    item = tab.item(row, col)
+                except Exception:
+                    item = None
+                if item is None:
+                    lines.append("")
+                    continue
+                try:
+                    value = item.data(Qt.ItemDataRole.UserRole)
+                except Exception:
+                    value = None
+                if value is None:
+                    try:
+                        value = item.text()
+                    except Exception:
+                        value = ""
+                lines.append(str(value or ""))
+
+            text = "\n".join(lines)
+            try:
+                QApplication.clipboard().setText(text)
+            except Exception:
+                return False
+
+            # Keep YSB's internal clipboard consistent with the OS plain text.
+            try:
+                if hasattr(self, 'make_text_clipboard_item_from_plain_text'):
+                    item = self.make_text_clipboard_item_from_plain_text(text)
+                    self.text_clipboard = [item] if item else []
+                    self.text_clipboard_is_plain = True
+                    self.text_paste_pending = False
+            except Exception:
+                pass
+            try:
+                self.audit_boundary_event(
+                    'RIGHT_TEXT_TABLE_COPY_HANDLED',
+                    column=col,
+                    rows=len(rows),
+                    text_len=len(text),
+                    throttle_ms=80,
+                )
+            except Exception:
+                pass
+            return True
+        except Exception as exc:
+            try:
+                self.audit_boundary_event('RIGHT_TEXT_TABLE_COPY_ERROR', error=repr(exc), throttle_ms=80)
+            except Exception:
+                pass
+            return False
+
+    def _select_all_right_text_table_rows(self):
+        try:
+            tab = getattr(self, "tab", None)
+            if tab is None or tab.rowCount() <= 0:
+                return False
+            tab.clearSelection()
+            model = tab.model()
+            sm = tab.selectionModel()
+            if model is None or sm is None:
+                return False
+            from PyQt6.QtCore import QItemSelection, QItemSelectionModel
+            selection = QItemSelection()
+            first_real_row = None
+            last_col = max(0, tab.columnCount() - 1)
+            for row in range(tab.rowCount()):
+                try:
+                    id_item = tab.item(row, 0)
+                    id_text = str(id_item.text() if id_item is not None else "").strip()
+                except Exception:
+                    id_text = ""
+                # The special ALL row is a command row, not a text item.
+                # Do not skip by hard-coded row number: row ordering/hidden rows can vary.
+                if id_text.upper() == "ALL" or not id_text:
+                    continue
+                selection.select(model.index(row, 0), model.index(row, last_col))
+                if first_real_row is None:
+                    first_real_row = row
+            if first_real_row is None:
+                return False
+            sm.select(selection, QItemSelectionModel.SelectionFlag.ClearAndSelect | QItemSelectionModel.SelectionFlag.Rows)
+            try:
+                col = int(getattr(tab, '_ysb_last_text_copy_column', -1) or -1)
+                if col not in (2, 3):
+                    col = int(tab.currentColumn()) if tab.currentColumn() in (2, 3) else 3
+                sm.setCurrentIndex(model.index(first_real_row, col), QItemSelectionModel.SelectionFlag.NoUpdate)
+            except Exception:
+                pass
+            return True
+        except Exception:
+            try:
+                getattr(self, "tab", None).selectAll()
+                return True
+            except Exception:
+                return False
+
+    def _handle_right_text_table_shortcut_event(self, obj, event):
+        """Let the right table own Ctrl+C and Ctrl+A before canvas shortcuts."""
+        try:
+            return bool(self._route_right_text_table_shortcut_by_owner(obj, event))
+        except Exception:
+            return False
+
     def _final_text_clipboard_should_ignore_stale_input_focus(self, action, obj=None):
-        """Decide whether final-text Ctrl+C/V should override stale widget focus."""
+        """Decide whether final-text Ctrl+C/V may override stale widget focus.
+
+        Interface inputs are now first-class shortcut owners.  If a spinbox,
+        line-edit, combo editor, color/font dialog field, or other input control
+        has focus, Ctrl+C/Ctrl+V must stay inside that widget.  Canvas object
+        copy/paste can only run after focus has actually returned to the canvas.
+        """
+        try:
+            if self._right_text_table_owns_focus(obj):
+                return False
+        except Exception:
+            pass
         try:
             if self._inline_text_editor_is_active():
                 return False
         except Exception:
             pass
         try:
-            selected_count = len(self.selected_text_data_items())
+            if self._ysb_interface_input_owns_keyboard(obj):
+                return False
         except Exception:
-            selected_count = 0
-        try:
-            paste_source = bool(self.has_available_text_paste_source()) if hasattr(self, 'has_available_text_paste_source') else bool(getattr(self, 'text_clipboard', None))
-        except Exception:
-            paste_source = False
-        if action == 'copy':
-            return selected_count > 0
-        if action in ('paste_mode', 'paste_same_position'):
-            # If a text object is selected, the user's visible context is the final canvas.
-            # If nothing is selected, only override when the focus does not have an
-            # explicit user text selection; this lets normal line-edit paste keep working.
-            return paste_source and (selected_count > 0 or not self._focused_plain_input_has_user_selection(obj))
+            pass
         return False
 
     def focus_final_text_canvas_for_shortcut(self, reason=''):
@@ -1810,6 +2802,42 @@ class MainWindowInteractionMixin:
             view = getattr(self, 'view', None)
             if view is None:
                 return False
+            try:
+                reason_s = str(reason or '')
+            except Exception:
+                reason_s = ''
+            try:
+                # 우측 텍스트 표/표 편집기에서 행 선택을 바꾸면 캔버스의
+                # QGraphicsScene selectionChanged도 함께 발생한다.  기존에는 즉시
+                # scene_selection_changed만 막고, 0ms 뒤 예약된
+                # scene_selection_changed_deferred는 통과시켜서 QTextEdit delegate가
+                # 열리자마자 최종 캔버스가 포커스를 다시 빼앗았다.
+                # 그 결과 원문/번역문 셀 더블클릭 편집이 '안 되는 것처럼' 보였다.
+                if self._right_text_shortcut_owner_active() and (
+                    reason_s in (
+                        'scene_selection_changed',
+                        'scene_selection_changed_deferred',
+                        'clipboard_shortcut_override_stale_focus',
+                    )
+                    or reason_s.startswith('scene_selection_changed')
+                ):
+                    try:
+                        self.audit_boundary_event(
+                            'RIGHT_TEXT_TABLE_CANVAS_FOCUS_RESTORE_BLOCKED',
+                            reason=reason_s,
+                            owner=str(getattr(self, '_ysb_text_shortcut_owner', '') or ''),
+                            throttle_ms=80,
+                        )
+                    except Exception:
+                        pass
+                    return False
+            except Exception:
+                pass
+            try:
+                if reason_s == 'final_canvas_mouse_press':
+                    self._set_text_shortcut_owner('final_canvas', reason=reason_s, obj=view, ttl_ms=12000)
+            except Exception:
+                pass
             try:
                 view.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
             except Exception:
@@ -1886,6 +2914,20 @@ class MainWindowInteractionMixin:
                 return False
         except Exception:
             return False
+        try:
+            if self._ysb_modal_dialog_owns_keyboard(obj):
+                try:
+                    self.audit_boundary_event('TEXT_CLIPBOARD_SHORTCUT_REJECTED', reason='modal_dialog_keyboard_owner', obj_type=type(obj).__name__ if obj is not None else '', throttle_ms=120)
+                except Exception:
+                    pass
+                return False
+        except Exception:
+            pass
+        try:
+            if self._right_text_table_owns_focus(obj):
+                return False
+        except Exception:
+            pass
 
         def _accept_only():
             try:
@@ -1994,7 +3036,24 @@ class MainWindowInteractionMixin:
         et = event.type()
 
         try:
+            self._remember_right_text_table_shortcut_owner_from_event(obj, event)
+        except Exception:
+            pass
+
+        try:
+            if self._route_right_text_table_shortcut_by_owner(obj, event):
+                return True
+        except Exception:
+            pass
+
+        try:
             if self._inline_text_edit_event_filter(obj, event):
+                return True
+        except Exception:
+            pass
+
+        try:
+            if self._handle_right_text_table_shortcut_event(obj, event):
                 return True
         except Exception:
             pass
