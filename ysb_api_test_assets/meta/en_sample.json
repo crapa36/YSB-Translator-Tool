@@ -1,0 +1,40 @@
+{
+  "key": "en",
+  "language": "English",
+  "description": "English sample for OCR / translation / inpaint precheck",
+  "image_path": "en_sample.png",
+  "mask_path": "en_sample_mask.png",
+  "canvas_size": [
+    1280,
+    720
+  ],
+  "font_size": 78,
+  "stroke_width": 10,
+  "lines": [
+    "The build passed today,",
+    "but the warning log still looks suspicious."
+  ],
+  "line_bboxes_xyxy": [
+    {
+      "line_index": 0,
+      "text": "The build passed today,",
+      "bbox": [
+        177,
+        240,
+        1102,
+        342
+      ]
+    },
+    {
+      "line_index": 1,
+      "text": "but the warning log still looks suspicious.",
+      "bbox": [
+        -161,
+        376,
+        1441,
+        479
+      ]
+    }
+  ],
+  "suggested_translation_target": "ko"
+}

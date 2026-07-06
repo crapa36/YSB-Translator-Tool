@@ -31,6 +31,28 @@ try:
 except ImportError:
     pass
 
+
+def _ysb_prepend_managed_runtime_target() -> None:
+    target = os.environ.get("YSB_MANAGED_RUNTIME_TARGET") or ""
+    if not target:
+        return
+    try:
+        if os.path.isdir(target) and target not in sys.path:
+            sys.path.insert(0, target)
+        if os.name == "nt":
+            for sub in ("", "torch/lib", "nvidia/cublas/bin", "nvidia/cudnn/bin"):
+                p = os.path.join(target, sub) if sub else target
+                if os.path.isdir(p):
+                    try:
+                        os.add_dll_directory(p)
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+
+_ysb_prepend_managed_runtime_target()
+
 import numpy as np
 
 _ENGINE_CACHE: dict[tuple[Any, ...], Any] = {}
@@ -82,7 +104,7 @@ def _normalize_lang(language: str) -> str:
 
 def _normalize_device(device: str) -> str:
     dev = str(device or "auto").strip().lower()
-    if dev in ("cuda", "gpu", "nvidia"):
+    if dev in ("cuda", "gpu", "gpu:0", "nvidia"):
         return "gpu"
     if dev in ("cpu",):
         return "cpu"
@@ -101,6 +123,139 @@ def _normalize_device(device: str) -> str:
     except Exception:
         pass
     return "cpu"
+
+
+def _canonical_resolved_device(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text.startswith("gpu") or text.startswith("cuda"):
+        return "cuda"
+    if text.startswith("cpu"):
+        return "cpu"
+    if text in ("error", "unavailable"):
+        return text
+    return "unknown"
+
+
+def _probe_paddle_runtime_device(info: dict[str, Any], *, stage: str = "") -> dict[str, Any]:
+    """Refresh Paddle's real selected device and store a user-readable report.
+
+    Paddle/PaddleOCR can accept a CUDA request but later choose CPU internally.
+    The parent process must not guess from success/failure alone, so every worker
+    response carries this runtime probe result.
+    """
+    try:
+        import paddle  # type: ignore
+        try:
+            current = str(paddle.device.get_device() or "")
+        except Exception:
+            current = ""
+        actual = _canonical_resolved_device(current)
+        info["paddle_current_device"] = current
+        info["actual_device"] = actual
+        info["device_probe_stage"] = stage
+        info["worker_python"] = sys.executable
+        try:
+            info["cuda_compiled"] = bool(paddle.device.is_compiled_with_cuda())
+        except Exception:
+            pass
+        try:
+            info["cuda_device_count"] = int(paddle.device.cuda.device_count())
+        except Exception:
+            pass
+        req = _normalize_device(str(info.get("requested_device") or "auto"))
+        if req == "gpu":
+            # Explicit CUDA is strict: only a real Paddle GPU/CUDA device is valid.
+            info["resolved_device"] = "cuda" if actual == "cuda" else actual
+        elif req == "cpu":
+            info["resolved_device"] = "cpu"
+        elif actual in ("cuda", "cpu"):
+            info["resolved_device"] = actual
+    except Exception as exc:
+        info["device_probe_error"] = str(exc)
+        info.setdefault("worker_python", sys.executable)
+    return info
+
+
+def _prepare_paddle_device(requested: str) -> dict[str, Any]:
+    """Select Paddle device and enforce explicit CUDA strictly.
+
+    PaddleOCR/PaddleX may otherwise print "Switching to CPU instead" and keep
+    going.  In YSB, Device=CUDA means CUDA-only: if GPU cannot be selected, the
+    worker must fail before OCR starts.
+    """
+    req = _normalize_device(requested)
+    info: dict[str, Any] = {
+        "requested_device": req,
+        "resolved_device": "unknown",
+        "cuda_compiled": False,
+        "cuda_device_count": 0,
+        "cuda_device_name": "",
+        "fallback_reason": "",
+        "actual_device": "unknown",
+        "paddle_current_device": "",
+        "device_probe_stage": "",
+        "worker_python": sys.executable,
+    }
+    try:
+        import paddle  # type: ignore
+        try:
+            info["cuda_compiled"] = bool(paddle.device.is_compiled_with_cuda())
+        except Exception:
+            info["cuda_compiled"] = False
+        try:
+            info["cuda_device_count"] = int(paddle.device.cuda.device_count())
+        except Exception:
+            info["cuda_device_count"] = 0
+        if req == "gpu":
+            if not info["cuda_compiled"] or int(info["cuda_device_count"] or 0) <= 0:
+                raise RuntimeError(
+                    "PaddleOCR CUDA requested but Paddle GPU is unavailable "
+                    f"(cuda_compiled={info['cuda_compiled']}, device_count={info['cuda_device_count']}). "
+                    "Install/repair the Paddle GPU runtime."
+                )
+            try:
+                paddle.set_device("gpu:0")
+            except Exception as exc:
+                raise RuntimeError(f"PaddleOCR CUDA requested but paddle.set_device('gpu:0') failed: {exc}")
+            info["resolved_device"] = "cuda"
+            try:
+                info["cuda_device_name"] = str(paddle.device.cuda.get_device_name(0) or "")
+            except Exception:
+                info["cuda_device_name"] = ""
+            return _probe_paddle_runtime_device(info, stage="after_set_cuda")
+        if req == "cpu":
+            try:
+                paddle.set_device("cpu")
+            except Exception:
+                pass
+            info["resolved_device"] = "cpu"
+            return _probe_paddle_runtime_device(info, stage="after_set_cpu")
+        # Auto mode may fall back to CPU, but it must be explicit in the result.
+        if info["cuda_compiled"] and int(info["cuda_device_count"] or 0) > 0:
+            try:
+                paddle.set_device("gpu:0")
+                info["resolved_device"] = "cuda"
+                try:
+                    info["cuda_device_name"] = str(paddle.device.cuda.get_device_name(0) or "")
+                except Exception:
+                    pass
+                return _probe_paddle_runtime_device(info, stage="after_auto_set_cuda")
+            except Exception as exc:
+                info["fallback_reason"] = f"auto_gpu_set_device_failed: {exc}"
+        try:
+            paddle.set_device("cpu")
+        except Exception:
+            pass
+        info["resolved_device"] = "cpu"
+        if not info.get("fallback_reason"):
+            info["fallback_reason"] = "auto_cpu_fallback"
+        return _probe_paddle_runtime_device(info, stage="after_auto_set_cpu")
+    except Exception:
+        if req == "gpu":
+            raise
+        info["resolved_device"] = "cpu"
+        info["fallback_reason"] = "paddle_device_probe_failed_cpu_fallback"
+        return info
 
 
 def _package_root() -> Path:
@@ -354,27 +509,66 @@ def _find_paddleocr_paths() -> tuple[str, str]:
 def _build_engine(language: str, device: str):
     lang = _normalize_lang(language)
     dev = _normalize_device(device)
-    device_arg = "gpu" if dev == "gpu" else "cpu"
-    
-    cache_key = (lang, device_arg)
+    device_info = _prepare_paddle_device(dev)
+    resolved = _canonical_resolved_device(device_info.get("resolved_device") or device_info.get("actual_device") or "cpu")
+    device_arg = "gpu" if resolved == "cuda" else "cpu"
+    use_gpu = resolved == "cuda"
+    model_dirs_all = _discover_paddle_model_dirs()
+    cache_key = (
+        lang,
+        device_arg,
+        model_dirs_all.get("text_detection_model_dir", ""),
+        model_dirs_all.get("text_recognition_model_dir", ""),
+        model_dirs_all.get("textline_orientation_model_dir", ""),
+    )
     if cache_key in _ENGINE_CACHE:
-        return _ENGINE_CACHE[cache_key]
+        device_info = _probe_paddle_runtime_device(device_info, stage="cache_hit")
+        if dev == "gpu" and _canonical_resolved_device(device_info.get("resolved_device") or device_info.get("actual_device")) != "cuda":
+            raise RuntimeError(
+                "PaddleOCR CUDA requested but cached engine is not on a CUDA device "
+                f"(current={device_info.get('paddle_current_device') or 'unknown'})."
+            )
+        return _ENGINE_CACHE[cache_key], device_info
 
-    from paddleocr import PaddleOCRVL
+    from paddleocr import PaddleOCR
 
-    layout_dir, rec_dir = _find_paddleocr_paths()
-
-    try:
-        engine = PaddleOCRVL(
-            pipeline_version="v1",
-            device=device_arg,
-            layout_detection_model_dir=layout_dir,
-            vl_rec_model_dir=rec_dir
-        )
-        _ENGINE_CACHE[cache_key] = engine
-        return engine
-    except Exception as e:
-        raise RuntimeError(f"PaddleOCR-VL initialization failed: {e}")
+    attempts: list[dict[str, Any]] = [
+        {"lang": lang, "use_doc_orientation_classify": False, "use_doc_unwarping": False, "use_textline_orientation": True, "device": device_arg, "enable_mkldnn": False, "cpu_threads": 1, **model_dirs_v3},
+        {"lang": lang, "use_doc_orientation_classify": False, "use_doc_unwarping": False, "use_textline_orientation": True, "device": device_arg, "enable_mkldnn": False, "cpu_threads": 1, **{k: v for k, v in model_dirs_v3.items() if k != "textline_orientation_model_dir"}},
+        {"lang": lang, "use_doc_orientation_classify": False, "use_doc_unwarping": False, "use_textline_orientation": False, "device": device_arg, "enable_mkldnn": False, "cpu_threads": 1, **{k: v for k, v in model_dirs_v3.items() if k != "textline_orientation_model_dir"}},
+        {"lang": lang, "use_doc_orientation_classify": False, "use_doc_unwarping": False, "use_textline_orientation": True, "device": device_arg, "enable_mkldnn": False, "cpu_threads": 1},
+        {"lang": lang, "use_doc_orientation_classify": False, "use_doc_unwarping": False, "use_textline_orientation": False, "device": device_arg, "enable_mkldnn": False, "cpu_threads": 1},
+        {"lang": lang, "use_angle_cls": True, "use_gpu": use_gpu, "show_log": False, "enable_mkldnn": False, **model_dirs_v2},
+        {"lang": lang, "use_angle_cls": True, "use_gpu": use_gpu, "show_log": False, "enable_mkldnn": False},
+        {"lang": lang},
+    ]
+    if use_gpu:
+        # If CUDA was selected/resolved, every PaddleOCR constructor attempt must
+        # explicitly request GPU.  A generic final fallback can silently create a
+        # CPU engine and make CUDA testing meaningless.
+        attempts = [
+            kw for kw in attempts
+            if str(kw.get("device", "")).lower().startswith("gpu") or bool(kw.get("use_gpu")) is True
+        ]
+    last_err: Exception | None = None
+    for kwargs in attempts:
+        try:
+            engine = PaddleOCR(**kwargs)
+            device_info = _probe_paddle_runtime_device(device_info, stage="after_engine_init")
+            if dev == "gpu" and _canonical_resolved_device(device_info.get("resolved_device") or device_info.get("actual_device")) != "cuda":
+                raise RuntimeError(
+                    "PaddleOCR CUDA requested but engine initialized on a non-CUDA device "
+                    f"(current={device_info.get('paddle_current_device') or 'unknown'})."
+                )
+            _ENGINE_CACHE[cache_key] = engine
+            return engine, device_info
+        except TypeError as e:
+            last_err = e
+            continue
+        except Exception as e:
+            last_err = e
+            continue
+    raise RuntimeError(f"PaddleOCR initialization failed: {last_err}")
 
 
 def _parse_old_ocr_result(result: Any) -> list[dict[str, Any]]:
@@ -483,7 +677,7 @@ def run_ocr_request(req: dict[str, Any]) -> dict[str, Any]:
         language = str(req.get("language") or "ja")
         device = str(req.get("device") or "auto")
         use_layout_detection = bool(req.get("use_layout_detection", True))
-        engine = _build_engine(language, device)
+        engine, device_info = _build_engine(language, device)
         lines: list[dict[str, Any]] = []
         if hasattr(engine, "predict"):
             try:
@@ -497,8 +691,24 @@ def run_ocr_request(req: dict[str, Any]) -> dict[str, Any]:
             except TypeError:
                 result = engine.ocr(image_path)
             lines = _parse_old_ocr_result(result)
-        _worker_log("CHILD OCR DONE", image_path=image_path, line_count=len(lines))
-        return {"ok": True, "engine": "paddleocr_external", "lines": lines, "error": ""}
+        device_info = _probe_paddle_runtime_device(device_info, stage="after_ocr")
+        if _normalize_device(device) == "gpu" and _canonical_resolved_device(device_info.get("resolved_device") or device_info.get("actual_device")) != "cuda":
+            raise RuntimeError(
+                "PaddleOCR CUDA requested but OCR finished on a non-CUDA device "
+                f"(current={device_info.get('paddle_current_device') or 'unknown'})."
+            )
+        _worker_log(
+            "CHILD OCR DONE",
+            image_path=image_path,
+            line_count=len(lines),
+            requested_device=device_info.get("requested_device"),
+            resolved_device=device_info.get("resolved_device"),
+            actual_device=device_info.get("actual_device"),
+            paddle_current_device=device_info.get("paddle_current_device"),
+            cuda_count=device_info.get("cuda_device_count"),
+            fallback_reason=device_info.get("fallback_reason"),
+        )
+        return {"ok": True, "engine": "paddleocr_external", "lines": lines, "error": "", "device_info": device_info}
     except Exception as e:
         _worker_log("CHILD OCR EXCEPTION", error=repr(e), traceback=traceback.format_exc())
         return {
@@ -507,6 +717,7 @@ def run_ocr_request(req: dict[str, Any]) -> dict[str, Any]:
             "lines": [],
             "error": str(e),
             "traceback": traceback.format_exc(),
+            "device_info": {"requested_device": _normalize_device(str(req.get("device") or "auto")), "resolved_device": "error", "worker_python": sys.executable},
         }
 
 

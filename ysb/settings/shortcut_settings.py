@@ -562,6 +562,7 @@ DEFAULT_SHORTCUTS = {
     "paint_erase": "E",
     "paint_zoom_in": "]",
     "paint_zoom_out": "[",
+    "paint_auto_clean_detection_mask": "",
     "paint_reanalyze": "F5",
     "paint_undo": "Ctrl+Z",
     "paint_redo": "Ctrl+Y",
@@ -573,14 +574,19 @@ DEFAULT_SHORTCUTS = {
     "paint_magic_expand_dec": "Ctrl+Shift+;",
     "paint_magic_fill": "Alt+Shift+D",
     "paint_area_fill": "J",
-     "paint_mask_wrap": "W",
+    "paint_mask_wrap": "W",
     "paint_mask_cut": "C",
+    "paint_color_outline_mask": "G",
+    "paint_original_restore": "Alt+B",
     "paint_mask_wrap_rect": "Alt+D",
     "paint_mask_wrap_free": "Alt+F",
+    "paint_mask_wrap_polygon": "Alt+Shift+G",
     "paint_mask_toggle": "Ctrl+M",
     "final_paint_color": "Ctrl+Shift+C",
     "final_paint_to_background": "Alt+P",
     "final_text_tool": "T",
+    "final_style_clone": "Shift+S",
+    "text_disable_toggle": "Ctrl+U",
     "final_paint_above_toggle": "X",
     "final_paint_opacity_inc": "Alt+S",
     "final_paint_opacity_dec": "Alt+A",
@@ -601,7 +607,9 @@ DEFAULT_SHORTCUTS = {
     "text_trapezoid_toggle": "Shift+J",
     "text_arc_toggle": "Shift+K",
     "text_rasterize": "Ctrl+Alt+K",
+    "text_partial_horizontal_toggle": "Ctrl+Alt+G",
     "text_paste_same_position": "Ctrl+Shift+V",
+    "text_delete": "Delete",
 
     # 2. 텍스트 입력 옵션
     # 사용자가 'Shift'라고 적어준 항목은 실제 입력 충돌 방지를 위해 Shift+Enter로 처리
@@ -636,7 +644,9 @@ DEFAULT_SHORTCUTS = {
     "setting_page_tab_display_name": "Ctrl+Alt+Shift+4",
     "setting_output_display_name": "Ctrl+Alt+Shift+5",
     "setting_output_options": "Ctrl+Alt+Shift+=",
+    "setting_log_options": "Ctrl+Alt+Shift+L",
     "setting_interface_tooltips": "Ctrl+Alt+Shift+1",
+    "option_hide_background": "Ctrl+Alt+Shift+H",
     "option_api_settings": "Ctrl+Alt+1",
     "option_shortcut_settings": "Ctrl+Alt+4",
     "option_macro_settings": "Ctrl+Alt+5",
@@ -645,7 +655,9 @@ DEFAULT_SHORTCUTS = {
     "option_translation_prompt": "Ctrl+Alt+2",
     "option_glossary": "Ctrl+Alt+3",
     "option_analysis_mask_settings": "Ctrl+Alt+Shift+M",
+    "option_mask_color_settings": "Ctrl+Alt+Shift+K",
     "option_ocr_analysis_regions": "Ctrl+Shift+Alt+A",
+    "option_cuda_runtime_diagnosis": "",
     "option_workspace_location": "Ctrl+Alt+Shift+6",
     "option_cleanup_temp_files": "Ctrl+Alt+Shift+7",
     "option_workspace_size_manager": "Ctrl+Alt+Shift+-",
@@ -679,15 +691,17 @@ DEFAULT_SHORTCUTS = {
     "work_quick_ocr": "Ctrl+J",
     "quick_ocr_execute": "",
     "work_text_number_width": "Ctrl+Shift+W",
+    "work_toggle_text_number_boxes": "Ctrl+Alt+Shift+N",
     "work_translate": "Ctrl+F6",
     "work_inpaint": "Ctrl+F7",
+    "work_inpaint_group_preview": "",
     "work_import_clean_background": "Alt+C",
     "work_inpaint_source": "",
     "work_restore_original_source": "Ctrl+Shift+R",
-    "work_extract_text": "Ctrl+L",
     "work_import_translation": "Ctrl+K",
     "work_clear_translation": "Ctrl+/",
     "work_clean_text": "Ctrl+Alt+Shift+C",
+    "work_clean_mask": "Ctrl+Alt+Y",
     "work_reset_text_rects": "Ctrl+G",
     "work_export": "Ctrl+E",
     "work_output_preview": "Ctrl+P",
@@ -696,6 +710,7 @@ DEFAULT_SHORTCUTS = {
     # 5. 자동화 작업 옵션
     "auto_text_size_current": "Ctrl+B",
     "auto_text_size_batch": "Ctrl+Shift+B",
+    "auto_text_adjust_options": "Ctrl+Alt+8",
     "auto_linebreak_current": "Ctrl+,",
     "auto_linebreak_batch": "Ctrl+Shift+,",
 
@@ -707,6 +722,7 @@ DEFAULT_SHORTCUTS = {
     "batch_extract_text": "Ctrl+Shift+L",
     "batch_clear_translation": "Ctrl+Shift+/",
     "batch_clean_text": "Ctrl+Shift+Y",
+    "batch_clean_mask": "Ctrl+Alt+Shift+Y",
     "batch_reset_text_rects": "Ctrl+Shift+G",
     "batch_export": "Ctrl+Shift+E",
 
@@ -766,11 +782,15 @@ GROUPS = [
         ("paint_area_fill", "영역 페인팅"),
         ("paint_mask_wrap", "마스크 랩핑"),
         ("paint_mask_cut", "마스크 커팅"),
+        ("paint_color_outline_mask", "색상/테두리 마스크"),
+        ("paint_original_restore", "영역 원본 복구"),
         ("paint_mask_wrap_rect", "마스크 선택 사각형"),
         ("paint_mask_wrap_free", "마스크 선택 자유형"),
+        ("paint_mask_wrap_polygon", "마스크 선택 폴리곤"),
         ("paint_mask_toggle", "페인팅 마스크 ON/OFF"),
         ("final_paint_color", "최종 페인팅 색상"),
         ("final_text_tool", "최종 텍스트 도구"),
+        ("final_style_clone", "스타일 복제"),
         ("final_paint_above_toggle", "텍스트 위 페인팅 ON/OFF"),
         ("final_paint_opacity_inc", "브러시 불투명도 증가"),
         ("final_paint_opacity_dec", "브러시 불투명도 감소"),
@@ -795,6 +815,7 @@ GROUPS = [
         ("item_align_right", "오른쪽 정렬"),
         ("item_text_color", "문자 색상 팔레트"),
         ("item_stroke_color", "획 색상 팔레트"),
+        ("text_disable_toggle", "텍스트 비활성화/활성화"),
         ("text_linebreak", "줄내림"),
         ("text_ellipsis", "말줄임표(…)"),
         ("text_horizontal_dash", "가로장음(―)"),
@@ -814,7 +835,9 @@ GROUPS = [
         ("text_trapezoid_toggle", "사다리꼴 변형"),
         ("text_arc_toggle", "부채꼴 변형"),
         ("text_rasterize", "텍스트를 객체로 변환"),
+        ("text_partial_horizontal_toggle", "부분 가로쓰기 사용"),
         ("text_paste_same_position", "원위치 붙여넣기"),
+        ("text_delete", "텍스트 삭제"),
     ]),
     ("프로젝트", [
         ("project_new", "새로 만들기"),
@@ -842,16 +865,17 @@ GROUPS = [
         ("work_analyze", "분석"),
         ("paint_reanalyze", "재분석"),
         ("work_quick_ocr", "빠른 OCR 설정"),
-        ("work_text_number_width", "텍스트 넘버 크기 변경"),
+        ("work_toggle_text_number_boxes", "텍스트 넘버 박스 숨기기/표시"),
         ("work_translate", "번역"),
         ("work_inpaint", "인페인팅"),
+        ("work_inpaint_group_preview", "인페인팅 그룹 미리보기"),
         ("work_import_clean_background", "클린본 불러오기"),
         ("final_paint_to_background", "배경을 원본으로 쓰기"),
         ("work_restore_original_source", "원본으로 돌아가기"),
-        ("work_extract_text", "지문 추출"),
         ("work_import_translation", "번역문 불러오기"),
         ("work_clear_translation", "번역문 내용 지우기"),
         ("work_clean_text", "텍스트 정리"),
+        ("work_clean_mask", "마스크 정리"),
         ("work_reset_text_rects", "현재 텍스트 기준으로 영역 재설정"),
         ("work_export", "출력"),
         ("work_output_preview", "출력 미리보기"),
@@ -865,15 +889,17 @@ GROUPS = [
         ("batch_extract_text", "일괄 지문 추출"),
         ("batch_clear_translation", "일괄 번역문 내용 지우기"),
         ("batch_clean_text", "일괄 텍스트 정리"),
+        ("batch_clean_mask", "일괄 마스크 정리"),
         ("batch_reset_text_rects", "일괄 현재 텍스트 기준으로 영역 재설정"),
         ("batch_export", "일괄 출력"),
         ("work_page_delete_all", "일괄 페이지탭 삭제"),
     ]),
     ("자동화 작업", [
-        ("auto_text_size_current", "자동 텍스트 크기 조정"),
-        ("auto_text_size_batch", "일괄 자동 텍스트 크기 조정"),
-        ("auto_linebreak_current", "자동 줄 내림"),
-        ("auto_linebreak_batch", "일괄 자동 줄 내림"),
+        ("auto_text_size_current", "텍스트 자동 조정"),
+        ("auto_text_size_batch", "일괄 텍스트 자동 조정"),
+        ("auto_text_adjust_options", "자동 텍스트 조정 옵션"),
+        ("auto_linebreak_current", "텍스트 자동 조정(줄내림 호환)"),
+        ("auto_linebreak_batch", "일괄 텍스트 자동 조정(줄내림 호환)"),
     ]),
     ("클라우드", [
         ("cloud_register", "클라우드 등록"),
@@ -882,11 +908,16 @@ GROUPS = [
         ("cloud_cache_restore", "클라우드에서 캐시 불러오기"),
     ]),
     ("옵션", [
+        ("option_hide_background", "배경 가리기"),
+        ("setting_log_options", "로그 출력 설정"),
         ("option_api_settings", "API 관리"),
         ("option_translation_prompt", "번역 프롬프트 입력"),
         ("option_glossary", "단어장"),
         ("option_analysis_mask_settings", "분석 마스크 확장 비율"),
+        ("work_text_number_width", "분석 박스 크기"),
+        ("option_mask_color_settings", "마스크 색상 지정"),
         ("option_ocr_analysis_regions", "OCR 분석 범위 지정"),
+        ("option_cuda_runtime_diagnosis", "로컬 CUDA 진단"),
         ("option_cleanup_outputs", "출력물 삭제"),
         ("option_workspace_location", "작업 폴더 위치 변경"),
         ("option_cleanup_temp_files", "사용자 데이터 및 임시파일 정리"),
@@ -921,9 +952,34 @@ GROUPS = [
 
 
 
+LOCAL_ONLY_SHORTCUT_KEYS = {"option_cuda_runtime_diagnosis"}
+
+
+def _is_local_edition_for_shortcut_ui() -> bool:
+    """Fail-closed edition check for Local-only shortcut/macro entries."""
+    try:
+        from ysb.editions.current import is_local_edition
+        return bool(is_local_edition())
+    except Exception:
+        return False
+
+
+def shortcut_key_visible_for_current_edition(key: str) -> bool:
+    if key in LOCAL_ONLY_SHORTCUT_KEYS:
+        return _is_local_edition_for_shortcut_ui()
+    return True
+
+
+def shortcut_groups_for_current_edition():
+    for group_title, rows in GROUPS:
+        filtered = [(key, label) for key, label in rows if shortcut_key_visible_for_current_edition(key)]
+        if filtered:
+            yield group_title, filtered
+
+
 def shortcut_label_map() -> Dict[str, str]:
     result = {}
-    for group_title, rows in GROUPS:
+    for group_title, rows in shortcut_groups_for_current_edition():
         for key, label in rows:
             result[key] = label
     return result
@@ -931,7 +987,7 @@ def shortcut_label_map() -> Dict[str, str]:
 
 def shortcut_group_rows():
     rows = []
-    for group_title, group_rows in GROUPS:
+    for group_title, group_rows in shortcut_groups_for_current_edition():
         for key, label in group_rows:
             rows.append((key, label, group_title))
     return rows
@@ -941,15 +997,15 @@ SHORTCUT_GROUP_SECTIONS = {
     "작업": [
         ("기본동작", ["work_tab_cycle", "work_source_compare", "paint_undo", "paint_redo", "work_open_current_project_folder", "work_export"]),
         ("페이지탭", ["work_page_prev", "work_page_next", "work_page_list", "work_page_full_name", "work_page_rename_source", "work_page_delete_current"]),
-        ("작업류", ["work_analyze", "paint_reanalyze", "work_translate", "work_inpaint"]),
-        ("텍스트 수정류", ["work_extract_text", "work_import_translation", "work_clear_translation", "work_clean_text"]),
+        ("작업류", ["work_analyze", "paint_reanalyze", "work_translate", "work_inpaint", "work_inpaint_group_preview"]),
+        ("텍스트 수정류", ["work_import_translation", "work_clear_translation", "work_clean_text", "work_clean_mask"]),
         ("이미지 교체류", ["work_import_clean_background", "final_paint_to_background", "work_restore_original_source"]),
-        ("기타 동작", ["work_quick_ocr", "work_text_number_width", "work_reset_text_rects", "work_output_preview"]),
+        ("기타 동작", ["work_quick_ocr", "work_reset_text_rects", "work_output_preview"]),
     ],
     "일괄 작업": [
         ("기본 동작", ["batch_export"]),
         ("일괄 작업류", ["batch_analyze", "batch_reanalyze", "batch_translate", "batch_inpaint"]),
-        ("텍스트 수정류", ["batch_extract_text", "batch_clear_translation", "batch_clean_text"]),
+        ("텍스트 수정류", ["batch_extract_text", "batch_clear_translation", "batch_clean_text", "batch_clean_mask"]),
         ("기타 동작", ["batch_reset_text_rects", "work_page_delete_all"]),
     ],
 }
@@ -1136,6 +1192,8 @@ class ShortcutSettingsStore:
             # C는 마스크 커팅으로 이동하고, 기존 C였던 최종 페인팅 색상은 Ctrl+Shift+C로 이동한다.
             if merged_shortcuts.get("paint_mask_cut") in ("", None):
                 merged_shortcuts["paint_mask_cut"] = DEFAULT_SHORTCUTS.get("paint_mask_cut", "C")
+            if merged_shortcuts.get("paint_original_restore") in ("", None):
+                merged_shortcuts["paint_original_restore"] = DEFAULT_SHORTCUTS.get("paint_original_restore", "Alt+B")
             if merged_shortcuts.get("final_paint_color") == "C":
                 merged_shortcuts["final_paint_color"] = DEFAULT_SHORTCUTS.get("final_paint_color", "Ctrl+Shift+C")
             if merged_shortcuts.get("paint_mask_wrap_rect") == "R":
@@ -1177,6 +1235,11 @@ class ShortcutSettingsStore:
             merged_shortcuts["work_page_rename_source"] = "Ctrl+F2"
             merged_shortcuts["work_page_delete_current"] = "Ctrl+Q"
             merged_shortcuts["work_page_delete_all"] = "Ctrl+Shift+Q"
+
+            # 최소 텍스트 크기 보정 옵션은 이전 빌드에서 기본 단축키가 비어 있었다.
+            # 사용자가 아직 지정하지 않은 빈 값이면 새 기본값(Ctrl+Alt+8)을 채운다.
+            if not str(merged_shortcuts.get("auto_text_adjust_options") or "").strip():
+                merged_shortcuts["auto_text_adjust_options"] = DEFAULT_SHORTCUTS.get("auto_text_adjust_options", "Ctrl+Alt+8")
             merged_shortcuts["project_exit"] = "Alt+Q"
             merged_shortcuts["project_import_images"] = "Alt+O"
 
@@ -1192,6 +1255,7 @@ class ShortcutSettingsStore:
                 "option_item_text_preset_settings": "Ctrl+Alt+7",
                 # Keep these fixed and move them to the bottom of the Options menu.
                 "option_analysis_mask_settings": "Ctrl+Alt+Shift+M",
+                "option_mask_color_settings": "Ctrl+Alt+Shift+K",
                 "option_ocr_analysis_regions": "Ctrl+Shift+Alt+A",
                 "option_cleanup_outputs": "Ctrl+Alt+Shift+Delete",
             }
@@ -1357,7 +1421,7 @@ class MacroFunctionSelectDialog(QDialog):
         layout.addWidget(help_label)
 
         self.search = QLineEdit()
-        self.search.setPlaceholderText(tr_text("기능명 / 그룹 / 단축키 검색  예: 자동 줄 내림, Ctrl+B", self._ui_language))
+        self.search.setPlaceholderText(tr_text("기능명 / 그룹 / 단축키 검색  예: 텍스트 자동 조정, Ctrl+B", self._ui_language))
         layout.addWidget(self.search)
 
         self.list_widget = QListWidget()
@@ -2151,6 +2215,7 @@ def shortcut_item_description(key: str, label: str, group_title: str, lang=LANG_
         "paint_erase": "브러시로 칠한 내용을 지웁니다.",
         "paint_zoom_in": "브러시 크기를 키웁니다.",
         "paint_zoom_out": "브러시 크기를 줄입니다.",
+        "paint_auto_clean_detection_mask": "현재 OCR 병합 영역 안에서 기준 글자군보다 유독 큰 효과음/손글씨성 감지 마스크를 자동 제거합니다.",
         "paint_reanalyze": "현재 텍스트 마스크를 기준으로 OCR 분석 영역을 다시 만들고, 기존 마스크는 재사용합니다.",
         "paint_undo": "마지막 작업을 되돌립니다.",
         "paint_redo": "되돌린 작업을 다시 실행합니다.",
@@ -2164,8 +2229,11 @@ def shortcut_item_description(key: str, label: str, group_title: str, lang=LANG_
         "paint_area_fill": "마스크 탭에서는 영역 마스킹, 최종결과 탭에서는 현재 페인팅 색상으로 영역 칠하기를 수행합니다.",
         "paint_mask_wrap": "마스크 랩핑은 지정한 영역의 마스크를 하나로 합치는 도구입니다.",
         "paint_mask_cut": "마스크 커팅은 지정한 영역과 겹치는 마스크를 잘라내는 도구입니다.",
+        "paint_color_outline_mask": "지정한 영역 안에서 텍스트 색상 또는 닫힌 획 내부를 현재 마스크에 추가합니다.",
+        "paint_original_restore": "최종결과 탭에서 지정한 영역에 원본 이미지 조각을 다시 덧씌우는 도구입니다.",
         "paint_mask_wrap_rect": "마스크 선택 모양을 사각형으로 바꿉니다.",
         "paint_mask_wrap_free": "마스크 선택 모양을 자유형으로 바꿉니다.",
+        "paint_mask_wrap_polygon": "마스크 선택 모양을 폴리곤으로 바꿉니다. 폴리곤 작성 중 Ctrl+Z/Backspace는 마지막 점만 취소합니다.",
         "paint_mask_toggle": "분석 생성 마스크를 숨기고 사용자가 직접 마스크를 그릴 수 있는 기능입니다.",
         "final_paint_color": "최종 페인팅 색상을 선택합니다.",
         "final_paint_to_background": "최종결과 배경을 이후 분석/인페인팅 기준이 되는 작업용 원본으로 반영합니다.",
@@ -2188,8 +2256,8 @@ def shortcut_item_description(key: str, label: str, group_title: str, lang=LANG_
 
         "item_font_select": "폰트 설정창을 엽니다.",
         "text_font_size": "문자 크기 입력칸에 포커싱을 줍니다.",
-        "item_font_inc": "선택한 텍스트의 문자 크기를 키웁니다.",
-        "item_font_dec": "선택한 텍스트의 문자 크기를 줄입니다.",
+        "item_font_inc": "선택한 텍스트의 문자 크기를 키웁니다. 기본 단축키: = 확대(+도 인식).",
+        "item_font_dec": "선택한 텍스트의 문자 크기를 줄입니다. 기본 단축키: - 축소.",
         "text_stroke_size": "획 크기 입력칸에 포커싱을 줍니다.",
         "item_stroke_inc": "선택한 텍스트의 획을 굵게 합니다.",
         "item_stroke_dec": "선택한 텍스트의 획을 얇게 합니다.",
@@ -2201,6 +2269,7 @@ def shortcut_item_description(key: str, label: str, group_title: str, lang=LANG_
         "text_italic_toggle": "문자를 기울입니다.",
         "text_strike_toggle": "문자에 취소선을 그립니다.",
         "text_transform_toggle": "선택한 텍스트의 변형 모드를 켜거나 끕니다.",
+        "text_partial_horizontal_toggle": "선택한 세로쓰기 텍스트의 숫자/영어/일부 특문 부분 가로쓰기 자동 진입을 켜거나 끕니다.",
         "item_align_left": "텍스트를 왼쪽 정렬합니다.",
         "item_align_center": "텍스트를 가운데 정렬합니다.",
         "item_align_right": "텍스트를 오른쪽 정렬합니다.",
@@ -2228,18 +2297,20 @@ def shortcut_item_description(key: str, label: str, group_title: str, lang=LANG_
         "work_page_delete_all": "선택한 페이지 탭 또는 지정한 범위의 페이지 탭을 일괄 삭제합니다.",
         "work_open_current_project_folder": "현재 프로젝트 작업 폴더를 엽니다.",
         "work_analyze": "현재 페이지를 OCR 분석합니다.",
+        "paint_auto_clean_detection_mask": "현재 OCR 병합 영역 안에서 기준 글자군보다 유독 큰 효과음/손글씨성 감지 마스크를 자동 제거합니다.",
         "paint_reanalyze": "현재 텍스트 마스크를 기준으로 OCR 분석 영역을 다시 만들고, 기존 마스크는 재사용합니다.",
         "work_quick_ocr": "빠른 OCR 설정창을 엽니다.",
-        "work_text_number_width": "텍스트 넘버 크기 설정을 엽니다.",
+        "work_text_number_width": "분석 박스 크기 설정을 엽니다.",
         "work_translate": "현재 페이지를 번역합니다.",
         "work_inpaint": "현재 페이지를 인페인팅합니다.",
+        "work_inpaint_group_preview": "현재 마스크를 비콘으로 사용해 인페인팅 전송 그룹을 오버레이로 미리 봅니다.",
         "work_import_clean_background": "클린본 이미지를 최종결과 배경으로 불러옵니다. 1개를 선택하면 현재 페이지, 여러 개를 선택하면 파일명과 페이지명을 매칭합니다.",
         "work_inpaint_source": "구버전 호환용 동작입니다. 현재는 배경을 원본으로 쓰기와 같은 동작을 실행합니다.",
         "work_restore_original_source": "원본 이미지 상태로 되돌립니다.",
-        "work_extract_text": "현재 페이지의 지문을 추출합니다.",
         "work_import_translation": "현재 페이지의 번역문을 불러옵니다.",
         "work_clear_translation": "현재 페이지 번역문 내용을 비웁니다.",
         "work_clean_text": "현재 페이지에서 체크 해제된 텍스트 라인을 정리합니다.",
+        "work_clean_mask": "현재 페이지에서 활성 OCR 영역 밖의 자동 마스크만 제거합니다. 사용자 수정 마스크는 유지합니다.",
         "work_reset_text_rects": "현재 텍스트의 크기를 기준으로 텍스트 영역을 재설정합니다.",
         "work_export": "현재 페이지를 출력합니다.",
         "work_output_preview": "현재 페이지가 실제 출력에서 어떻게 보일지 미리보기로 확인합니다.",
@@ -2252,23 +2323,28 @@ def shortcut_item_description(key: str, label: str, group_title: str, lang=LANG_
         "batch_extract_text": "전체 페이지의 지문을 한 번에 추출합니다.",
         "batch_clear_translation": "전체 페이지 번역문 내용을 지웁니다.",
         "batch_clean_text": "전체 페이지에서 체크 해제된 텍스트 라인을 정리합니다.",
+        "batch_clean_mask": "선택한 페이지들에서 활성 OCR 영역 밖의 자동 마스크만 일괄 제거합니다. 사용자 수정 마스크는 유지합니다.",
         "batch_reset_text_rects": "현재 텍스트의 크기를 기준으로 전체 페이지의 텍스트 영역을 재설정합니다.",
         "batch_export": "전체 페이지를 한 번에 출력합니다.",
 
-        "auto_text_size_current": "현재 페이지 텍스트 크기를 자동 조정합니다.",
-        "auto_text_size_batch": "전체 페이지 텍스트 크기를 자동 조정합니다.",
-        "auto_linebreak_current": "현재 페이지 텍스트 줄내림을 자동 정리합니다.",
-        "auto_linebreak_batch": "전체 페이지 텍스트 줄내림을 자동 정리합니다.",
+        "auto_text_size_current": "현재 페이지 텍스트를 OCR 영역 안에 자동 배치하고 줄내림과 크기를 함께 조정합니다.",
+        "auto_text_size_batch": "전체 페이지 텍스트를 OCR 영역 안에 자동 배치하고 줄내림과 크기를 함께 조정합니다.",
+        "auto_text_adjust_options": "자동 텍스트 조정에서 세로쓰기 자동 적용과 비정상적으로 작은 글자 보정 기준을 조정합니다.",
+        "auto_linebreak_current": "기존 줄내림 단축키 호환용입니다. 현재 페이지 텍스트 자동 조정을 실행합니다.",
+        "auto_linebreak_batch": "기존 줄내림 단축키 호환용입니다. 일괄 텍스트 자동 조정을 실행합니다.",
 
         "cloud_register": "클라우드 백업 계정을 등록합니다.",
         "cloud_unregister": "클라우드 등록을 해제합니다.",
         "cloud_cache_backup": "옵션과 단축키 같은 캐시를 클라우드에 백업합니다.",
         "cloud_cache_restore": "클라우드에 저장한 캐시를 불러옵니다.",
         
+        "option_hide_background": "작업 화면의 이미지 배경을 짙은 회색으로 가리고 이미지 바깥쪽 페이드 테두리로 실제 캔버스 크기를 표시합니다. 원본 비교창과 실제 출력에는 영향이 없습니다.",
+        "setting_log_options": "엔진/자동 조정/렌더링 진단 로그 중 어떤 이벤트를 파일에 남길지 선택합니다. 기본값은 필수 로그만 켜져 있습니다.",
         "option_api_settings": "API 설정 관리창을 엽니다.",
         "option_translation_prompt": "번역 프롬프트 설정창을 엽니다.",
         "option_glossary": "단어장 관리창을 엽니다.",
         "option_analysis_mask_settings": "분석/페인트 마스크 확장 비율을 설정합니다.",
+        "option_mask_color_settings": "텍스트 인식 마스크와 페인팅 마스크의 표시 색상/불투명도를 설정합니다.",
         "option_ocr_analysis_regions": "OCR 분석 범위 지정 기능을 엽니다.",
         "option_cleanup_outputs": "출력물 정리 창을 엽니다.",
         "option_workspace_location": "작업 폴더 위치를 바꿉니다.",
@@ -2377,7 +2453,7 @@ class ShortcutSettingsDialog(QDialog):
         self.card_records = []
         self.extra_shortcut_text_by_key = {}
 
-        for title_text, rows in GROUPS:
+        for title_text, rows in shortcut_groups_for_current_edition():
             page = QWidget()
             page_layout = QVBoxLayout(page)
             page_layout.setContentsMargins(0, 0, 0, 0)

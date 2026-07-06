@@ -80,6 +80,9 @@ def run(cmd: list[str], logger: Logger, label: str) -> None:
     env = os.environ.copy()
     env.setdefault("PYTHONUTF8", "1")
     env.setdefault("PYTHONIOENCODING", "utf-8")
+    env.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
+    env.setdefault("PIP_NO_PYTHON_VERSION_WARNING", "1")
+    env.setdefault("PIP_NO_INPUT", "1")
 
     proc = subprocess.Popen(
         cmd,
@@ -175,20 +178,20 @@ def install_requirements(edition: str, logger: Logger) -> None:
 
     logger.write("[2/9] Upgrading pip...")
     # Keep pip below 26 for now. Some binary-heavy local packages changed resolver/log behavior in newer pip releases.
-    run([str(PY_EXE), "-m", "pip", "install", "--upgrade", "pip<26", "--prefer-binary"], logger, "Upgrade pip")
+    run([str(PY_EXE), "-m", "pip", "--disable-pip-version-check", "install", "--upgrade", "pip<26", "--prefer-binary"], logger, "Upgrade pip")
 
     index = 3
     for label, req in steps:
         if not req.exists():
             if label == "build requirements":
                 logger.write(f"[{index}/9] {label} file missing; installing PyInstaller directly...")
-                run([str(PY_EXE), "-m", "pip", "install", "--upgrade", "--prefer-binary", "pyinstaller"], logger, "Install PyInstaller")
+                run([str(PY_EXE), "-m", "pip", "--disable-pip-version-check", "install", "--upgrade", "--prefer-binary", "pyinstaller"], logger, "Install PyInstaller")
             else:
                 logger.write(f"[{index}/9] {label} file missing, skipped: {req}")
             index += 1
             continue
         logger.write(f"[{index}/9] Installing {label}...")
-        run([str(PY_EXE), "-m", "pip", "install", "--prefer-binary", "-r", str(req)], logger, f"Install {label}")
+        run([str(PY_EXE), "-m", "pip", "--disable-pip-version-check", "install", "--prefer-binary", "-r", str(req)], logger, f"Install {label}")
         index += 1
 
 

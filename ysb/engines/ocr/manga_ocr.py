@@ -28,7 +28,7 @@ import numpy as np
 from ysb.engines.ocr.base import OcrRequest, OcrResult
 
 _ENGINE = None
-_EXTERNAL_WORKER_CLIENT = None
+_EXTERNAL_WORKER_CLIENTS: dict[str, "_ExternalMangaOcrWorkerClient"] = {}
 
 MODEL_ID = "kha-white/manga-ocr-base"
 
@@ -63,9 +63,72 @@ def _app_root() -> Path:
         return Path.cwd()
 
 
-def _runtime_manga_ocr_root() -> Path:
-    return _app_root() / "local_runtime" / "manga_ocr"
+def _packaged_runtime_root() -> Path:
+    return _app_root() / ("local_runtime_exe" if getattr(sys, "frozen", False) else "local_runtime")
 
+
+def _runtime_manga_ocr_root() -> Path:
+    return _packaged_runtime_root() / "manga_ocr"
+
+
+def _managed_torch_runtime_python() -> Path | None:
+    """Return the program-managed Torch CUDA runtime Python when installed.
+
+    BAT/source and EXE builds now install CUDA runtimes into local_runtime_bat
+    or local_runtime_exe from the UI. Manga OCR is Torch-backed, so it must
+    share that Torch runtime instead of silently falling back to the main .venv.
+    """
+    candidates: list[Path] = []
+    env_value = os.environ.get("YSB_TORCH_CUDA_PYTHON") or os.environ.get("YSB_LOCAL_PYTHON")
+    if env_value:
+        candidates.append(Path(env_value).expanduser())
+    try:
+        from ysb.editions.local.cuda_runtime_installer import runtime_python_path
+        candidates.append(runtime_python_path("torch"))
+    except Exception:
+        pass
+    root = _app_root()
+    bases = [root / "local_runtime_exe"] if getattr(sys, "frozen", False) else [root / "local_runtime_bat", root / "local_runtime_exe"]
+    for base in bases:
+        if os.name == "nt":
+            candidates.append(base / "torch_cuda_venv" / "Scripts" / "python.exe")
+        else:
+            candidates.append(base / "torch_cuda_venv" / "bin" / "python")
+        candidates.append(base / "manga_ocr" / "python" / "python.exe")
+        candidates.append(base / "paddle" / "python" / "python.exe")
+        candidates.append(base / "bootstrap_python" / "python.exe")
+        candidates.append(base / "torch_cuda" / "python" / "python.exe")
+        candidates.append(base / "torch" / "python" / "python.exe")
+    seen: set[str] = set()
+    for candidate in candidates:
+        try:
+            key = str(candidate.resolve())
+        except Exception:
+            key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _managed_torch_runtime_ready() -> bool:
+    return _managed_torch_runtime_python() is not None
+
+
+
+
+
+
+def _apply_managed_torch_runtime_env(env: dict[str, str]) -> dict[str, str]:
+    try:
+        from ysb.editions.local.cuda_runtime_installer import runtime_subprocess_env
+        return runtime_subprocess_env("torch", env)
+    except Exception:
+        env.setdefault("PYTHONUTF8", "1")
+        env.setdefault("PYTHONIOENCODING", "utf-8")
+        return env
 
 def manga_ocr_runtime_model_root() -> Path:
     return _runtime_manga_ocr_root() / "model_cache"
@@ -180,36 +243,55 @@ def ensure_manga_ocr_local_cache_env() -> Path:
 
 
 def _external_worker_file() -> Path:
-    root = _app_root()
-    preferred = root / "local_runtime" / "manga_ocr" / "manga_ocr_worker.py"
+    base = _packaged_runtime_root()
+    preferred = base / "manga_ocr" / "manga_ocr_worker.py"
     if preferred.exists():
         return preferred
-    return root / "local_runtime" / "manga_ocr_worker.py"
+    return base / "manga_ocr_worker.py"
 
 
-def _external_worker_python() -> Path | None:
+def _external_worker_python(device: str | None = None) -> Path | None:
+    norm_device = _normalize_device(device)
+    strict_cuda = norm_device == "cuda"
+    explicit_cpu = norm_device == "cpu"
+
+    # Auto/CUDA may use the program-managed Torch CUDA runtime.  Explicit CPU
+    # must not: it should go straight to a CPU-safe runtime/direct loader.
+    if not explicit_cpu:
+        managed = _managed_torch_runtime_python()
+        if managed is not None:
+            return managed
+
+    if strict_cuda:
+        # Device=CUDA is strict.  Missing managed Torch runtime must fail instead
+        # of falling back to .venv/current Python.  Environment overrides are
+        # intentionally ignored in strict CUDA mode for the same reason.
+        return None
+
     env_python = os.environ.get("YSB_MANGA_OCR_PYTHON")
     if env_python:
         candidate = Path(env_python).expanduser()
         if candidate.exists():
             return candidate
+
     root = _app_root()
-    candidates = [
-        # Final Local distribution uses its own Manga OCR runtime, separate from PaddleOCR.
-        root / "local_runtime" / "manga_ocr" / "python" / "python.exe",
-
-        # Source/dev optional Manga OCR runtime.
-        root / "local_runtime" / "manga_ocr_venv" / "Scripts" / "python.exe",
-        root / "local_runtime" / "manga_ocr_venv" / "bin" / "python",
-
-        # Backward-compatible fallbacks from older test builds.
-        root / "local_runtime" / "python" / "python.exe",
-        root / "local_runtime" / "ocr_venv" / "Scripts" / "python.exe",
-        root / "local_runtime" / "ocr_venv" / "bin" / "python",
-        root / ".venv" / "Scripts" / "python.exe",
-        root / ".venv" / "bin" / "python",
-    ]
-    if not getattr(sys, "frozen", False):
+    base = _packaged_runtime_root()
+    if getattr(sys, "frozen", False):
+        candidates = [
+            base / "manga_ocr" / "python" / "python.exe",
+            base / "python" / "python.exe",
+        ]
+    else:
+        candidates = [
+            base / "manga_ocr" / "python" / "python.exe",
+            base / "manga_ocr_venv" / "Scripts" / "python.exe",
+            base / "manga_ocr_venv" / "bin" / "python",
+            base / "python" / "python.exe",
+            base / "ocr_venv" / "Scripts" / "python.exe",
+            base / "ocr_venv" / "bin" / "python",
+            root / ".venv" / "Scripts" / "python.exe",
+            root / ".venv" / "bin" / "python",
+        ]
         candidates.append(Path(sys.executable))
     for candidate in candidates:
         if candidate.exists():
@@ -217,29 +299,34 @@ def _external_worker_python() -> Path | None:
     return None
 
 
-def _should_use_external_worker() -> bool:
-    """Use the external worker only where it actually makes sense.
-
-    Source/test runs already execute inside the project's .venv, so Manga OCR can
-    be loaded directly from that Python environment and can read
-    local_models/manga_ocr.  The local_runtime worker is primarily for frozen /
-    packaged Local builds where the main EXE cannot directly import the heavy ML
-    stack.
-
-    Set YSB_MANGA_OCR_USE_WORKER=1 to force the worker in source mode, or
-    YSB_MANGA_OCR_INTERNAL=1 to force direct mode.
-    """
+def _should_use_external_worker(device: str | None = None) -> bool:
     if os.environ.get("YSB_MANGA_OCR_INTERNAL", "").strip().lower() in ("1", "true", "yes"):
         return False
+    norm_device = _normalize_device(device)
+    worker_ready = _external_worker_file().exists() and _external_worker_python(device) is not None
+    if norm_device == "cuda":
+        return worker_ready
+    if norm_device == "cpu":
+        # Source/dev CPU mode should use the direct CPU loader unless the user
+        # explicitly asks for the worker.  Packaged builds can still use a
+        # CPU-safe bundled worker if present.
+        if not getattr(sys, "frozen", False):
+            forced = os.environ.get("YSB_MANGA_OCR_USE_WORKER", "").strip().lower()
+            return worker_ready and forced in ("1", "true", "yes")
+        return worker_ready
+    # Auto is the only non-strict mode that may prefer managed CUDA when ready.
+    if _managed_torch_runtime_ready():
+        return worker_ready
     if not getattr(sys, "frozen", False):
         forced = os.environ.get("YSB_MANGA_OCR_USE_WORKER", "").strip().lower()
         if forced not in ("1", "true", "yes"):
             return False
-    return _external_worker_file().exists() and _external_worker_python() is not None
+    return worker_ready
 
 
 class _ExternalMangaOcrWorkerClient:
-    def __init__(self):
+    def __init__(self, device: str = "auto"):
+        self.device = _normalize_device(device)
         self.proc: subprocess.Popen[str] | None = None
         self.log_handle = None
         self.log_path = _app_root() / "ysb_manga_ocr_worker.log"
@@ -269,27 +356,31 @@ class _ExternalMangaOcrWorkerClient:
         if self.proc and self.proc.poll() is None:
             return
         worker = _external_worker_file()
-        python = _external_worker_python()
+        python = _external_worker_python(self.device)
         if not worker.exists():
             raise RuntimeError(f"External Manga OCR worker not found: {worker}")
         if python is None:
-            raise RuntimeError("External Manga OCR Python runtime not found. 배포판은 local_runtime/manga_ocr/python/python.exe, 소스 테스트는 .venv/현재 Python을 확인해 주세요.")
+            if _normalize_device(self.device) == "cuda":
+                raise RuntimeError("Manga OCR CUDA 런타임을 찾을 수 없습니다. 설정 -> 로컬 CUDA 진단에서 Torch CUDA 런타임 설치/복구를 실행해 주세요.")
+            raise RuntimeError("External Manga OCR Python runtime not found. 배포판은 local_runtime_exe/manga_ocr/python/python.exe, 소스 테스트는 .venv/현재 Python을 확인해 주세요.")
 
         env = os.environ.copy()
         env.setdefault("PYTHONUTF8", "1")
         env.setdefault("PYTHONIOENCODING", "utf-8")
+        env = _apply_managed_torch_runtime_env(env)
         ensure_manga_ocr_local_cache_env()
         model_root = manga_ocr_model_root()
         env["YSB_MANGA_OCR_MODEL_ROOT"] = str(model_root)
         env["HF_HOME"] = str(model_root / "huggingface")
         env["HF_HUB_CACHE"] = str(model_root / "huggingface" / "hub")
         env["TRANSFORMERS_CACHE"] = str(model_root / "huggingface" / "transformers")
+        env["YSB_MANGA_OCR_DEVICE"] = self.device
 
         try:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             self.log_handle = open(self.log_path, "a", encoding="utf-8", errors="replace")
             self.log_handle.write("\n=== YSB External Manga OCR worker start ===\n")
-            self.log_handle.write(f"python={python}\nworker={worker}\napp_root={_app_root()}\nmodel_root={manga_ocr_model_root()}\n")
+            self.log_handle.write(f"python={python}\nworker={worker}\napp_root={_app_root()}\nmodel_root={manga_ocr_model_root()}\ndevice={self.device}\n")
             self.log_handle.flush()
         except Exception:
             self.log_handle = subprocess.DEVNULL  # type: ignore[assignment]
@@ -320,7 +411,7 @@ class _ExternalMangaOcrWorkerClient:
         self._start()
         assert self.proc is not None and self.proc.stdin is not None and self.proc.stdout is not None
         try:
-            self.proc.stdin.write(json.dumps({"image_path": image_path}, ensure_ascii=False) + "\n")
+            self.proc.stdin.write(json.dumps({"image_path": image_path, "device": self.device}, ensure_ascii=False) + "\n")
             self.proc.stdin.flush()
             line = self.proc.stdout.readline()
             if not line:
@@ -338,25 +429,36 @@ class _ExternalMangaOcrWorkerClient:
             return OcrResult(ok=False, engine="manga_ocr_external", error=str(e), raw=None)
 
 
-def _get_external_worker_client() -> _ExternalMangaOcrWorkerClient:
-    global _EXTERNAL_WORKER_CLIENT
-    if _EXTERNAL_WORKER_CLIENT is None:
-        _EXTERNAL_WORKER_CLIENT = _ExternalMangaOcrWorkerClient()
-    return _EXTERNAL_WORKER_CLIENT
+def _get_external_worker_client(device: str = "auto") -> _ExternalMangaOcrWorkerClient:
+    key = _normalize_device(device)
+    client = _EXTERNAL_WORKER_CLIENTS.get(key)
+    if client is None:
+        client = _ExternalMangaOcrWorkerClient(device=key)
+        _EXTERNAL_WORKER_CLIENTS[key] = client
+    return client
 
 
 def _close_external_worker() -> None:
-    global _EXTERNAL_WORKER_CLIENT
-    if _EXTERNAL_WORKER_CLIENT is not None:
+    global _EXTERNAL_WORKER_CLIENTS
+    for client in list(_EXTERNAL_WORKER_CLIENTS.values()):
         try:
-            _EXTERNAL_WORKER_CLIENT.close()
+            client.close()
         except Exception:
             pass
-    _EXTERNAL_WORKER_CLIENT = None
+    _EXTERNAL_WORKER_CLIENTS = {}
 
 
 atexit.register(_close_external_worker)
 
+
+
+def _normalize_device(value: str | None) -> str:
+    v = str(value or "auto").strip().lower()
+    if v in ("gpu", "cuda:0", "cuda"):
+        return "cuda"
+    if v in ("cpu", "mps"):
+        return v
+    return "auto"
 
 def _direct_model_cache_ready() -> bool:
     try:
@@ -382,7 +484,8 @@ class _DirectMangaOcr:
     AutoFeatureExtractor and fail with current manga-ocr-base metadata.
     """
 
-    def __init__(self):
+    def __init__(self, device: str = "auto"):
+        self.requested_device = _normalize_device(device)
         ensure_manga_ocr_local_cache_env()
         import torch
         from PIL import Image
@@ -401,10 +504,24 @@ class _DirectMangaOcr:
         self.processor = ViTImageProcessor.from_pretrained(MODEL_ID, local_files_only=local_only)
         self.tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, local_files_only=local_only)
         self.model = MangaOcrModel.from_pretrained(MODEL_ID, local_files_only=local_only)
-        if torch.cuda.is_available():
+        selected = self.requested_device
+        if selected == "cuda":
+            if not torch.cuda.is_available() or torch.cuda.device_count() <= 0:
+                raise RuntimeError("Manga OCR CUDA를 사용할 수 없습니다. Torch CUDA 런타임/드라이버 상태를 확인해 주세요.")
+            self.model.cuda()
+        elif selected == "cpu":
+            self.model.to("cpu")
+        elif selected == "mps":
+            if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+                self.model.to("mps")
+            else:
+                self.model.to("cpu")
+        elif torch.cuda.is_available() and torch.cuda.device_count() > 0:
             self.model.cuda()
         elif getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
             self.model.to("mps")
+        else:
+            self.model.to("cpu")
         self.model.eval()
 
     def __call__(self, img_or_path):
@@ -420,12 +537,15 @@ class _DirectMangaOcr:
         return _post_process_manga_ocr_text(text)
 
 
-def _get_engine():
+def _get_engine(device: str = "auto"):
     global _ENGINE
-    if _ENGINE is None:
+    key = _normalize_device(device)
+    if not isinstance(_ENGINE, dict):
+        _ENGINE = {}
+    if key not in _ENGINE:
         # Heavy import/model load stays lazy so Lite/API workflows are not touched.
-        _ENGINE = _DirectMangaOcr()
-    return _ENGINE
+        _ENGINE[key] = _DirectMangaOcr(device=key)
+    return _ENGINE[key]
 
 
 def _write_temp_image(image_bgr: np.ndarray | None, image_path: str | None) -> tuple[str, bool]:
@@ -470,11 +590,13 @@ class MangaOcrEngine:
                 )
             temp_path, should_delete = _write_temp_image(img_for_ocr, image_path)
 
-            if _should_use_external_worker():
-                return _get_external_worker_client().run_image(temp_path)
+            if _should_use_external_worker(self.device):
+                return _get_external_worker_client(self.device).run_image(temp_path)
 
+            if _normalize_device(self.device) == "cuda":
+                raise RuntimeError("Manga OCR CUDA 런타임을 찾을 수 없습니다. 설정 -> 로컬 CUDA 진단에서 Torch CUDA 런타임 설치/복구를 실행해 주세요.")
             try:
-                text = str(_get_engine()(temp_path) or "").strip()
+                text = str(_get_engine(self.device)(temp_path) or "").strip()
             finally:
                 pass
             if not text:

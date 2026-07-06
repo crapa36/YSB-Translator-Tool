@@ -45,6 +45,154 @@ _LOG_NAME_HINTS = (
 )
 
 
+_CRASH_EVIDENCE_TOKENS = (
+    "PYTHON_EXCEPTION_HOOK",
+    "APP_EXEC_EXCEPTION",
+    "Fatal Python error",
+    "Windows fatal exception",
+    "access violation",
+    "stack overflow",
+    "Traceback (most recent call last)",
+    "CRITICAL",
+    "FATAL",
+)
+
+_BENIGN_CRASH_TRACE_EVENTS = (
+    "APP_EXEC_ENTER",
+    "APP_EXEC_RETURN",
+)
+
+
+def _read_tail_text(path: str | os.PathLike[str] | None, *, max_bytes: int = 524288) -> str:
+    try:
+        if not path:
+            return ""
+        p = Path(path)
+        if not p.exists() or not p.is_file():
+            return ""
+        size = p.stat().st_size
+        with p.open("rb") as f:
+            if size > max_bytes:
+                f.seek(max(0, size - max_bytes))
+            data = f.read(max_bytes)
+        return data.decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def log_text_has_crash_evidence(text: str) -> bool:
+    try:
+        if not text:
+            return False
+        return any(token in text for token in _CRASH_EVIDENCE_TOKENS)
+    except Exception:
+        return False
+
+
+def log_file_has_crash_evidence(path: str | os.PathLike[str] | None) -> bool:
+    return log_text_has_crash_evidence(_read_tail_text(path))
+
+
+def cleanup_clean_crash_trace_log(path: str | os.PathLike[str] | None) -> None:
+    """Remove a crash-trace file when it only records a normal app.exec cycle.
+
+    ysb_crash_trace_*.log is a crash-capture breadcrumb, not proof of a crash.
+    If a session ends cleanly and the file only has APP_EXEC_ENTER/RETURN style
+    records, leaving it around makes users think a crash happened.
+    """
+    try:
+        if not path:
+            return
+        p = Path(path)
+        if not p.exists() or not p.is_file():
+            return
+        text = p.read_text(encoding="utf-8", errors="replace")
+        if log_text_has_crash_evidence(text):
+            return
+        meaningful = []
+        for raw in text.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            if any(event in line for event in _BENIGN_CRASH_TRACE_EVENTS):
+                continue
+            meaningful.append(line)
+        if not meaningful:
+            p.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def cleanup_stale_benign_crash_traces(*, max_files: int = 80) -> None:
+    """Best-effort cleanup for old one-line crash_trace files from clean runs."""
+    try:
+        root = log_dir()
+        files = sorted(root.glob("ysb_crash_trace_*.log"), key=lambda x: x.stat().st_mtime if x.exists() else 0, reverse=True)[:max_files]
+        for path in files:
+            cleanup_clean_crash_trace_log(path)
+    except Exception:
+        pass
+
+
+def _session_marker_has_crash_evidence(marker: dict[str, Any] | None) -> bool:
+    try:
+        if not isinstance(marker, dict):
+            return False
+        for key in ("crash_trace_log_path", "runtime_log_path", "faulthandler_log_path", "fatal_log_path"):
+            if log_file_has_crash_evidence(marker.get(key)):
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def _is_low_confidence_unclean_marker(marker: dict[str, Any] | None) -> bool:
+    """Return True for stale/false previous-session markers with no crash evidence.
+
+    Native crashes usually leave faulthandler/runtime evidence.  A lone
+    UncleanShutdown marker without any matching fatal text is often produced by
+    shutdown/cleanup races or an old debug trace file, so do not keep nagging the
+    user about it on every launch.
+    """
+    try:
+        if not isinstance(marker, dict):
+            return False
+        exctype = str(marker.get("exctype") or "").strip()
+        if exctype and exctype != "UncleanShutdown":
+            return False
+        prev = marker.get("previous_session")
+        if isinstance(prev, dict):
+            if _session_marker_has_crash_evidence(prev):
+                return False
+        if _session_marker_has_crash_evidence(marker):
+            return False
+        return True
+    except Exception:
+        return False
+
+
+
+def _is_known_internal_false_positive_marker(marker: dict[str, Any] | None) -> bool:
+    """Return True for crash markers produced by the logger/crash reporter itself.
+
+    A previous build wrote a fatal marker for TypeError:
+    ``append_log() got multiple values for argument 'path'``.  That was not a
+    user workflow crash; it was a diagnostic logger signature conflict triggered
+    while trying to record a normal event with a payload field named ``path``.
+    Suppress and clear that stale marker so the bug-report dialog does not keep
+    appearing on later launches.
+    """
+    try:
+        if not isinstance(marker, dict):
+            return False
+        exctype = str(marker.get("exctype") or "").strip()
+        message = str(marker.get("message") or "")
+        if exctype == "TypeError" and "append_log() got multiple values for argument 'path'" in message:
+            return True
+        return False
+    except Exception:
+        return False
+
 def _now() -> _dt.datetime:
     return _dt.datetime.now()
 
@@ -120,7 +268,7 @@ def detect_unclean_crash_session() -> dict[str, Any] | None:
         return None
 
 
-def start_crash_session_marker(*, runtime_log_path: str | os.PathLike[str] | None = None, faulthandler_log_path: str | os.PathLike[str] | None = None) -> dict[str, Any] | None:
+def start_crash_session_marker(*, runtime_log_path: str | os.PathLike[str] | None = None, faulthandler_log_path: str | os.PathLike[str] | None = None, crash_trace_log_path: str | os.PathLike[str] | None = None) -> dict[str, Any] | None:
     """Create a running marker early so native crashes can be detected next launch.
 
     Python exceptions can write ysb_fatal_marker.json after the fact. Native Qt/C++
@@ -129,15 +277,25 @@ def start_crash_session_marker(*, runtime_log_path: str | os.PathLike[str] | Non
     If a previous running marker is found and its pid is gone, it is promoted to
     the normal fatal marker so the existing bug-report dialog can reuse it.
     """
+    try:
+        cleanup_stale_benign_crash_traces()
+    except Exception:
+        pass
+
     previous = detect_unclean_crash_session()
     try:
         if previous and not fatal_marker_path().exists():
-            write_fatal_marker(
-                exctype_name=str(previous.get("exctype") or "UncleanShutdown"),
-                message=str(previous.get("message") or "Previous YSB Tool session ended without a clean shutdown."),
-                fatal_log_path=previous.get("faulthandler_log_path") or previous.get("fatal_log_path") or faulthandler_log_path or "",
-                extra={"previous_session": previous},
-            )
+            # Do not promote a bare stale running-session marker into a user-facing
+            # crash alert unless there is actual fatal evidence in the related logs.
+            # This prevents one-line ysb_crash_trace files and cleanup races from
+            # producing "previous crash" popups on every launch.
+            if not _is_low_confidence_unclean_marker({"previous_session": previous, **previous}):
+                write_fatal_marker(
+                    exctype_name=str(previous.get("exctype") or "UncleanShutdown"),
+                    message=str(previous.get("message") or "Previous YSB Tool session ended without a clean shutdown."),
+                    fatal_log_path=previous.get("faulthandler_log_path") or previous.get("fatal_log_path") or faulthandler_log_path or "",
+                    extra={"previous_session": previous},
+                )
     except Exception:
         pass
 
@@ -154,6 +312,7 @@ def start_crash_session_marker(*, runtime_log_path: str | os.PathLike[str] | Non
             "cwd": os.getcwd(),
             "runtime_log_path": str(runtime_log_path or ""),
             "faulthandler_log_path": str(faulthandler_log_path or ""),
+            "crash_trace_log_path": str(crash_trace_log_path or ""),
         }
         p = crash_session_marker_path()
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -236,6 +395,12 @@ def load_pending_fatal_marker() -> dict[str, Any] | None:
         data = json.loads(p.read_text(encoding="utf-8", errors="replace"))
         if isinstance(data, dict):
             data["_marker_path"] = str(p)
+            if _is_known_internal_false_positive_marker(data) or _is_low_confidence_unclean_marker(data):
+                try:
+                    p.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                return None
             return data
     except Exception:
         return None

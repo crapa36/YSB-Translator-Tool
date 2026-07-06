@@ -1,0 +1,52 @@
+{
+  "key": "en",
+  "language": "English",
+  "description": "English sample in exactly 3 lines for OCR / translation / inpaint practical test",
+  "image_path": "en_sample.png",
+  "mask_path": "en_sample_mask.png",
+  "mask_npy_path": "en_sample_mask.npy",
+  "canvas_size": [
+    1280,
+    720
+  ],
+  "font_size": 72,
+  "stroke_width": 10,
+  "lines": [
+    "The build passed today,",
+    "but the warning log",
+    "still looks suspicious."
+  ],
+  "line_bboxes_xyxy": [
+    {
+      "line_index": 0,
+      "text": "The build passed today,",
+      "bbox": [
+        212,
+        192,
+        1068,
+        286
+      ]
+    },
+    {
+      "line_index": 1,
+      "text": "but the warning log",
+      "bbox": [
+        283,
+        312,
+        996,
+        408
+      ]
+    },
+    {
+      "line_index": 2,
+      "text": "still looks suspicious.",
+      "bbox": [
+        254,
+        434,
+        1025,
+        527
+      ]
+    }
+  ],
+  "suggested_translation_target": "ko"
+}

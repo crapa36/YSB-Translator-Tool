@@ -159,13 +159,43 @@ class YSBMaskEngine:
             return None
         return page_data.get(key)
 
+    def _mask_equal(self, a: Any, b: Any) -> bool:
+        """Return a real bool for mask equality.
+
+        Numpy comparisons such as ``a == b`` can return an array.  Passing that
+        array into ``if`` raises ``ValueError: The truth value of an array ...``.
+        Mask commits run before save/inpaint, so keep this helper defensive and
+        always collapse comparisons to a scalar bool.
+        """
+        try:
+            if a is b:
+                return True
+            if a is None or b is None:
+                return False
+            if isinstance(a, np.ndarray) or isinstance(b, np.ndarray):
+                try:
+                    aa = a if isinstance(a, np.ndarray) else np.asarray(a)
+                    bb = b if isinstance(b, np.ndarray) else np.asarray(b)
+                    return bool(aa.shape == bb.shape and np.array_equal(aa, bb))
+                except Exception:
+                    return False
+            value = (a == b)
+            if isinstance(value, np.ndarray):
+                return bool(np.all(value))
+            return bool(value)
+        except Exception:
+            return False
+
     def set_mask(self, page_data: Dict[str, Any], mask: Any, *, page_idx: int, mode_idx: int, mask_toggle_enabled: bool = False, key: str | None = None) -> Optional[str]:
         if not isinstance(page_data, dict):
             return None
         key = key or self.active_key(mode_idx, mask_toggle_enabled)
         if not key:
             return None
-        page_data[key] = mask.copy() if isinstance(mask, np.ndarray) else mask
+        new_mask = mask.copy() if isinstance(mask, np.ndarray) else mask
+        if self._mask_equal(page_data.get(key), new_mask):
+            return key
+        page_data[key] = new_mask
         page_data[f"{key}_dirty"] = True
         self.mark_dirty(page_idx, key)
         return key
@@ -173,7 +203,10 @@ class YSBMaskEngine:
     def set_mask_by_key(self, page_data: Dict[str, Any], key: str, mask: Any, *, page_idx: int) -> Optional[str]:
         if key not in MASK_KEYS or not isinstance(page_data, dict):
             return None
-        page_data[key] = mask.copy() if isinstance(mask, np.ndarray) else mask
+        new_mask = mask.copy() if isinstance(mask, np.ndarray) else mask
+        if self._mask_equal(page_data.get(key), new_mask):
+            return key
+        page_data[key] = new_mask
         page_data[f"{key}_dirty"] = True
         self.mark_dirty(page_idx, key)
         return key

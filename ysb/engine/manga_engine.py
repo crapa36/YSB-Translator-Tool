@@ -15,6 +15,10 @@ import subprocess
 import shutil
 from pathlib import Path
 from openai import OpenAI
+from ysb.core.lm_studio_compat import parse_translation_items_strict, strip_json_code_fence
+from ysb.core.api_diagnostics import call_gemini_inpaint_api, extract_gemini_image_bytes
+from ysb.core.project_store import imwrite_unicode
+from ysb.core.text_style_limits import clamp_text_line_spacing, clamp_text_char_scale, text_line_height_from_percent
 try:
     from PIL import Image, ImageDraw, ImageFont, ImageFilter
     _PIL_IMPORT_ERROR = None
@@ -64,14 +68,18 @@ class Config:
 
     # [설정] Local OCR / comic_text_detector + PaddleOCR
     LOCAL_PADDLE_MASK_DEVICE = "auto"
+    # Historical alias: the Paddle setting is shared by detector and OCR recognition.
+    LOCAL_PADDLE_OCR_DEVICE = "auto"
     LOCAL_PADDLE_OCR_LANGUAGE = "ja"
     LOCAL_MANGA_OCR_LANGUAGE = "ja"
+    LOCAL_MANGA_OCR_DEVICE = "auto"
     # comic_text_detector input_size는 사용자 원본 이미지 크기가 아니라 모델 내부 리사이즈 캔버스다.
     # UI에는 노출하지 않고 페이지 크기에 따라 자동 선택한다.
     LOCAL_PADDLE_MASK_INPUT_SIZE = "auto"
     
     # [설정] OpenAI & Replicate
     TRANSLATION_PROVIDER = "openai"
+    TRANSLATION_TARGET_LANGUAGE = "ko"
     OPENAI_API_KEY = ""
     DEEPSEEK_API_KEY = ""
     GOOGLE_TRANSLATE_API_KEY = ""
@@ -80,6 +88,12 @@ class Config:
     CUSTOM_TRANSLATION_BASE_URL = ""
     CUSTOM_TRANSLATION_MODEL = ""
     CUSTOM_TRANSLATION_PRESET_NAME = "Custom Compatible"
+    LM_STUDIO_BASE_URL = "http://localhost:1234/v1"
+    LM_STUDIO_MODEL = ""
+    LM_STUDIO_API_KEY = ""
+    GEMINI_DELAYED_API_KEY = ""
+    GEMINI_DELAYED_TRANSLATION_MODEL = "gemini-2.5-flash-lite"
+    GEMINI_DELAYED_MODE = "flex"
     REPLICATE_API_TOKEN = ""  # 구버전/선택 provider 호환용
     LAMA_REPLICATE_API_TOKEN = ""
     STABLE_REPLICATE_API_TOKEN = ""
@@ -106,12 +120,21 @@ class Config:
     STABLE_INPAINT_WAIT_SECONDS = 3
     LOCAL_LAMA_WAIT_SECONDS = 0
     LOCAL_INPAINT_MODEL_PATH = ""
-    GEMINI_INPAINT_MODEL = "gemini-2.5-flash-image"
+    LOCAL_LAMA_DEVICE = "auto"
+    GEMINI_INPAINT_MODEL = "gemini-3.1-flash-image"
     GEMINI_INPAINT_PROMPT = (
         "Remove the text only inside the white mask area and reconstruct the original manga background. "
         "Keep all characters, panel borders, screentones, line art, and unmasked areas unchanged. "
         "Return only the edited full image."
     )
+    # 선택된 OCR/분석 모델의 분석 중 텍스트와 인접한 효과음 OCR 후보 제외 옵션.
+    OCR_EXCLUDE_SFX_OCR_CANDIDATES = False
+    CLOVA_EXCLUDE_SFX_OCR_CANDIDATES = False
+    GOOGLE_VISION_EXCLUDE_SFX_OCR_CANDIDATES = False
+    LOCAL_PADDLE_OCR_EXCLUDE_SFX_OCR_CANDIDATES = False
+    LOCAL_MANGA_OCR_EXCLUDE_SFX_OCR_CANDIDATES = False
+    # 구버전 호환용. 분석 마스크 생성에는 더 이상 사용하지 않는다.
+    INPAINT_EXCLUDE_SFX_OCR_CANDIDATES = False
 
     # [설정] 마스킹 비율
     INPAINT_RATIO = 0.1
@@ -155,6 +178,46 @@ class MangaProcessEngine:
                 api_key=key_to_use,
                 base_url=custom_base_url.rstrip("/")
             )
+
+        self.lm_studio_client = None
+        lm_base_url = str(getattr(Config, "LM_STUDIO_BASE_URL", "http://localhost:1234/v1") or "http://localhost:1234/v1").strip().rstrip("/")
+        if lm_base_url:
+            lm_api_key = str(getattr(Config, "LM_STUDIO_API_KEY", "") or "lm-studio").strip() or "lm-studio"
+            self.lm_studio_client = OpenAI(api_key=lm_api_key, base_url=lm_base_url)
+
+    @staticmethod
+    def _lm_studio_models_url(base_url):
+        base = str(base_url or "").strip().rstrip("/")
+        if not base:
+            return ""
+        if base.lower().endswith("/v1"):
+            return base + "/models"
+        return base + "/v1/models"
+
+    def _check_lm_studio_server_ready(self):
+        base_url = str(getattr(Config, "LM_STUDIO_BASE_URL", "") or "").strip().rstrip("/")
+        models_url = self._lm_studio_models_url(base_url)
+        if not models_url:
+            raise ValueError("LM Studio 서버 설정이 비어있습니다. Base URL을 확인하고 LM Studio Developer 서버를 켜 주세요.")
+        try:
+            resp = requests.get(models_url, timeout=2)
+            if resp.status_code < 200 or resp.status_code >= 300:
+                raise RuntimeError(f"HTTP {resp.status_code}")
+            try:
+                payload = resp.json()
+            except Exception:
+                payload = {}
+            data = payload.get("data") if isinstance(payload, dict) else None
+            if isinstance(data, list) and not data:
+                raise ValueError("LM Studio 서버는 켜져 있지만 로드된 모델이 없습니다. LM Studio에서 모델을 로드한 뒤 다시 시도해 주세요.")
+        except ValueError:
+            raise
+        except Exception as e:
+            raise ValueError(
+                "LM Studio 서버에 연결할 수 없습니다. "
+                "LM Studio > Developer > Local Server에서 서버를 켠 뒤 다시 시도해 주세요. "
+                f"Base URL: {base_url} / 확인 주소: {models_url} / 상세: {e}"
+            ) from e
 
     # ---------------------------------------------------------
     # [CORE] CLOVA OCR 호출
@@ -1058,6 +1121,70 @@ class MangaProcessEngine:
                 continue
         return out
 
+    def _filter_sfx_ocr_candidates_for_initial_mask(self, raw_items, w, h):
+        """분석 중 마스크를 처음 그리기 전에 텍스트와 인접한 효과음성 OCR 조각을 제외한다.
+
+        이 기능은 API 관리 > OCR/분석 모델 옵션에서 켤 수 있다.
+        현재 적용 대상은 CLOVA OCR / Google Vision OCR이다.
+        자동 정리 후처리와 같은 철학을 쓰되, 초기 분석 단계이므로 OCR RAW 조각 자체를
+        keep/drop으로 나눈 뒤 keep 조각만 _group_text_blocks_by_ratio에 넘긴다.
+        """
+        items = list(raw_items or [])
+        if not items:
+            return [], {"enabled": True, "kept": 0, "dropped": 0}
+        sizes = []
+        for it in items:
+            try:
+                sizes.append(float(self._ocr_item_size_score(it)))
+            except Exception:
+                sizes.append(1.0)
+        if sizes:
+            page_median = max(1.0, float(np.median(np.array(sizes, dtype=np.float32))))
+        else:
+            page_median = 1.0
+
+        kept = []
+        dropped = []
+        for it, size in zip(items, sizes):
+            text = str(it.get('text', '') or '')
+            compact = ''.join(ch for ch in text if not ch.isspace())
+            char_count = max(1, len(compact))
+            ratio = float(size) / max(1.0, page_median)
+            drop = False
+            reason = 'keep'
+            # 짧고 큰 OCR은 보통 효과음/손글씨 후보로 본다.
+            if char_count <= 2 and ratio >= 1.45:
+                drop = True
+                reason = f'drop_short_large_ratio={ratio:.2f}'
+            elif char_count <= 5 and ratio >= 1.70:
+                drop = True
+                reason = f'drop_mid_large_ratio={ratio:.2f}'
+            elif ratio >= 2.15:
+                drop = True
+                reason = f'drop_any_large_ratio={ratio:.2f}'
+            # 단, 보호 fallback이나 비정상적으로 작은 정보는 보수적으로 keep
+            if bool(it.get('protected_fallback')):
+                drop = False
+                reason = 'keep_protected_fallback'
+            if drop:
+                try:
+                    it = dict(it)
+                    it['sfx_filter_drop_reason'] = reason
+                    it['sfx_filter_size_ratio'] = ratio
+                except Exception:
+                    pass
+                dropped.append(it)
+            else:
+                kept.append(it)
+        stats = {
+            "enabled": True,
+            "page_median": float(page_median),
+            "kept": int(len(kept)),
+            "dropped": int(len(dropped)),
+            "dropped_texts": [str(x.get('text', '') or '') for x in dropped[:12]],
+        }
+        return kept, stats
+
     def analyze_image(self, image_path, analysis_regions=None, progress_fn=None):
         print(f">>> [Analysis] 전체 분석: {os.path.basename(image_path)}")
 
@@ -1099,6 +1226,18 @@ class MangaProcessEngine:
                 offset_x=0,
                 offset_y=0
             )
+
+        if bool(getattr(Config, 'OCR_EXCLUDE_SFX_OCR_CANDIDATES', False)):
+            raw_items, sfx_stats = self._filter_sfx_ocr_candidates_for_initial_mask(raw_items, w, h)
+            try:
+                print(
+                    f">>> [Analysis] Adjacent SFX OCR filter[{getattr(Config, 'OCR_PROVIDER', 'ocr')}]: "
+                    f"kept={sfx_stats.get('kept')} dropped={sfx_stats.get('dropped')} "
+                    f"median={float(sfx_stats.get('page_median', 0) or 0):.1f} "
+                    f"texts={sfx_stats.get('dropped_texts')}"
+                )
+            except Exception:
+                pass
 
         grouped_data, mask_merge = self._group_text_blocks_by_ratio(raw_items, w, h)
         mask_inpaint = self._create_ratio_mask(grouped_data, w, h)
@@ -1977,7 +2116,7 @@ class MangaProcessEngine:
             return grouped_data or []
         h, w = ori_img.shape[:2]
         lang = self._current_ocr_language()
-        device = str(getattr(Config, 'LOCAL_PADDLE_MASK_DEVICE', 'auto') or 'auto')
+        device = str(getattr(Config, 'LOCAL_PADDLE_OCR_DEVICE', getattr(Config, 'LOCAL_PADDLE_MASK_DEVICE', 'auto')) or 'auto')
 
         try:
             from ysb.engines.ocr.base import OcrRequest
@@ -2114,7 +2253,8 @@ class MangaProcessEngine:
         try:
             from ysb.engines.ocr.base import OcrRequest
             from ysb.engines.ocr.manga_ocr import MangaOcrEngine
-            manga_engine = MangaOcrEngine(language='ja')
+            manga_device = str(getattr(Config, 'LOCAL_MANGA_OCR_DEVICE', 'auto') or 'auto')
+            manga_engine = MangaOcrEngine(language='ja', device=manga_device)
         except Exception as e:
             print(f">>> [Local OCR] Manga OCR 준비 실패: {e}")
             return grouped_data
@@ -2140,6 +2280,7 @@ class MangaProcessEngine:
                         'image_bgr': crop,
                         # manga-ocr는 말풍선/세로문 crop에서 확대 입력이 안정적인 편이다.
                         'scale': 2.0,
+                        'device': manga_device,
                     },
                 ))
                 if not res.ok:
@@ -2192,6 +2333,19 @@ class MangaProcessEngine:
             return self._apply_local_manga_ocr_to_groups(ori_img, grouped_data, progress_fn=progress_fn)
         return self._apply_local_paddle_ocr_to_groups(ori_img, grouped_data, progress_fn=progress_fn)
 
+    def _local_detector_device_for_current_ocr(self) -> str:
+        """Return the device policy that comic_text_detector should follow.
+
+        The detector is a preprocessing step, but it should still mirror the
+        selected Local OCR engine's CPU/CUDA/Auto choice so one run has a
+        single, predictable device policy.  For historical compatibility the
+        LOCAL Paddle setting is still stored as LOCAL_PADDLE_MASK_DEVICE.
+        """
+        provider = str(getattr(Config, "OCR_PROVIDER", "local_paddle_ocr") or "local_paddle_ocr").strip().lower()
+        if provider == "local_manga_ocr":
+            return str(getattr(Config, "LOCAL_MANGA_OCR_DEVICE", "auto") or "auto").strip().lower() or "auto"
+        return str(getattr(Config, "LOCAL_PADDLE_OCR_DEVICE", getattr(Config, "LOCAL_PADDLE_MASK_DEVICE", "auto")) or "auto").strip().lower() or "auto"
+
     def analyze_image_local_paddle_mask(self, image_path, ori_img=None, analysis_mask=None, progress_fn=None):
         """LOCAL Paddle OCR 선택 시 실행되는 Local 분석 경로.
 
@@ -2211,11 +2365,11 @@ class MangaProcessEngine:
         from ysb.engines.text_detection.manager import detect_with_default_engine
 
         input_size = self._local_detector_auto_input_size(w, h)
-        device = str(getattr(Config, "LOCAL_PADDLE_MASK_DEVICE", "auto") or "auto")
+        device = self._local_detector_device_for_current_ocr()
 
+        print(f">>> [Local OCR] comic_text_detector device follows OCR setting: {device}")
         if progress_fn:
             progress_fn(1, 3, "comic_text_detector 영역 분석 중...")
-
         result = detect_with_default_engine(TextDetectionRequest(
             image_path=image_path,
             options={
@@ -2230,6 +2384,24 @@ class MangaProcessEngine:
 
         if progress_fn:
             progress_fn(2, 3, "텍스트 마스크 생성 및 레이아웃 정리 중...")
+
+        raw_payload = result.raw if isinstance(result.raw, dict) else {}
+        detector_device_report = dict(raw_payload.get("device_report") or {})
+        if detector_device_report:
+            try:
+                print(
+                    ">>>> [Local OCR] comic_text_detector actual device: "
+                    f"requested={detector_device_report.get('requested_device', device)}, "
+                    f"resolved={detector_device_report.get('resolved_device', 'unknown')}, "
+                    f"actual={detector_device_report.get('actual_device', 'unknown')}, "
+                    f"model={detector_device_report.get('model_device', 'unknown')}, "
+                    f"cuda_available={detector_device_report.get('torch_cuda_available', False)}, "
+                    f"cuda_count={detector_device_report.get('torch_cuda_device_count', 0)}, "
+                    f"gpu={detector_device_report.get('torch_cuda_device_name', '')}, "
+                    f"python={detector_device_report.get('python_executable', '')}"
+                )
+            except Exception:
+                pass
 
         # 1순위 개선: detector의 raw/refined segmentation mask를 직접 쓰지 않는다.
         # raw mask는 머리카락·옷 주름·배경선까지 과하게 잡을 수 있으므로,
@@ -2259,7 +2431,6 @@ class MangaProcessEngine:
                 analysis_mask = _am
             except Exception:
                 analysis_mask = None
-        raw_payload = result.raw if isinstance(result.raw, dict) else {}
         source_mask = raw_payload.get("mask_refined")
         if source_mask is None:
             source_mask = raw_payload.get("mask")
@@ -2297,6 +2468,17 @@ class MangaProcessEngine:
             source_mask=source_mask,
         )
         grouped_data = self._align_local_groups_to_text_mask(grouped_data, mask_merge, w, h)
+        if detector_device_report:
+            for _item in grouped_data:
+                if isinstance(_item, dict):
+                    _item['detector_device_requested'] = detector_device_report.get('requested_device', device)
+                    _item['detector_device_resolved'] = detector_device_report.get('resolved_device', 'unknown')
+                    _item['detector_device_actual'] = detector_device_report.get('actual_device', 'unknown')
+                    _item['detector_model_device'] = detector_device_report.get('model_device', 'unknown')
+                    _item['detector_cuda_available'] = detector_device_report.get('torch_cuda_available')
+                    _item['detector_cuda_count'] = detector_device_report.get('torch_cuda_device_count')
+                    _item['detector_cuda_gpu'] = detector_device_report.get('torch_cuda_device_name', '')
+                    _item['detector_worker_python'] = detector_device_report.get('python_executable', '')
         grouped_data = self._apply_current_local_ocr_engine_to_groups(ori_img, grouped_data, progress_fn=progress_fn)
 
         merge_pixels = int(cv2.countNonZero(mask_merge)) if mask_merge is not None else 0
@@ -2308,7 +2490,11 @@ class MangaProcessEngine:
             f"line_merged={base_stats.get('used_line_merged', 0)}, "
             f"fallback_lines={base_stats.get('fallback_lines', 0)}, "
             f"text_mask_pixels={merge_pixels}, paint_mask_pixels={inpaint_pixels}, "
-            f"raw_mask=line_gated, expand=analysis_mask_settings, input_size={input_size}"
+            f"raw_mask=line_gated, expand=analysis_mask_settings, input_size={input_size}, "
+            f"detector_requested={detector_device_report.get('requested_device', device) if detector_device_report else device}, "
+            f"detector_resolved={detector_device_report.get('resolved_device', 'unknown') if detector_device_report else 'unknown'}, "
+            f"detector_actual={detector_device_report.get('actual_device', 'unknown') if detector_device_report else 'unknown'}, "
+            f"detector_model={detector_device_report.get('model_device', 'unknown') if detector_device_report else 'unknown'}"
         )
         return ori_img, grouped_data, mask_merge, mask_inpaint
 
@@ -2317,10 +2503,11 @@ class MangaProcessEngine:
         img_bgr 일부 영역을 임시 파일로 저장해서 CLOVA OCR 호출.
         OCR 좌표는 원본 이미지 기준 좌표로 보정해서 반환.
         """
-        temp_path = f"temp_ocr_tile_{uuid.uuid4().hex}.jpg"
+        temp_path = os.path.join(tempfile.gettempdir(), f"temp_ocr_tile_{uuid.uuid4().hex}.jpg")
 
         try:
-            cv2.imwrite(temp_path, img_bgr)
+            if not imwrite_unicode(temp_path, np.ascontiguousarray(img_bgr)):
+                raise ValueError("OCR 임시 이미지 저장 실패")
 
             provider = str(getattr(Config, "OCR_PROVIDER", "clova") or "clova").lower()
 
@@ -2536,7 +2723,8 @@ class MangaProcessEngine:
             elif provider == "local_manga_ocr":
                 from ysb.engines.ocr.base import OcrRequest
                 from ysb.engines.ocr.manga_ocr import MangaOcrEngine
-                res = MangaOcrEngine(language="ja").run(OcrRequest(
+                manga_device = str(getattr(Config, "LOCAL_MANGA_OCR_DEVICE", "auto") or "auto")
+                res = MangaOcrEngine(language="ja", device=manga_device).run(OcrRequest(
                     image_path='',
                     language="ja",
                     options={
@@ -2851,7 +3039,7 @@ class MangaProcessEngine:
         from ysb.engines.text_detection.manager import detect_with_default_engine
 
         input_size = self._local_detector_auto_input_size(w, h)
-        device = str(getattr(Config, "LOCAL_PADDLE_MASK_DEVICE", "auto") or "auto")
+        device = self._local_detector_device_for_current_ocr()
 
         result = detect_with_default_engine(TextDetectionRequest(
             image_path=image_path,
@@ -3279,9 +3467,18 @@ class MangaProcessEngine:
         elif provider == "gemini":
             if not getattr(Config, "GEMINI_API_KEY", ""):
                 raise ValueError("Gemini API 키가 비어있습니다.")
+        elif provider == "gemini_deferred":
+            if not getattr(Config, "GEMINI_DELAYED_API_KEY", "") and not getattr(Config, "GEMINI_API_KEY", ""):
+                raise ValueError("Gemini Flex / Batch API Key가 비어있습니다.")
         elif provider == "custom":
             if self.custom_translation_client is None or not getattr(Config, "CUSTOM_TRANSLATION_MODEL", ""):
                 raise ValueError("Custom 번역 API 설정이 비어있습니다. Base URL, Model, API Key를 확인해주세요.")
+        elif provider == "lm_studio":
+            if self.lm_studio_client is None or not getattr(Config, "LM_STUDIO_BASE_URL", ""):
+                raise ValueError("LM Studio 서버 설정이 비어있습니다. Base URL을 확인하고 LM Studio Developer 서버를 켜 주세요.")
+            if not getattr(Config, "LM_STUDIO_MODEL", ""):
+                raise ValueError("LM Studio 모델명이 비어있습니다. LM Studio에서 모델을 로드한 뒤 모델명을 입력해 주세요.")
+            self._check_lm_studio_server_ready()
         elif provider in ("local_argos", "local_hf_jako", "local_hf_enko", "local_nllb"):
             provider = "openai"
             if self.openai_client is None:
@@ -3299,13 +3496,17 @@ class MangaProcessEngine:
                 chunk_size = 50
             elif provider == "gemini":
                 chunk_size = 10
+            elif provider == "gemini_deferred":
+                chunk_size = 50
+            elif provider == "lm_studio":
+                chunk_size = 20
             else:
                 chunk_size = 20
         else:
             try:
                 chunk_size = int(chunk_size)
             except:
-                chunk_size = 8 if provider == "deepseek" else (50 if provider == "google" else (10 if provider == "gemini" else 20))
+                chunk_size = 8 if provider == "deepseek" else (50 if provider in ("google", "gemini_deferred") else (10 if provider == "gemini" else 20))
             chunk_size = max(1, min(chunk_size, 100))
 
         final_results = []
@@ -3319,7 +3520,8 @@ class MangaProcessEngine:
 
             except Exception as e:
                 print(f"Chunk Translate Error: {e}")
-                if "API 키가 비어" in str(e):
+                err_text = str(e)
+                if "API 키가 비어" in err_text or "YSB JSON 형식과 호환되지" in err_text or "reasoning/channel" in err_text:
                     raise
 
                 # 청크 실패 시 한 줄씩 재시도
@@ -3329,7 +3531,8 @@ class MangaProcessEngine:
                         final_results.extend(one_result)
                     except Exception as e2:
                         print(f"Single Translate Error: {e2}")
-                        if "API 키가 비어" in str(e2):
+                        err_text2 = str(e2)
+                        if "API 키가 비어" in err_text2 or "YSB JSON 형식과 호환되지" in err_text2 or "reasoning/channel" in err_text2:
                             raise
                         final_results.append(one_text)
 
@@ -3346,6 +3549,28 @@ class MangaProcessEngine:
 
 
 
+    def _translation_target_language_label(self):
+        lang = str(getattr(Config, "TRANSLATION_TARGET_LANGUAGE", "ko") or "ko").strip().lower()
+        labels = {
+            "ko": "Korean", "kr": "Korean", "korean": "Korean", "한국어": "Korean",
+            "en": "English", "english": "English", "영어": "English",
+            "ja": "Japanese", "jp": "Japanese", "japanese": "Japanese", "일본어": "Japanese",
+            "zh": "Simplified Chinese", "zh-cn": "Simplified Chinese", "chinese": "Simplified Chinese", "중국어": "Simplified Chinese", "중국어 간체": "Simplified Chinese",
+            "zh-tw": "Traditional Chinese", "zh-hant": "Traditional Chinese", "중국어 번체": "Traditional Chinese",
+        }
+        return labels.get(lang, lang or "Korean")
+
+    def _google_translate_target_language_code(self):
+        lang = str(getattr(Config, "TRANSLATION_TARGET_LANGUAGE", "ko") or "ko").strip().lower()
+        aliases = {
+            "kr": "ko", "korean": "ko", "한국어": "ko",
+            "english": "en", "영어": "en",
+            "jp": "ja", "japanese": "ja", "일본어": "ja",
+            "zh": "zh-CN", "zh-cn": "zh-CN", "zh-hans": "zh-CN", "chinese": "zh-CN", "중국어": "zh-CN", "중국어 간체": "zh-CN",
+            "zh-tw": "zh-TW", "zh-hant": "zh-TW", "중국어 번체": "zh-TW",
+        }
+        return aliases.get(lang, lang or "ko")
+
     def _translate_text_chunk_google(self, texts):
         """Google Cloud Translation Basic v2 API."""
         key = str(getattr(Config, "GOOGLE_TRANSLATE_API_KEY", "") or "").strip()
@@ -3356,7 +3581,7 @@ class MangaProcessEngine:
         payload = {
             "q": [str(t or "") for t in texts],
             "source": "ja",
-            "target": "ko",
+            "target": self._google_translate_target_language_code(),
             "format": "text",
         }
         r = requests.post(url, params={"key": key}, json=payload, timeout=60)
@@ -3374,81 +3599,80 @@ class MangaProcessEngine:
                 results.append(str(original or ""))
         return results
 
-    def _translate_text_chunk_gemini(self, texts, base_id=0):
-        """Google AI Studio Gemini API 번역."""
-        key = str(getattr(Config, "GEMINI_API_KEY", "") or "").strip()
-        if not key:
-            raise ValueError("Gemini API 키가 비어있습니다.")
-
-        model = str(getattr(Config, "GEMINI_TRANSLATION_MODEL", "gemini-2.5-flash-lite") or "gemini-2.5-flash-lite").strip()
+    def build_gemini_translation_request(self, texts, base_id=0, contexts=None, *, model_override=None, service_tier=None):
+        """Gemini Flex/Batch 창에서 네트워크 호출 없이 재사용할 요청 payload를 만든다."""
+        model = str(model_override or getattr(Config, "GEMINI_TRANSLATION_MODEL", "gemini-2.5-flash-lite") or "gemini-2.5-flash-lite").strip()
+        if not model:
+            raise ValueError("Gemini 모델명이 비어있습니다.")
         prompt = self._build_translation_system_prompt()
-
         input_items = []
-        for i, text in enumerate(texts):
-            input_items.append({"id": base_id + i, "text": text})
-
+        for i, text in enumerate(texts or []):
+            input_items.append({"id": int(base_id) + i, "text": str(text or "")})
         user_text = prompt.strip() + "\n\nINPUT JSON:\n" + json.dumps(input_items, ensure_ascii=False)
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
         payload = {
-            "contents": [
-                {"role": "user", "parts": [{"text": user_text}]}
-            ],
+            "contents": [{"role": "user", "parts": [{"text": user_text}]}],
             "generationConfig": {
                 "temperature": 0.2,
-                "responseMimeType": "application/json"
-            }
+                "responseMimeType": "application/json",
+            },
         }
+        if service_tier:
+            payload["service_tier"] = str(service_tier)
+        return payload
 
-        r = requests.post(url, params={"key": key}, json=payload, timeout=90)
-        if r.status_code != 200:
-            err_text = r.text[:800]
-            try:
-                err = r.json().get("error", {})
-                msg = str(err.get("message", "") or err_text)
-                code = int(err.get("code", r.status_code) or r.status_code)
-            except Exception:
-                msg = err_text
-                code = r.status_code
+    def parse_gemini_translation_response(self, data, texts, base_id=0, provider_name="Gemini"):
+        """Gemini GenerateContent 응답에서 JSON 번역 결과를 추출한다."""
+        candidates = data.get("candidates", []) if isinstance(data, dict) else []
+        if not candidates:
+            raise ValueError(f"{provider_name} 번역 응답이 비어있습니다.")
+        parts = candidates[0].get("content", {}).get("parts", [])
+        content = "".join(str(part.get("text", "")) for part in parts if isinstance(part, dict)).strip()
+        if not content:
+            raise ValueError(f"{provider_name} 번역 텍스트가 비어있습니다.")
+        return self._parse_translation_json_response(content, texts, base_id, provider_name=provider_name)
 
-            if code == 429:
-                raise ValueError(
-                    "Gemini Translate Error: 429 / Gemini API 할당량 또는 속도 제한을 초과했습니다. "
-                    "AI Studio의 Rate limits와 결제 설정을 확인해 주세요. 무료 등급에서 limit: 0으로 표시되면 "
-                    "해당 프로젝트에 사용 가능한 무료 할당량이 없거나 결제 설정이 필요한 상태일 수 있습니다. "
-                    f"원문: {msg[:400]}"
-                )
-            if code == 404:
-                raise ValueError(
-                    f"Gemini Translate Error: 404 / Gemini 모델명을 찾을 수 없습니다. 현재 모델명 '{model}'을 확인해 주세요. "
+    @staticmethod
+    def _gemini_http_error(response, model=""):
+        err_text = str(getattr(response, "text", "") or "")[:800]
+        try:
+            err = response.json().get("error", {})
+            msg = str(err.get("message", "") or err_text)
+            code = int(err.get("code", getattr(response, "status_code", 0)) or getattr(response, "status_code", 0))
+        except Exception:
+            msg = err_text
+            code = int(getattr(response, "status_code", 0) or 0)
+        if code == 429:
+            return ValueError(
+                "Gemini Translate Error: 429 / Gemini API 할당량 또는 속도 제한을 초과했습니다. "
+                "AI Studio의 Rate limits와 결제 설정을 확인해 주세요. 무료 등급에서 limit: 0으로 표시되면 "
+                "해당 프로젝트에 사용 가능한 무료 할당량이 없거나 결제 설정이 필요한 상태일 수 있습니다. "
+                f"원문: {msg[:400]}"
+            )
+        if code == 404:
+            model_text = str(model or "").strip()
+            if model_text:
+                return ValueError(
+                    f"Gemini Translate Error: 404 / Gemini 모델명을 찾을 수 없습니다. 현재 모델명 '{model_text}'을 확인해 주세요. "
                     "예: gemini-2.5-flash-lite"
                 )
-            raise ValueError(f"Gemini Translate Error: {code} / {msg[:500]}")
+            return ValueError(f"Gemini Translate Error: 404 / Gemini 모델명을 찾을 수 없습니다. 원문: {msg[:400]}")
+        return ValueError(f"Gemini Translate Error: {code} / {msg[:500]}")
 
-        data = r.json()
-        candidates = data.get("candidates", [])
-        if not candidates:
-            raise ValueError("Gemini 번역 응답이 비어있습니다.")
-
-        parts = candidates[0].get("content", {}).get("parts", [])
-        content = "".join(str(part.get("text", "")) for part in parts).strip()
-        if not content:
-            raise ValueError("Gemini 번역 텍스트가 비어있습니다.")
-
+    def _parse_translation_json_response(self, content, texts, base_id, provider_name="번역"):
+        content = str(content or "").strip()
         if content.startswith("```json"):
             content = content[7:]
         if content.startswith("```"):
             content = content[3:]
         if content.endswith("```"):
             content = content[:-3]
-
         parsed = json.loads(content.strip())
         if isinstance(parsed, dict):
             items = parsed.get("items", [])
         elif isinstance(parsed, list):
             items = parsed
         else:
-            raise ValueError("Gemini 번역 응답 JSON 형식이 올바르지 않습니다.")
-
+            raise ValueError(f"{provider_name} 응답 JSON 형식이 올바르지 않습니다.")
         by_id = {}
         for item in items:
             if isinstance(item, dict):
@@ -3456,19 +3680,30 @@ class MangaProcessEngine:
                     by_id[int(item.get("id"))] = str(item.get("translation", ""))
                 except Exception:
                     pass
-
         results = []
         missing_ids = []
-        for i in range(len(texts)):
-            item_id = base_id + i
+        for i in range(len(texts or [])):
+            item_id = int(base_id) + i
             if item_id in by_id:
                 results.append(by_id[item_id])
             else:
                 missing_ids.append(item_id)
-
         if missing_ids:
-            raise ValueError(f"Gemini 번역 누락 ID 발생: {missing_ids}")
+            raise ValueError(f"{provider_name} 번역 누락 ID 발생: {missing_ids}")
         return results
+
+    def _translate_text_chunk_gemini(self, texts, base_id=0, api_key_override=None, model_override=None):
+        """Google AI Studio Gemini API 번역."""
+        key = str(api_key_override or getattr(Config, "GEMINI_API_KEY", "") or "").strip()
+        if not key:
+            raise ValueError("Gemini API 키가 비어있습니다.")
+        model = str(model_override or getattr(Config, "GEMINI_TRANSLATION_MODEL", "gemini-2.5-flash-lite") or "gemini-2.5-flash-lite").strip()
+        payload = self.build_gemini_translation_request(texts, base_id=base_id, model_override=model)
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        r = requests.post(url, params={"key": key}, json=payload, timeout=90)
+        if r.status_code != 200:
+            raise self._gemini_http_error(r, model=model)
+        return self.parse_gemini_translation_response(r.json(), texts, base_id, provider_name="Gemini")
 
     def _build_translation_system_prompt(self):
         """
@@ -3479,8 +3714,14 @@ class MangaProcessEngine:
         glossary_text = str(getattr(Config, "TRANSLATION_GLOSSARY_TEXT", "") or "").strip()
 
         parts = []
+        target_label = self._translation_target_language_label()
+        parts.append(
+            f"Translate every source text into natural {target_label}. "
+            "Preserve speaker tone, sentence meaning, names, symbols, and manga-style punctuation unless the user prompt says otherwise."
+        )
         if custom_prompt:
-            parts.append(custom_prompt)
+            prompt_with_target = custom_prompt.replace("{target_language}", target_label).replace("{TARGET_LANGUAGE}", target_label)
+            parts.append(prompt_with_target)
 
         if glossary_text:
             parts.append(
@@ -3517,6 +3758,10 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
             return self._translate_text_chunk_google(texts)
         if provider == "gemini":
             return self._translate_text_chunk_gemini(texts, base_id)
+        if provider == "gemini_deferred":
+            delayed_key = str(getattr(Config, "GEMINI_DELAYED_API_KEY", "") or getattr(Config, "GEMINI_API_KEY", "") or "").strip()
+            delayed_model = str(getattr(Config, "GEMINI_DELAYED_TRANSLATION_MODEL", "") or getattr(Config, "GEMINI_TRANSLATION_MODEL", "gemini-2.5-flash-lite") or "gemini-2.5-flash-lite").strip()
+            return self._translate_text_chunk_gemini(texts, base_id, api_key_override=delayed_key, model_override=delayed_model)
         if provider in ("local_argos", "local_hf_jako", "local_hf_enko", "local_nllb"):
             provider = "openai"
 
@@ -3532,6 +3777,13 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
             model = str(getattr(Config, "CUSTOM_TRANSLATION_MODEL", "") or "").strip()
             if not model:
                 raise ValueError("Custom 번역 모델명이 비어있습니다.")
+        elif provider == "lm_studio":
+            if self.lm_studio_client is None:
+                raise ValueError("LM Studio 서버 설정이 비어있습니다. Base URL을 확인하고 LM Studio Developer 서버를 켜 주세요.")
+            client = self.lm_studio_client
+            model = str(getattr(Config, "LM_STUDIO_MODEL", "") or "").strip()
+            if not model:
+                raise ValueError("LM Studio 모델명이 비어있습니다.")
         else:
             if self.openai_client is None:
                 raise ValueError("OpenAI API 키가 비어있습니다.")
@@ -3570,23 +3822,20 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
             )
         content = raw_content
 
-        if content.startswith("```json"):
-            content = content[7:]
-        if content.startswith("```"):
-            content = content[3:]
-        if content.endswith("```"):
-            content = content[:-3]
-
-        parsed = json.loads(content.strip())
-
-        # 정상 형식: {"items": [...]}
-        if isinstance(parsed, dict):
-            items = parsed.get("items", [])
-        # 혹시 리스트로 튀어나온 경우도 방어
-        elif isinstance(parsed, list):
-            items = parsed
+        if provider == "lm_studio":
+            items = parse_translation_items_strict(content)
         else:
-            raise ValueError("번역 응답 JSON 형식이 올바르지 않습니다.")
+            content, _had_code_fence = strip_json_code_fence(content)
+            parsed = json.loads(content.strip())
+
+            # 정상 형식: {"items": [...]}
+            if isinstance(parsed, dict):
+                items = parsed.get("items", [])
+            # 혹시 리스트로 튀어나온 경우도 방어
+            elif isinstance(parsed, list):
+                items = parsed
+            else:
+                raise ValueError("번역 응답 JSON 형식이 올바르지 않습니다.")
 
         by_id = {}
 
@@ -3767,6 +4016,321 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
         print(f">>> [Local Inpaint] WARN: failed to stage LaMa model to ASCII path: {last_error}")
         return str(src)
 
+
+    def _normalize_local_lama_device_request(self, device=None):
+        req = str(device if device is not None else getattr(Config, "LOCAL_LAMA_DEVICE", "auto") or "auto").strip().lower() or "auto"
+        if req in ("gpu", "nvidia", "cuda:0"):
+            return "cuda"
+        if req == "cuda":
+            return "cuda"
+        if req == "cpu":
+            return "cpu"
+        return "auto"
+
+    def _managed_runtime_subprocess_env(self, role, base_env=None):
+        env = dict(base_env or os.environ.copy())
+        try:
+            from ysb.editions.local.cuda_runtime_installer import runtime_subprocess_env
+            return runtime_subprocess_env(role, env)
+        except Exception:
+            env.setdefault("PYTHONUTF8", "1")
+            env.setdefault("PYTHONIOENCODING", "utf-8")
+            return env
+
+    def _hidden_worker_subprocess_kwargs(self):
+        """Hide internal Python worker console windows on Windows.
+
+        Local LaMa/CUDA workers are implementation details.  They must keep
+        stdout/stderr pipes for logs, but should not steal focus with a
+        separate python.exe console window in the packaged Local edition.
+        """
+        if os.name != "nt":
+            return {}
+        try:
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 1)
+            startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+            flags = int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            return {"startupinfo": startupinfo, "creationflags": flags}
+        except Exception:
+            return {}
+
+    def _python_has_module(self, py, module_name, role=None):
+        try:
+            py_text = str(py or "").strip()
+            if not py_text:
+                return False
+            proc = subprocess.run(
+                [py_text, "-c", f"import {module_name}"],
+                cwd=str(Path(__file__).resolve().parents[2]),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=20,
+                env=self._managed_runtime_subprocess_env(role or "", os.environ.copy()) if role else None,
+                stdin=subprocess.DEVNULL,
+                **self._hidden_worker_subprocess_kwargs(),
+            )
+            return proc.returncode == 0
+        except Exception:
+            return False
+
+    def _current_python_has_local_lama(self):
+        try:
+            import importlib.util
+            return importlib.util.find_spec("simple_lama_inpainting") is not None
+        except Exception:
+            return False
+
+    def _managed_local_lama_torch_python(self):
+        try:
+            from ysb.editions.local.cuda_runtime_installer import runtime_python_path
+            py = runtime_python_path("torch")
+            if py.exists():
+                return py
+        except Exception:
+            pass
+        return None
+
+    def _managed_local_lama_worker_python(self, device=None):
+        req = self._normalize_local_lama_device_request(device)
+        if req == "cpu":
+            # Explicit CPU is still a CPU route: it must not do Auto-style CUDA
+            # probing or CUDA fallback.  Prefer the current/direct environment.
+            # If that environment does not contain simple-lama-inpainting, use the
+            # managed Torch runtime only as a dependency fallback while forcing
+            # device=cpu inside the worker.  This restores old CPU-only behavior
+            # on setups where LaMa deps are installed only in the managed runtime.
+            if self._current_python_has_local_lama():
+                return None
+            py = self._managed_local_lama_torch_python()
+            if py is not None and self._python_has_module(py, "simple_lama_inpainting", role="torch"):
+                print(
+                    ">>> [Local Inpaint] CPU direct env has no simple_lama_inpainting; "
+                    "using managed Torch runtime as forced-CPU dependency fallback."
+                )
+                return py
+            return None
+        py = self._managed_local_lama_torch_python()
+        if py is not None:
+            return py
+        return None
+
+    def _install_local_lama_torch_load_map_location(self, resolved_device):
+        try:
+            import torch  # type: ignore
+        except Exception:
+            return None
+        dev = str(resolved_device or "cpu").strip().lower()
+        map_location = "cuda:0" if dev.startswith("cuda") else "cpu"
+        force_override = not dev.startswith("cuda")
+        originals = []
+
+        def _apply(args, kwargs):
+            args = list(args)
+            kwargs = dict(kwargs)
+            if force_override:
+                if len(args) >= 2:
+                    args[1] = map_location
+                else:
+                    kwargs["map_location"] = map_location
+            else:
+                if len(args) < 2 and kwargs.get("map_location") is None:
+                    kwargs["map_location"] = map_location
+            return tuple(args), kwargs
+
+        def _wrap(original):
+            def _ysb_loader(*args, **kwargs):
+                mapped_args, mapped_kwargs = _apply(args, kwargs)
+                return original(*mapped_args, **mapped_kwargs)
+            return _ysb_loader
+
+        def _patch(obj, attr):
+            try:
+                original = getattr(obj, attr, None)
+                if callable(original):
+                    setattr(obj, attr, _wrap(original))
+                    originals.append((obj, attr, original))
+            except Exception:
+                pass
+
+        _patch(torch, "load")
+        try:
+            serialization = getattr(torch, "serialization", None)
+            if serialization is not None:
+                _patch(serialization, "load")
+        except Exception:
+            pass
+        try:
+            jit = getattr(torch, "jit", None)
+            if jit is not None:
+                _patch(jit, "load")
+        except Exception:
+            pass
+        return originals or None
+
+    def _restore_local_lama_torch_load(self, originals):
+        if not originals:
+            return
+        for obj, attr, original in list(originals):
+            try:
+                setattr(obj, attr, original)
+            except Exception:
+                pass
+
+    def _force_local_lama_model_to_device(self, model, device):
+        dev = str(device or "cpu").strip().lower() or "cpu"
+        try:
+            import torch  # type: ignore
+            torch_dev = torch.device("cuda:0" if dev.startswith("cuda") else "cpu")
+        except Exception:
+            torch_dev = "cuda:0" if dev.startswith("cuda") else "cpu"
+        seen = set()
+        candidates = [model]
+        for name in ("model", "net", "lama", "module", "inpaint_model", "generator", "network"):
+            try:
+                obj = getattr(model, name, None)
+                if obj is not None:
+                    candidates.append(obj)
+            except Exception:
+                pass
+        for obj in candidates:
+            try:
+                oid = id(obj)
+                if oid in seen:
+                    continue
+                seen.add(oid)
+            except Exception:
+                pass
+            try:
+                to_fn = getattr(obj, "to", None)
+                if callable(to_fn):
+                    to_fn(torch_dev)
+            except Exception:
+                pass
+            try:
+                if hasattr(obj, "device"):
+                    setattr(obj, "device", torch_dev)
+            except Exception:
+                try:
+                    if hasattr(obj, "device"):
+                        setattr(obj, "device", str(torch_dev))
+                except Exception:
+                    pass
+
+    def _local_lama_worker_file(self):
+        roots = []
+        try:
+            roots.append(Path(__file__).resolve().parents[2])
+        except Exception:
+            pass
+        try:
+            roots.append(Path(getattr(sys, "executable", "")).resolve().parent)
+        except Exception:
+            pass
+        for root in roots:
+            candidate = root / ("local_runtime_exe" if getattr(sys, "frozen", False) else "local_runtime") / "local_lama_worker.py"
+            try:
+                if candidate.exists():
+                    return candidate
+            except Exception:
+                pass
+        return None
+
+    def _call_local_lama_external_worker(self, image_path, mask_img, model_path=""):
+        requested_device = self._normalize_local_lama_device_request(getattr(Config, "LOCAL_LAMA_DEVICE", "auto"))
+        py = self._managed_local_lama_worker_python(requested_device)
+        worker = self._local_lama_worker_file()
+        if py is None or worker is None:
+            return None
+        if mask_img is None:
+            raise ValueError("LOCAL LaMa 인페인팅 마스크가 없습니다.")
+        temp_dir = tempfile.gettempdir()
+        mask_path = os.path.join(temp_dir, f"ysb_local_lama_mask_{uuid.uuid4().hex}.png")
+        input_json = os.path.join(temp_dir, f"ysb_local_lama_in_{uuid.uuid4().hex}.json")
+        output_json = os.path.join(temp_dir, f"ysb_local_lama_out_{uuid.uuid4().hex}.json")
+        output_png = os.path.join(temp_dir, f"ysb_local_lama_result_{uuid.uuid4().hex}.png")
+        try:
+            mask_arr = np.asarray(mask_img)
+            if mask_arr.ndim == 3:
+                mask_arr = cv2.cvtColor(mask_arr, cv2.COLOR_BGR2GRAY)
+            mask_arr = np.where(mask_arr > 10, 255, 0).astype("uint8")
+            ok, buf = cv2.imencode(".png", mask_arr)
+            if not ok:
+                raise ValueError("LOCAL LaMa 임시 마스크 파일을 저장하지 못했습니다.")
+            with open(mask_path, "wb") as f:
+                f.write(buf.tobytes())
+            payload = {
+                "image_path": str(image_path),
+                "mask_path": str(mask_path),
+                "output_path": str(output_png),
+                "model_path": str(model_path or ""),
+                "device": requested_device,
+            }
+            with open(input_json, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False)
+            proc = subprocess.run(
+                [str(py), str(worker), "--input-json", input_json, "--output-json", output_json],
+                cwd=str(Path(__file__).resolve().parents[2]),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=3600,
+                env=self._managed_runtime_subprocess_env("torch", os.environ.copy()),
+                stdin=subprocess.DEVNULL,
+                **self._hidden_worker_subprocess_kwargs(),
+            )
+            result = {}
+            if os.path.exists(output_json):
+                with open(output_json, "r", encoding="utf-8") as f:
+                    result = json.load(f)
+            device_info = result.get("device_info") or {}
+            model_device = str(result.get("model_device") or "unknown")
+            try:
+                self._last_local_lama_device_info = {
+                    "worker_python": str(py),
+                    "requested_device": str(device_info.get("requested_device") or getattr(Config, "LOCAL_LAMA_DEVICE", "auto") or "auto"),
+                    "resolved_device": str(device_info.get("resolved_device") or "unknown"),
+                    "cuda_available": bool(device_info.get("cuda_available")),
+                    "cuda_device_count": int(device_info.get("cuda_device_count") or 0),
+                    "cuda_device_name": str(device_info.get("cuda_device_name") or ""),
+                    "torch_version": str(device_info.get("torch_version") or ""),
+                    "torch_cuda_build": str(device_info.get("torch_cuda_build") or ""),
+                    "reason": str(device_info.get("reason") or ""),
+                    "model_device": model_device,
+                }
+            except Exception:
+                self._last_local_lama_device_info = {
+                    "worker_python": str(py),
+                    "requested_device": str(getattr(Config, "LOCAL_LAMA_DEVICE", "auto") or "auto"),
+                    "resolved_device": "unknown",
+                    "model_device": model_device,
+                }
+            info = getattr(self, "_last_local_lama_device_info", {}) or {}
+            print(
+                ">>> [Local Inpaint] LOCAL LaMa device: "
+                f"requested={info.get('requested_device', 'auto')}, "
+                f"resolved={info.get('resolved_device', 'unknown')}, "
+                f"model={info.get('model_device', 'unknown')}, "
+                f"cuda_available={info.get('cuda_available', False)}, "
+                f"cuda_count={info.get('cuda_device_count', 0)}, "
+                f"gpu={info.get('cuda_device_name', '')}"
+            )
+            if proc.returncode != 0 or not result.get("ok"):
+                err = result.get("error") or proc.stderr or proc.stdout or f"worker returned {proc.returncode}"
+                raise ValueError(f"LOCAL LaMa 외부 런타임 실패: {err}")
+            with open(output_png, "rb") as f:
+                return f.read()
+        finally:
+            for p in (mask_path, input_json, output_json, output_png):
+                try:
+                    if p and os.path.exists(p):
+                        os.remove(p)
+                except Exception:
+                    pass
+
     def _call_local_lama(self, image_path, mask_img):
         """Run local LaMa/MAT inpainting using LocalInpaintEngine or fallback to simple-lama-inpainting.
 
@@ -3821,6 +4385,7 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
         # simple-lama-inpainting은 LAMA_MODEL 환경변수를 지원한다.
         # local_models/lama/big-lama.pt가 있으면 자동 다운로드/cache 대신 그 파일을 사용한다.
         local_model_path = self._find_local_lama_model_path()
+        safe_model_path = ""
         if local_model_path:
             safe_model_path = self._ascii_safe_local_lama_model_path(local_model_path)
             os.environ["LAMA_MODEL"] = safe_model_path
@@ -3832,20 +4397,58 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
         else:
             print(">>> [Local Inpaint] LOCAL LaMa model not found in local_models; using simple-lama cache/auto-download.")
 
+        external_result = self._call_local_lama_external_worker(image_path, mask_img, safe_model_path)
+        if external_result is not None:
+            return external_result
+
+        lama_device = self._normalize_local_lama_device_request(getattr(Config, "LOCAL_LAMA_DEVICE", "auto"))
+        load_patch = None
+        if lama_device == "cpu":
+            os.environ["CUDA_VISIBLE_DEVICES"] = ""
+            load_patch = self._install_local_lama_torch_load_map_location("cpu")
+        elif lama_device == "cuda":
+            # Device=CUDA is strict.  If the managed Torch runtime is missing, do
+            # not fall back to the main .venv/current Python and accidentally run
+            # on CPU.
+            raise ValueError("LOCAL LaMa CUDA 런타임을 찾을 수 없습니다. 설정 -> 로컬 CUDA 진단에서 Torch CUDA 런타임 설치/복구를 실행해 주세요.")
         try:
             from simple_lama_inpainting import SimpleLama
         except Exception as e:
+            self._restore_local_lama_torch_load(load_patch)
+            if lama_device == "cpu":
+                raise ValueError(
+                    "LOCAL LaMa CPU 실행 환경에 필수 패키지(simple-lama-inpainting)가 없습니다. "
+                    "CPU 직접 실행은 현재 Python/.venv에 simple-lama-inpainting이 있어야 합니다. "
+                    "관리 Torch 런타임에도 해당 패키지를 찾지 못했습니다. "
+                    "설정 -> 로컬 CUDA 진단에서 Torch 런타임 설치/복구를 실행하거나 현재 .venv에 simple-lama-inpainting을 설치해 주세요. "
+                    f"원문 오류: {e}"
+                )
             raise ValueError(
-                "LOCAL LaMa를 사용할 수 없습니다. setup_local_core_venv_v2_1_0.bat를 먼저 실행해 주세요. "
+                "LOCAL LaMa를 사용할 수 없습니다. 설정 -> 로컬 CUDA 진단에서 Torch CUDA 런타임 설치/복구를 실행해 주세요. "
                 f"원문 오류: {e}"
             )
 
         mask = Image.fromarray(mask_arr, mode="L")
-        model = getattr(self, "_local_lama_model", None)
+        cache_attr = "_local_lama_model_cpu" if lama_device == "cpu" else "_local_lama_model"
+        model = getattr(self, cache_attr, None)
         if model is None:
             print(">>> [Local Inpaint] Loading SimpleLaMa model...")
-            model = SimpleLama()
-            self._local_lama_model = model
+            try:
+                model = SimpleLama()
+            except Exception:
+                self._restore_local_lama_torch_load(load_patch)
+                raise
+            finally:
+                self._restore_local_lama_torch_load(load_patch)
+                load_patch = None
+            if lama_device == "cpu":
+                self._force_local_lama_model_to_device(model, "cpu")
+            setattr(self, cache_attr, model)
+        else:
+            self._restore_local_lama_torch_load(load_patch)
+            load_patch = None
+            if lama_device == "cpu":
+                self._force_local_lama_model_to_device(model, "cpu")
 
         print(">>> [Local Inpaint] Running LOCAL LaMa...")
         result = model(image, mask)
@@ -3867,110 +4470,56 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
         return bio.getvalue()
 
     def _call_gemini_inpaint(self, image_path, mask_img):
-        """Gemini image model을 이용한 테스트용 인페인팅.
+        """Gemini image model based inpainting / image editing.
 
-        Gemini는 LaMa처럼 별도 mask 파라미터를 가진 전용 인페인팅 API가 아니라,
-        원본 이미지 + 마스크 이미지 + 프롬프트를 함께 주고 이미지 편집 결과를 받는 방식이다.
-        그래서 결과 품질은 모델/프롬프트/원본에 따라 달라질 수 있다.
+        Current Gemini image-editing docs use the Interactions API.  Use that
+        path first, and fall back to legacy generateContent with responseModalities
+        for older deployments.  The response parser accepts both shapes.
         """
-        import base64
-
         key = str(getattr(Config, "GEMINI_API_KEY", "") or "").strip()
         if not key:
             raise ValueError("Gemini API Key가 비어있습니다.")
 
-        model = str(getattr(Config, "GEMINI_INPAINT_MODEL", "") or "gemini-2.5-flash-image").strip()
-        # gemini-2.5-flash-image-preview has been shut down; keep old cache/config from breaking.
-        if model == "gemini-2.5-flash-image-preview":
-            model = "gemini-2.5-flash-image"
+        model = str(getattr(Config, "GEMINI_INPAINT_MODEL", "") or "gemini-3.1-flash-image").strip()
+        if model in ("gemini-2.5-flash-image", "gemini-2.5-flash-image-preview", "gemini-2.0-flash-exp-image-generation"):
+            model = "gemini-3.1-flash-image"
         prompt = str(getattr(Config, "GEMINI_INPAINT_PROMPT", "") or "").strip()
-        if not prompt:
-            prompt = (
-                "Remove the text only inside the white mask area and reconstruct the original manga background. "
-                "Keep all characters, panel borders, screentones, line art, and unmasked areas unchanged. "
-                "Return only the edited full image."
-            )
 
-        def _file_part(path):
-            ext = os.path.splitext(str(path))[1].lower()
-            mime = "image/png"
-            if ext in (".jpg", ".jpeg"):
-                mime = "image/jpeg"
-            elif ext == ".webp":
-                mime = "image/webp"
-            with open(path, "rb") as f:
-                data = base64.b64encode(f.read()).decode("ascii")
-            return {"inlineData": {"mimeType": mime, "data": data}}
+        img_array = np.fromfile(str(image_path), np.uint8)
+        base_img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+        if base_img is None or base_img.size <= 0:
+            raise ValueError(f"Gemini 인페인팅용 원본 이미지를 읽을 수 없습니다: {image_path}")
 
-        ok, mask_png = cv2.imencode(".png", mask_img)
-        if not ok:
-            raise ValueError("Gemini 인페인팅용 마스크 PNG 생성 실패")
-        mask_part = {
-            "inlineData": {
-                "mimeType": "image/png",
-                "data": base64.b64encode(mask_png.tobytes()).decode("ascii"),
-            }
-        }
-
-        instruction = (
-            prompt
-            + "\n\nThe first image is the source manga page. The second image is a black-and-white mask. "
-            + "White pixels mark the exact area to edit. Black pixels must remain unchanged. "
-            + "Return a full-size edited image, not a crop."
-        )
-
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-        payload = {
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [
-                        {"text": instruction},
-                        _file_part(image_path),
-                        mask_part,
-                    ],
-                }
-            ],
-            "generationConfig": {
-                "temperature": 0.1,
-            },
-        }
-
-        r = requests.post(url, params={"key": key}, json=payload, timeout=180)
-        if r.status_code != 200:
-            err_text = r.text[:800]
-            try:
-                err = r.json().get("error", {})
-                msg = str(err.get("message", "") or err_text)
-                code = int(err.get("code", r.status_code) or r.status_code)
-            except Exception:
-                msg = err_text
-                code = r.status_code
-            if code == 404 and "gemini-2.5-flash-image-preview" in msg:
-                raise ValueError(
-                    "Gemini Inpaint Error: 404 / gemini-2.5-flash-image-preview 모델은 더 이상 사용할 수 없습니다. "
-                    "API 설정의 Gemini 인페인팅 모델을 gemini-2.5-flash-image로 바꿔주세요. "
-                    f"원문: {msg[:400]}"
-                )
-            raise ValueError(f"Gemini Inpaint Error: {code} / {msg[:500]}")
-
-        data = r.json()
-        parts = []
         try:
-            parts = data.get("candidates", [])[0].get("content", {}).get("parts", []) or []
-        except Exception:
-            parts = []
+            mask_arr = np.asarray(mask_img)
+            if mask_arr.ndim == 3:
+                mask_arr = cv2.cvtColor(mask_arr, cv2.COLOR_BGR2GRAY)
+            mask_arr = np.where(mask_arr > 0, 255, 0).astype(np.uint8)
+        except Exception as e:
+            raise ValueError(f"Gemini 인페인팅용 마스크 정규화 실패: {e}")
 
-        text_notes = []
-        for part in parts:
-            inline = part.get("inlineData") or part.get("inline_data") or {}
-            image_b64 = inline.get("data")
-            if image_b64:
-                return base64.b64decode(image_b64)
-            if part.get("text"):
-                text_notes.append(str(part.get("text") or ""))
+        if mask_arr.shape[:2] != base_img.shape[:2]:
+            try:
+                mask_arr = cv2.resize(mask_arr, (base_img.shape[1], base_img.shape[0]), interpolation=cv2.INTER_NEAREST)
+            except Exception as e:
+                raise ValueError(f"Gemini 인페인팅용 마스크 크기 보정 실패: {e}")
 
-        raise ValueError("Gemini 인페인팅 이미지 응답이 비어있습니다. " + " ".join(text_notes)[:300])
+        try:
+            resp = call_gemini_inpaint_api(key, model, base_img, mask_arr, prompt, timeout=180)
+            image_bytes = resp.get("image_bytes")
+            if not image_bytes:
+                raise ValueError("Gemini 인페인팅 이미지 응답이 비어있습니다.")
+            try:
+                print(
+                    "YSB_GEMINI_INPAINT_DONE "
+                    f"api={resp.get('api')} model={resp.get('model')} source={resp.get('source')} "
+                    f"attempts={resp.get('attempts')}"
+                )
+            except Exception:
+                pass
+            return image_bytes
+        except Exception as e:
+            raise ValueError(f"Gemini Inpaint Error: {e}")
 
     def _normalize_stable_model_name(self, model_name):
         model_name = str(model_name or "").strip()
@@ -4017,8 +4566,9 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
         if not model_name:
             raise ValueError("Stable Diffusion 인페인팅 모델명이 비어있습니다.")
         prompt = str(getattr(Config, "STABLE_INPAINT_PROMPT", "") or "remove text and restore the original background")
-        temp_mask = f"temp_mask_stable_{uuid.uuid4().hex}.png"
-        cv2.imwrite(temp_mask, mask_img)
+        temp_mask = os.path.join(tempfile.gettempdir(), f"temp_mask_stable_{uuid.uuid4().hex}.png")
+        if not imwrite_unicode(temp_mask, np.ascontiguousarray(mask_img)):
+            raise ValueError("Stable 인페인팅용 임시 마스크 파일을 저장하지 못했습니다.")
 
         def _run_with_input(extra_input):
             with open(image_path, "rb") as img_file, open(temp_mask, "rb") as mask_file:
@@ -4080,11 +4630,107 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
             pass
 
         def _write_temp_mask(mask_arr):
-            temp_mask_path = os.path.join(tempfile.gettempdir(), f"temp_mask_lama_{uuid.uuid4().hex}.png")
-            ok = cv2.imwrite(temp_mask_path, mask_arr)
-            if not ok or not os.path.exists(temp_mask_path):
-                raise ValueError("LaMa 임시 마스크 파일을 저장하지 못했습니다.")
-            return temp_mask_path
+            temp_dir = tempfile.gettempdir()
+            temp_mask_path = os.path.join(temp_dir, f"temp_mask_lama_{uuid.uuid4().hex}.png")
+            debug = {
+                "stage": "begin",
+                "temp_dir": str(temp_dir),
+                "temp_mask_path": str(temp_mask_path),
+                "temp_dir_exists": False,
+                "temp_dir_writable_probe": False,
+                "mask_shape": "",
+                "mask_dtype": "",
+                "mask_nonzero": -1,
+                "mask_min": "",
+                "mask_max": "",
+                "mask_contiguous": False,
+                "cv2_imwrite_ok": False,
+                "exists_after_imwrite": False,
+                "size_after_imwrite": -1,
+                "fallback_imencode_ok": False,
+                "exists_after_fallback": False,
+                "size_after_fallback": -1,
+                "error": "",
+            }
+            try:
+                debug["temp_dir_exists"] = bool(os.path.isdir(temp_dir))
+            except Exception as e:
+                debug["temp_dir_exists_error"] = repr(e)
+            probe_path = None
+            try:
+                probe_path = os.path.join(temp_dir, f"ysb_lama_temp_probe_{uuid.uuid4().hex}.tmp")
+                with open(probe_path, "wb") as f:
+                    f.write(b"ysb-temp-probe")
+                debug["temp_dir_writable_probe"] = bool(os.path.exists(probe_path))
+            except Exception as e:
+                debug["temp_dir_writable_error"] = repr(e)
+            finally:
+                if probe_path:
+                    try:
+                        if os.path.exists(probe_path):
+                            os.remove(probe_path)
+                    except Exception:
+                        pass
+            try:
+                debug["mask_shape"] = str(getattr(mask_arr, "shape", ""))
+                debug["mask_dtype"] = str(getattr(mask_arr, "dtype", ""))
+                debug["mask_contiguous"] = bool(getattr(mask_arr, "flags", {}).get("C_CONTIGUOUS", False)) if hasattr(getattr(mask_arr, "flags", None), "__getitem__") else bool(np.ascontiguousarray(mask_arr).flags["C_CONTIGUOUS"])
+                try:
+                    debug["mask_nonzero"] = int(cv2.countNonZero(mask_arr))
+                except Exception:
+                    debug["mask_nonzero"] = int(np.count_nonzero(mask_arr))
+                try:
+                    debug["mask_min"] = str(np.min(mask_arr))
+                    debug["mask_max"] = str(np.max(mask_arr))
+                except Exception:
+                    pass
+            except Exception as e:
+                debug["mask_info_error"] = repr(e)
+            try:
+                safe_mask = np.ascontiguousarray(mask_arr)
+                ok = cv2.imwrite(temp_mask_path, safe_mask)
+                debug["cv2_imwrite_ok"] = bool(ok)
+                debug["exists_after_imwrite"] = bool(os.path.exists(temp_mask_path))
+                if debug["exists_after_imwrite"]:
+                    try:
+                        debug["size_after_imwrite"] = int(os.path.getsize(temp_mask_path))
+                    except Exception:
+                        pass
+                if ok and debug["exists_after_imwrite"] and int(debug.get("size_after_imwrite") or 0) > 0:
+                    debug["stage"] = "imwrite_ok"
+                    self._last_lama_temp_mask_debug = debug
+                    print(f"YSB_LAMA_TEMP_MASK_DEBUG {debug}")
+                    return temp_mask_path
+            except Exception as e:
+                debug["cv2_imwrite_error"] = repr(e)
+
+            # OpenCV imwrite can fail on some Windows unicode/temp paths.  Use
+            # imencode + ndarray.tofile as a unicode-path-safe fallback and keep
+            # the detailed debug payload for the single_inpaint log.
+            try:
+                ok, buf = cv2.imencode(".png", np.ascontiguousarray(mask_arr))
+                debug["fallback_imencode_ok"] = bool(ok)
+                if ok:
+                    buf.tofile(temp_mask_path)
+                debug["exists_after_fallback"] = bool(os.path.exists(temp_mask_path))
+                if debug["exists_after_fallback"]:
+                    try:
+                        debug["size_after_fallback"] = int(os.path.getsize(temp_mask_path))
+                    except Exception:
+                        pass
+                if ok and debug["exists_after_fallback"] and int(debug.get("size_after_fallback") or 0) > 0:
+                    debug["stage"] = "fallback_tofile_ok"
+                    self._last_lama_temp_mask_debug = debug
+                    print(f"YSB_LAMA_TEMP_MASK_DEBUG {debug}")
+                    return temp_mask_path
+            except Exception as e:
+                debug["fallback_error"] = repr(e)
+
+            debug["stage"] = "failed"
+            debug["error"] = "LaMa temporary mask write failed"
+            self._last_lama_temp_mask_debug = debug
+            print(f"YSB_LAMA_TEMP_MASK_DEBUG {debug}")
+            raise ValueError("LaMa 임시 마스크 파일을 저장하지 못했습니다.")
 
         def _write_oom_resized_request(src_path, src_mask, *, max_side, max_pixels):
             img_arr = cv2.imdecode(np.fromfile(str(src_path), np.uint8), cv2.IMREAD_COLOR)
@@ -4234,7 +4880,7 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
     # ---------------------------------------------------------
     # [CORE] 출력
     # ---------------------------------------------------------
-    def export_project_result(self, data, img_path, bg_data, font_name, stroke_size, fixed_font_size, output_root=None, output_name_stem=None, clean_name_stem=None, output_image_format=None, clean_image_format=None, output_image_quality=95, clean_image_quality=95):
+    def export_project_result(self, data, img_path, bg_data, font_name, stroke_size, fixed_font_size, output_root=None, output_name_stem=None, clean_name_stem=None, output_image_format=None, clean_image_format=None, output_image_quality=95, clean_image_quality=95, preserve_output_folder_contents=False):
         """
         결과 출력:
         - project_dir/clean/Clean_XXXX.png: 인페인팅된 배경
@@ -4462,12 +5108,90 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
             except Exception:
                 pass
 
+        def _numeric_aliases(n):
+            try:
+                n = int(n)
+            except Exception:
+                return []
+            vals = [str(n), f"{n:02d}", f"{n:03d}", f"{n:04d}", f"{n:05d}"]
+            out = []
+            seen = set()
+            for v in vals:
+                if v not in seen:
+                    out.append(v)
+                    seen.add(v)
+            return out
+
+        def _remove_clean_alias_variants(folder, clean_source_stem, clean_stem):
+            aliases = [clean_source_stem, clean_stem]
+            for raw in (clean_source_stem, clean_stem):
+                try:
+                    m = re.search(r"(\d+)$", str(raw or ""))
+                    if m:
+                        n = int(m.group(1))
+                        prefix = str(raw or "")[: -len(m.group(1))]
+                        for stem in _numeric_aliases(n):
+                            aliases.append(stem)
+                            aliases.append(f"clean_{stem}")
+                            if prefix:
+                                aliases.append(prefix + stem)
+                                aliases.append(f"clean_{prefix + stem}")
+                except Exception:
+                    pass
+            seen = set()
+            for stem in aliases:
+                stem = str(stem or "").strip()
+                key = stem.casefold()
+                if not stem or key in seen:
+                    continue
+                seen.add(key)
+                _remove_same_stem_variants(folder, stem, "")
+
+        WEBP_MAX_SIDE_PX = 16383
+
+        def _webp_size_exceeds_limit(img):
+            try:
+                w, h = img.size
+                return int(w) > WEBP_MAX_SIDE_PX or int(h) > WEBP_MAX_SIDE_PX
+            except Exception:
+                return False
+
+        def _fallback_output_path(path, fmt):
+            fmt = _norm_fmt(fmt)
+            root, _ext = os.path.splitext(str(path or ""))
+            return f"{root}{_ext_for_fmt(fmt)}"
+
+        def _safe_log_export_fallback(original_path, fallback_path, size):
+            try:
+                self._emit_progress_log(
+                    "⚠️ WebP 최대 크기(16383px)를 초과해 PNG로 자동 출력합니다: "
+                    f"{os.path.basename(str(original_path or ''))} -> {os.path.basename(str(fallback_path or ''))} "
+                    f"({int(size[0])}x{int(size[1])})"
+                )
+            except Exception:
+                try:
+                    print(
+                        "[YSB_EXPORT_WEBP_FALLBACK]",
+                        str(original_path),
+                        "->",
+                        str(fallback_path),
+                        str(size),
+                    )
+                except Exception:
+                    pass
+
         def _save_pil_for_output(img, path, fmt, quality):
             fmt = _norm_fmt(fmt)
             q = _quality(quality)
             out = img
+            actual_path = path
+            actual_fmt = fmt
+            if fmt == "webp" and _webp_size_exceeds_limit(out):
+                actual_fmt = "png"
+                actual_path = _fallback_output_path(path, actual_fmt)
+                _safe_log_export_fallback(path, actual_path, getattr(out, "size", (0, 0)))
             params = {}
-            if fmt == "jpg":
+            if actual_fmt == "jpg":
                 if out.mode in ("RGBA", "LA") or (out.mode == "P" and "transparency" in getattr(out, "info", {})):
                     bg = Image.new("RGB", out.size, (255, 255, 255))
                     try:
@@ -4478,13 +5202,22 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
                 else:
                     out = out.convert("RGB")
                 params.update({"quality": q, "subsampling": 0, "optimize": True})
-            elif fmt == "webp":
+            elif actual_fmt == "webp":
                 if out.mode == "P":
                     out = out.convert("RGBA")
                 params.update({"quality": q, "method": 6})
             else:
                 params.update({"optimize": True})
-            out.save(path, _pil_fmt(fmt), **params)
+            try:
+                out.save(actual_path, _pil_fmt(actual_fmt), **params)
+            except ValueError as e:
+                if actual_fmt == "webp" and "WebP limit" in str(e):
+                    fallback_path = _fallback_output_path(path, "png")
+                    _safe_log_export_fallback(path, fallback_path, getattr(out, "size", (0, 0)))
+                    out.save(fallback_path, _pil_fmt("png"), optimize=True)
+                    return fallback_path, "png"
+                raise
+            return actual_path, actual_fmt
 
         output_fmt = _norm_fmt(output_image_format)
         clean_fmt = _norm_fmt(clean_image_format)
@@ -4493,8 +5226,8 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
 
         # img_path는 실제 존재하는 원본 이미지 경로로 쓴다.
         # Result 파일명은 사용자가 정한 출력 표시명(output_name_stem)을 따른다.
-        # Clean 파일명은 반드시 원본 페이지 파일명 stem을 따르되, 클린본임을 알 수 있게 clean_ 접두사를 붙인다.
-        # 예: 원본 001.png + 클린 형식 webp => clean/clean_001.webp
+        # Clean 파일명은 호출자가 넘긴 페이지 순번 stem을 따르며, clean_ 접두사를 붙인다.
+        # 예: 1페이지 + 클린 형식 webp => clean/clean_0001.webp
         result_stem = str(output_name_stem or "").strip()
         if not result_stem:
             result_stem = os.path.splitext(os.path.basename(img_path))[0]
@@ -4512,18 +5245,21 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
         result_img_path = os.path.join(result_dir, result_img_name)
 
         # 출력 형식을 바꿔 다시 출력하면 같은 stem의 기존 PNG/JPG/WebP는 중복 보관하지 않고
-        # 새 형식 파일 하나로 갈아탄다.
-        _remove_same_stem_variants(clean_dir, clean_stem, "")
-        _remove_same_stem_variants(result_dir, result_stem, "Result_")
-        # 직전 버전에서 잘못 생성된 접두사 없는 원본명 클린본과 Clean_출력명 클린본도 같이 정리한다.
-        _remove_same_stem_variants(clean_dir, clean_source_stem, "")
-        _remove_same_stem_variants(clean_dir, result_stem, "Clean_")
+        # 새 형식 파일 하나로 갈아탄다. 단, 일괄 출력에서 일부 페이지만 다시 뽑을 때는
+        # result/clean 폴더의 기존 산출물을 보존해야 하므로 삭제 정리를 하지 않고
+        # 현재 페이지의 정확한 출력 파일만 덮어쓴다.
+        if not bool(preserve_output_folder_contents):
+            _remove_clean_alias_variants(clean_dir, clean_source_stem, clean_stem)
+            _remove_same_stem_variants(result_dir, result_stem, "Result_")
+            # 직전 버전에서 잘못 생성된 Clean_출력명 클린본도 같이 정리한다.
+            _remove_same_stem_variants(clean_dir, result_stem, "Clean_")
 
         bg_img = _load_pil_image(bg_data)
         if bg_img is None:
             bg_img = _load_pil_image(img_path)
         if bg_img is not None:
-            _save_pil_for_output(bg_img, clean_img_path, clean_fmt, clean_quality)
+            clean_img_path, clean_fmt = _save_pil_for_output(bg_img, clean_img_path, clean_fmt, clean_quality)
+            clean_img_name = os.path.basename(clean_img_path)
 
         def _font_candidates_for_js(name):
             raw = str(name or '').strip()
@@ -4787,10 +5523,10 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
                 stroke_w = int(d.get('stroke', 0) or 0)
                 fill = _hex_to_rgb(d.get('textColor'), (0, 0, 0))
                 stroke_fill = _hex_to_rgb(d.get('strokeColor'), (255, 255, 255))
-                line_spacing_pct = max(50, min(300, int(d.get('lineSpacing', 100) or 100)))
+                line_spacing_pct = clamp_text_line_spacing(d.get('lineSpacing', 100), 100)
                 letter_spacing = int(d.get('letterSpacing', 0) or 0)
-                char_w_pct = max(10, min(300, int(d.get('charWidth', 100) or 100)))
-                char_h_pct = max(10, min(300, int(d.get('charHeight', 100) or 100)))
+                char_w_pct = clamp_text_char_scale(d.get('charWidth', 100), 100)
+                char_h_pct = clamp_text_char_scale(d.get('charHeight', 100), 100)
                 bold = bool(d.get('bold', False))
                 strike = bool(d.get('strike', False))
                 italic = bool(d.get('italic', False))
@@ -4805,7 +5541,7 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
                     base_line_h = max(1, bbox[3] - bbox[1])
                     ascent = int(base_line_h * 0.8)
 
-                line_h = max(1, int(base_line_h * (line_spacing_pct / 100.0)))
+                line_h = max(1, abs(text_line_height_from_percent(base_line_h, line_spacing_pct)))
                 widths = [_measure_line(tmp_draw_probe, line, font, stroke_w, letter_spacing) for line in lines]
                 raw_w = max(widths or [1]) + stroke_w * 4 + 8
                 raw_h = line_h * max(1, len(lines)) + stroke_w * 4 + 8
@@ -4883,7 +5619,8 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
                 result_img.alpha_composite(layer, (int(round(tx)), int(round(ty))))
                 result_img = result_img.convert("RGB")
 
-            _save_pil_for_output(result_img, result_img_path, output_fmt, output_quality)
+            result_img_path, output_fmt = _save_pil_for_output(result_img, result_img_path, output_fmt, output_quality)
+            result_img_name = os.path.basename(result_img_path)
 
 
         json_str = json.dumps(layers_list, ensure_ascii=False)

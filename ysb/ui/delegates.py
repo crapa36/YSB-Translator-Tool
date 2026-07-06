@@ -113,12 +113,50 @@ class MultilineDelegate(QStyledItemDelegate):
         pressed = self._event_to_keysequence(event)
         return pressed.matches(seq) == QKeySequence.SequenceMatch.ExactMatch
 
+    def _is_select_all_shortcut(self, event):
+        try:
+            if event.matches(QKeySequence.StandardKey.SelectAll):
+                return True
+        except Exception:
+            pass
+        try:
+            return (
+                event.key() == Qt.Key.Key_A
+                and bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+                and not bool(event.modifiers() & (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier))
+            )
+        except Exception:
+            return False
+
+    def _select_all_editor_text(self, editor):
+        try:
+            cursor = editor.textCursor()
+            cursor.select(QTextCursor.SelectionType.Document)
+            editor.setTextCursor(cursor)
+            return True
+        except Exception:
+            try:
+                editor.selectAll()
+                return True
+            except Exception:
+                return False
+
     def eventFilter(self, editor, event):
         if event.type() in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
             if self._is_alt_modifier_guard_event(event):
                 event.accept()
                 return True
+        if event.type() == QEvent.Type.ShortcutOverride:
+            # QTextEdit inside the right text table must own Ctrl+A.
+            # Otherwise the parent table/window can steal it as a row/object shortcut.
+            if self._is_select_all_shortcut(event):
+                event.accept()
+                return True
         if event.type() == QEvent.Type.KeyPress:
+            if self._is_select_all_shortcut(event):
+                self._select_all_editor_text(editor)
+                event.accept()
+                return True
             if self._handle_symbol_shortcut(editor, event):
                 return True
             if self._linebreak_matches(event):

@@ -512,35 +512,61 @@ class UndoCommandApplyMixin:
             if page_idx == int(getattr(self, "idx", 0) or 0):
                 component_type = str(getattr(command, "component_type", "") or "")
                 content_like = component_type in ("text_content", "text_direct_edit") or "translated_text" in changed_fields
+                structural_fields = {
+                    'rasterized_text', 'raster_png', 'raster_w', 'raster_h',
+                    'text_anchor_mode', 'manual_text_rect',
+                }
+                structural_text_rebuild = bool(component_type in ("text_object_conversion", "text_raster_object"))
+                try:
+                    structural_text_rebuild = structural_text_rebuild or bool(set(changed_fields) & structural_fields)
+                    structural_text_rebuild = structural_text_rebuild or bool((getattr(command, "meta", {}) or {}).get("structural_text_rebuild"))
+                except Exception:
+                    pass
                 refreshed = False
-                # 직접 텍스트 수정 Undo/Redo는 2.4.1의 안정 경로처럼 기존 TypesettingItem을 살려두고
-                # 해당 item만 갱신한다.  여기서 force_rebuild_final_text_layer_from_data()를 타면
-                # mode_chg(4)로 scene item을 갈아끼우게 되어 Qt/C++ access violation 위험이 커진다.
-                scene_items = self._scene_text_items_by_id()
-                live_items = []
-                for sid in changed_ids:
-                    item = scene_items.get(str(sid))
-                    data_item = by_id.get(str(sid))
-                    if item is not None and isinstance(data_item, dict):
-                        try:
-                            item.data = data_item
-                        except Exception:
-                            pass
-                        try:
-                            item.setVisible(True)
-                        except Exception:
-                            pass
-                        live_items.append(item)
-                if live_items:
+                if structural_text_rebuild:
+                    # Text<->rasterized object conversion changes the concrete
+                    # TypesettingItem subclass state.  Reusing the old live item leaves
+                    # _is_rasterized_text/path/shape stale, so rebuild the text layer.
                     try:
-                        refreshed = bool(self.refresh_text_items_live_in_place(live_items, keep_selection=True))
+                        self._remove_inline_text_editor_from_scene()
                     except Exception:
-                        refreshed = False
-                if not refreshed:
+                        pass
                     try:
-                        refreshed = bool(self.rebuild_current_page_text_layer_from_data(changed_ids, clear_selection=False))
+                        refreshed = bool(self.force_rebuild_final_text_layer_from_data(changed_ids))
                     except Exception:
-                        refreshed = False
+                        try:
+                            refreshed = bool(self.rebuild_current_page_text_layer_from_data(changed_ids, clear_selection=False))
+                        except Exception:
+                            refreshed = False
+                else:
+                    # 직접 텍스트 수정 Undo/Redo는 2.4.1의 안정 경로처럼 기존 TypesettingItem을 살려두고
+                    # 해당 item만 갱신한다.  여기서 force_rebuild_final_text_layer_from_data()를 타면
+                    # mode_chg(4)로 scene item을 갈아끼우게 되어 Qt/C++ access violation 위험이 커진다.
+                    scene_items = self._scene_text_items_by_id()
+                    live_items = []
+                    for sid in changed_ids:
+                        item = scene_items.get(str(sid))
+                        data_item = by_id.get(str(sid))
+                        if item is not None and isinstance(data_item, dict):
+                            try:
+                                item.data = data_item
+                            except Exception:
+                                pass
+                            try:
+                                item.setVisible(True)
+                            except Exception:
+                                pass
+                            live_items.append(item)
+                    if live_items:
+                        try:
+                            refreshed = bool(self.refresh_text_items_live_in_place(live_items, keep_selection=True))
+                        except Exception:
+                            refreshed = False
+                    if not refreshed:
+                        try:
+                            refreshed = bool(self.rebuild_current_page_text_layer_from_data(changed_ids, clear_selection=False))
+                        except Exception:
+                            refreshed = False
                 # text_style/text_content Command는 item 수/ID가 바뀌는 구조 변경이 아니다.
                 # 실패 시에도 전체 mode_chg rebuild 대신 짧은 지연 부분 refresh만 예약한다.
                 if not refreshed:
@@ -908,7 +934,7 @@ class UndoCommandApplyMixin:
         except Exception:
             mask = mask_state
         try:
-            color = QColor(0, 0, 255, 150) if mode_i == 3 else QColor(168, 93, 102, 140)
+            color = self.current_mask_overlay_color(mode_i) if hasattr(self, "current_mask_overlay_color") else (QColor(0, 0, 255, 220) if mode_i == 3 else QColor(168, 93, 102, 220))
             if getattr(view, "user_mask_item", None) is None:
                 if hasattr(view, "set_mask_overlay_layer"):
                     view.set_mask_overlay_layer(mask, color)
@@ -917,7 +943,7 @@ class UndoCommandApplyMixin:
         except Exception:
             try:
                 if hasattr(view, "set_mask_overlay_layer"):
-                    view.set_mask_overlay_layer(mask, QColor(0, 0, 255, 150) if mode_i == 3 else QColor(168, 93, 102, 140))
+                    view.set_mask_overlay_layer(mask, self.current_mask_overlay_color(mode_i) if hasattr(self, "current_mask_overlay_color") else (QColor(0, 0, 255, 220) if mode_i == 3 else QColor(168, 93, 102, 220)))
             except Exception:
                 return False
         try:
@@ -1117,7 +1143,7 @@ class UndoCommandApplyMixin:
                     except Exception:
                         pass
                     try:
-                        color = QColor(0, 0, 255, 100) if mode == 3 else QColor(255, 0, 0, 100)
+                        color = self.current_mask_overlay_color(mode) if hasattr(self, "current_mask_overlay_color") else (QColor(0, 0, 255, 220) if mode == 3 else QColor(168, 93, 102, 220))
                         if hasattr(view, "set_mask_overlay_layer"):
                             view.set_mask_overlay_layer(self.get_active_mask(curr, mode), color)
                     except Exception:
@@ -1290,7 +1316,7 @@ class UndoCommandApplyMixin:
         component_type = str(getattr(command, "component_type", "") or "")
         if component_type in ("text_item_lifecycle", "text_item_add", "text_item_remove"):
             return self._apply_text_item_lifecycle_command(command, redo=bool(redo))
-        if component_type in ("text_style", "text_item_style", "text_content", "text_direct_edit"):
+        if component_type in ("text_style", "text_item_style", "text_content", "text_direct_edit", "text_object_conversion", "text_raster_object"):
             return self._apply_text_style_command(command, redo=bool(redo))
         if component_type in ("text_geometry", "text_position", "text_move", "text_rect"):
             return self._apply_text_geometry_command(command, redo=bool(redo))

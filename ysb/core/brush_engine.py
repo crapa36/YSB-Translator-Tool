@@ -1,11 +1,11 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from PyQt6.QtWidgets import QGraphicsPathItem, QGraphicsEllipseItem
 from PyQt6.QtGui import QPainter, QPen, QBrush, QColor, QPixmap, QPainterPath
-from PyQt6.QtCore import Qt, QRectF, QPointF
+from PyQt6.QtCore import Qt, QRect, QRectF, QPointF
 
 
 class PageBrushEngine:
@@ -34,9 +34,16 @@ class PageBrushEngine:
         self.stroke_patches: List[Dict[str, Any]] = []
         # Backward compatibility name for older erase path code.
         self.erase_patches: List[Dict[str, Any]] = self.stroke_patches
-        # Draw mode live-render buffer.  A stroke is recomposed from this base
-        # pixmap on every mouse move so semi-transparent brushes do not create
-        # bead-like overlaps at every segment endpoint.
+        # BRUSH_TILE_LIGHT_PATH:
+        # 브러시 Undo/실시간 표시용 원본은 전체 QPixmap을 복사하지 않는다.
+        # 스트로크가 처음 건드린 tile만 before snapshot으로 보관하고, commit 때
+        # 같은 tile들의 after snapshot을 만들어 하나의 Undo record로 닫는다.
+        self.tile_size = 512
+        self.stroke_tiles: Dict[Tuple[int, int], Dict[str, Any]] = {}
+        self.stroke_tile_order: List[Tuple[int, int]] = []
+        self.stroke_segment_count = 0
+        # Legacy compatibility slot.  Older code may still look for this attr,
+        # but the tile path deliberately avoids full-layer copies.
         self.draw_base_pixmap: Optional[QPixmap] = None
 
     def clear_preview(self) -> None:
@@ -62,6 +69,9 @@ class PageBrushEngine:
         self.dirty_scene_rect = None
         self.stroke_patches = []
         self.erase_patches = self.stroke_patches
+        self.stroke_tiles = {}
+        self.stroke_tile_order = []
+        self.stroke_segment_count = 0
         self.draw_base_pixmap = None
 
     def _view_update_scene_rect(self, rect: QRectF, *, force: bool = False) -> None:
@@ -82,6 +92,95 @@ class PageBrushEngine:
         if rect is None or rect.isNull():
             return
         self.dirty_scene_rect = QRectF(rect) if self.dirty_scene_rect is None else self.dirty_scene_rect.united(rect)
+
+    def _note_brush_activity(self, ms: int = 900) -> None:
+        """Keep non-brush background/UI work away from the brush hot path."""
+        try:
+            main = getattr(self.viewer, "main", None)
+            if main is not None and hasattr(main, "note_ui_interaction_activity"):
+                main.note_ui_interaction_activity(int(ms or 900))
+        except Exception:
+            pass
+        try:
+            main = getattr(self.viewer, "main", None)
+            if main is not None:
+                import time
+                until = time.monotonic() + max(0.08, min(float(ms or 900) / 1000.0, 3.0))
+                for attr in ("_source_compare_sync_block_until", "_heavy_preview_block_until"):
+                    setattr(main, attr, max(float(getattr(main, attr, 0.0) or 0.0), until))
+        except Exception:
+            pass
+
+    def _tile_size_px(self) -> int:
+        try:
+            main = getattr(self.viewer, "main", None)
+            opts = getattr(main, "app_options", {}) if main is not None else {}
+            value = int((opts or {}).get("brush_tile_size", self.tile_size) or self.tile_size)
+        except Exception:
+            value = int(self.tile_size or 512)
+        return max(128, min(value, 1024))
+
+    def _iter_tile_rects(self, qrect: QRect, pix_rect: QRect):
+        if qrect is None or qrect.isEmpty():
+            return
+        try:
+            qrect = QRect(qrect).intersected(pix_rect)
+        except Exception:
+            return
+        if qrect.isEmpty():
+            return
+        tile = self._tile_size_px()
+        left = max(0, int(qrect.left()) // tile)
+        right = max(0, int(qrect.right()) // tile)
+        top = max(0, int(qrect.top()) // tile)
+        bottom = max(0, int(qrect.bottom()) // tile)
+        for ty in range(top, bottom + 1):
+            for tx in range(left, right + 1):
+                r = QRect(tx * tile, ty * tile, tile, tile).intersected(pix_rect)
+                if not r.isEmpty():
+                    yield (tx, ty), r
+
+    def _ensure_tile_snapshots(self, pix: QPixmap, qrect: QRect) -> None:
+        if pix is None or pix.isNull() or qrect is None or qrect.isEmpty():
+            return
+        pix_rect = pix.rect()
+        for key, rect in self._iter_tile_rects(qrect, pix_rect) or []:
+            if key in self.stroke_tiles:
+                continue
+            self.stroke_tiles[key] = {"rect": QRect(rect), "before": pix.copy(rect)}
+            self.stroke_tile_order.append(key)
+
+    def _tile_patches_from_target(self, pix: QPixmap) -> List[Dict[str, Any]]:
+        patches: List[Dict[str, Any]] = []
+        if pix is None or pix.isNull():
+            return patches
+        pix_rect = pix.rect()
+        seen = set()
+        for key in list(self.stroke_tile_order):
+            if key in seen:
+                continue
+            seen.add(key)
+            info = self.stroke_tiles.get(key) or {}
+            before = info.get("before")
+            rect = info.get("rect")
+            if before is None or rect is None:
+                continue
+            try:
+                rect = QRect(rect).intersected(pix_rect)
+            except Exception:
+                continue
+            if rect.isEmpty():
+                continue
+            patches.append({"rect": rect, "before": before, "after": pix.copy(rect)})
+        return patches
+
+    def _audit_tile_event(self, event: str, **kwargs) -> None:
+        try:
+            main = getattr(self.viewer, "main", None)
+            if main is not None and hasattr(main, "audit_boundary_event"):
+                main.audit_boundary_event(event, throttle_ms=250, **kwargs)
+        except Exception:
+            pass
 
     def _segment_rect(self, a: QPointF, b: QPointF) -> QRectF:
         pad = max(2, int(self.brush_size or 1) + 6)
@@ -140,7 +239,8 @@ class PageBrushEngine:
         if qrect is None:
             return False
         try:
-            before = pix.copy(qrect)
+            self._note_brush_activity(700)
+            self._ensure_tile_snapshots(pix, qrect)
             a_local = self._map_point_to_target(a_scene)
             b_local = self._map_point_to_target(b_scene)
             p = QPainter(pix)
@@ -154,57 +254,73 @@ class PageBrushEngine:
             p.setPen(pen)
             p.drawLine(a_local, b_local)
             p.end()
-            after = pix.copy(qrect)
             self.target_item.setPixmap(pix)
             self.target_item.update(QRectF(qrect))
-            self.stroke_patches.append({"rect": qrect, "before": before, "after": after})
+            self.stroke_segment_count += 1
             self._add_dirty(scene_rect)
             self._view_update_scene_rect(scene_rect, force=force)
             return True
         except Exception:
             return False
 
-    def _render_draw_live_to_target(self, *, force: bool = False) -> bool:
-        """Render the current draw stroke directly onto the target pixmap.
+    def _render_draw_live_to_target(self, scene_rect: Optional[QRectF] = None, *, force: bool = False) -> bool:
+        """Render only the tiles touched by the latest draw segment.
 
-        This is deliberately different from the old per-segment direct draw.
-        We restore the dirty stroke area from the pixmap captured at stroke
-        start, then draw the whole current path once.  That gives immediate
-        feedback without semi-transparent endpoints accumulating into dotted
-        beads.
+        The previous live draw path copied the whole layer at stroke start and
+        rewound an ever-growing dirty union on every mouse move.  That preserved
+        alpha blending quality, but long strokes made the brush hot path grow
+        heavier every frame.  This tile path snapshots only touched tiles,
+        restores only the currently touched tile(s), and redraws the current
+        stroke path clipped to those tile(s).
         """
         if self.target_item is None or self.preview_path is None:
-            return False
-        base = self.draw_base_pixmap
-        if base is None or base.isNull():
             return False
         pix = self.target_item.pixmap()
         if pix.isNull():
             return False
-        dirty = self.dirty_scene_rect
-        if dirty is None or dirty.isNull():
-            dirty = self.preview_path.boundingRect().adjusted(-self.brush_size - 4, -self.brush_size - 4, self.brush_size + 4, self.brush_size + 4)
-        pix_for_rect, qrect = self._target_rect(dirty)
+        if scene_rect is None or scene_rect.isNull():
+            scene_rect = self.preview_path.boundingRect().adjusted(
+                -self.brush_size - 4,
+                -self.brush_size - 4,
+                self.brush_size + 4,
+                self.brush_size + 4,
+            )
+        pix_for_rect, qrect = self._target_rect(scene_rect)
         if qrect is None:
             return False
         try:
+            self._note_brush_activity(700)
+            self._ensure_tile_snapshots(pix, qrect)
+            local_path = self._map_path_to_target(self.preview_path)
+            pen = QPen(self.color, self.brush_size, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
             p = QPainter(pix)
-            # Rewind only the stroke's dirty rectangle to the pre-stroke base.
-            p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
-            p.drawPixmap(qrect.topLeft(), base.copy(qrect))
-            p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
             p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            p.setClipRect(qrect.adjusted(-2, -2, 2, 2))
-            p.setPen(QPen(self.color, self.brush_size, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-            p.drawPath(self._map_path_to_target(self.preview_path))
+            dirty_local = QRectF()
+            for key, tile_rect in self._iter_tile_rects(qrect, pix.rect()) or []:
+                info = self.stroke_tiles.get(key) or {}
+                before = info.get("before")
+                if before is None:
+                    continue
+                p.setClipping(False)
+                p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+                p.drawPixmap(tile_rect.topLeft(), before)
+                p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+                p.setClipRect(tile_rect.adjusted(-2, -2, 2, 2))
+                p.setPen(pen)
+                p.drawPath(local_path)
+                dirty_local = QRectF(tile_rect) if dirty_local.isNull() else dirty_local.united(QRectF(tile_rect))
+            p.setClipping(False)
             p.end()
             self.target_item.setPixmap(pix)
-            self.target_item.update(QRectF(qrect))
-            try:
-                scene_qrect = self.target_item.mapRectToScene(QRectF(qrect))
-            except Exception:
-                scene_qrect = QRectF(qrect)
-            self._view_update_scene_rect(scene_qrect, force=force)
+            if not dirty_local.isNull():
+                self.target_item.update(dirty_local)
+                try:
+                    scene_dirty = self.target_item.mapRectToScene(dirty_local)
+                except Exception:
+                    scene_dirty = dirty_local
+            else:
+                scene_dirty = scene_rect
+            self._view_update_scene_rect(scene_dirty, force=force)
             return True
         except Exception:
             try:
@@ -225,19 +341,18 @@ class PageBrushEngine:
         self.last_pos = QPointF(start_pos)
         self.active = True
 
+        self._note_brush_activity(1000)
         if self.mode == "draw":
-            # Draw must be visible immediately, but direct per-segment painting
-            # makes semi-transparent brushes look like a chain of dots. Capture
-            # the pre-stroke layer once, then live-render the whole stroke from
-            # that base on each move.
+            # Draw is visible immediately, but the before state is captured only
+            # for tiles touched by the stroke.  No full-layer pixmap copy here.
             try:
-                self.draw_base_pixmap = target_item.pixmap().copy()
+                self.draw_base_pixmap = None
                 self.preview_path = QPainterPath(self.last_pos)
                 self.preview_path.lineTo(QPointF(self.last_pos.x() + 0.15, self.last_pos.y()))
                 self.paths = [self.preview_path]
                 r = self._segment_rect(self.last_pos, self.last_pos)
                 self._add_dirty(r)
-                self._render_draw_live_to_target(force=True)
+                self._render_draw_live_to_target(r, force=True)
             except Exception:
                 pass
         elif self.mode == "erase":
@@ -263,7 +378,9 @@ class PageBrushEngine:
                 self.preview_path.lineTo(now)
                 r = self._segment_rect(last, now)
                 self._add_dirty(r)
-                self._render_draw_live_to_target(force=True)
+                # Mouse-move 중 viewport.repaint()까지 강제하면 브러시가 한 박자씩 막힌다.
+                # 실시간 획은 update()로만 예약하고, 첫 점/명시 force 상황에서만 repaint를 허용한다.
+                self._render_draw_live_to_target(r, force=False)
             except Exception:
                 pass
         else:
@@ -302,31 +419,35 @@ class PageBrushEngine:
         kind = self._kind()
         record = None
         try:
-            if mode == "draw":
-                pix = target.pixmap()
-                if pix.isNull():
-                    return False
-                dirty = self.dirty_scene_rect
-                if dirty is None:
-                    dirty = self._segment_rect(QPointF(self.last_pos or QPointF(0, 0)), QPointF(self.last_pos or QPointF(0, 0)))
-                pix, qrect = self._target_rect(dirty)
-                if qrect is None:
-                    return False
-                base = self.draw_base_pixmap
-                before = base.copy(qrect) if base is not None and not base.isNull() else pix.copy(qrect)
-                # The live-render path has already drawn the final stroke onto
-                # the target pixmap. Commit only records the patch; it does not
-                # paint a second time.
-                after = pix.copy(qrect)
-                record = {"_brush_record": True, "target_item": target, "kind": kind, "patches": [{"rect": qrect, "before": before, "after": after}]}
+            pix = target.pixmap()
+            if pix.isNull():
+                return False
+            patches = self._tile_patches_from_target(pix)
+            if not patches and self.stroke_patches:
+                # Compatibility fallback for records created by older direct patch paths.
+                patches = list(self.stroke_patches)
+            if patches:
+                record = {"_brush_record": True, "target_item": target, "kind": kind, "patches": patches}
                 try:
-                    scene_qrect = target.mapRectToScene(QRectF(qrect))
+                    dirty = None
+                    for patch in patches:
+                        r = QRectF(patch.get("rect"))
+                        dirty = r if dirty is None else dirty.united(r)
+                    if dirty is not None:
+                        try:
+                            scene_qrect = target.mapRectToScene(dirty)
+                        except Exception:
+                            scene_qrect = dirty
+                        self._view_update_scene_rect(scene_qrect, force=False)
                 except Exception:
-                    scene_qrect = QRectF(qrect)
-                self._view_update_scene_rect(scene_qrect, force=False)
-            else:
-                if self.stroke_patches:
-                    record = {"_brush_record": True, "target_item": target, "kind": kind, "patches": list(self.stroke_patches)}
+                    pass
+                self._audit_tile_event(
+                    "BRUSH_TILE_STROKE_COMMIT",
+                    mode=str(mode or ""),
+                    kind=str(kind or ""),
+                    tile_count=len(patches),
+                    segment_count=int(getattr(self, "stroke_segment_count", 0) or 0),
+                )
             if record is not None:
                 reason = "최종 페인팅" if kind == "final_paint" else "마스크 브러시"
                 try:
@@ -350,7 +471,13 @@ class PageBrushEngine:
                             }, page_idx=int(getattr(self.viewer.main, "idx", 0) or 0))
                 except Exception:
                     pass
-                self._sync_cached_images()
+                # Do not force a full pixmap.toImage() copy on mouse release.
+                # The delayed layer commit/save path reads the current layer item
+                # later; keeping release O(tile_count) prevents the "손 뗄 때" spike.
+                try:
+                    setattr(self.viewer, "_paint_layer_cache_dirty", True)
+                except Exception:
+                    pass
                 return True
             return False
         finally:
@@ -390,7 +517,14 @@ class PageBrushEngine:
                     scene_dirty = dirty
                 self._view_update_scene_rect(scene_dirty, force=False)
             self.target_item = target
-            self._sync_cached_images()
+            try:
+                main = getattr(self.viewer, "main", None)
+                if bool(getattr(main, "_paint_history_apply_active", False)):
+                    setattr(self.viewer, "_paint_layer_cache_dirty", True)
+                else:
+                    self._sync_cached_images()
+            except Exception:
+                pass
             return str(record.get("kind") or self._kind() or "paint")
         except Exception:
             return None

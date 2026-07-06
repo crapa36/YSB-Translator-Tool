@@ -1,6 +1,9 @@
 import gc
+import time
 from ysb.ui.main_window_support import *
-from ysb.utils.runtime_logger import append_log, memory_text, numpy_shape_text
+from ysb.ui.gemini_delayed_translation import GeminiDelayedTranslationController, GeminiDelayedTranslationDialog
+from ysb.utils.runtime_logger import append_log, make_log_path, memory_text, numpy_shape_text
+from ysb.core.inpaint_grouping import build_inpaint_mask_groups
 
 
 class MainWindowOperationsMixin:
@@ -14,12 +17,19 @@ class MainWindowOperationsMixin:
         ApiSettingsStore.save(self.api_settings)
         apply_settings_to_config(self.api_settings)
         self.sync_translation_option_cache_to_config()
+        def _chunk_setting(attr_name):
+            try:
+                return max(0, min(int(getattr(self.api_settings, attr_name, 0) or 0), 100))
+            except Exception:
+                return 0
         self.trans_chunk_sizes = {
-            "openai": int(getattr(self.api_settings, "openai_chunk_size", 20) or 20),
-            "deepseek": int(getattr(self.api_settings, "deepseek_chunk_size", 8) or 8),
-            "google": int(getattr(self.api_settings, "google_translate_chunk_size", 50) or 50),
-            "gemini": int(getattr(self.api_settings, "gemini_chunk_size", 10) or 10),
-            "custom": int(getattr(self.api_settings, "custom_translation_chunk_size", 20) or 20),
+            "openai": _chunk_setting("openai_chunk_size"),
+            "deepseek": _chunk_setting("deepseek_chunk_size"),
+            "google": _chunk_setting("google_translate_chunk_size"),
+            "gemini": _chunk_setting("gemini_chunk_size"),
+            "gemini_deferred": _chunk_setting("gemini_delayed_chunk_size"),
+            "custom": _chunk_setting("custom_translation_chunk_size"),
+            "lm_studio": _chunk_setting("lm_studio_chunk_size"),
         }
         if hasattr(self, "cb_trans_provider"):
             self.cb_trans_provider.blockSignals(True)
@@ -32,6 +42,70 @@ class MainWindowOperationsMixin:
             self.refresh_ocr_language_combo(save=False)
         self.restart_engine(show_error=True)
         self.log("🔑 API settings cache saved" if self.ui_language == LANG_EN else "🔑 API 설정 캐시 저장 완료")
+
+
+    def run_local_cuda_preflight_or_alert(self, task, *, batch=False):
+        """Do not block local OCR/inpaint jobs with a modal preflight.
+
+        Local CUDA/runtime checks must run inside the task progress dialog so the
+        UI never looks frozen before the progress window appears.  This method is
+        kept for older call sites but intentionally returns True.
+        """
+        try:
+            self.log("ℹ️ CUDA/로컬 런타임 확인은 작업 진행창 안에서 수행합니다.")
+        except Exception:
+            pass
+        return True
+
+
+
+    def show_worker_failure_alert(self, title, message):
+        """Show a final error alert for abnormal worker completion.
+
+        Success never opens a modal, but failed/abnormal analyze/inpaint jobs must
+        clearly tell the user what went wrong after the progress window ends.
+        """
+        msg = str(message or "알 수 없는 오류")
+        try:
+            self.log(f"❌ {title}: {msg}")
+        except Exception:
+            pass
+        try:
+            self.update_task_progress_overlay(current=100, total=100, detail=f"오류: {msg}")
+        except Exception:
+            pass
+        try:
+            QMessageBox.critical(self, self.tr_ui(title), self.tr_msg(msg))
+        except Exception:
+            pass
+
+    def on_analysis_worker_failed(self, page_idx, message, preserve_text_mask=False):
+        task_name = "텍스트 마스크 재분석" if preserve_text_mask else "분석"
+        try:
+            if hasattr(self, 'audit_boundary_event'):
+                self.audit_boundary_event("ANALYSIS_WORKER_FAILED", target_page=page_idx, message=str(message or ''))
+        except Exception:
+            pass
+        self._active_task_worker = None
+        try:
+            self.end_busy_state(task_name)
+        except Exception:
+            pass
+        self.show_worker_failure_alert(f"{task_name} 오류", message)
+
+    def on_inpaint_worker_failed(self, page_idx, message):
+        try:
+            if hasattr(self, 'audit_boundary_event'):
+                self.audit_boundary_event("INPAINT_WORKER_FAILED", target_page=page_idx, message=str(message or ''))
+        except Exception:
+            pass
+        self._active_task_worker = None
+        try:
+            self.end_busy_state("인페인팅")
+        except Exception:
+            pass
+        self.show_worker_failure_alert("인페인팅 오류", message)
+
 
     def open_translation_prompt_dialog(self):
         old_prompt = str(self.app_options.get(TRANSLATION_PROMPT_KEY, "") or "")
@@ -353,15 +427,16 @@ class MainWindowOperationsMixin:
         return False
 
     def _finish_magic_wand_runtime_command(self, *, reason="요술봉 선택"):
-        before = getattr(self, "_pending_magic_wand_runtime_before", None)
+        """요술봉 미리보기 단계는 전용 history로만 관리한다.
+
+        Ctrl+Z가 클릭/확장/확정 단계를 하나씩 되돌려야 하므로,
+        canonical timeline에는 동일 내용을 중복으로 넣지 않는다.
+        그렇지 않으면 magic history를 다 비운 뒤에도 timeline에 남은
+        요술봉 command가 다시 튀어나와 전체 동작이 한꺼번에 되감기는
+        체감이 생길 수 있다.
+        """
         self._pending_magic_wand_runtime_before = None
-        if not isinstance(before, dict):
-            return False
-        try:
-            after = self._copy_magic_state_light()
-        except Exception:
-            return False
-        return self.push_magic_wand_runtime_command(before, after, reason=reason)
+        return False
 
     def _apply_magic_wand_runtime_command(self, command, *, redo=False):
         changes = list(getattr(command, "changes", []) or [])
@@ -480,7 +555,7 @@ class MainWindowOperationsMixin:
             mode = int(self.cb_mode.currentIndex()) if hasattr(self, "cb_mode") else 2
         try:
             applied = mask.copy() if isinstance(mask, np.ndarray) else mask
-            color = QColor(0, 0, 255, 150) if mode == 3 else QColor(168, 93, 102, 140)
+            color = self.current_mask_overlay_color(mode)
             self.view.set_user_mask_np(applied, color)
             curr = self.data.get(self.idx)
             if isinstance(curr, dict):
@@ -520,6 +595,23 @@ class MainWindowOperationsMixin:
                     self.view.clear_magic_wand_preview()
             except Exception:
                 pass
+
+    def push_full_mask_layer_undo(self, before_pixmap, after_pixmap, *, mode=None, reason="마스크 수정"):
+        try:
+            if not hasattr(self, "view") or self.view is None or getattr(self.view, "user_mask_item", None) is None:
+                return False
+            if before_pixmap is None or after_pixmap is None or before_pixmap.isNull() or after_pixmap.isNull():
+                return False
+            rect = QRect(0, 0, int(after_pixmap.width()), int(after_pixmap.height()))
+            record = {
+                "_brush_record": True,
+                "target_item": self.view.user_mask_item,
+                "kind": "mask",
+                "patches": [{"rect": rect, "before": before_pixmap.copy(), "after": after_pixmap.copy()}],
+            }
+            return bool(self.undo_push_paint_record(self.view, record, kind="mask", reason=str(reason or "마스크 수정"), mode=int(mode if mode is not None else self.current_mode_index_safe())))
+        except Exception:
+            return False
 
     def undo_magic_wand_selection(self):
         page_idx = int(getattr(self, "idx", 0) or 0)
@@ -685,83 +777,673 @@ class MainWindowOperationsMixin:
         except Exception:
             return None
 
+    def _normalize_area_selection_shape(self, shape):
+        shape = str(shape or "rect").strip().lower()
+        aliases = {
+            "rectangle": "rect", "사각형": "rect", "box": "rect",
+            "freehand": "free", "freeform": "free", "자유형": "free",
+            "poly": "polygon", "polygonal": "polygon", "다각형": "polygon", "폴리곤": "polygon",
+        }
+        shape = aliases.get(shape, shape)
+        return shape if shape in ("rect", "free", "polygon") else "rect"
+
+    def _area_selection_shape_label(self, shape):
+        shape = self._normalize_area_selection_shape(shape)
+        if shape == "polygon":
+            return self.tr_ui("폴리곤")
+        if shape == "free":
+            return self.tr_ui("자유형")
+        return self.tr_ui("사각형")
+
+    def _sync_area_selection_shape_buttons(self, names, shape, active_style):
+        shape = self._normalize_area_selection_shape(shape)
+        for btn_name, value in names:
+            btn = getattr(self, btn_name, None)
+            if btn is None:
+                continue
+            try:
+                btn.blockSignals(True)
+                btn.setChecked(shape == value)
+                btn.blockSignals(False)
+                if shape == value:
+                    btn.setStyleSheet(active_style)
+                else:
+                    btn.setStyleSheet("opacity:0.7;")
+            except Exception:
+                pass
+
     def set_mask_wrap_shape(self, shape, silent=False):
-        shape = "free" if str(shape) == "free" else "rect"
+        shape = self._normalize_area_selection_shape(shape)
         try:
             self.view.mask_wrap_shape = shape
             self.view.clear_mask_wrap_preview()
         except Exception:
             pass
-        for btn, active in ((getattr(self, "btn_mask_wrap_rect", None), shape == "rect"), (getattr(self, "btn_mask_wrap_free", None), shape == "free")):
-            if btn is None:
-                continue
-            try:
-                btn.blockSignals(True)
-                btn.setChecked(active)
-                btn.blockSignals(False)
-                if active:
-                    btn.setStyleSheet("font-weight:bold; background:#8A4A52; color:white;")
-                else:
-                    btn.setStyleSheet("opacity:0.7;")
-            except Exception:
-                pass
+        self._sync_area_selection_shape_buttons(
+            (("btn_mask_wrap_rect", "rect"), ("btn_mask_wrap_free", "free"), ("btn_mask_wrap_polygon", "polygon")),
+            shape,
+            "font-weight:bold; background:#8A4A52; color:white;",
+        )
         if not silent:
-            if shape == "rect":
-                self.log("🩹 마스크 랩핑 모드: 사각형")
-            else:
-                self.log("🩹 마스크 랩핑 모드: 자유형")
+            self.log("🩹 " + self.tr_ui("마스크 랩핑 모드") + f": {self._area_selection_shape_label(shape)}")
 
     def set_mask_cut_shape(self, shape, silent=False):
-        shape = "free" if str(shape) == "free" else "rect"
+        shape = self._normalize_area_selection_shape(shape)
         try:
             self.view.mask_cut_shape = shape
             self.view.clear_mask_cut_preview()
         except Exception:
             pass
-        for btn, active in ((getattr(self, "btn_mask_cut_rect", None), shape == "rect"), (getattr(self, "btn_mask_cut_free", None), shape == "free")):
-            if btn is None:
-                continue
+        self._sync_area_selection_shape_buttons(
+            (("btn_mask_cut_rect", "rect"), ("btn_mask_cut_free", "free"), ("btn_mask_cut_polygon", "polygon")),
+            shape,
+            "font-weight:bold; background:#c2410c; color:white;",
+        )
+        if not silent:
+            self.log("🔪 " + self.tr_ui("마스크 커팅 모드") + f": {self._area_selection_shape_label(shape)}")
+
+    def set_color_outline_mask_shape(self, shape, silent=False):
+        shape = self._normalize_area_selection_shape(shape)
+        try:
+            self.view.color_outline_mask_shape = shape
+            self.view.clear_color_outline_mask_preview()
+        except Exception:
+            pass
+        self._sync_area_selection_shape_buttons(
+            (("btn_color_outline_mask_rect", "rect"), ("btn_color_outline_mask_free", "free"), ("btn_color_outline_mask_polygon", "polygon")),
+            shape,
+            "font-weight:bold; background:#0891b2; color:white;",
+        )
+        if not silent:
+            self.log("🎯 " + self.tr_ui("색상/테두리 마스크 모드") + f": {self._area_selection_shape_label(shape)}")
+
+    def _normalize_color_outline_hex(self, value, fallback="#000000"):
+        try:
+            c = QColor(str(value or fallback))
+            if not c.isValid():
+                c = QColor(str(fallback))
+            return c.name(QColor.NameFormat.HexRgb).upper()
+        except Exception:
+            return str(fallback or "#000000").upper()
+
+    def _update_color_outline_mask_button_styles(self):
+        try:
+            txt = self._normalize_color_outline_hex(getattr(self, "color_outline_mask_text_color", "#000000"), "#000000")
+            out = self._normalize_color_outline_hex(getattr(self, "color_outline_mask_outline_color", "#FFFFFF"), "#FFFFFF")
+            for btn, color_hex in ((getattr(self, "btn_color_outline_text_color", None), txt), (getattr(self, "btn_color_outline_outline_color", None), out)):
+                if btn is None:
+                    continue
+                btn.setText("")
+                btn.setProperty("color_outline_hex", color_hex)
+                btn.setFixedSize(22, 22)
+                btn.setStyleSheet(
+                    f"QPushButton {{ background:{color_hex}; border:1px solid #6b7280; min-width:22px; max-width:22px; min-height:22px; max-height:22px; padding:0px; }}"
+                    f"QPushButton:disabled {{ background:{color_hex}; border:1px solid #3f3f46; opacity:0.45; padding:0px; }}"
+                )
+        except Exception:
+            pass
+
+    def _contrast_text_color(self, hex_color):
+        try:
+            c = QColor(str(hex_color))
+            lum = (0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue())
+            return "#000000" if lum >= 150 else "#FFFFFF"
+        except Exception:
+            return "#FFFFFF"
+
+    def update_color_outline_option_state(self):
+        outline_on = bool(getattr(getattr(self, "cb_color_outline_detect_outline", None), "isChecked", lambda: False)())
+        for name in ("btn_color_outline_text_color",):
             try:
-                btn.blockSignals(True)
-                btn.setChecked(active)
-                btn.blockSignals(False)
-                if active:
-                    btn.setStyleSheet("font-weight:bold; background:#c2410c; color:white;")
-                else:
-                    btn.setStyleSheet("opacity:0.7;")
+                w = getattr(self, name, None)
+                if w is not None:
+                    w.setEnabled(not outline_on)
             except Exception:
                 pass
-        if not silent:
-            if shape == "rect":
-                self.log(self.tr_ui("🔪 마스크 커팅 모드: 사각형"))
+        for name in ("btn_color_outline_outline_color",):
+            try:
+                w = getattr(self, name, None)
+                if w is not None:
+                    w.setEnabled(outline_on)
+            except Exception:
+                pass
+        try:
+            if getattr(self, "sb_color_outline_tolerance", None) is not None:
+                self.sb_color_outline_tolerance.setEnabled(True)
+        except Exception:
+            pass
+        self._update_color_outline_mask_button_styles()
+
+    def pick_color_outline_mask_color(self, kind="text"):
+        attr = "color_outline_mask_outline_color" if str(kind) == "outline" else "color_outline_mask_text_color"
+        current = self._normalize_color_outline_hex(getattr(self, attr, "#FFFFFF" if attr.endswith("outline_color") else "#000000"))
+        try:
+            color = ysb_get_color_with_hex_focus(QColor(current), self, self.tr_ui("색상 선택"))
+        except Exception:
+            color = QColor(current)
+        if color is None or not color.isValid():
+            return
+        setattr(self, attr, color.name(QColor.NameFormat.HexRgb).upper())
+        self._update_color_outline_mask_button_styles()
+
+    def pick_color_outline_mask_from_scene(self, x, y):
+        img = None
+        try:
+            img = self.get_source_display_image(self.idx)
+        except Exception:
+            img = None
+        if img is None:
+            self.log(self.tr_ui("⚠️ 색상/테두리 마스크 기준 이미지가 없습니다."))
+            return
+        try:
+            before = self.view.get_mask_np()
+            if before is not None and img.shape[:2] != before.shape[:2]:
+                img = cv2.resize(img, (before.shape[1], before.shape[0]), interpolation=cv2.INTER_LINEAR)
+        except Exception:
+            pass
+        h, w = img.shape[:2]
+        if x < 0 or y < 0 or x >= w or y >= h:
+            return
+        try:
+            b, g, r = [int(v) for v in img[int(y), int(x), :3]]
+            hex_color = QColor(r, g, b).name(QColor.NameFormat.HexRgb).upper()
+        except Exception:
+            return
+        outline_on = bool(getattr(getattr(self, "cb_color_outline_detect_outline", None), "isChecked", lambda: False)())
+        if outline_on:
+            self.color_outline_mask_outline_color = hex_color
+            self.log(self.tr_ui("스포이드: 획 색상") + f" {hex_color}")
+        else:
+            self.color_outline_mask_text_color = hex_color
+            self.log(self.tr_ui("스포이드: 텍스트 색상") + f" {hex_color}")
+        self._update_color_outline_mask_button_styles()
+
+    def _color_outline_hex_to_rgb_array(self, hex_color):
+        c = QColor(str(hex_color))
+        if not c.isValid():
+            c = QColor("#000000")
+        return np.array([c.red(), c.green(), c.blue()], dtype=np.int16)
+
+    def _remove_small_color_outline_components(self, mask, min_area=6):
+        try:
+            binary = (mask > 0).astype(np.uint8) * 255
+            num, labels, stats, _ = cv2.connectedComponentsWithStats(binary, 8)
+            out = np.zeros_like(binary)
+            for i in range(1, num):
+                area = int(stats[i, cv2.CC_STAT_AREA])
+                if area >= int(min_area):
+                    out[labels == i] = 255
+            return out
+        except Exception:
+            return (mask > 0).astype(np.uint8) * 255
+
+    def _build_color_outline_candidate(self, source_rgb, region, color_hex, tolerance):
+        target = self._color_outline_hex_to_rgb_array(color_hex)
+        arr = source_rgb.astype(np.int16)
+        diff = np.max(np.abs(arr - target.reshape(1, 1, 3)), axis=2)
+        cand = ((diff <= int(tolerance)) & (region > 0)).astype(np.uint8) * 255
+        return self._remove_small_color_outline_components(cand, min_area=6)
+
+    def _build_outline_fill_candidate(self, outline_mask, region):
+        """Return the full inside area of closed outline strokes inside the user region.
+
+        The old implementation filled the external contour of the detected stroke pixels.
+        On anti-aliased / broken balloon borders this could leave the middle empty.
+        This path treats detected outline pixels as a wall, flood-fills from outside,
+        then uses the non-reachable area as the closed-outline interior.
+        """
+        try:
+            region_bin = (region > 0).astype(np.uint8) * 255
+            if region_bin.size <= 0 or int(np.count_nonzero(region_bin)) <= 0:
+                return np.zeros_like(region_bin, dtype=np.uint8)
+            outline = self._remove_small_color_outline_components(outline_mask, min_area=4)
+            outline = cv2.bitwise_and(outline, region_bin)
+            if int(np.count_nonzero(outline)) <= 0:
+                return np.zeros_like(region_bin, dtype=np.uint8)
+
+            # 1px 정도의 끊김/안티앨리어싱 공백은 닫힌 테두리로 보정한다.
+            # 너무 크게 잇지 않도록 3x3 1회만 적용한다.
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            wall = cv2.morphologyEx(outline, cv2.MORPH_CLOSE, kernel, iterations=1)
+            wall = cv2.dilate(wall, kernel, iterations=1)
+            wall = cv2.bitwise_and(wall, region_bin)
+
+            h, w = wall.shape[:2]
+            canvas = np.zeros((h + 2, w + 2), dtype=np.uint8)
+            canvas[1:h + 1, 1:w + 1] = wall
+            flood = canvas.copy()
+            flood_mask = np.zeros((h + 4, w + 4), dtype=np.uint8)
+            cv2.floodFill(flood, flood_mask, (0, 0), 128)
+
+            flooded = (flood[1:h + 1, 1:w + 1] == 128)
+            enclosed = ((region_bin > 0) & (~flooded))
+            # 벽만 있고 실제 내부가 없는 작은 잡음은 닫힌 영역으로 취급하지 않는다.
+            interior = enclosed & (wall == 0)
+            if int(np.count_nonzero(interior)) < 8:
+                return np.zeros_like(region_bin, dtype=np.uint8)
+
+            filled = enclosed.astype(np.uint8) * 255
+            filled = self._remove_small_color_outline_components(filled, min_area=12)
+            return cv2.bitwise_and(filled, region_bin)
+        except Exception:
+            return np.zeros_like((region > 0).astype(np.uint8) * 255, dtype=np.uint8)
+
+    def apply_color_outline_mask(self, region_mask):
+        """사용자가 지정한 영역 안에서 텍스트 색상 또는 닫힌 획 기준으로 현재 마스크에 추가한다."""
+        try:
+            mode = int(self.cb_mode.currentIndex())
+        except Exception:
+            mode = -1
+        if mode not in (2, 3):
+            self.log(self.tr_ui("⚠️ 색상/테두리 마스크는 텍스트 마스크/페인팅 마스크 탭에서 사용하세요."))
+            self.update_left_tool_action_states()
+            return
+        if region_mask is None:
+            self.log(self.tr_ui("⚠️ 색상/테두리 마스크 영역이 비어 있습니다."))
+            return
+        before = self.view.get_mask_np()
+        if before is None:
+            self.log(self.tr_ui("⚠️ 현재 탭에 마스크 레이어가 없습니다."))
+            return
+        source = None
+        try:
+            source = self.get_source_display_image(self.idx)
+        except Exception:
+            source = None
+        if source is None:
+            self.log(self.tr_ui("⚠️ 색상/테두리 마스크 기준 이미지가 없습니다."))
+            return
+        try:
+            mask = (before > 0).astype(np.uint8) * 255
+            region = (region_mask > 0).astype(np.uint8) * 255
+            if mask.shape[:2] != region.shape[:2]:
+                region = cv2.resize(region, (mask.shape[1], mask.shape[0]), interpolation=cv2.INTER_NEAREST)
+            if source.shape[:2] != mask.shape[:2]:
+                source = cv2.resize(source, (mask.shape[1], mask.shape[0]), interpolation=cv2.INTER_LINEAR)
+            source_rgb = cv2.cvtColor(source[:, :, :3], cv2.COLOR_BGR2RGB)
+
+            outline_on = bool(getattr(getattr(self, "cb_color_outline_detect_outline", None), "isChecked", lambda: False)())
+            if outline_on:
+                tol = int(getattr(getattr(self, "sb_color_outline_tolerance", None), "value", lambda: 32)())
+                outline_color = self._normalize_color_outline_hex(getattr(self, "color_outline_mask_outline_color", "#FFFFFF"), "#FFFFFF")
+                outline_seed = self._build_color_outline_candidate(source_rgb, region, outline_color, tol)
+                candidate = self._build_outline_fill_candidate(outline_seed, region)
+                if int(np.count_nonzero(candidate)) <= 0:
+                    self.log(self.tr_ui("⚠️ 닫힌 획 영역을 찾지 못했습니다."))
+                    return
+                mode_name = self.tr_ui("획")
             else:
-                self.log(self.tr_ui("🔪 마스크 커팅 모드: 자유형"))
+                tol = int(getattr(getattr(self, "sb_color_outline_tolerance", None), "value", lambda: 32)())
+                text_color = self._normalize_color_outline_hex(getattr(self, "color_outline_mask_text_color", "#000000"), "#000000")
+                candidate = self._build_color_outline_candidate(source_rgb, region, text_color, tol)
+                if int(np.count_nonzero(candidate)) <= 0:
+                    self.log(self.tr_ui("⚠️ 선택 영역에서 조건에 맞는 픽셀을 찾지 못했습니다."))
+                    return
+                mode_name = self.tr_ui("텍스트")
+
+            expand = int(getattr(getattr(self, "sb_color_outline_expand", None), "value", lambda: 0)())
+            if expand > 0:
+                k = expand * 2 + 1
+                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+                candidate = cv2.dilate(candidate, kernel, iterations=1)
+                candidate = cv2.bitwise_and(candidate, region)
+
+            combined = cv2.bitwise_or(mask, candidate)
+            added = int(np.count_nonzero((combined > 0) & (mask == 0)))
+            if added <= 0:
+                self.log(self.tr_ui("⚠️ 색상/테두리 마스크로 추가될 영역이 없습니다."))
+                return
+
+            before_pixmap = None
+            try:
+                if getattr(self.view, "user_mask_item", None) is not None:
+                    before_pixmap = self.view.user_mask_item.pixmap().copy()
+            except Exception:
+                before_pixmap = None
+            try:
+                self.commit_current_page_ui_to_data(include_mask=True)
+            except Exception:
+                pass
+            color = self.current_mask_overlay_color(mode)
+            self.view.set_user_mask_np(combined, color)
+            try:
+                curr = self.data.get(self.idx)
+                if isinstance(curr, dict):
+                    self.set_active_mask(curr, combined, mode)
+            except Exception:
+                pass
+            after_pixmap = None
+            try:
+                if getattr(self.view, "user_mask_item", None) is not None:
+                    after_pixmap = self.view.user_mask_item.pixmap().copy()
+            except Exception:
+                after_pixmap = None
+            self.push_full_mask_layer_undo(before_pixmap, after_pixmap, mode=mode, reason="색상/테두리 마스크")
+            self.on_view_mask_edited()
+            self.log(f"🎯 색상/테두리 마스크 완료: {mode_name} / {added} px 추가")
+        except Exception as e:
+            self.log(f"⚠️ 색상/테두리 마스크 실패: {e}")
 
     def set_area_paint_shape(self, shape, silent=False):
-        shape = "free" if str(shape) == "free" else "rect"
+        shape = self._normalize_area_selection_shape(shape)
         try:
             self.view.area_paint_shape = shape
             self.view.clear_area_paint_preview()
         except Exception:
             pass
-        for btn, active in ((getattr(self, "btn_area_paint_rect", None), shape == "rect"), (getattr(self, "btn_area_paint_free", None), shape == "free")):
-            if btn is None:
-                continue
+        self._sync_area_selection_shape_buttons(
+            (("btn_area_paint_rect", "rect"), ("btn_area_paint_free", "free"), ("btn_area_paint_polygon", "polygon")),
+            shape,
+            "font-weight:bold; background:#7c3aed; color:white;",
+        )
+        if not silent:
+            self.log("▦ " + self.tr_ui("영역 페인팅 모드") + f": {self._area_selection_shape_label(shape)}")
+
+    def set_original_restore_shape(self, shape, silent=False):
+        shape = self._normalize_area_selection_shape(shape)
+        try:
+            self.view.original_restore_shape = shape
+            self.view.clear_original_restore_preview()
+        except Exception:
+            pass
+        self._sync_area_selection_shape_buttons(
+            (("btn_original_restore_rect", "rect"), ("btn_original_restore_free", "free"), ("btn_original_restore_polygon", "polygon")),
+            shape,
+            "font-weight:bold; background:#2563eb; color:white;",
+        )
+        if not silent:
+            self.log("🧩 " + self.tr_ui("영역 원본 복구 모드") + f": {self._area_selection_shape_label(shape)}")
+
+    def set_original_restore_selection(self, region_mask=None, region_path=None):
+        self.original_restore_mask = region_mask.copy() if isinstance(region_mask, np.ndarray) else None
+        self.original_restore_path = region_path
+        try:
+            if hasattr(self, "view") and self.view is not None:
+                self.view.show_original_restore_selection(region_path)
+        except Exception:
+            pass
+
+    def clear_original_restore_selection(self, keep_tool=False):
+        self.original_restore_mask = None
+        self.original_restore_path = None
+        try:
+            if hasattr(self, "view") and self.view is not None:
+                self.view.clear_original_restore_preview()
+        except Exception:
+            pass
+        if not keep_tool:
             try:
-                btn.blockSignals(True)
-                btn.setChecked(active)
-                btn.blockSignals(False)
-                if active:
-                    btn.setStyleSheet("font-weight:bold; background:#7c3aed; color:white;")
-                else:
-                    btn.setStyleSheet("opacity:0.7;")
+                self.refresh_shared_option_bar()
             except Exception:
                 pass
-        if not silent:
-            if shape == "rect":
-                self.log(self.tr_ui("▦ 영역 페인팅 모드: 사각형"))
+
+    def apply_original_restore_selection(self):
+        if getattr(self, "cb_mode", None) is None or self.cb_mode.currentIndex() != 4:
+            self.log(self.tr_ui("⚠️ 영역 원본 복구는 최종결과 탭에서만 사용할 수 있습니다."))
+            return False
+        region_mask = getattr(self, "original_restore_mask", None)
+        if region_mask is None:
+            self.log(self.tr_ui("⚠️ 먼저 복구할 영역을 드래그로 지정하세요."))
+            return False
+        if not hasattr(self, "view") or self.view is None or not hasattr(self.view, "apply_original_restore_patch"):
+            return False
+        try:
+            self.commit_current_page_ui_to_data(include_mask=False)
+        except Exception:
+            pass
+        ok = False
+        try:
+            ok = bool(self.view.apply_original_restore_patch(region_mask))
+        except Exception as e:
+            self.log(self.tr_ui("⚠️ 영역 원본 복구 실패: {e}", e=str(e)))
+            ok = False
+        if ok:
+            self.clear_original_restore_selection(keep_tool=True)
+            try:
+                if hasattr(self, "schedule_deferred_view_layer_commit"):
+                    self.schedule_deferred_view_layer_commit("final_paint", delay_ms=1200)
+                elif hasattr(self, "on_final_paint_edited"):
+                    self.on_final_paint_edited()
+            except Exception:
+                pass
+            self.log(self.tr_ui("🧩 선택한 영역에 원본 조각을 다시 덧씌웠습니다."))
+        return ok
+
+    def mask_style_defaults(self):
+        return {
+            "text": {"color": "#A85D66", "opacity": 220},
+            "paint": {"color": "#0060FF", "opacity": 220},
+        }
+
+    def mask_type_for_mode(self, mode=None):
+        try:
+            mode_i = int(mode if mode is not None else self.cb_mode.currentIndex())
+        except Exception:
+            mode_i = 2
+        return "paint" if mode_i == 3 else "text"
+
+    def normalize_mask_overlay_style(self, style=None, mask_type="text"):
+        defaults = self.mask_style_defaults().get(str(mask_type or "text"), self.mask_style_defaults()["text"])
+        src = dict(style or {})
+        color = str(src.get("color") or defaults.get("color") or "#A85D66")
+        qcolor = QColor(color)
+        if not qcolor.isValid():
+            color = str(defaults.get("color") or "#A85D66")
+        try:
+            opacity = int(src.get("opacity", defaults.get("opacity", 220)))
+        except Exception:
+            opacity = int(defaults.get("opacity", 220))
+        opacity = max(20, min(255, opacity))
+        return {"color": color, "opacity": opacity}
+
+    def page_mask_overlay_styles(self, page_idx=None):
+        try:
+            page_idx = int(page_idx if page_idx is not None else getattr(self, "idx", 0) or 0)
+        except Exception:
+            page_idx = int(getattr(self, "idx", 0) or 0)
+        curr = self.data.get(page_idx) if isinstance(getattr(self, "data", None), dict) else None
+        raw = curr.get("mask_overlay_styles") if isinstance(curr, dict) else None
+        if not isinstance(raw, dict):
+            raw = {}
+        return {
+            "text": self.normalize_mask_overlay_style(raw.get("text"), "text"),
+            "paint": self.normalize_mask_overlay_style(raw.get("paint"), "paint"),
+        }
+
+    def current_mask_overlay_color(self, mode=None, page_idx=None):
+        mask_type = self.mask_type_for_mode(mode)
+        style = self.page_mask_overlay_styles(page_idx).get(mask_type) or self.normalize_mask_overlay_style(None, mask_type)
+        color = QColor(str(style.get("color") or "#A85D66"))
+        if not color.isValid():
+            color = QColor("#0060FF" if mask_type == "paint" else "#A85D66")
+        try:
+            color.setAlpha(max(20, min(255, int(style.get("opacity", 220)))))
+        except Exception:
+            color.setAlpha(220)
+        return color
+
+    def set_page_mask_overlay_styles(self, page_idx, styles):
+        try:
+            page_idx = int(page_idx)
+        except Exception:
+            page_idx = int(getattr(self, "idx", 0) or 0)
+        curr = self.data.get(page_idx) if isinstance(getattr(self, "data", None), dict) else None
+        if not isinstance(curr, dict):
+            return False
+        clean = {
+            "text": self.normalize_mask_overlay_style((styles or {}).get("text"), "text"),
+            "paint": self.normalize_mask_overlay_style((styles or {}).get("paint"), "paint"),
+        }
+        curr["mask_overlay_styles"] = clean
+        try:
+            self.mark_page_data_dirty_explicit(page_idx, "mask_overlay_style")
+        except Exception:
+            pass
+        return True
+
+    def refresh_current_mask_overlay_style(self):
+        try:
+            mode = int(self.cb_mode.currentIndex()) if hasattr(self, "cb_mode") else -1
+        except Exception:
+            mode = -1
+        if mode not in (2, 3):
+            return False
+        curr = self.data.get(self.idx) if isinstance(getattr(self, "data", None), dict) else None
+        if not isinstance(curr, dict):
+            return False
+        try:
+            mask = self.get_active_mask(curr, mode)
+            color = self.current_mask_overlay_color(mode, self.idx)
+            if hasattr(self.view, "set_mask_overlay_layer"):
+                self.view.set_mask_overlay_layer(mask, color)
             else:
-                self.log(self.tr_ui("▦ 영역 페인팅 모드: 자유형"))
+                self.view.set_user_mask_np(mask, color)
+            return True
+        except Exception:
+            return False
+
+    def open_mask_color_settings_dialog(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle(self.tr_ui("마스크 색상 지정"))
+        dlg.resize(520, 360)
+        layout = QVBoxLayout(dlg)
+
+        info = QLabel(self.tr_ui("마스크 데이터는 바꾸지 않고 화면에 보이는 색상과 불투명도만 바꿉니다.\n현재 페이지 적용은 즉시 화면을 갱신하고, 전체 페이지 적용은 각 페이지의 표시 설정만 저장합니다."))
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        form_box = QGroupBox(self.tr_ui("마스크 표시 색상"))
+        form = QGridLayout(form_box)
+
+        styles = self.page_mask_overlay_styles(getattr(self, "idx", 0))
+        text_color_btn = QPushButton()
+        paint_color_btn = QPushButton()
+        text_opacity = QSpinBox()
+        paint_opacity = QSpinBox()
+        for sb in (text_opacity, paint_opacity):
+            sb.setRange(20, 255)
+            sb.setSuffix(" / 255")
+        text_opacity.setValue(int(styles["text"].get("opacity", 220)))
+        paint_opacity.setValue(int(styles["paint"].get("opacity", 220)))
+
+        selected = {
+            "text": QColor(str(styles["text"].get("color") or "#A85D66")),
+            "paint": QColor(str(styles["paint"].get("color") or "#0060FF")),
+        }
+        if not selected["text"].isValid():
+            selected["text"] = QColor("#A85D66")
+        if not selected["paint"].isValid():
+            selected["paint"] = QColor("#0060FF")
+
+        def update_color_button(btn, qcolor):
+            try:
+                btn.setText(qcolor.name(QColor.NameFormat.HexRgb).upper())
+                btn.setStyleSheet(f"background:{qcolor.name(QColor.NameFormat.HexRgb)}; color:white; font-weight:bold;")
+            except Exception:
+                pass
+
+        update_color_button(text_color_btn, selected["text"])
+        update_color_button(paint_color_btn, selected["paint"])
+
+        def pick(kind, btn):
+            old = selected.get(kind) or QColor("#FFFFFF")
+            color = QColorDialog.getColor(old, dlg, self.tr_ui("마스크 색상 선택"))
+            if color.isValid():
+                selected[kind] = color
+                update_color_button(btn, color)
+
+        text_color_btn.clicked.connect(lambda checked=False: pick("text", text_color_btn))
+        paint_color_btn.clicked.connect(lambda checked=False: pick("paint", paint_color_btn))
+
+        form.addWidget(QLabel(self.tr_ui("텍스트 인식 마스크 색상")), 0, 0)
+        form.addWidget(text_color_btn, 0, 1)
+        form.addWidget(QLabel(self.tr_ui("텍스트 인식 마스크 불투명도")), 1, 0)
+        form.addWidget(text_opacity, 1, 1)
+        form.addWidget(QLabel(self.tr_ui("페인팅 마스크 색상")), 2, 0)
+        form.addWidget(paint_color_btn, 2, 1)
+        form.addWidget(QLabel(self.tr_ui("페인팅 마스크 불투명도")), 3, 0)
+        form.addWidget(paint_opacity, 3, 1)
+        layout.addWidget(form_box)
+
+        preview = QLabel()
+        preview.setMinimumHeight(46)
+        preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(preview)
+
+        def current_styles():
+            return {
+                "text": {"color": selected["text"].name(QColor.NameFormat.HexRgb).upper(), "opacity": int(text_opacity.value())},
+                "paint": {"color": selected["paint"].name(QColor.NameFormat.HexRgb).upper(), "opacity": int(paint_opacity.value())},
+            }
+
+        def update_preview():
+            st = current_styles()
+            preview.setText(
+                self.tr_ui("텍스트 인식") + f": {st['text']['color']} / {st['text']['opacity']}    "
+                + self.tr_ui("페인팅") + f": {st['paint']['color']} / {st['paint']['opacity']}"
+            )
+        text_opacity.valueChanged.connect(lambda v: update_preview())
+        paint_opacity.valueChanged.connect(lambda v: update_preview())
+        update_preview()
+
+        btn_row = QHBoxLayout()
+        btn_current = QPushButton(self.tr_ui("현재 페이지에 적용"))
+        btn_all = QPushButton(self.tr_ui("전체 페이지에 적용"))
+        btn_default = QPushButton(self.tr_ui("기본값"))
+        btn_cancel = QPushButton(self.tr_ui("닫기"))
+        btn_row.addWidget(btn_current)
+        btn_row.addWidget(btn_all)
+        btn_row.addWidget(btn_default)
+        btn_row.addStretch()
+        btn_row.addWidget(btn_cancel)
+        layout.addLayout(btn_row)
+
+        def apply_current():
+            st = current_styles()
+            self.set_page_mask_overlay_styles(getattr(self, "idx", 0), st)
+            self.refresh_current_mask_overlay_style()
+            try:
+                self.schedule_deferred_auto_save_project()
+            except Exception:
+                try:
+                    self.auto_save_project()
+                except Exception:
+                    pass
+            self.log(self.tr_ui("🎨 현재 페이지 마스크 색상 설정 적용"))
+            dlg.accept()
+
+        def apply_all():
+            st = current_styles()
+            count = 0
+            for page_idx in list(getattr(self, "data", {}) or {}):
+                if self.set_page_mask_overlay_styles(page_idx, st):
+                    count += 1
+            self.refresh_current_mask_overlay_style()
+            try:
+                self.schedule_deferred_auto_save_project()
+            except Exception:
+                try:
+                    self.auto_save_project()
+                except Exception:
+                    pass
+            self.log(self.tr_ui("🎨 전체 페이지 마스크 색상 설정 적용") + f": {count}")
+            dlg.accept()
+
+        def reset_default():
+            defaults = self.mask_style_defaults()
+            selected["text"] = QColor(defaults["text"]["color"])
+            selected["paint"] = QColor(defaults["paint"]["color"])
+            text_opacity.setValue(int(defaults["text"]["opacity"]))
+            paint_opacity.setValue(int(defaults["paint"]["opacity"]))
+            update_color_button(text_color_btn, selected["text"])
+            update_color_button(paint_color_btn, selected["paint"])
+            update_preview()
+
+        btn_current.clicked.connect(apply_current)
+        btn_all.clicked.connect(apply_all)
+        btn_default.clicked.connect(reset_default)
+        btn_cancel.clicked.connect(dlg.reject)
+        dlg.exec()
 
     def apply_mask_wrapping(self, region_mask):
         """선택한 영역 안의 분리된 마스크 덩어리들을 하나의 채움 영역으로 감싸준다."""
@@ -800,9 +1482,14 @@ class MainWindowOperationsMixin:
                 self.log("⚠️ 마스크 랩핑 영역 안에서 마스크를 찾지 못했습니다.")
                 return
 
+            before_pixmap = None
+            try:
+                if getattr(self.view, "user_mask_item", None) is not None:
+                    before_pixmap = self.view.user_mask_item.pixmap().copy()
+            except Exception:
+                before_pixmap = None
             try:
                 self.commit_current_page_ui_to_data(include_mask=True)
-                self.push_project_undo("마스크 랩핑")
             except Exception:
                 pass
 
@@ -818,8 +1505,21 @@ class MainWindowOperationsMixin:
                 self.log("⚠️ 마스크 랩핑으로 추가될 영역이 없습니다.")
                 return
 
-            color = QColor(0, 0, 255, 150) if mode == 3 else QColor(168, 93, 102, 140)
+            color = self.current_mask_overlay_color(mode)
             self.view.set_user_mask_np(wrapped, color)
+            try:
+                curr = self.data.get(self.idx)
+                if isinstance(curr, dict):
+                    self.set_active_mask(curr, wrapped, mode)
+            except Exception:
+                pass
+            after_pixmap = None
+            try:
+                if getattr(self.view, "user_mask_item", None) is not None:
+                    after_pixmap = self.view.user_mask_item.pixmap().copy()
+            except Exception:
+                after_pixmap = None
+            self.push_full_mask_layer_undo(before_pixmap, after_pixmap, mode=mode, reason="마스크 랩핑")
             self.on_view_mask_edited()
             self.log(f"🩹 마스크 랩핑 완료: {len(comps)}개 마스크 덩어리를 1개 영역으로 감쌈")
         except Exception as e:
@@ -871,9 +1571,14 @@ class MainWindowOperationsMixin:
                 self.log(self.tr_ui("⚠️ 지정한 커팅 영역에 제거할 마스크가 없습니다."))
                 return
 
+            before_pixmap = None
+            try:
+                if getattr(self.view, "user_mask_item", None) is not None:
+                    before_pixmap = self.view.user_mask_item.pixmap().copy()
+            except Exception:
+                before_pixmap = None
             try:
                 self.commit_current_page_ui_to_data(include_mask=True)
-                self.push_project_undo("마스크 커팅")
             except Exception:
                 pass
 
@@ -884,8 +1589,21 @@ class MainWindowOperationsMixin:
                 self.log(self.tr_ui("⚠️ 마스크 커팅으로 변경된 영역이 없습니다."))
                 return
 
-            color = QColor(0, 0, 255, 150) if mode == 3 else QColor(168, 93, 102, 140)
+            color = self.current_mask_overlay_color(mode)
             self.view.set_user_mask_np(cut, color)
+            try:
+                curr = self.data.get(self.idx)
+                if isinstance(curr, dict):
+                    self.set_active_mask(curr, cut, mode)
+            except Exception:
+                pass
+            after_pixmap = None
+            try:
+                if getattr(self.view, "user_mask_item", None) is not None:
+                    after_pixmap = self.view.user_mask_item.pixmap().copy()
+            except Exception:
+                after_pixmap = None
+            self.push_full_mask_layer_undo(before_pixmap, after_pixmap, mode=mode, reason="마스크 커팅")
             self.on_view_mask_edited()
             lang = normalize_ui_language(getattr(self, "ui_language", None) or current_ui_language())
             if lang == LANG_EN:
@@ -1087,7 +1805,7 @@ class MainWindowOperationsMixin:
 
         mask = self.fill_magic_wand_outer_region(self.magic_wand_mask).astype(np.uint8)
         combined = cv2.bitwise_or(before.astype(np.uint8), mask)
-        color = QColor(0, 0, 255, 150) if mode == 3 else QColor(168, 93, 102, 140)
+        color = self.current_mask_overlay_color(mode)
         self.view.set_user_mask_np(combined, color)
         try:
             curr = self.data.get(self.idx)
@@ -1307,6 +2025,18 @@ class MainWindowOperationsMixin:
                     except Exception:
                         pass
                     widget.setParent(None)
+            exit_btn = None
+            if bool(getattr(self, "_inpaint_group_preview_active", False)):
+                try:
+                    exit_btn = self._ensure_inpaint_group_preview_exit_button()
+                except Exception:
+                    exit_btn = None
+            if exit_btn is not None:
+                try:
+                    right_layout.addWidget(exit_btn)
+                    exit_btn.show()
+                except Exception:
+                    pass
             if effect_cb is not None:
                 try:
                     right_layout.addWidget(effect_cb)
@@ -1328,7 +2058,7 @@ class MainWindowOperationsMixin:
 
     def _hide_legacy_option_bars(self):
         for bar_name in (
-            "area_paint_bar", "magic_wand_bar", "mask_wrap_bar", "mask_cut_bar",
+            "area_paint_bar", "magic_wand_bar", "mask_wrap_bar", "mask_cut_bar", "color_outline_mask_bar", "original_restore_bar",
             "ocr_region_bar", "final_paint_option_bar", "final_edit_bar",
             "source_compare_bar",
         ):
@@ -1428,6 +2158,7 @@ class MainWindowOperationsMixin:
                 self._shared_add_label(self.tr_ui("영역 마스킹") if mode in (2, 3) else self.tr_ui("영역 페인팅"))
                 add_widget(getattr(self, "btn_area_paint_rect", None))
                 add_widget(getattr(self, "btn_area_paint_free", None))
+                add_widget(getattr(self, "btn_area_paint_polygon", None))
                 self._shared_add_label(
                     self.tr_ui("선택한 영역을 현재 마스크에 채웁니다.")
                     if mode in (2, 3)
@@ -1448,23 +2179,54 @@ class MainWindowOperationsMixin:
                     pass
                 add_widget(getattr(self, "btn_magic_fill", None))
                 populated = True
+            elif mode in (2, 3) and draw_mode == "color_outline_mask":
+                self._shared_add_label(self.tr_ui("영역 지정"))
+                add_widget(getattr(self, "btn_color_outline_mask_rect", None))
+                add_widget(getattr(self, "btn_color_outline_mask_free", None))
+                add_widget(getattr(self, "btn_color_outline_mask_polygon", None))
+                self._shared_add_label(self.tr_ui("텍스트"))
+                add_widget(getattr(self, "btn_color_outline_text_color", None))
+                self._shared_add_label(self.tr_ui("허용치"))
+                add_widget(getattr(self, "sb_color_outline_tolerance", None))
+                add_widget(getattr(self, "cb_color_outline_detect_outline", None))
+                add_widget(getattr(self, "btn_color_outline_outline_color", None))
+                self._shared_add_label(self.tr_ui("영역 확장"))
+                add_widget(getattr(self, "sb_color_outline_expand", None))
+                populated = True
             elif mode in (2, 3) and draw_mode == "mask_wrap":
                 self._shared_add_label(self.tr_ui("마스크 랩핑"))
                 add_widget(getattr(self, "btn_mask_wrap_rect", None))
                 add_widget(getattr(self, "btn_mask_wrap_free", None))
+                add_widget(getattr(self, "btn_mask_wrap_polygon", None))
                 self._shared_add_label(self.tr_ui("선택한 영역 안의 떨어진 마스크들을 하나의 채움 영역으로 감싸줍니다."))
                 populated = True
             elif mode in (2, 3) and draw_mode == "mask_cut":
                 self._shared_add_label(self.tr_ui("마스크 커팅"))
                 add_widget(getattr(self, "btn_mask_cut_rect", None))
                 add_widget(getattr(self, "btn_mask_cut_free", None))
+                add_widget(getattr(self, "btn_mask_cut_polygon", None))
                 self._shared_add_label(self.tr_ui("커팅 폭"))
                 add_widget(getattr(self, "sb_mask_cut_px", None))
+                populated = True
+            elif mode == 4 and draw_mode == "original_restore":
+                self._shared_add_label(self.tr_ui("영역 원본 복구"))
+                add_widget(getattr(self, "btn_original_restore_rect", None))
+                add_widget(getattr(self, "btn_original_restore_free", None))
+                add_widget(getattr(self, "btn_original_restore_polygon", None))
+                self._shared_add_label(self.tr_ui("원본 조각을 현재 최종결과 위에 다시 덧씌웁니다."))
+                add_widget(getattr(self, "btn_original_restore_apply", None))
+                populated = True
+            elif draw_mode == "inpaint_group_preview":
+                groups = getattr(self, "_inpaint_group_preview_groups", []) or []
+                self._shared_add_label(self.tr_ui("인페인팅 그룹 미리보기"))
+                self._shared_add_label(self.tr_ui("그룹") + f" {len(groups)}" + self.tr_ui("개"))
+                self._shared_add_label(self.tr_ui("주황 외곽선/노란 영역이 실제 인페인팅 전송 단위입니다."))
                 populated = True
             elif draw_mode == "ocr_region_select":
                 self._shared_add_label(self.tr_ui("OCR 분석 영역"))
                 add_widget(getattr(self, "btn_ocr_region_rect", None))
                 add_widget(getattr(self, "btn_ocr_region_free", None))
+                add_widget(getattr(self, "btn_ocr_region_polygon", None))
                 self._shared_add_label(self.tr_ui("OCR이 읽을 범위를 드래그로 지정합니다."))
                 add_widget(getattr(self, "btn_ocr_region_finish", None))
                 populated = True
@@ -1482,7 +2244,204 @@ class MainWindowOperationsMixin:
             pass
 
 
-    def _source_compare_sync_blocked(self):
+    def _ui_heavy_interaction_remaining_ms(self, *, minimum_when_view_fast_path=900):
+        """Return ms while expensive preview/cache work should stay paused.
+
+        The compare clone, cache rebuild and preview synchronization are useful,
+        but they must not wake up during brush strokes, inline text input, text
+        drags, middle-button panning or zoom bursts.  Returning a positive value
+        means the caller should schedule one idle retry instead of doing the
+        heavy work immediately.
+        """
+        remaining = 0
+        try:
+            if hasattr(self, "ui_interaction_busy_remaining_ms"):
+                remaining = max(remaining, int(self.ui_interaction_busy_remaining_ms(minimum_when_view_fast_path=minimum_when_view_fast_path)))
+        except Exception:
+            pass
+        try:
+            now = time.monotonic()
+            for attr in ("_source_compare_sync_block_until", "_heavy_preview_block_until"):
+                until = float(getattr(self, attr, 0.0) or 0.0)
+                if until > now:
+                    remaining = max(remaining, int(round((until - now) * 1000.0)))
+        except Exception:
+            pass
+        try:
+            view = getattr(self, "view", None)
+            if view is not None:
+                if bool(getattr(view, "_view_interaction_fast_path_active", False)):
+                    remaining = max(remaining, int(minimum_when_view_fast_path or 900))
+                if bool(getattr(view, "_middle_pan_active", False)):
+                    remaining = max(remaining, 900)
+                for attr in (
+                    "is_mask_painting",
+                    "is_area_painting",
+                    "is_raster_erasing",
+                    "is_raster_text_brush_erasing",
+                    "is_ocr_region_drawing",
+                    "is_quick_ocr_drawing",
+                    "is_color_outline_masking",
+                    "is_mask_wrapping",
+                    "is_mask_cutting",
+                    "is_original_restoring",
+                    "_cad_text_group_drag_started",
+                    "_direct_text_drag_item",
+                    "_active_transform_item",
+                ):
+                    if bool(getattr(view, attr, False)):
+                        remaining = max(remaining, 900)
+                be = getattr(view, "brush_engine", None)
+                if be is not None and bool(getattr(be, "active", False)):
+                    remaining = max(remaining, 900)
+        except Exception:
+            pass
+        try:
+            if getattr(self, "_work_cache_image_delta_active_keys", None) or getattr(self, "_view_layer_save_active_keys", None):
+                remaining = max(remaining, 1200)
+        except Exception:
+            pass
+        try:
+            if getattr(self, "inline_text_editor", None) is not None:
+                remaining = max(remaining, 900)
+        except Exception:
+            pass
+        try:
+            if getattr(self, "_text_scene_mutation_lock", False) or getattr(self, "_text_item_drag_active", False):
+                remaining = max(remaining, 900)
+        except Exception:
+            pass
+        try:
+            if QApplication.mouseButtons() != Qt.MouseButton.NoButton:
+                remaining = max(remaining, 700)
+        except Exception:
+            pass
+        return max(0, int(remaining))
+
+    def _mark_heavy_preview_paused(self, ms=900, reason="ui_activity"):
+        try:
+            ms = max(80, min(int(ms or 900), 3000))
+        except Exception:
+            ms = 900
+        try:
+            self._heavy_preview_block_until = max(
+                float(getattr(self, "_heavy_preview_block_until", 0.0) or 0.0),
+                time.monotonic() + ms / 1000.0,
+            )
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "note_ui_interaction_activity"):
+                self.note_ui_interaction_activity(ms)
+        except Exception:
+            pass
+
+    def _schedule_source_compare_idle_resume(self, delay_ms=420, reason="idle_resume"):
+        """Coalesce deferred source-compare syncs into one idle retry."""
+        try:
+            delay_ms = max(120, min(int(delay_ms or 420), 2500))
+        except Exception:
+            delay_ms = 420
+        try:
+            self._source_compare_sync_resume_after_text_mutation = True
+            self._source_compare_idle_resume_reason = str(reason or "idle_resume")
+            timer = getattr(self, "_source_compare_idle_resume_timer", None)
+            if timer is None:
+                timer = QTimer(self)
+                timer.setSingleShot(True)
+                timer.timeout.connect(self._run_source_compare_idle_resume)
+                self._source_compare_idle_resume_timer = timer
+            timer.stop()
+            timer.start(delay_ms)
+        except Exception:
+            pass
+
+    def _run_source_compare_idle_resume(self):
+        try:
+            busy_ms = self._source_compare_realtime_busy_remaining_ms()
+        except Exception:
+            busy_ms = 0
+        if busy_ms > 0:
+            try:
+                self._source_compare_fast_path_log(
+                    "SOURCE_COMPARE_SYNC_DEFERRED_DURING_UI_ACTIVITY",
+                    busy_ms=int(busy_ms),
+                    reason=str(getattr(self, "_source_compare_idle_resume_reason", "idle_resume") or "idle_resume"),
+                    throttle_ms=300,
+                )
+            except Exception:
+                pass
+            self._schedule_source_compare_idle_resume(max(220, min(int(busy_ms) + 220, 1800)), reason="still_busy")
+            return
+        try:
+            self._source_compare_sync_resume_after_text_mutation = False
+        except Exception:
+            pass
+        try:
+            self.schedule_source_compare_sync(16)
+        except Exception:
+            pass
+
+    def _source_compare_realtime_busy_remaining_ms(self):
+        """Return ms only for states that must really block clone sync.
+
+        Page save/cache work should wait during every zoom/scroll burst, but the
+        source-compare clone itself must follow the view quickly.  This helper
+        intentionally does NOT treat ordinary view fast-path, middle panning,
+        wheel scrolling, or a pressed mouse button as blockers.  It blocks only
+        data-mutating or layout-dangerous states such as text mutation, brush
+        strokes, transforms, splitter resizing, and explicit source-compare
+        sync locks.
+        """
+        remaining = 0
+        try:
+            if getattr(self, "_text_scene_mutation_lock", False):
+                remaining = max(remaining, 900)
+            if getattr(self, "_source_compare_splitter_adjusting", False):
+                remaining = max(remaining, 420)
+            until = float(getattr(self, "_source_compare_sync_block_until", 0.0) or 0.0)
+            if until and time.monotonic() < until:
+                remaining = max(remaining, int(round((until - time.monotonic()) * 1000.0)))
+        except Exception:
+            pass
+        try:
+            view = getattr(self, "view", None)
+            if view is not None:
+                for attr in (
+                    "is_mask_painting",
+                    "is_area_painting",
+                    "is_raster_erasing",
+                    "is_raster_text_brush_erasing",
+                    "is_ocr_region_drawing",
+                    "is_quick_ocr_drawing",
+                    "is_color_outline_masking",
+                    "is_mask_wrapping",
+                    "is_mask_cutting",
+                    "is_original_restoring",
+                    "_cad_text_group_drag_started",
+                    "_direct_text_drag_item",
+                    "_active_transform_item",
+                ):
+                    if bool(getattr(view, attr, False)):
+                        remaining = max(remaining, 900)
+                be = getattr(view, "brush_engine", None)
+                if be is not None and bool(getattr(be, "active", False)):
+                    remaining = max(remaining, 900)
+        except Exception:
+            pass
+        try:
+            if getattr(self, "inline_text_editor", None) is not None:
+                remaining = max(remaining, 900)
+        except Exception:
+            pass
+        try:
+            if getattr(self, "_text_item_drag_active", False):
+                remaining = max(remaining, 900)
+        except Exception:
+            pass
+        return max(0, int(remaining))
+
+    def _source_compare_sync_blocked(self, realtime=False):
         try:
             if getattr(self, "_text_scene_mutation_lock", False):
                 return True
@@ -1490,6 +2449,11 @@ class MainWindowOperationsMixin:
                 return True
             until = float(getattr(self, "_source_compare_sync_block_until", 0.0) or 0.0)
             if until and time.monotonic() < until:
+                return True
+            if realtime:
+                if self._source_compare_realtime_busy_remaining_ms() > 0:
+                    return True
+            elif self._ui_heavy_interaction_remaining_ms(minimum_when_view_fast_path=0) > 0:
                 return True
         except Exception:
             pass
@@ -1503,6 +2467,7 @@ class MainWindowOperationsMixin:
             )
             self._source_compare_sync_pending = False
             self._source_compare_reverse_sync_pending = False
+            self._schedule_source_compare_idle_resume(max(220, int(ms or 180) + 160), reason="block_temporarily")
         except Exception:
             pass
 
@@ -1522,15 +2487,18 @@ class MainWindowOperationsMixin:
         hints after movement stops.
         """
         try:
-            if getattr(self, "_text_scene_mutation_lock", False) or getattr(self, "_text_item_drag_active", False):
+            busy_ms = self._source_compare_realtime_busy_remaining_ms()
+            if busy_ms > 0:
                 self._source_compare_fast_path_finish_pending = True
                 self._source_compare_fast_path_log(
-                    "TEXT_SCENE_MUTATION_TIMER_GUARD_BLOCKED_SOURCE_COMPARE",
+                    "SOURCE_COMPARE_FAST_PATH_DEFERRED_DURING_UI_ACTIVITY",
                     action="begin",
                     reason=str(reason or "sync"),
+                    busy_ms=int(busy_ms),
                     text_drag=bool(getattr(self, "_text_item_drag_active", False)),
-                    throttle_ms=100,
+                    throttle_ms=300,
                 )
+                self._schedule_source_compare_idle_resume(max(220, min(int(busy_ms) + 220, 1800)), reason="fast_path_begin_busy")
                 return
             view = getattr(self, "source_compare_view", None)
             if view is None or not view.isVisible():
@@ -1611,7 +2579,8 @@ class MainWindowOperationsMixin:
             state = getattr(self, "_source_compare_fast_path_state", None)
             if not isinstance(state, dict) or not state.get("active"):
                 return
-            if getattr(self, "_text_scene_mutation_lock", False) or getattr(self, "_text_item_drag_active", False):
+            busy_ms = self._source_compare_realtime_busy_remaining_ms()
+            if busy_ms > 0:
                 self._source_compare_fast_path_finish_pending = True
                 try:
                     timer = getattr(self, "_source_compare_fast_path_timer", None)
@@ -1620,11 +2589,13 @@ class MainWindowOperationsMixin:
                 except Exception:
                     pass
                 self._source_compare_fast_path_log(
-                    "TEXT_SCENE_MUTATION_TIMER_GUARD_BLOCKED_SOURCE_COMPARE",
+                    "SOURCE_COMPARE_FAST_PATH_DEFERRED_DURING_UI_ACTIVITY",
                     action="finish",
                     reason=str(state.get("reason") or "sync"),
-                    throttle_ms=100,
+                    busy_ms=int(busy_ms),
+                    throttle_ms=300,
                 )
+                self._schedule_source_compare_idle_resume(max(220, min(int(busy_ms) + 220, 1800)), reason="fast_path_finish_busy")
                 return
             view = getattr(self, "source_compare_view", None)
             reason = str(state.get("reason") or "sync")
@@ -1980,7 +2951,7 @@ class MainWindowOperationsMixin:
             timer = getattr(self, "_source_compare_sync_timer", None)
             if timer is None:
                 timer = QTimer(self)
-                timer.setInterval(80)
+                timer.setInterval(33)
                 timer.timeout.connect(lambda: self.sync_source_compare_from_main())
                 self._source_compare_sync_timer = timer
             return timer
@@ -1989,7 +2960,7 @@ class MainWindowOperationsMixin:
 
     def start_source_compare_sync_timer(self):
         try:
-            if self._source_compare_sync_blocked():
+            if self._source_compare_sync_blocked(realtime=True):
                 return
             if not self.source_compare_is_visible():
                 return
@@ -2018,16 +2989,20 @@ class MainWindowOperationsMixin:
         - Keep the existing one-shot/pending structure so this remains low-risk.
         """
         try:
-            if getattr(self, "_text_scene_mutation_lock", False) or getattr(self, "_text_item_drag_active", False):
+            busy_ms = self._source_compare_realtime_busy_remaining_ms()
+            if busy_ms > 0:
                 self._source_compare_sync_resume_after_text_mutation = True
                 self._source_compare_fast_path_log(
-                    "TEXT_SCENE_MUTATION_TIMER_GUARD_BLOCKED_SOURCE_COMPARE",
+                    "SOURCE_COMPARE_SYNC_DEFERRED_DURING_UI_ACTIVITY",
                     action="schedule_sync",
+                    busy_ms=int(busy_ms),
                     text_drag=bool(getattr(self, "_text_item_drag_active", False)),
-                    throttle_ms=100,
+                    throttle_ms=300,
                 )
+                self._schedule_source_compare_idle_resume(max(220, min(int(busy_ms) + 220, 1800)), reason="schedule_sync_busy")
                 return
-            if self._source_compare_sync_blocked() or getattr(self, "_source_compare_syncing", False) or getattr(self, "_source_compare_user_driving", False):
+            if self._source_compare_sync_blocked(realtime=True) or getattr(self, "_source_compare_syncing", False) or getattr(self, "_source_compare_user_driving", False):
+                self._schedule_source_compare_idle_resume(160, reason="schedule_sync_blocked")
                 return
             if not self.source_compare_is_visible():
                 return
@@ -2039,22 +3014,20 @@ class MainWindowOperationsMixin:
             def _run():
                 try:
                     self._source_compare_sync_pending = False
-                    if getattr(self, "_text_scene_mutation_lock", False) or getattr(self, "_text_item_drag_active", False):
+                    busy_ms = self._source_compare_realtime_busy_remaining_ms()
+                    if busy_ms > 0:
                         self._source_compare_sync_resume_after_text_mutation = True
                         self._source_compare_fast_path_log(
-                            "TEXT_SCENE_MUTATION_TIMER_GUARD_BLOCKED_SOURCE_COMPARE",
+                            "SOURCE_COMPARE_SYNC_DEFERRED_DURING_UI_ACTIVITY",
                             action="run_sync",
+                            busy_ms=int(busy_ms),
                             text_drag=bool(getattr(self, "_text_item_drag_active", False)),
-                            throttle_ms=100,
+                            throttle_ms=300,
                         )
+                        self._schedule_source_compare_idle_resume(max(220, min(int(busy_ms) + 220, 1800)), reason="run_sync_busy")
                         return
-                    view = getattr(self, "view", None)
-                    if view is not None and getattr(view, "_view_interaction_fast_path_active", False):
-                        # A wheel burst is still repainting the work view.  Syncing the
-                        # clone now causes two views to repaint mid-gesture.  Push once.
-                        self.schedule_source_compare_sync(180)
-                        return
-                    if self._source_compare_sync_blocked() or getattr(self, "_source_compare_user_driving", False):
+                    if self._source_compare_sync_blocked(realtime=True) or getattr(self, "_source_compare_user_driving", False):
+                        self._schedule_source_compare_idle_resume(160, reason="run_sync_blocked")
                         return
                     self.sync_source_compare_from_main()
                 except Exception:
@@ -2102,16 +3075,20 @@ class MainWindowOperationsMixin:
                 pass
 
     def sync_source_compare_from_main(self):
-        if getattr(self, "_text_scene_mutation_lock", False) or getattr(self, "_text_item_drag_active", False):
+        busy_ms = self._source_compare_realtime_busy_remaining_ms()
+        if busy_ms > 0:
             self._source_compare_sync_resume_after_text_mutation = True
             self._source_compare_fast_path_log(
-                "TEXT_SCENE_MUTATION_TIMER_GUARD_BLOCKED_SOURCE_COMPARE",
+                "SOURCE_COMPARE_SYNC_DEFERRED_DURING_UI_ACTIVITY",
                 action="sync_from_main",
+                busy_ms=int(busy_ms),
                 text_drag=bool(getattr(self, "_text_item_drag_active", False)),
-                throttle_ms=100,
+                throttle_ms=300,
             )
+            self._schedule_source_compare_idle_resume(max(220, min(int(busy_ms) + 220, 1800)), reason="sync_from_main_busy")
             return
-        if self._source_compare_sync_blocked():
+        if self._source_compare_sync_blocked(realtime=True):
+            self._schedule_source_compare_idle_resume(160, reason="sync_from_main_blocked")
             return
         if getattr(self, "_source_compare_syncing", False) or getattr(self, "_source_compare_user_driving", False):
             return
@@ -2121,7 +3098,7 @@ class MainWindowOperationsMixin:
             return
         self._source_compare_syncing = True
         try:
-            self._begin_source_compare_clone_fast_path("main_to_clone_sync", delay_ms=180)
+            self._begin_source_compare_clone_fast_path("main_to_clone_sync", delay_ms=120)
             center = self.view.mapToScene(self.view.viewport().rect().center())
             self.source_compare_view.setTransform(self.view.transform())
             self.source_compare_view.centerOn(center)
@@ -2136,16 +3113,20 @@ class MainWindowOperationsMixin:
 
     def schedule_main_sync_from_source_compare(self, delay=0):
         try:
-            if getattr(self, "_text_scene_mutation_lock", False) or getattr(self, "_text_item_drag_active", False):
+            busy_ms = self._source_compare_realtime_busy_remaining_ms()
+            if busy_ms > 0:
                 self._source_compare_sync_resume_after_text_mutation = True
                 self._source_compare_fast_path_log(
-                    "TEXT_SCENE_MUTATION_TIMER_GUARD_BLOCKED_SOURCE_COMPARE",
+                    "SOURCE_COMPARE_SYNC_DEFERRED_DURING_UI_ACTIVITY",
                     action="schedule_reverse_sync",
+                    busy_ms=int(busy_ms),
                     text_drag=bool(getattr(self, "_text_item_drag_active", False)),
-                    throttle_ms=100,
+                    throttle_ms=300,
                 )
+                self._schedule_source_compare_idle_resume(max(220, min(int(busy_ms) + 220, 1800)), reason="schedule_reverse_sync_busy")
                 return
-            if self._source_compare_sync_blocked() or getattr(self, "_source_compare_syncing", False):
+            if self._source_compare_sync_blocked(realtime=True) or getattr(self, "_source_compare_syncing", False):
+                self._schedule_source_compare_idle_resume(160, reason="schedule_reverse_sync_blocked")
                 return
             if not self.source_compare_is_visible():
                 return
@@ -2157,11 +3138,12 @@ class MainWindowOperationsMixin:
             def _run():
                 try:
                     self._source_compare_reverse_sync_pending = False
-                    sc_view = getattr(self, "source_compare_view", None)
-                    if sc_view is not None and getattr(sc_view, "_view_interaction_fast_path_active", False):
-                        self.schedule_main_sync_from_source_compare(180)
+                    busy_ms = self._source_compare_realtime_busy_remaining_ms()
+                    if busy_ms > 0:
+                        self._schedule_source_compare_idle_resume(max(120, min(int(busy_ms) + 120, 1200)), reason="run_reverse_sync_busy")
                         return
-                    if self._source_compare_sync_blocked():
+                    if self._source_compare_sync_blocked(realtime=True):
+                        self._schedule_source_compare_idle_resume(160, reason="run_reverse_sync_blocked")
                         return
                     self.sync_main_from_source_compare()
                 except Exception:
@@ -2178,7 +3160,7 @@ class MainWindowOperationsMixin:
                 pass
 
     def sync_main_from_source_compare(self):
-        if self._source_compare_sync_blocked():
+        if self._source_compare_sync_blocked(realtime=True):
             return
         if getattr(self, "_source_compare_syncing", False):
             return
@@ -2188,10 +3170,10 @@ class MainWindowOperationsMixin:
             return
         self._source_compare_syncing = True
         try:
-            self._begin_source_compare_clone_fast_path("clone_to_main_sync", delay_ms=180)
+            self._begin_source_compare_clone_fast_path("clone_to_main_sync", delay_ms=120)
             try:
                 if hasattr(self.view, "_begin_view_interaction_fast_path"):
-                    self.view._begin_view_interaction_fast_path("source_compare_reverse_sync", delay_ms=180)
+                    self.view._begin_view_interaction_fast_path("source_compare_reverse_sync", delay_ms=120)
             except Exception:
                 pass
             center = self.source_compare_view.mapToScene(self.source_compare_view.viewport().rect().center())
@@ -2208,10 +3190,10 @@ class MainWindowOperationsMixin:
 
     def _on_main_view_scroll_changed_for_source_compare(self, *_args):
         try:
-            if self._source_compare_sync_blocked() or getattr(self, "_source_compare_syncing", False):
+            if self._source_compare_sync_blocked(realtime=True) or getattr(self, "_source_compare_syncing", False):
                 return
             try:
-                self._begin_source_compare_clone_fast_path("main_scroll_sync", delay_ms=180)
+                self._begin_source_compare_clone_fast_path("main_scroll_sync", delay_ms=120)
             except Exception:
                 pass
             self.schedule_source_compare_sync(16)
@@ -2220,7 +3202,7 @@ class MainWindowOperationsMixin:
 
     def _on_source_compare_scroll_changed_for_main(self, *_args):
         try:
-            if self._source_compare_sync_blocked() or getattr(self, "_source_compare_syncing", False):
+            if self._source_compare_sync_blocked(realtime=True) or getattr(self, "_source_compare_syncing", False):
                 return
             sc_view = getattr(self, "source_compare_view", None)
             # Resize/layout changes also move scrollbars. Treat reverse sync as user intent
@@ -2233,10 +3215,154 @@ class MainWindowOperationsMixin:
             if not user_driving:
                 return
             try:
-                self._begin_source_compare_clone_fast_path("clone_scroll_reverse_sync", delay_ms=180)
+                self._begin_source_compare_clone_fast_path("clone_scroll_reverse_sync", delay_ms=120)
             except Exception:
                 pass
             self.schedule_main_sync_from_source_compare(16)
+        except Exception:
+            pass
+
+
+    def recover_left_tool_toolbar_state(self, reason=""):
+        """Force the custom left tool palette back into an interactive state.
+
+        Project-open busy recovery restores ordinary QToolBars, but the left tool
+        palette is a custom QAction/QToolButton bundle.  If a busy overlay or
+        first-frame render interrupts while its action widgets are disabled,
+        transparent-for-mouse, or signal-blocked, the canvas may be alive while
+        the left tools ignore clicks and the cursor stays on the previous tool.
+        This method repairs that palette directly.
+        """
+        restored_actions = 0
+        restored_buttons = 0
+        transparent_fixed = 0
+        signal_fixed = 0
+        try:
+            tb = getattr(self, "tb", None)
+            if tb is not None:
+                try:
+                    tb.setEnabled(True)
+                except Exception:
+                    pass
+                try:
+                    tb.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+                except Exception:
+                    pass
+                try:
+                    tb.releaseMouse()
+                    tb.releaseKeyboard()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        actions = getattr(self, "left_tool_actions", {}) or {}
+        buttons = getattr(self, "left_tool_buttons", {}) or {}
+
+        try:
+            # Some buttons are not cached until widgetForAction() has been called.
+            tb = getattr(self, "tb", None)
+            if tb is not None:
+                for key, action in list(actions.items()):
+                    if action is None:
+                        continue
+                    if buttons.get(key) is None:
+                        try:
+                            btn = tb.widgetForAction(action)
+                            if btn is not None:
+                                buttons[key] = btn
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+        for key, action in list(actions.items()):
+            if action is not None:
+                try:
+                    action.blockSignals(False)
+                    signal_fixed += 1
+                except Exception:
+                    pass
+                try:
+                    action.setEnabled(True)
+                    restored_actions += 1
+                except Exception:
+                    pass
+            btn = buttons.get(key)
+            if btn is None:
+                continue
+            try:
+                btn.blockSignals(False)
+                signal_fixed += 1
+            except Exception:
+                pass
+            try:
+                if not btn.isEnabled():
+                    restored_buttons += 1
+                btn.setEnabled(True)
+            except Exception:
+                pass
+            try:
+                if btn.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents):
+                    transparent_fixed += 1
+                btn.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+            except Exception:
+                pass
+            try:
+                btn.releaseMouse()
+                btn.releaseKeyboard()
+            except Exception:
+                pass
+            try:
+                btn.setCheckable(True)
+            except Exception:
+                pass
+            try:
+                btn.setProperty("ysb_left_tool_button", True)
+                btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            except Exception:
+                pass
+            try:
+                btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            except Exception:
+                pass
+            try:
+                btn.updateGeometry()
+                btn.update()
+            except Exception:
+                pass
+
+        try:
+            self.left_tool_buttons = buttons
+        except Exception:
+            pass
+
+        try:
+            self.update_left_tool_action_states()
+        except Exception:
+            pass
+
+        try:
+            view = getattr(self, "view", None)
+            if view is not None and hasattr(view, "force_tool_cursor_refresh"):
+                view.force_tool_cursor_refresh(delay_followups=True)
+            elif view is not None and hasattr(view, "update_tool_cursor"):
+                view.update_tool_cursor(force=True)
+        except Exception:
+            pass
+
+        try:
+            self.audit_boundary_event(
+                "LEFT_TOOLBAR_INTERACTION_RECOVERY",
+                reason=str(reason or ""),
+                actions=len(actions),
+                cached_buttons=len(buttons),
+                restored_actions=restored_actions,
+                restored_buttons=restored_buttons,
+                transparent_fixed=transparent_fixed,
+                signal_fixed=signal_fixed,
+                draw_mode=str(getattr(getattr(self, "view", None), "draw_mode", None)),
+            )
         except Exception:
             pass
 
@@ -2304,6 +3430,7 @@ class MainWindowOperationsMixin:
 
     def set_tool(self, m):
         mode = self.cb_mode.currentIndex() if hasattr(self, "cb_mode") else 0
+        old_tool = getattr(getattr(self, "view", None), "draw_mode", None)
 
         if m == 'magic_wand' and mode not in [2, 3, 4]:
             self.log("⚠️ 요술봉은 마스크 탭 또는 최종결과 탭에서 사용하세요.")
@@ -2315,8 +3442,16 @@ class MainWindowOperationsMixin:
         if m == 'mask_cut' and mode not in [2, 3]:
             self.log(self.tr_ui("⚠️ 마스크 커팅은 텍스트 마스크/페인팅 마스크 탭에서 사용하세요."))
             return
+        if m == 'color_outline_mask' and mode not in [2, 3]:
+            self.log(self.tr_ui("⚠️ 색상/테두리 마스크는 텍스트 마스크/페인팅 마스크 탭에서 사용하세요."))
+            self.update_left_tool_action_states()
+            return
         if m == 'final_text' and mode != 4:
             self.log("⚠️ 텍스트 도구는 최종화면에서만 사용할 수 있습니다.")
+            self.update_left_tool_action_states()
+            return
+        if m == 'original_restore' and mode != 4:
+            self.log(self.tr_ui("⚠️ 영역 원본 복구는 최종결과 탭에서만 사용할 수 있습니다."))
             self.update_left_tool_action_states()
             return
         if m == 'area_paint' and mode not in [2, 3, 4]:
@@ -2325,6 +3460,10 @@ class MainWindowOperationsMixin:
             return
         if m == 'paste_text' and mode != 4:
             self.log("⚠️ 텍스트 붙여넣기는 최종화면에서만 사용할 수 있습니다.")
+            self.update_left_tool_action_states()
+            return
+        if m == 'text_style_clone' and mode != 4:
+            self.log("⚠️ 스타일 복제는 최종화면에서만 사용할 수 있습니다.")
             self.update_left_tool_action_states()
             return
         if m == 'raster_erase' and mode != 4:
@@ -2343,8 +3482,53 @@ class MainWindowOperationsMixin:
             except Exception:
                 pass
 
+        if m != 'text_style_clone':
+            try:
+                if hasattr(self, 'clear_text_style_clone_source'):
+                    self.clear_text_style_clone_source(keep_tool=True)
+            except Exception:
+                pass
+
+        try:
+            if hasattr(self.view, "cancel_click_click_area_interaction"):
+                self.view.cancel_click_click_area_interaction(clear_tool=False)
+        except Exception:
+            pass
         self.view.draw_mode = m
-        self.view.setDragMode(QGraphicsView.DragMode.NoDrag if m else QGraphicsView.DragMode.ScrollHandDrag)
+        try:
+            if hasattr(self.view, "refresh_text_item_interaction_for_tool_mode"):
+                self.view.refresh_text_item_interaction_for_tool_mode(m, reason="set_tool")
+        except Exception:
+            pass
+        try:
+            if hasattr(self.view, "sync_drag_mode_from_operation"):
+                self.view.sync_drag_mode_from_operation()
+            else:
+                self.view.setDragMode(QGraphicsView.DragMode.NoDrag if m else QGraphicsView.DragMode.ScrollHandDrag)
+        except Exception:
+            self.view.setDragMode(QGraphicsView.DragMode.NoDrag if m else QGraphicsView.DragMode.ScrollHandDrag)
+        paint_tool_switch = old_tool in ('draw', 'erase') and m in ('draw', 'erase')
+        try:
+            if hasattr(self.view, "clear_scene_item_cursors_for_tool_mode"):
+                self.view.clear_scene_item_cursors_for_tool_mode(m, force=True)
+        except Exception:
+            pass
+        try:
+            if hasattr(self.view, "update_tool_cursor"):
+                self.view.update_tool_cursor(m, force=True)
+
+                def _refresh_tool_cursor_later():
+                    try:
+                        view = getattr(self, "view", None)
+                        if view is not None and hasattr(view, "update_tool_cursor"):
+                            view.update_tool_cursor(force=True)
+                    except Exception:
+                        pass
+                QTimer.singleShot(0, _refresh_tool_cursor_later)
+                QTimer.singleShot(30, _refresh_tool_cursor_later)
+                QTimer.singleShot(120, _refresh_tool_cursor_later)
+        except Exception:
+            pass
         self.update_left_tool_action_states(m)
         self._hide_legacy_option_bars()
         if m != 'magic_wand':
@@ -2353,6 +3537,10 @@ class MainWindowOperationsMixin:
             self.view.clear_mask_wrap_preview()
         if m != 'mask_cut' and hasattr(self.view, "clear_mask_cut_preview"):
             self.view.clear_mask_cut_preview()
+        if m != 'color_outline_mask' and hasattr(self.view, "clear_color_outline_mask_preview"):
+            self.view.clear_color_outline_mask_preview()
+        if m != 'original_restore' and hasattr(self, "clear_original_restore_selection"):
+            self.clear_original_restore_selection(keep_tool=True)
         if m != 'ocr_region_select' and hasattr(self.view, "clear_ocr_region_preview"):
             self.view.clear_ocr_region_preview()
         if m != 'quick_ocr' and hasattr(self.view, "clear_quick_ocr_preview"):
@@ -2363,6 +3551,14 @@ class MainWindowOperationsMixin:
             self.view.area_paint_points = []
         if m != 'raster_erase' and hasattr(self.view, "clear_raster_erase_preview"):
             self.view.clear_raster_erase_preview()
+        if m != 'inpaint_group_preview':
+            try:
+                if hasattr(self.view, "clear_inpaint_group_preview_overlay"):
+                    self.view.clear_inpaint_group_preview_overlay()
+                self._inpaint_group_preview_active = False
+                self._inpaint_group_preview_groups = []
+            except Exception:
+                pass
 
         self.update_final_paint_option_bar_visibility()
         try:
@@ -2374,6 +3570,8 @@ class MainWindowOperationsMixin:
             self.log("🔤 도구: 텍스트")
         elif m == 'paste_text':
             self.log("📋 도구: 텍스트 붙여넣기 위치 지정")
+        elif m == 'text_style_clone':
+            self.log("🧬 도구: 스타일 복제 — 기준 텍스트를 먼저 클릭하세요. ESC로 해제.")
         elif m == 'area_paint':
             if mode in (2, 3):
                 self.log("▦ 도구: 영역 마스킹")
@@ -2389,10 +3587,16 @@ class MainWindowOperationsMixin:
             self.log("🩹 도구: 마스크 랩핑")
         elif m == 'mask_cut':
             self.log(self.tr_ui("🔪 도구: 마스크 커팅"))
+        elif m == 'color_outline_mask':
+            self.log(self.tr_ui("🎯 도구: 색상/테두리 마스크"))
+        elif m == 'original_restore':
+            self.log(self.tr_ui("🧩 도구: 영역 원본 복구"))
         elif m == 'ocr_region_select':
             self.log("🔎 도구: OCR 분석 영역 지정")
         elif m == 'quick_ocr':
             self.log("🔎 도구: 빠른 OCR 영역 선택")
+        elif m == 'inpaint_group_preview':
+            self.log("🧩 인페인팅 그룹 미리보기")
         elif m is None:
             self.log("✋ 도구: 이동")
 
@@ -2438,27 +3642,19 @@ class MainWindowOperationsMixin:
             pass
 
     def set_ocr_region_shape(self, shape, silent=False):
-        shape = "free" if str(shape) == "free" else "rect"
+        shape = self._normalize_area_selection_shape(shape)
         try:
             self.view.ocr_region_shape = shape
             self.view.clear_ocr_region_preview()
         except Exception:
             pass
-        for btn, active in ((getattr(self, "btn_ocr_region_rect", None), shape == "rect"), (getattr(self, "btn_ocr_region_free", None), shape == "free")):
-            if btn is None:
-                continue
-            try:
-                btn.blockSignals(True)
-                btn.setChecked(active)
-                btn.blockSignals(False)
-                if active:
-                    btn.setStyleSheet("font-weight:bold; background:#8A4A52; color:white;")
-                else:
-                    btn.setStyleSheet("opacity:0.7;")
-            except Exception:
-                pass
+        self._sync_area_selection_shape_buttons(
+            (("btn_ocr_region_rect", "rect"), ("btn_ocr_region_free", "free"), ("btn_ocr_region_polygon", "polygon")),
+            shape,
+            "font-weight:bold; background:#8A4A52; color:white;",
+        )
         if not silent:
-            self.log("🔎 OCR 분석 영역: 사각형" if shape == "rect" else "🔎 OCR 분석 영역: 자유형")
+            self.log("🔎 " + self.tr_ui("OCR 분석 영역") + f": {self._area_selection_shape_label(shape)}")
 
     def open_ocr_analysis_region_dialog(self):
         if not getattr(self, "paths", None):
@@ -3135,7 +4331,51 @@ class MainWindowOperationsMixin:
                 continue
         return ""
 
+    def request_open_quick_ocr_dialog(self):
+        """Open Quick OCR settings after the active menu has fully closed."""
+        try:
+            self.audit_boundary_event("QUICK_OCR_DIALOG_REQUEST", page_idx=getattr(self, "idx", None), mode=(self.cb_mode.currentIndex() if hasattr(self, "cb_mode") else None), throttle_ms=50)
+        except Exception:
+            pass
+        try:
+            timer = getattr(self, "_tooltip_timer", None)
+            if timer is not None:
+                timer.stop()
+            self._tooltip_target = None
+            self._tooltip_html = ""
+            self._tooltip_visible_target = None
+            # Do not call QToolTip.hideText() here.  On Windows, doing so while a
+            # QMenu action is closing can crash inside Qt.  Only hide our custom
+            # tooltip label, then open the dialog after a short defer.
+            popup = getattr(self, "_tooltip_popup", None)
+            if popup is not None:
+                popup.hide()
+        except Exception:
+            pass
+
+        def _open():
+            try:
+                self.open_quick_ocr_dialog()
+            except Exception as e:
+                try:
+                    self.audit_boundary_event("QUICK_OCR_DIALOG_OPEN_ERROR", error=str(e), throttle_ms=50)
+                except Exception:
+                    pass
+                try:
+                    QMessageBox.warning(self, self.tr_ui("빠른 OCR 오류"), self.tr_ui("빠른 OCR 설정창을 여는 중 오류가 발생했습니다.") + f"\n\n{e}")
+                except Exception:
+                    pass
+
+        try:
+            QTimer.singleShot(80, _open)
+        except Exception:
+            _open()
+
     def open_quick_ocr_dialog(self):
+        try:
+            self.audit_boundary_event("QUICK_OCR_DIALOG_OPEN_ENTER", page_idx=getattr(self, "idx", None), mode=(self.cb_mode.currentIndex() if hasattr(self, "cb_mode") else None), memory=memory_text(), throttle_ms=50)
+        except Exception:
+            pass
         dlg = QDialog(self)
         dlg.setWindowTitle(self.tr_ui("빠른 OCR"))
         dlg.resize(660, 430)
@@ -3295,7 +4535,14 @@ class MainWindowOperationsMixin:
         buttons.rejected.connect(dlg.reject)
         root.addWidget(buttons)
 
-        if dlg.exec() == QDialog.DialogCode.Accepted:
+        try:
+            result = dlg.exec()
+        finally:
+            try:
+                self.audit_boundary_event("QUICK_OCR_DIALOG_CLOSED", throttle_ms=50)
+            except Exception:
+                pass
+        if result == QDialog.DialogCode.Accepted:
             self.show_ok_notice("빠른 OCR 설정 저장 완료", "빠른 OCR 설정이 저장되었습니다.")
 
     def _quick_ocr_popup_style(self):
@@ -3696,6 +4943,11 @@ class MainWindowOperationsMixin:
             }
         curr_page = self.data[self.idx]
         try:
+            if hasattr(self, "_apply_pending_work_cache_image_delta_payload_for_page"):
+                self._apply_pending_work_cache_image_delta_payload_for_page(self.idx, reason="page_load")
+        except Exception:
+            pass
+        try:
             self.sync_text_effect_preview_checkbox_for_current_page()
         except Exception:
             try:
@@ -3711,7 +4963,7 @@ class MainWindowOperationsMixin:
                 self.idx,
                 include_ori=True,
                 include_heavy=bool(current_mode == 4 or curr_page.get('use_inpainted_as_source') or curr_page.get('clean_path') or curr_page.get('working_source_path') or curr_page.get('final_paint_path') or curr_page.get('final_paint_above_path')),
-                include_masks=bool(current_mode in (2, 3)),
+                include_masks=bool(current_mode in (2, 3) or getattr(self, "_inpaint_group_preview_active", False)),
             )
         except Exception:
             if curr_page.get('ori') is None and not curr_page.get('use_inpainted_as_source'):
@@ -3721,7 +4973,7 @@ class MainWindowOperationsMixin:
                 self.trim_page_image_cache(keep_indices=[self.idx])
             except Exception:
                 pass
-            if current_mode in (2, 3):
+            if current_mode in (2, 3) or bool(getattr(self, "_inpaint_group_preview_active", False)):
                 try:
                     self.ensure_page_masks_loaded(self.idx)
                     self.touch_page_mask_cache(self.idx)
@@ -3741,7 +4993,17 @@ class MainWindowOperationsMixin:
         finally:
             self.is_page_loading = prev_loading
         try:
+            if bool(getattr(self, "_inpaint_group_preview_active", False)):
+                self.refresh_inpaint_group_preview_for_current_page(silent=True)
+        except Exception:
+            pass
+        try:
             self.schedule_progressive_page_load(self.idx)
+        except Exception:
+            pass
+        try:
+            if int(self.cb_mode.currentIndex()) == 4:
+                self.ensure_final_text_layer_bound('after_page_load_mode4', delay_ms=140)
         except Exception:
             pass
 
@@ -3948,6 +5210,7 @@ class MainWindowOperationsMixin:
 
                 all_id_item = QTableWidgetItem("ALL")
                 all_id_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                all_id_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
                 self.tab.setItem(0, 0, all_id_item)
 
                 all_check_item = QTableWidgetItem("")
@@ -3955,8 +5218,12 @@ class MainWindowOperationsMixin:
                 self.tab.setItem(0, 1, all_check_item)
                 self.tab.setCellWidget(0, 1, self.make_center_check_widget(0, False))
 
-                self.tab.setItem(0, 2, QTableWidgetItem(self.tr_ui("전체 선택")))
-                self.tab.setItem(0, 3, QTableWidgetItem(""))
+                all_text_item = QTableWidgetItem(self.tr_ui("전체 선택"))
+                all_text_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                all_trans_item = QTableWidgetItem("")
+                all_trans_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                self.tab.setItem(0, 2, all_text_item)
+                self.tab.setItem(0, 3, all_trans_item)
 
                 self.paint_all_row_header()
                 for c in range(4):
@@ -3984,6 +5251,7 @@ class MainWindowOperationsMixin:
 
             all_id_item = QTableWidgetItem("ALL")
             all_id_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            all_id_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
             self.tab.setItem(0, 0, all_id_item)
 
             all_check_item = QTableWidgetItem("")
@@ -3991,8 +5259,12 @@ class MainWindowOperationsMixin:
             self.tab.setItem(0, 1, all_check_item)
             self.tab.setCellWidget(0, 1, self.make_center_check_widget(0, all_checked))
 
-            self.tab.setItem(0, 2, QTableWidgetItem(self.tr_ui("전체 선택")))
-            self.tab.setItem(0, 3, QTableWidgetItem(""))
+            all_text_item = QTableWidgetItem(self.tr_ui("전체 선택"))
+            all_text_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+            all_trans_item = QTableWidgetItem("")
+            all_trans_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+            self.tab.setItem(0, 2, all_text_item)
+            self.tab.setItem(0, 3, all_trans_item)
 
             self.paint_all_row_header()
             for c in range(4):
@@ -4012,6 +5284,7 @@ class MainWindowOperationsMixin:
 
                 id_item = QTableWidgetItem(str(x.get('id', i + 1)))
                 id_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                id_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
                 self.tab.setItem(row, 0, id_item)
 
                 check_item = QTableWidgetItem("")
@@ -4029,6 +5302,8 @@ class MainWindowOperationsMixin:
                 else:
                     text_item = QTableWidgetItem(x.get('text', ''))
                     trans_item = QTableWidgetItem(x.get('translated_text', ''))
+                    text_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEditable)
+                    trans_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEditable)
                 text_item.setData(Qt.ItemDataRole.UserRole, str(x.get('text', '') or ''))
                 trans_item.setData(Qt.ItemDataRole.UserRole, str(x.get('translated_text', '') or ''))
                 self.tab.setItem(row, 2, text_item)
@@ -4052,13 +5327,15 @@ class MainWindowOperationsMixin:
         if not self.confirm_ocr_analysis_regions_before_run([self.idx]):
             self.log("↩️ OCR 분석 취소")
             return
+        if not self.run_local_cuda_preflight_or_alert("analyze"):
+            return
 
         self.commit_current_page_ui_to_data(include_mask=False)
 
         target_idx = self.idx
         self.prepare_text_mask_slots_for_fresh_analysis(target_idx)
         self._long_task_cancel_requested = False
-        self.prepare_task_progress_overlay("분석", "OCR/API 분석을 진행 중입니다.", total=0, cancellable=True)
+        self.prepare_task_progress_overlay("분석", "현재 작업: 분석 준비 중", total=100, cancellable=True)
         self.begin_busy_state("분석")
         self.w = AnalysisWorker(
             self.engine,
@@ -4067,11 +5344,1771 @@ class MainWindowOperationsMixin:
         )
         self._active_task_worker = self.w
         self.w.log.connect(lambda msg: self.handle_long_task_message(msg))
+        if hasattr(self.w, "failed"):
+            self.w.failed.connect(lambda msg, page_idx=target_idx: self.on_analysis_worker_failed(page_idx, msg, preserve_text_mask=False))
         self.w.finished.connect(
             lambda o, d, mm, mi, page_idx=target_idx:
                 self.anal_end_for_page(page_idx, o, d, mm, mi, preserve_text_mask=False)
         )
         self.w.start()
+
+
+    # ---------------------------------------------------------
+    # [TEXT MASK] 자동 우선순위 정리
+    # ---------------------------------------------------------
+    def _normalize_detection_mask_for_auto_clean(self, mask, shape_hint=None):
+        """현재 텍스트 마스크를 0/255 단일 채널 감지 마스크로 정규화한다."""
+        if mask is None:
+            return None
+        try:
+            arr = np.asarray(mask)
+            if arr.ndim == 3:
+                if arr.shape[2] >= 3:
+                    arr = cv2.cvtColor(arr[:, :, :3], cv2.COLOR_RGB2GRAY)
+                else:
+                    arr = arr[:, :, 0]
+            if shape_hint is not None:
+                try:
+                    hh, ww = int(shape_hint[0]), int(shape_hint[1])
+                    if arr.shape[:2] != (hh, ww):
+                        arr = cv2.resize(arr, (ww, hh), interpolation=cv2.INTER_NEAREST)
+                except Exception:
+                    pass
+            return np.where(arr > 0, 255, 0).astype(np.uint8)
+        except Exception:
+            return None
+
+    def _auto_clean_piece_from_payload(self, payload, group_idx=0, piece_idx=0, fallback_vertices=None, fallback_stroke=0.0):
+        """분석 data 안의 ocr_items_all/vertices_list 조각을 자동 정리용 표준 조각으로 변환한다."""
+        payload = payload if isinstance(payload, dict) else {}
+        vertices = payload.get('vertices') or fallback_vertices or []
+        clean_vertices = []
+        for p in vertices or []:
+            try:
+                clean_vertices.append([int(round(float(p[0]))), int(round(float(p[1])))])
+            except Exception:
+                try:
+                    clean_vertices.append([int(round(float(p.get('x', 0)))), int(round(float(p.get('y', 0))))])
+                except Exception:
+                    pass
+
+        rect = payload.get('rect')
+        if rect is None and clean_vertices:
+            try:
+                xs = [int(v[0]) for v in clean_vertices]
+                ys = [int(v[1]) for v in clean_vertices]
+                x1, y1, x2, y2 = min(xs), min(ys), max(xs), max(ys)
+                rect = [x1, y1, max(1, x2 - x1), max(1, y2 - y1)]
+            except Exception:
+                rect = None
+        if rect is None:
+            rect = [0, 0, 1, 1]
+        try:
+            x, y, w, h = [int(round(float(v))) for v in rect[:4]]
+            w = max(1, w)
+            h = max(1, h)
+        except Exception:
+            x, y, w, h = 0, 0, 1, 1
+
+        if not clean_vertices:
+            clean_vertices = [[x, y], [x + w, y], [x + w, y + h], [x, y + h]]
+
+        text = str(payload.get('text', '') or '')
+        compact = ''.join(ch for ch in text if not ch.isspace())
+        try:
+            char_count = int(payload.get('char_count') or len(compact) or 1)
+        except Exception:
+            char_count = max(1, len(compact))
+        char_count = max(1, char_count)
+
+        try:
+            stroke = float(payload.get('stroke_size', 0) or 0)
+        except Exception:
+            stroke = 0.0
+        if stroke <= 0:
+            try:
+                stroke = float(fallback_stroke or 0)
+            except Exception:
+                stroke = 0.0
+
+        try:
+            per_char_area = (max(1.0, float(w) * float(h) / max(1, char_count))) ** 0.5
+        except Exception:
+            per_char_area = float(max(1, min(w, h)))
+        try:
+            if h >= w * 1.25 and char_count > 1:
+                line_orientation = 'vertical'
+                line_char_size = max(float(w), float(h) / max(1, char_count))
+            elif w >= h * 1.25 and char_count > 1:
+                line_orientation = 'horizontal'
+                line_char_size = max(float(h), float(w) / max(1, char_count))
+            else:
+                line_orientation = 'block'
+                line_char_size = float(min(w, h))
+        except Exception:
+            line_orientation = 'block'
+            line_char_size = float(max(1, min(w, h)))
+        # OCR이 세로줄/가로줄 전체를 하나의 박스로 주는 경우가 있어,
+        # bbox 전체 높이/너비가 아니라 줄 방향과 글자 수로 1글자 크기를 보정한다.
+        safe_stroke = float(stroke or 0)
+        if safe_stroke > 0 and line_char_size > 0:
+            safe_stroke = min(safe_stroke, max(float(min(w, h)) * 1.45, float(line_char_size) * 1.45))
+        size_score = max(float(min(w, h)), float(safe_stroke or 0), float(per_char_area or 0), float(line_char_size or 0), 1.0)
+
+        return {
+            'piece_id': f"g{int(group_idx)}_p{int(piece_idx)}",
+            'group_idx': int(group_idx),
+            'piece_idx': int(piece_idx),
+            'text': text,
+            'char_count': int(char_count),
+            'rect': [int(x), int(y), int(w), int(h)],
+            'vertices': clean_vertices,
+            'cx': float(payload.get('cx', x + w / 2.0) or (x + w / 2.0)),
+            'cy': float(payload.get('cy', y + h / 2.0) or (y + h / 2.0)),
+            'stroke_size': float(stroke or 0),
+            'size_score': float(size_score),
+            'line_orientation': str(line_orientation),
+            'line_char_size': float(line_char_size or size_score),
+        }
+
+    def _auto_clean_collect_detection_pieces(self, page_data):
+        """현재 분석 데이터에서 OCR 원본 조각을 모은다. ocr_items_all이 없으면 vertices_list를 보수적으로 fallback한다."""
+        pieces = []
+        for group_idx, item in enumerate((page_data or {}).get('data', []) or []):
+            if not isinstance(item, dict):
+                continue
+            raw_items = item.get('ocr_items_all') or item.get('ocr_items') or []
+            if raw_items:
+                for piece_idx, payload in enumerate(raw_items):
+                    try:
+                        pieces.append(self._auto_clean_piece_from_payload(payload, group_idx, piece_idx, fallback_stroke=item.get('avg_stroke', 0)))
+                    except Exception:
+                        continue
+                continue
+
+            # Local detector 등 OCR 조각이 없는 분석 데이터는 삭제 판단을 하지 않기 위해
+            # vertices_list 전체를 하나의 보호 조각처럼 취급한다.
+            for piece_idx, vertices in enumerate(item.get('vertices_list', []) or []):
+                try:
+                    piece = self._auto_clean_piece_from_payload({}, group_idx, piece_idx, fallback_vertices=vertices, fallback_stroke=item.get('avg_stroke', 0))
+                    piece['protected_fallback'] = True
+                    pieces.append(piece)
+                except Exception:
+                    continue
+        return pieces
+
+    def _auto_clean_piece_mask(self, piece, shape, pad_ratio=0.25, min_px=1):
+        """OCR 조각 하나의 후보 마스크를 만든다.
+
+        pad_ratio는 글자 크기(size_score) 기준 확장 비율이고, min_px가 0보다 크면
+        분석 마스크 확장 설정처럼 최소 확장 px를 강제한다.
+        """
+        h, w = int(shape[0]), int(shape[1])
+        mask = np.zeros((h, w), dtype=np.uint8)
+        try:
+            pts = np.array(piece.get('vertices') or [], dtype=np.int32).reshape((-1, 1, 2))
+            if pts.shape[0] >= 3 and abs(cv2.contourArea(pts)) >= 1:
+                cv2.fillPoly(mask, [pts], 255)
+            else:
+                raise ValueError('invalid vertices')
+        except Exception:
+            try:
+                x, y, rw, rh = [int(round(float(v))) for v in piece.get('rect', [0, 0, 1, 1])[:4]]
+                x1 = max(0, min(w, x)); y1 = max(0, min(h, y))
+                x2 = max(0, min(w, x + max(1, rw))); y2 = max(0, min(h, y + max(1, rh)))
+                if x2 > x1 and y2 > y1:
+                    cv2.rectangle(mask, (x1, y1), (x2 - 1, y2 - 1), 255, thickness=-1)
+            except Exception:
+                pass
+
+        try:
+            pad = int(round(float(piece.get('size_score', 1.0) or 1.0) * float(pad_ratio))) if float(pad_ratio or 0.0) > 0 else 0
+        except Exception:
+            pad = 0
+        try:
+            min_px = int(round(float(min_px or 0)))
+        except Exception:
+            min_px = 0
+        if min_px > 0:
+            pad = max(pad, min_px)
+        if pad > 0 and cv2.countNonZero(mask) > 0:
+            k = max(3, pad * 2 + 1)
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+            mask = cv2.dilate(mask, kernel, iterations=1)
+        return mask
+
+    def _auto_clean_cluster_by_size(self, pieces, ratio=1.32):
+        """글자 크기/획 크기가 가까운 OCR 조각을 같은 폰트 덩어리로 묶는다."""
+        items = sorted(list(pieces or []), key=lambda p: float(p.get('size_score', 1.0) or 1.0))
+        clusters = []
+        for piece in items:
+            size = max(1.0, float(piece.get('size_score', 1.0) or 1.0))
+            placed = False
+            for cluster in clusters:
+                avg = max(1.0, float(cluster.get('avg_size', 1.0) or 1.0))
+                if max(size, avg) / min(size, avg) <= float(ratio):
+                    cluster['pieces'].append(piece)
+                    sizes = [float(p.get('size_score', 1.0) or 1.0) for p in cluster['pieces']]
+                    cluster['avg_size'] = float(sum(sizes) / max(1, len(sizes)))
+                    placed = True
+                    break
+            if not placed:
+                clusters.append({'pieces': [piece], 'avg_size': size})
+
+        for idx, cluster in enumerate(clusters):
+            ps = cluster.get('pieces') or []
+            xs1 = []; ys1 = []; xs2 = []; ys2 = []
+            for p in ps:
+                try:
+                    x, y, rw, rh = [float(v) for v in p.get('rect', [0, 0, 1, 1])[:4]]
+                    xs1.append(x); ys1.append(y); xs2.append(x + max(1.0, rw)); ys2.append(y + max(1.0, rh))
+                except Exception:
+                    pass
+            cluster['cluster_id'] = int(idx)
+            cluster['piece_count'] = int(len(ps))
+            cluster['char_count'] = int(sum(max(1, int(p.get('char_count', 1) or 1)) for p in ps))
+            cluster['avg_size'] = float(sum(float(p.get('size_score', 1.0) or 1.0) for p in ps) / max(1, len(ps)))
+            if xs1 and ys1:
+                x1, y1, x2, y2 = min(xs1), min(ys1), max(xs2), max(ys2)
+                cluster['rect'] = [float(x1), float(y1), float(max(1.0, x2 - x1)), float(max(1.0, y2 - y1))]
+            else:
+                cluster['rect'] = [0.0, 0.0, 1.0, 1.0]
+        return clusters
+
+    def _auto_clean_rect_gap(self, rect_a, rect_b):
+        try:
+            ax, ay, aw, ah = [float(v) for v in rect_a[:4]]
+            bx, by, bw, bh = [float(v) for v in rect_b[:4]]
+            ax2, ay2 = ax + max(1.0, aw), ay + max(1.0, ah)
+            bx2, by2 = bx + max(1.0, bw), by + max(1.0, bh)
+            dx = max(0.0, max(bx - ax2, ax - bx2))
+            dy = max(0.0, max(by - ay2, ay - by2))
+            return float((dx * dx + dy * dy) ** 0.5)
+        except Exception:
+            return 999999.0
+
+    def _auto_clean_dominant_sizes(self, pieces):
+        clusters = self._auto_clean_cluster_by_size(pieces, ratio=1.32)
+        ranked = []
+        for c in clusters:
+            support = int(c.get('piece_count', 0) or 0) + int(c.get('char_count', 0) or 0)
+            if support >= 2:
+                ranked.append((support, float(c.get('avg_size', 1.0) or 1.0)))
+        ranked.sort(reverse=True)
+        return [size for _support, size in ranked[:4]]
+
+    def _auto_clean_cluster_is_furigana_like(self, cluster, clusters):
+        """작은 글자군이 큰 글자군에 가깝게 붙어 있으면 후리가나/첨자 보호 대상으로 본다."""
+        try:
+            size = float(cluster.get('avg_size', 1.0) or 1.0)
+            rect = cluster.get('rect') or [0, 0, 1, 1]
+        except Exception:
+            return False
+        for other in clusters or []:
+            if other is cluster:
+                continue
+            try:
+                other_size = float(other.get('avg_size', 1.0) or 1.0)
+            except Exception:
+                other_size = 1.0
+            if size >= other_size * 0.74:
+                continue
+            gap = self._auto_clean_rect_gap(rect, other.get('rect') or [0, 0, 1, 1])
+            if gap <= max(14.0, other_size * 1.90):
+                return True
+        return False
+
+    def _auto_clean_cluster_has_furigana_child(self, cluster, clusters):
+        """큰 글자군 옆에 작은 후리가나/첨자 후보가 붙어 있으면 큰 글자군을 본문으로 보호한다."""
+        try:
+            size = float(cluster.get('avg_size', 1.0) or 1.0)
+            rect = cluster.get('rect') or [0, 0, 1, 1]
+        except Exception:
+            return False
+        for other in clusters or []:
+            if other is cluster:
+                continue
+            try:
+                other_size = float(other.get('avg_size', 1.0) or 1.0)
+            except Exception:
+                other_size = 1.0
+            if other_size >= size * 0.74:
+                continue
+            gap = self._auto_clean_rect_gap(rect, other.get('rect') or [0, 0, 1, 1])
+            if gap <= max(14.0, size * 1.90):
+                return True
+        return False
+
+    def _auto_clean_cluster_mask(self, cluster, shape):
+        mask = np.zeros((int(shape[0]), int(shape[1])), dtype=np.uint8)
+        for p in cluster.get('pieces') or []:
+            try:
+                mask = cv2.bitwise_or(mask, self._auto_clean_piece_mask(p, shape))
+            except Exception:
+                continue
+        return mask
+
+    def _auto_clean_local_recover_keep_text_lane_mask(self, cluster, base_mask, domain_mask, shape):
+        """keep된 본문 lane의 외곽선/테두리를 원래 감지 마스크에서 국소 회수한다.
+
+        단순히 OCR bbox 패딩을 더 키우면 붙어 있던 효과음 덩어리가 다시 따라 들어올 수 있다.
+        그래서 이미 keep된 base_mask를 seed로 삼아, 그 주변의 원본 domain 픽셀만 조금 확장 회수한다.
+        """
+        if base_mask is None or domain_mask is None:
+            return base_mask
+        try:
+            if cv2.countNonZero(base_mask) <= 0 or cv2.countNonZero(domain_mask) <= 0:
+                return base_mask
+        except Exception:
+            return base_mask
+        try:
+            keep_decision = str(cluster.get('keep_decision', '') or '')
+            keep_reason = str(cluster.get('keep_reason', '') or '')
+            lane_axis = str(cluster.get('lane_axis', '') or '')
+            base_piece_count = int(cluster.get('base_piece_count', cluster.get('piece_count', 0)) or 0)
+            base_char_count = int(cluster.get('base_char_count', cluster.get('char_count', 0)) or 0)
+            single_large_penalty = int(cluster.get('single_large_penalty', 0) or 0)
+            cut_pad = int(cluster.get('cut_pad_px', 0) or 0)
+        except Exception:
+            return base_mask
+        if keep_decision != 'keep' or single_large_penalty:
+            return base_mask
+        text_lane_like = bool(
+            keep_reason.startswith('keep_single_text_lane')
+            or keep_reason.startswith('keep_single_text_ratio')
+            or keep_reason.startswith('keep_multi')
+            or (base_piece_count <= 1 and base_char_count >= 3 and lane_axis in {'vertical', 'horizontal'})
+        )
+        if not text_lane_like:
+            return base_mask
+
+        try:
+            base_pixels = int(cv2.countNonZero(base_mask))
+        except Exception:
+            base_pixels = 0
+        if base_pixels <= 0:
+            return base_mask
+
+        # OCR bbox를 다시 크게 키우는 것이 아니라, 살아남은 실제 마스크 픽셀 주변만 회수한다.
+        # 긴 본문 lane은 외곽선이 잘릴 가능성이 크므로 조금 더 넓게, 짧은 텍스트는 보수적으로.
+        if base_char_count >= 6:
+            desired_extra = max(5, int(round(max(1, cut_pad) * 0.42)))
+            growth_limit = 0.42
+        elif base_char_count >= 4:
+            desired_extra = max(4, int(round(max(1, cut_pad) * 0.36)))
+            growth_limit = 0.36
+        else:
+            desired_extra = max(3, int(round(max(1, cut_pad) * 0.28)))
+            growth_limit = 0.28
+        desired_extra = int(max(1, min(12, desired_extra)))
+
+        # 너무 많이 불어나면 효과음 접촉부가 다시 딸려온 것으로 보고 반경을 줄인다.
+        max_added = int(max(1800, min(18000, base_pixels * growth_limit)))
+        tried = []
+        for extra in [desired_extra, int(round(desired_extra * 0.70)), int(round(desired_extra * 0.45)), 2]:
+            extra = int(max(1, extra))
+            if extra in tried:
+                continue
+            tried.append(extra)
+            try:
+                k = max(3, extra * 2 + 1)
+                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+                recovered = cv2.dilate((base_mask > 0).astype(np.uint8) * 255, kernel, iterations=1)
+                recovered = cv2.bitwise_and(recovered, domain_mask)
+                recovered_pixels = int(cv2.countNonZero(recovered))
+                added = max(0, recovered_pixels - base_pixels)
+                if added <= max_added or extra <= 2:
+                    cluster['local_recover_radius'] = int(extra)
+                    cluster['local_recover_added'] = int(added)
+                    cluster['local_recover_limit'] = int(max_added)
+                    return recovered
+            except Exception:
+                continue
+        return base_mask
+
+
+    def _auto_clean_piece_norm_gap(self, piece_a, piece_b):
+        """두 OCR 조각 사이의 bbox gap을 글자 크기 기준으로 정규화해 반환한다."""
+        try:
+            gap = float(self._auto_clean_rect_gap(piece_a.get('rect') or [0, 0, 1, 1], piece_b.get('rect') or [0, 0, 1, 1]))
+            sa = max(1.0, float(piece_a.get('size_score', 1.0) or 1.0))
+            sb = max(1.0, float(piece_b.get('size_score', 1.0) or 1.0))
+            base = max(1.0, min(sa, sb))
+            return gap / base
+        except Exception:
+            return 999999.0
+
+    def _auto_clean_rect_center(self, rect):
+        try:
+            x, y, w, h = [float(v) for v in (rect or [0, 0, 1, 1])[:4]]
+            return float(x + max(1.0, w) / 2.0), float(y + max(1.0, h) / 2.0)
+        except Exception:
+            return 0.0, 0.0
+
+    def _auto_clean_rect_area(self, rect):
+        try:
+            _x, _y, w, h = [float(v) for v in (rect or [0, 0, 1, 1])[:4]]
+            return float(max(1.0, w) * max(1.0, h))
+        except Exception:
+            return 1.0
+
+    def _auto_clean_union_rect_for_pieces(self, pieces):
+        xs1 = []; ys1 = []; xs2 = []; ys2 = []
+        for p in pieces or []:
+            try:
+                x, y, w, h = [float(v) for v in p.get('rect', [0, 0, 1, 1])[:4]]
+                xs1.append(x); ys1.append(y); xs2.append(x + max(1.0, w)); ys2.append(y + max(1.0, h))
+            except Exception:
+                continue
+        if not xs1 or not ys1:
+            return [0.0, 0.0, 1.0, 1.0]
+        x1, y1, x2, y2 = min(xs1), min(ys1), max(xs2), max(ys2)
+        return [float(x1), float(y1), float(max(1.0, x2 - x1)), float(max(1.0, y2 - y1))]
+
+    def _auto_clean_build_piece_neighbor_graph(self, pieces, page_median=1.0):
+        """OCR 조각의 공간 밀집도를 보기 위한 근접 그래프를 만든다."""
+        n = len(pieces or [])
+        neighbors = {i: set() for i in range(n)}
+        if n <= 1:
+            return neighbors
+        page_median = max(1.0, float(page_median or 1.0))
+        for i in range(n):
+            a = pieces[i]
+            try:
+                sa = max(1.0, float(a.get('size_score', 1.0) or 1.0))
+            except Exception:
+                sa = page_median
+            for j in range(i + 1, n):
+                b = pieces[j]
+                try:
+                    sb = max(1.0, float(b.get('size_score', 1.0) or 1.0))
+                except Exception:
+                    sb = page_median
+                gap = self._auto_clean_rect_gap(a.get('rect') or [0, 0, 1, 1], b.get('rect') or [0, 0, 1, 1])
+                min_size = max(1.0, min(sa, sb))
+                max_size = max(sa, sb)
+                # 글자 크기 차이가 너무 큰 조각끼리는 "같은 군체"로 바로 묶지 않는다.
+                # 큰 효과음/손글씨가 본문 군체 옆에 붙어 있을 때 본체와 한 덩어리로 오인하지 않기 위함이다.
+                size_ratio = max_size / min_size
+                near_limit = max(10.0, min_size * 1.45, page_median * 0.95)
+                loose_attach_limit = max(14.0, min_size * 1.95, page_median * 1.15)
+                if size_ratio <= 1.38 and gap <= near_limit:
+                    neighbors[i].add(j); neighbors[j].add(i)
+                elif size_ratio <= 1.18 and gap <= loose_attach_limit:
+                    neighbors[i].add(j); neighbors[j].add(i)
+        return neighbors
+
+    def _auto_clean_spatial_groups(self, pieces, neighbors):
+        """근접 그래프 기준으로 공간 군체를 만든다."""
+        n = len(pieces or [])
+        seen = set()
+        groups = []
+        for i in range(n):
+            if i in seen:
+                continue
+            stack = [i]
+            seen.add(i)
+            idxs = []
+            while stack:
+                cur = stack.pop()
+                idxs.append(cur)
+                for nb in neighbors.get(cur, set()):
+                    if nb not in seen:
+                        seen.add(nb)
+                        stack.append(nb)
+            ps = [pieces[k] for k in idxs]
+            sizes = [max(1.0, float(p.get('size_score', 1.0) or 1.0)) for p in ps]
+            chars = [max(1, int(p.get('char_count', 1) or 1)) for p in ps]
+            rect = self._auto_clean_union_rect_for_pieces(ps)
+            groups.append({
+                'indexes': idxs,
+                'pieces': ps,
+                'piece_count': int(len(ps)),
+                'char_count': int(sum(chars)),
+                'avg_size': float(sum(sizes) / max(1, len(sizes))),
+                'median_size': float(sorted(sizes)[len(sizes) // 2]) if sizes else 1.0,
+                'rect': rect,
+                'area': float(self._auto_clean_rect_area(rect)),
+            })
+        return groups
+
+    def _auto_clean_is_piece_punctuation_like(self, piece):
+        """말줄임표/문장부호/감정기호 계열은 종양 제거 대상에서 보호한다."""
+        text = str(piece.get('text', '') or '').strip()
+        if not text:
+            return False
+        compact = ''.join(ch for ch in text if not ch.isspace())
+        if not compact:
+            return False
+        safe = set('.,!?！？。、…⋯・･:;；：~〜ー―-─—…♡♥❤☆★♪♬♩（）()[]【】「」『』〈〉《》')
+        return all(ch in safe for ch in compact)
+
+    def _auto_clean_piece_inside_expanded_rect(self, piece, rect, expand):
+        try:
+            cx, cy = self._auto_clean_rect_center(piece.get('rect') or [0, 0, 1, 1])
+            x, y, w, h = [float(v) for v in (rect or [0, 0, 1, 1])[:4]]
+            return (x - expand) <= cx <= (x + max(1.0, w) + expand) and (y - expand) <= cy <= (y + max(1.0, h) + expand)
+        except Exception:
+            return False
+
+    def _auto_clean_piece_is_furigana_like(self, piece, core_groups):
+        """작은 조각이 큰 군체에 가까이 붙어 있으면 후리가나/첨자로 보호한다."""
+        try:
+            size = max(1.0, float(piece.get('size_score', 1.0) or 1.0))
+            rect = piece.get('rect') or [0, 0, 1, 1]
+        except Exception:
+            return False
+        for core in core_groups or []:
+            csize = max(1.0, float(core.get('median_size', core.get('avg_size', 1.0)) or 1.0))
+            if size >= csize * 0.74:
+                continue
+            gap = self._auto_clean_rect_gap(rect, core.get('rect') or [0, 0, 1, 1])
+            if gap <= max(14.0, csize * 1.80):
+                return True
+        return False
+
+    def _auto_clean_current_text_mask_expand_options(self):
+        """텍스트 감지 마스크를 OCR seed 기준으로 다시 만들 때 쓸 확장 설정을 읽는다."""
+        try:
+            opts = self.app_options if isinstance(getattr(self, 'app_options', None), dict) else {}
+        except Exception:
+            opts = {}
+        text_ratio = clamp_analysis_mask_ratio(
+            opts.get(ANALYSIS_TEXT_MASK_EXPAND_RATIO_KEY, DEFAULT_ANALYSIS_TEXT_MASK_EXPAND_RATIO),
+            DEFAULT_ANALYSIS_TEXT_MASK_EXPAND_RATIO,
+        )
+        text_min_px = clamp_analysis_mask_min_px(
+            opts.get(ANALYSIS_TEXT_MASK_MIN_EXPAND_PX_KEY, DEFAULT_ANALYSIS_TEXT_MASK_MIN_EXPAND_PX),
+            DEFAULT_ANALYSIS_TEXT_MASK_MIN_EXPAND_PX,
+        )
+        return float(text_ratio), int(text_min_px)
+
+    def _auto_clean_cut_padding_for_cluster(self, cluster, shape):
+        """자동 정리에서 seed로 선택된 OCR 조각을 다시 그릴 때의 패딩을 계산한다.
+
+        이전 패치의 해상도 기준 고정 패딩/keep_text_lane_wide/local_recover는
+        글자를 과하게 부풀리는 문제가 있었다. 여기서는 원래 분석 마스크 생성과 같은
+        설정(텍스트 마스크 확장 비율/최소 확장 px)을 기준으로 되돌린다.
+        """
+        try:
+            text_ratio, text_min_px = self._auto_clean_current_text_mask_expand_options()
+        except Exception:
+            text_ratio, text_min_px = 0.20, 5
+        try:
+            sizes = [float(p.get('size_score', 1.0) or 1.0) for p in (cluster.get('pieces') or [])]
+            ref_size = float(np.median(np.array(sizes, dtype=np.float32))) if sizes else float(cluster.get('median_size', 1.0) or 1.0)
+        except Exception:
+            ref_size = float(cluster.get('median_size', 1.0) or 1.0)
+        try:
+            pad = int(round(max(1.0, ref_size) * float(text_ratio or 0.0))) if float(text_ratio or 0.0) > 0 else 0
+        except Exception:
+            pad = 0
+        try:
+            text_min_px = max(0, int(text_min_px or 0))
+        except Exception:
+            text_min_px = 0
+        if text_min_px > 0:
+            pad = max(pad, text_min_px)
+        pad = max(0, int(pad))
+        # 반환 형식은 기존 로그 호환을 위해 유지한다. base=pad, factor=1.0으로 표기.
+        return pad, float(pad), 1.0, 1.0, 'original_text_mask_expand'
+
+    def _auto_clean_component_domain_from_seed(self, mask_bin, labels, seed_mask):
+        """seed OCR 조각이 닿은 현재 텍스트 마스크 연결 성분 전체를 반환한다."""
+        if mask_bin is None or seed_mask is None:
+            return None, []
+        try:
+            if labels is None:
+                return cv2.bitwise_and(seed_mask, mask_bin), []
+            hits = (seed_mask > 0) & (mask_bin > 0)
+            if not np.any(hits):
+                return None, []
+            label_ids = [int(v) for v in np.unique(labels[hits]).tolist() if int(v) > 0]
+            if not label_ids:
+                return None, []
+            domain = (np.isin(labels, label_ids) & (mask_bin > 0)).astype(np.uint8) * 255
+            return domain, label_ids
+        except Exception:
+            try:
+                return cv2.bitwise_and(seed_mask, mask_bin), []
+            except Exception:
+                return None, []
+
+    def _auto_clean_pieces_overlapping_domain(self, pieces, domain_mask, shape):
+        """같은 현재 마스크 연결 성분에 닿은 OCR 조각들을 모은다."""
+        out = []
+        if domain_mask is None or cv2.countNonZero(domain_mask) <= 0:
+            return out
+        for piece in pieces or []:
+            try:
+                pm = self._auto_clean_piece_mask(piece, shape, pad_ratio=0.03, min_px=0)
+                if cv2.countNonZero(cv2.bitwise_and(pm, domain_mask)) > 0:
+                    out.append(piece)
+            except Exception:
+                continue
+        return out
+
+    def _auto_clean_piece_is_rebuild_seed(self, piece, comp_median, page_median, dominant_sizes):
+        """거대한 통마스크를 다시 만들 때 살릴 OCR 글자 후보인지 판단한다.
+
+        큰 손글씨/효과음 선을 지우려는 모드에서는 '무엇을 지울지'보다
+        '무엇을 다시 살릴지'가 중요하다. OCR 텍스트가 있고, 페이지/영역의
+        일반 글자 크기대와 가까운 조각만 seed로 쓴다.
+        """
+        if not isinstance(piece, dict):
+            return False
+        if bool(piece.get('protected_fallback')):
+            # Local detector fallback처럼 실제 OCR 텍스트가 없는 조각만으로 강한 재구성을 하면 위험하다.
+            return False
+        text = str(piece.get('text', '') or '').strip()
+        if not text:
+            return False
+        compact = ''.join(ch for ch in text if not ch.isspace())
+        if not compact:
+            return False
+        try:
+            size = max(1.0, float(piece.get('size_score', 1.0) or 1.0))
+        except Exception:
+            size = 1.0
+        try:
+            char_count = max(1, int(piece.get('char_count', 1) or 1))
+        except Exception:
+            char_count = max(1, len(compact))
+        rect = piece.get('rect') or [0, 0, 1, 1]
+        area = self._auto_clean_rect_area(rect)
+        try:
+            per_char_extent = (area / max(1, char_count)) ** 0.5
+        except Exception:
+            per_char_extent = size
+
+        comp_median = max(1.0, float(comp_median or 1.0))
+        page_median = max(1.0, float(page_median or 1.0))
+        dominant_close = any(max(size, ds) / max(1.0, min(size, ds)) <= 1.35 for ds in dominant_sizes or [])
+        normal_size = bool(size <= max(page_median * 1.45, comp_median * 1.30))
+        normal_extent = bool(per_char_extent <= max(page_median * 2.25, comp_median * 1.95, size * 2.25))
+
+        # 1~2글자짜리 커다란 효과음 조각은 seed로 삼지 않는다.
+        too_large_short = bool(char_count <= 2 and size >= max(page_median * 1.70, comp_median * 1.55))
+        too_huge = bool(size >= max(page_median * 2.10, comp_median * 1.90) and not dominant_close)
+        if too_large_short or too_huge:
+            return False
+
+        return bool((dominant_close or normal_size) and normal_extent)
+
+    def _auto_clean_rebuild_domain_from_text_seeds(self, domain_mask, domain_pieces, *, comp_median, page_median, dominant_sizes, shape):
+        """거대한 저밀도/손글씨형 통마스크를 OCR seed 기반으로 재구성한다.
+
+        현재 마스크에서 손글씨를 정확히 '빼는' 대신, 살릴 OCR 텍스트 후보 주변만
+        분석 마스크 확장 비율/최소 px 설정대로 다시 만들고 나머지를 버린다.
+        """
+        if domain_mask is None or cv2.countNonZero(domain_mask) <= 0:
+            return None, None, {'changed': False}
+        text_ratio, text_min_px = self._auto_clean_current_text_mask_expand_options()
+        keep_pieces = [p for p in (domain_pieces or []) if self._auto_clean_piece_is_rebuild_seed(p, comp_median, page_median, dominant_sizes)]
+        if not keep_pieces:
+            return None, None, {'changed': False, 'reason': 'no_seed'}
+
+        preserve = np.zeros(shape, dtype=np.uint8)
+        for piece in keep_pieces:
+            try:
+                pm = self._auto_clean_piece_mask(piece, shape, pad_ratio=text_ratio, min_px=text_min_px)
+                preserve = cv2.bitwise_or(preserve, pm)
+            except Exception:
+                continue
+        preserve = cv2.bitwise_and(preserve, domain_mask)
+        preserve_pixels = int(cv2.countNonZero(preserve))
+        domain_pixels = int(cv2.countNonZero(domain_mask))
+        if preserve_pixels <= 0 or domain_pixels <= 0:
+            return None, None, {'changed': False, 'reason': 'empty_preserve'}
+
+        coverage = float(preserve_pixels) / float(max(1, domain_pixels))
+        removed_pixels = int(domain_pixels - preserve_pixels)
+
+        # OCR seed 주변만 남기는 강한 재구성은 통마스크가 실제로 과하게 부풀었을 때만 적용한다.
+        # 정상 말풍선 텍스트처럼 seed와 현재 마스크가 비슷하면 건드리지 않는다.
+        should_rebuild = bool(
+            domain_pixels >= 900
+            and removed_pixels >= max(320, int(domain_pixels * 0.18))
+            and coverage <= 0.78
+            and domain_pixels >= preserve_pixels * 1.28
+        )
+        if not should_rebuild:
+            return None, None, {
+                'changed': False,
+                'reason': 'not_bloated',
+                'coverage': coverage,
+                'domain_pixels': domain_pixels,
+                'preserve_pixels': preserve_pixels,
+            }
+
+        return preserve, keep_pieces, {
+            'changed': True,
+            'removed_pixels': int(removed_pixels),
+            'preserve_pixels': int(preserve_pixels),
+            'domain_pixels': int(domain_pixels),
+            'seed_pieces': int(len(keep_pieces)),
+            'coverage': float(coverage),
+            'text_ratio': float(text_ratio),
+            'text_min_px': int(text_min_px),
+        }
+
+    def _auto_clean_build_same_size_neighbor_graph(self, pieces, page_median=1.0):
+        """같은 크기대 글자끼리만 군체를 만들기 위한 근접 그래프를 만든다.
+
+        핵심 원칙:
+        - 후리가나를 제외하면 같은 크기의 문자들만 먼저 군체로 본다.
+        - 1개짜리 큰 글자가 여러 글자 군체에 섞여 들어가지 않게 크기 조건을 엄격하게 둔다.
+        """
+        n = len(pieces or [])
+        neighbors = {i: set() for i in range(n)}
+        if n <= 1:
+            return neighbors
+        page_median = max(1.0, float(page_median or 1.0))
+        for i in range(n):
+            a = pieces[i]
+            sa = max(1.0, float(a.get('size_score', 1.0) or 1.0))
+            for j in range(i + 1, n):
+                b = pieces[j]
+                sb = max(1.0, float(b.get('size_score', 1.0) or 1.0))
+                min_size = max(1.0, min(sa, sb))
+                max_size = max(sa, sb)
+                size_ratio = max_size / min_size
+                gap = self._auto_clean_rect_gap(a.get('rect') or [0, 0, 1, 1], b.get('rect') or [0, 0, 1, 1])
+                near_limit = max(10.0, min_size * 1.42, page_median * 0.92)
+                if size_ratio <= 1.22 and gap <= near_limit:
+                    neighbors[i].add(j)
+                    neighbors[j].add(i)
+                elif size_ratio <= 1.10 and gap <= max(12.0, min_size * 1.80, page_median * 1.05):
+                    neighbors[i].add(j)
+                    neighbors[j].add(i)
+        return neighbors
+
+    def _auto_clean_split_groups_by_size_range(self, groups, *, bucket_ratio=1.16, max_range_ratio=1.26):
+        """연결 그래프의 전이 효과 때문에 크기가 다른 글자가 한 군체가 되는 것을 막는다."""
+        refined = []
+        split_events = []
+        for group in groups or []:
+            ps = list(group.get('pieces') or [])
+            idxs = list(group.get('indexes') or [])
+            if len(ps) <= 1:
+                refined.append(group)
+                continue
+            sizes = [max(1.0, float(p.get('size_score', 1.0) or 1.0)) for p in ps]
+            size_min = min(sizes)
+            size_max = max(sizes)
+            range_ratio = size_max / max(1.0, size_min)
+            group['min_size'] = float(size_min)
+            group['max_size'] = float(size_max)
+            group['size_range_ratio'] = float(range_ratio)
+            if range_ratio <= float(max_range_ratio):
+                refined.append(group)
+                continue
+
+            local_pairs = sorted(zip(idxs, ps, sizes), key=lambda it: it[2])
+            buckets = []
+            for local_idx, piece, size in local_pairs:
+                placed = False
+                for bucket in buckets:
+                    b_sizes = bucket['sizes']
+                    b_min = min(b_sizes)
+                    b_max = max(b_sizes)
+                    next_min = min(b_min, size)
+                    next_max = max(b_max, size)
+                    b_avg = sum(b_sizes) / max(1, len(b_sizes))
+                    if max(size, b_avg) / max(1.0, min(size, b_avg)) <= float(bucket_ratio) and next_max / max(1.0, next_min) <= float(max_range_ratio):
+                        bucket['idxs'].append(local_idx)
+                        bucket['pieces'].append(piece)
+                        bucket['sizes'].append(size)
+                        placed = True
+                        break
+                if not placed:
+                    buckets.append({'idxs': [local_idx], 'pieces': [piece], 'sizes': [size]})
+
+            for bucket in buckets:
+                bucket_pieces = list(bucket.get('pieces') or [])
+                bucket_sizes = [max(1.0, float(v)) for v in bucket.get('sizes') or []]
+                chars = [max(1, int(pp.get('char_count', 1) or 1)) for pp in bucket_pieces]
+                rect = self._auto_clean_union_rect_for_pieces(bucket_pieces)
+                refined.append({
+                    'indexes': list(bucket.get('idxs') or []),
+                    'pieces': bucket_pieces,
+                    'piece_count': int(len(bucket_pieces)),
+                    'char_count': int(sum(chars)),
+                    'avg_size': float(sum(bucket_sizes) / max(1, len(bucket_sizes))) if bucket_sizes else 1.0,
+                    'median_size': float(sorted(bucket_sizes)[len(bucket_sizes) // 2]) if bucket_sizes else 1.0,
+                    'min_size': float(min(bucket_sizes)) if bucket_sizes else 1.0,
+                    'max_size': float(max(bucket_sizes)) if bucket_sizes else 1.0,
+                    'size_range_ratio': float(max(bucket_sizes) / max(1.0, min(bucket_sizes))) if bucket_sizes else 1.0,
+                    'rect': rect,
+                    'area': float(self._auto_clean_rect_area(rect)),
+                    'split_from_size_range': True,
+                    'split_source_ratio': float(range_ratio),
+                })
+            split_events.append({
+                'source_piece_count': int(len(ps)),
+                'source_char_count': int(group.get('char_count', 0) or 0),
+                'source_min': float(size_min),
+                'source_max': float(size_max),
+                'source_ratio': float(range_ratio),
+                'bucket_count': int(len(buckets)),
+            })
+        return refined, split_events
+
+    def _auto_clean_piece_line_orientation(self, piece):
+        try:
+            ori = str(piece.get('line_orientation', '') or '')
+            if ori in {'vertical', 'horizontal'}:
+                return ori
+            x, y, w, h = [float(v) for v in (piece.get('rect') or [0, 0, 1, 1])[:4]]
+            if h >= w * 1.25:
+                return 'vertical'
+            if w >= h * 1.25:
+                return 'horizontal'
+        except Exception:
+            pass
+        return 'block'
+
+    def _auto_clean_piece_line_char_size(self, piece):
+        try:
+            cached = float(piece.get('line_char_size', 0) or 0)
+            if cached > 0:
+                return cached
+        except Exception:
+            pass
+        try:
+            x, y, w, h = [float(v) for v in (piece.get('rect') or [0, 0, 1, 1])[:4]]
+            char_count = max(1, int(piece.get('char_count', 1) or 1))
+            ori = self._auto_clean_piece_line_orientation(piece)
+            if ori == 'vertical' and char_count > 1:
+                return max(1.0, w, h / max(1, char_count))
+            if ori == 'horizontal' and char_count > 1:
+                return max(1.0, h, w / max(1, char_count))
+            return max(1.0, min(w, h), float(piece.get('size_score', 1.0) or 1.0))
+        except Exception:
+            return max(1.0, float(piece.get('size_score', 1.0) or 1.0))
+
+    def _auto_clean_rebuild_lane_group(self, indexes, pieces, *, lane_axis=None, lane_key=None, lane_source=None):
+        ps = list(pieces or [])
+        idxs = [int(i) for i in (indexes or []) if 0 <= int(i) < len(ps)]
+        out_pieces = [ps[i] for i in idxs]
+        sizes = [max(1.0, float(p.get('size_score', 1.0) or 1.0)) for p in out_pieces]
+        line_sizes = [max(1.0, float(self._auto_clean_piece_line_char_size(p))) for p in out_pieces]
+        chars = [max(1, int(p.get('char_count', 1) or 1)) for p in out_pieces]
+        rect = self._auto_clean_union_rect_for_pieces(out_pieces)
+        median_line_size = float(sorted(line_sizes)[len(line_sizes) // 2]) if line_sizes else 1.0
+        return {
+            'indexes': idxs,
+            'pieces': out_pieces,
+            'piece_count': int(len(out_pieces)),
+            'char_count': int(sum(chars)),
+            'avg_size': float(sum(line_sizes) / max(1, len(line_sizes))) if line_sizes else 1.0,
+            'median_size': float(median_line_size),
+            'min_size': float(min(line_sizes)) if line_sizes else 1.0,
+            'max_size': float(max(line_sizes)) if line_sizes else 1.0,
+            'raw_min_size': float(min(sizes)) if sizes else 1.0,
+            'raw_max_size': float(max(sizes)) if sizes else 1.0,
+            'line_size_inferred': True,
+            'line_size_min': float(min(line_sizes)) if line_sizes else 1.0,
+            'line_size_max': float(max(line_sizes)) if line_sizes else 1.0,
+            'size_range_ratio': float(max(line_sizes) / max(1.0, min(line_sizes))) if line_sizes else 1.0,
+            'rect': rect,
+            'area': float(self._auto_clean_rect_area(rect)),
+            'lane_axis': lane_axis or 'none',
+            'lane_key': float(lane_key) if lane_key is not None else 0.0,
+            'lane_source': lane_source or '',
+        }
+
+    def _auto_clean_split_groups_by_text_lane(self, groups, all_pieces, *, page_median=1.0):
+        """같은 크기 군체 안에서도 세로줄/가로줄 lane을 기준으로 다시 분리한다.
+
+        OCR이 '落ち着かねーと'처럼 한 세로줄 전체를 한 박스로 주는 경우가 있으므로,
+        한 OCR 조각을 글자 단위로 쪼개지는 않는다. 대신 OCR 조각의 줄 방향과 중심선으로
+        lane을 나누고, 그 lane의 bbox/char_count로 글자 크기를 다시 추정한다.
+        """
+        refined = []
+        events = []
+        pieces = list(all_pieces or [])
+        page_median = max(1.0, float(page_median or 1.0))
+        for group in groups or []:
+            idxs = [int(i) for i in (group.get('indexes') or []) if 0 <= int(i) < len(pieces)]
+            if len(idxs) <= 1:
+                # 1개 OCR 조각이어도 줄 크기 추정값은 반영한다.
+                refined.append(self._auto_clean_rebuild_lane_group(idxs, pieces, lane_axis='single', lane_key=0.0, lane_source='single'))
+                continue
+            orientations = [self._auto_clean_piece_line_orientation(pieces[i]) for i in idxs]
+            vertical_count = sum(1 for v in orientations if v == 'vertical')
+            horizontal_count = sum(1 for v in orientations if v == 'horizontal')
+            if vertical_count >= max(2, int(len(idxs) * 0.55)):
+                axis = 'vertical'
+                key_func = lambda p: float(self._auto_clean_rect_center(p.get('rect') or [0, 0, 1, 1])[0])
+                along_start = lambda p: float((p.get('rect') or [0, 0, 1, 1])[1])
+                along_end = lambda p: float((p.get('rect') or [0, 0, 1, 1])[1]) + max(1.0, float((p.get('rect') or [0, 0, 1, 1])[3]))
+            elif horizontal_count >= max(2, int(len(idxs) * 0.55)):
+                axis = 'horizontal'
+                key_func = lambda p: float(self._auto_clean_rect_center(p.get('rect') or [0, 0, 1, 1])[1])
+                along_start = lambda p: float((p.get('rect') or [0, 0, 1, 1])[0])
+                along_end = lambda p: float((p.get('rect') or [0, 0, 1, 1])[0]) + max(1.0, float((p.get('rect') or [0, 0, 1, 1])[2]))
+            else:
+                refined.append(group)
+                continue
+
+            line_sizes = [max(1.0, float(self._auto_clean_piece_line_char_size(pieces[i]))) for i in idxs]
+            median_size = float(sorted(line_sizes)[len(line_sizes) // 2]) if line_sizes else page_median
+            lane_tol = max(8.0, min(page_median * 0.55, median_size * 0.55))
+            ordered = sorted(idxs, key=lambda i: key_func(pieces[i]))
+            lanes = []
+            for idx in ordered:
+                key = key_func(pieces[idx])
+                placed = False
+                best_lane = None
+                best_dist = 999999.0
+                for lane in lanes:
+                    dist = abs(key - lane['key'])
+                    if dist <= lane_tol and dist < best_dist:
+                        best_dist = dist
+                        best_lane = lane
+                if best_lane is not None:
+                    best_lane['idxs'].append(idx)
+                    keys = [key_func(pieces[i]) for i in best_lane['idxs']]
+                    best_lane['key'] = float(sum(keys) / max(1, len(keys)))
+                    placed = True
+                if not placed:
+                    lanes.append({'key': float(key), 'idxs': [idx]})
+
+            # 같은 lane 안에서도 너무 멀리 떨어진 조각은 별도 segment로 나눈다.
+            lane_groups = []
+            for lane in lanes:
+                lane_idxs = sorted(lane['idxs'], key=lambda i: along_start(pieces[i]))
+                if not lane_idxs:
+                    continue
+                cur = [lane_idxs[0]]
+                prev_end = along_end(pieces[lane_idxs[0]])
+                for idx in lane_idxs[1:]:
+                    gap = along_start(pieces[idx]) - prev_end
+                    piece_size = max(1.0, float(self._auto_clean_piece_line_char_size(pieces[idx])))
+                    gap_limit = max(16.0, min(page_median * 1.35, max(median_size, piece_size) * 1.85))
+                    if gap > gap_limit:
+                        lane_groups.append((lane['key'], cur))
+                        cur = [idx]
+                    else:
+                        cur.append(idx)
+                    prev_end = max(prev_end, along_end(pieces[idx]))
+                lane_groups.append((lane['key'], cur))
+
+            if len(lane_groups) <= 1:
+                # 분리되지 않더라도 line size 추정값은 반영한다.
+                lane_key = lane_groups[0][0] if lane_groups else 0.0
+                refined.append(self._auto_clean_rebuild_lane_group(idxs, pieces, lane_axis=axis, lane_key=lane_key, lane_source='same_lane'))
+                continue
+
+            for lane_key, lane_idxs in lane_groups:
+                refined.append(self._auto_clean_rebuild_lane_group(lane_idxs, pieces, lane_axis=axis, lane_key=lane_key, lane_source='lane_split'))
+            events.append({
+                'axis': axis,
+                'source_piece_count': int(len(idxs)),
+                'source_char_count': int(group.get('char_count', 0) or 0),
+                'lane_count': int(len(lane_groups)),
+                'lane_tol': float(lane_tol),
+                'median_size': float(median_size),
+            })
+        return refined, events
+
+    def _auto_clean_group_is_furigana_like(self, group, groups, dominant_sizes=None, page_median=1.0):
+        """작은 군체가 큰 본문 군체의 옆/위에 아주 가깝게 붙어 있을 때만 후리가나로 본다.
+
+        핵심 보호 규칙:
+        - 1개짜리 초대형 효과음/손글씨 군체는 parent가 될 수 없다.
+        - child는 parent보다 충분히 작아야 하고, piece/char 수가 적어야 한다.
+        - 방향(세로/가로)에 맞는 위치 관계가 아니면 후리가나로 보지 않는다.
+        """
+        try:
+            size = max(1.0, float(group.get('median_size', group.get('avg_size', 1.0)) or 1.0))
+            rect = group.get('rect') or [0, 0, 1, 1]
+            piece_count = int(group.get('piece_count', 0) or 0)
+            char_count = int(group.get('char_count', 0) or 0)
+        except Exception:
+            return False, None
+        if piece_count <= 0:
+            return False, None
+        # child 자체가 너무 크거나 길면 후리가나가 아니다.
+        if piece_count > 2 or char_count > 5:
+            return False, None
+        page_median = max(1.0, float(page_median or 1.0))
+        gx, gy, gw, gh = [float(v) for v in (rect[:4] if rect else [0, 0, 1, 1])]
+        best_parent = None
+        best_score = None
+        for other in groups or []:
+            if other is group:
+                continue
+            other_size = max(1.0, float(other.get('median_size', other.get('avg_size', 1.0)) or 1.0))
+            other_piece_count = int(other.get('piece_count', 0) or 0)
+            other_char_count = int(other.get('char_count', 0) or 0)
+            # parent가 될 군체는 '일반 본문' 쪽이어야 한다.
+            if other_piece_count < 2 and other_char_count < 3:
+                continue
+            # 1개짜리 군체는 크기와 무관하게 후리가나 parent 금지.
+            # OCR이 세로줄 하나를 통째로 한 조각으로 줄 수 있기 때문에,
+            # 단일 조각이 parent가 되면 효과음/손글씨가 작은 글자군을 먹는 오판이 생긴다.
+            if other_piece_count <= 1:
+                continue
+            if other_size >= page_median * 1.80:
+                continue
+            size_ratio = size / max(1.0, other_size)
+            if size_ratio < 0.24 or size_ratio > 0.68:
+                continue
+            other_rect = other.get('rect') or [0, 0, 1, 1]
+            ox, oy, ow, oh = [float(v) for v in (other_rect[:4] if other_rect else [0, 0, 1, 1])]
+            gap = self._auto_clean_rect_gap(rect, other_rect)
+            if gap > max(8.0, min(other_size * 0.72, page_median * 0.60)):
+                continue
+
+            # 위치 관계 체크: 세로 텍스트면 좌/우에, 가로 텍스트면 위/아래에 바싹 붙어야 한다.
+            x_overlap = max(0.0, min(gx + gw, ox + ow) - max(gx, ox))
+            y_overlap = max(0.0, min(gy + gh, oy + oh) - max(gy, oy))
+            x_overlap_ratio = x_overlap / max(1.0, min(gw, ow))
+            y_overlap_ratio = y_overlap / max(1.0, min(gh, oh))
+            parent_vertical = (oh >= ow * 1.20)
+            parent_horizontal = (ow >= oh * 1.20)
+            if parent_vertical:
+                side_ok = (gx + gw <= ox + max(6.0, other_size * 0.35)) or (ox + ow <= gx + max(6.0, other_size * 0.35))
+                if not (side_ok and y_overlap_ratio >= 0.35):
+                    continue
+                pos_score = y_overlap_ratio
+            elif parent_horizontal:
+                above_below_ok = (gy + gh <= oy + max(6.0, other_size * 0.35)) or (oy + oh <= gy + max(6.0, other_size * 0.35))
+                if not (above_below_ok and x_overlap_ratio >= 0.35):
+                    continue
+                pos_score = x_overlap_ratio
+            else:
+                if max(x_overlap_ratio, y_overlap_ratio) < 0.45:
+                    continue
+                pos_score = max(x_overlap_ratio, y_overlap_ratio)
+
+            dominant_close = self._auto_clean_group_dominant_close(other, dominant_sizes or [])
+            # 점수가 낮을수록 더 좋은 parent
+            score = (
+                0 if dominant_close else 1,
+                gap,
+                abs(size_ratio - 0.45),
+                -pos_score,
+            )
+            if best_score is None or score < best_score:
+                best_score = score
+                best_parent = other
+        return (best_parent is not None), best_parent
+
+    def _auto_clean_group_dominant_close(self, group, dominant_sizes, ratio=1.28):
+        size = max(1.0, float(group.get('median_size', group.get('avg_size', 1.0)) or 1.0))
+        return any(max(size, ds) / max(1.0, min(size, ds)) <= float(ratio) for ds in (dominant_sizes or []))
+
+    def _auto_clean_build_priority_clusters(self, groups, dominant_sizes, page_median=1.0):
+        """공간 군체를 실제 마스크 소유 군체로 변환한다.
+
+        - 일반 군체는 그대로 하나의 보호 군체가 된다.
+        - 후리가나는 '큰 효과음'이 아니라 '일반 본문' 군체에만 제한적으로 붙인다.
+        - 후리가나 child는 보호용 부속물일 뿐, parent의 체급을 과도하게 올리지 않는다.
+        - 여러 글자 군체가 1개짜리 큰 글자보다 우선하도록 우선순위를 만든다.
+        """
+        indexed = list(enumerate(groups or []))
+        parent_map = {}
+        for idx, group in indexed:
+            is_furi, parent = self._auto_clean_group_is_furigana_like(group, groups, dominant_sizes=dominant_sizes, page_median=page_median)
+            if is_furi and parent is not None:
+                try:
+                    parent_idx = groups.index(parent)
+                except Exception:
+                    parent_idx = None
+                if parent_idx is not None:
+                    parent_map[idx] = parent_idx
+
+        children_map = {}
+        for child_idx, parent_idx in parent_map.items():
+            children_map.setdefault(parent_idx, []).append(child_idx)
+
+        clusters = []
+        for idx, group in indexed:
+            if idx in parent_map:
+                continue
+            child_idxs = children_map.get(idx, [])
+            pieces = list(group.get('pieces') or [])
+            for ci in child_idxs:
+                pieces.extend(groups[ci].get('pieces') or [])
+            base_piece_count = int(group.get('piece_count', 0) or 0)
+            base_char_count = int(group.get('char_count', 0) or 0)
+            total_piece_count = int(len(pieces))
+            total_char_count = int(sum(max(1, int(p.get('char_count', 1) or 1)) for p in pieces))
+            median_size = max(1.0, float(group.get('median_size', group.get('avg_size', 1.0)) or 1.0))
+            dominant_close = self._auto_clean_group_dominant_close(group, dominant_sizes)
+            # 체급은 base 군체만으로 계산한다. child(후리가나)는 점수 뻥튀기 재료가 아니다.
+            multi_rank = 3 if (base_piece_count >= 3 or base_char_count >= 4) else (2 if (base_piece_count >= 2 or base_char_count >= 2) else 1)
+            single_large_penalty = 0
+            if base_piece_count == 1 and median_size >= max(page_median * 1.60, 150.0):
+                single_large_penalty = 1
+            text_like_rank = 1 if dominant_close else 0
+            priority_key = (
+                int(multi_rank),
+                int(text_like_rank),
+                0 if single_large_penalty else 1,
+                int(base_piece_count),
+                int(base_char_count),
+                1 if child_idxs else 0,
+                float(-median_size),
+            )
+            clusters.append({
+                'cluster_id': int(idx),
+                'group_indexes': [idx] + list(child_idxs),
+                'pieces': pieces,
+                'base_piece_count': int(base_piece_count),
+                'base_char_count': int(base_char_count),
+                'piece_count': int(total_piece_count),
+                'char_count': int(total_char_count),
+                'median_size': float(median_size),
+                'rect': self._auto_clean_union_rect_for_pieces(pieces),
+                'lane_axis': group.get('lane_axis', ''),
+                'lane_key': group.get('lane_key', 0.0),
+                'lane_source': group.get('lane_source', ''),
+                'dominant_close': bool(dominant_close),
+                'priority_key': priority_key,
+                'has_furigana_child': bool(child_idxs),
+                'furigana_child_count': int(len(child_idxs)),
+                'single_large_penalty': int(single_large_penalty),
+            })
+        # parent를 찾지 못한 순수 후리가나/작은 군체도 별도 군체로 남긴다.
+        for idx, group in indexed:
+            if idx in parent_map:
+                continue
+            if any(c.get('cluster_id') == idx for c in clusters):
+                continue
+            median_size = max(1.0, float(group.get('median_size', group.get('avg_size', 1.0)) or 1.0))
+            base_piece_count = int(group.get('piece_count', 0) or 0)
+            base_char_count = int(group.get('char_count', 0) or 0)
+            single_large_penalty = 1 if (base_piece_count == 1 and median_size >= max(page_median * 1.60, 150.0)) else 0
+            clusters.append({
+                'cluster_id': int(idx),
+                'group_indexes': [idx],
+                'pieces': list(group.get('pieces') or []),
+                'base_piece_count': base_piece_count,
+                'base_char_count': base_char_count,
+                'piece_count': base_piece_count,
+                'char_count': base_char_count,
+                'median_size': float(median_size),
+                'rect': group.get('rect') or [0, 0, 1, 1],
+                'lane_axis': group.get('lane_axis', ''),
+                'lane_key': group.get('lane_key', 0.0),
+                'lane_source': group.get('lane_source', ''),
+                'dominant_close': self._auto_clean_group_dominant_close(group, dominant_sizes),
+                'priority_key': (
+                    3 if (base_piece_count >= 3 or base_char_count >= 4) else (2 if (base_piece_count >= 2 or base_char_count >= 2) else 1),
+                    1 if self._auto_clean_group_dominant_close(group, dominant_sizes) else 0,
+                    0 if single_large_penalty else 1,
+                    base_piece_count,
+                    base_char_count,
+                    0,
+                    float(-median_size),
+                ),
+                'has_furigana_child': False,
+                'furigana_child_count': 0,
+                'single_large_penalty': int(single_large_penalty),
+            })
+        return clusters
+
+    def _auto_clean_cluster_keep_decision(self, cluster, page_median=1.0):
+        """라인 분리된 군체를 실제로 보존할지 판단한다.
+
+        이전 단계는 군체를 잘게 나누는 역할이고, 이 단계는 "일반 대사/배경글씨 lane"만
+        최종 마스크에 남기는 역할이다. 1개짜리 큰 효과음/손글씨 군체는 겹치지 않아도
+        계속 살아남는 문제가 있었으므로 여기서 drop 처리한다.
+        """
+        try:
+            page_median = max(1.0, float(page_median or 1.0))
+        except Exception:
+            page_median = 1.0
+        try:
+            base_piece_count = int(cluster.get('base_piece_count', cluster.get('piece_count', 0)) or 0)
+            base_char_count = int(cluster.get('base_char_count', cluster.get('char_count', 0)) or 0)
+            median_size = max(1.0, float(cluster.get('median_size', 1.0) or 1.0))
+            dominant_close = bool(cluster.get('dominant_close'))
+            single_large_penalty = int(cluster.get('single_large_penalty', 0) or 0)
+            has_furi = bool(cluster.get('has_furigana_child'))
+            lane_axis = str(cluster.get('lane_axis', '') or '')
+        except Exception:
+            return True, 'fallback_keep'
+
+        size_ratio = median_size / max(1.0, page_median)
+        if has_furi:
+            return True, 'keep_furigana_parent'
+        if base_piece_count >= 2:
+            if size_ratio >= 1.85 and not dominant_close:
+                return False, f'drop_multi_large_ratio={size_ratio:.2f}'
+            return True, 'keep_multi_lane'
+        # OCR이 세로줄 하나를 한 박스로 주는 경우. 글자 수가 충분하고 본문 크기대면 살린다.
+        if base_piece_count == 1 and base_char_count >= 3:
+            if single_large_penalty:
+                return False, f'drop_single_large_penalty_ratio={size_ratio:.2f}'
+            if size_ratio >= 1.45 and not dominant_close:
+                return False, f'drop_single_piece_large_ratio={size_ratio:.2f}'
+            if size_ratio >= 1.70:
+                return False, f'drop_single_piece_too_large_ratio={size_ratio:.2f}'
+            if dominant_close or lane_axis in {'vertical', 'horizontal', 'single'}:
+                return True, f'keep_single_text_lane_ratio={size_ratio:.2f}'
+            return True, f'keep_single_text_ratio={size_ratio:.2f}'
+        # 짧은 감탄/소형 텍스트는 본문 크기대만 살린다.
+        if base_piece_count == 1 and base_char_count <= 2:
+            if single_large_penalty or size_ratio >= 1.45:
+                return False, f'drop_short_large_ratio={size_ratio:.2f}'
+            return True, f'keep_short_text_ratio={size_ratio:.2f}'
+        if single_large_penalty:
+            return False, f'drop_single_large_penalty_ratio={size_ratio:.2f}'
+        return True, f'keep_default_ratio={size_ratio:.2f}'
+
+    def _auto_clean_cluster_mask_with_text_options(self, cluster, shape, domain_mask=None):
+        # seed로 선택된 OCR 조각을 원래 텍스트 마스크 생성 방식대로 다시 그린다.
+        # keep_text_lane_wide / local_recover 같은 추가 확대는 기본 동작에서 제거한다.
+        try:
+            text_ratio, text_min_px = self._auto_clean_current_text_mask_expand_options()
+        except Exception:
+            text_ratio, text_min_px = 0.20, 5
+        cut_pad, base_pad, scale, factor, reason = self._auto_clean_cut_padding_for_cluster(cluster, shape)
+        try:
+            cluster['cut_pad_px'] = int(cut_pad)
+            cluster['cut_pad_base'] = float(base_pad)
+            cluster['cut_pad_scale'] = float(scale)
+            cluster['cut_pad_factor'] = float(factor)
+            cluster['cut_pad_reason'] = str(reason)
+            cluster['local_recover_added'] = 0
+            cluster['local_recover_radius'] = 0
+        except Exception:
+            pass
+        mask = np.zeros((int(shape[0]), int(shape[1])), dtype=np.uint8)
+        for p in cluster.get('pieces') or []:
+            try:
+                pm = self._auto_clean_piece_mask(p, shape, pad_ratio=float(text_ratio or 0.0), min_px=int(text_min_px or 0))
+                mask = cv2.bitwise_or(mask, pm)
+            except Exception:
+                continue
+        if domain_mask is not None:
+            mask = cv2.bitwise_and(mask, domain_mask)
+        return mask
+
+    def _auto_clean_detection_mask_by_priority(self, mask_bin, pieces, page_data=None, debug_path=None):
+        """OCR 조각을 '군체' 단위로 나누고, 군체 우선순위에 따라 감지 마스크를 커팅한다.
+
+        플랜 2 핵심:
+        - OCR 조각들을 같은 크기/가까운 거리 기준으로 군체(cluster)로 묶는다.
+        - 후리가나는 가까운 본문 군체의 부속 군체로 붙인다.
+        - 각 군체에 텍스트 마스크 확장 비율/최소 px 설정으로 보호 테두리를 만든다.
+        - 여러 글자 군체는 1개짜리 큰 글자 군체보다 우선순위가 높다.
+        - 겹치는 마스크는 높은 우선순위 군체가 먼저 소유하고, 낮은 우선순위 군체는 겹친 부분이 커팅된다.
+        """
+        if mask_bin is None or not isinstance(mask_bin, np.ndarray) or cv2.countNonZero(mask_bin) <= 0:
+            return mask_bin, {'changed': False, 'removed_clusters': 0, 'removed_pixels': 0, 'components': 0, 'pieces': len(pieces or [])}
+        pieces = list(pieces or [])
+        if not pieces:
+            return mask_bin, {'changed': False, 'removed_clusters': 0, 'removed_pixels': 0, 'components': 0, 'pieces': 0}
+
+        h, w = mask_bin.shape[:2]
+        corrected = mask_bin.copy()
+        page_sizes = [max(1.0, float(p.get('size_score', 1.0) or 1.0)) for p in pieces]
+        page_sizes_sorted = sorted(page_sizes)
+        page_median = float(page_sizes_sorted[len(page_sizes_sorted) // 2]) if page_sizes_sorted else 1.0
+        dominant_sizes = self._auto_clean_dominant_sizes(pieces)
+        text_ratio, text_min_px = self._auto_clean_current_text_mask_expand_options()
+        debug_line_count = 0
+        debug_line_limit = 3000
+
+        def _debug_log(msg):
+            nonlocal debug_line_count
+            if debug_line_count >= debug_line_limit:
+                return
+            try:
+                append_log(debug_path, "DETECTION_CLUSTER_DEBUG", message=str(msg))
+            except Exception:
+                pass
+            try:
+                self.log(f"🧹 [군체커팅] {msg}")
+            except Exception:
+                pass
+            debug_line_count += 1
+
+        def _short_text_for_log(value, limit=18):
+            try:
+                s = str(value or '').replace('\n', '\n')
+            except Exception:
+                s = ''
+            if len(s) > int(limit):
+                return s[:int(limit)] + '…'
+            return s
+
+        def _piece_summary_for_log(piece):
+            try:
+                rect = piece.get('rect') or [0, 0, 1, 1]
+                x, y, rw, rh = [int(round(float(v))) for v in rect[:4]]
+            except Exception:
+                x, y, rw, rh = 0, 0, 1, 1
+            try:
+                vertices = piece.get('vertices') or []
+                vcount = len(vertices)
+            except Exception:
+                vcount = 0
+            try:
+                size = float(piece.get('size_score', 1.0) or 1.0)
+            except Exception:
+                size = 1.0
+            try:
+                stroke = float(piece.get('stroke_size', 0.0) or 0.0)
+            except Exception:
+                stroke = 0.0
+            try:
+                char_count = int(piece.get('char_count', 1) or 1)
+            except Exception:
+                char_count = 1
+            return (
+                f"pid={piece.get('piece_id')} g={piece.get('group_idx')} p={piece.get('piece_idx')} "
+                f"text='{_short_text_for_log(piece.get('text'))}' rect=({x},{y},{rw},{rh}) "
+                f"v={vcount} chars={char_count} size={size:.1f}px stroke={stroke:.1f} "
+                f"fallback={bool(piece.get('protected_fallback'))}"
+            )
+
+        _debug_log(
+            f"시작: OCR조각={len(pieces)}개 / 텍스트확장={float(text_ratio):.2f}x / 최소확장={int(text_min_px)}px / "
+            f"page_median={float(page_median):.1f}px / dominant={[round(float(v), 1) for v in (dominant_sizes or [])]}"
+        )
+        try:
+            cut_base = 20.0 * (((float(w) * float(h)) / (2508.0 * 3541.0)) ** 0.5)
+        except Exception:
+            cut_base = 20.0
+        _debug_log(f"기존 텍스트확장계산식: pad=max(round(size_px*{float(text_ratio):.2f}), {int(text_min_px)}px)")
+        _debug_log(f"커팅패딩계산식: 기준 2508x3541@20px / 현재 {w}x{h} => base={cut_base:.1f}px / 군체 해당도 0.45~1.35배")
+        try:
+            char_lengths = [len(''.join(ch for ch in str(p.get('text', '') or '') if not ch.isspace())) for p in pieces]
+            single_count = sum(1 for v in char_lengths if v == 1)
+            multi_count = sum(1 for v in char_lengths if v > 1)
+            long_count = sum(1 for v in char_lengths if v >= 6)
+            max_len = max(char_lengths) if char_lengths else 0
+            avg_len = (sum(char_lengths) / max(1, len(char_lengths))) if char_lengths else 0.0
+            _debug_log(f"OCR_단위요약: total={len(char_lengths)} single={single_count} multi={multi_count} long>=6={long_count} avg_len={avg_len:.2f} max_len={max_len}")
+            if single_count > 0 and multi_count > 0:
+                _debug_log("OCR_단위혼합주의: 한 페이지 안에 1글자 OCR과 다글자 OCR이 섞여 있음. OCR 조각 기반 군체 커팅은 '글자 단위'가 아니라 'OCR 조각 단위'까지만 신뢰 가능")
+        except Exception:
+            pass
+        for raw_i, raw_piece in enumerate(pieces[:16]):
+            _debug_log(f"OCR_RAW[{raw_i}] {_piece_summary_for_log(raw_piece)}")
+        if len(pieces) > 16:
+            _debug_log(f"OCR_RAW: 이하 {len(pieces) - 16}개 생략")
+        try:
+            _num_labels, component_labels = cv2.connectedComponents((mask_bin > 0).astype(np.uint8), connectivity=8)
+        except Exception:
+            component_labels = None
+        processed_domain_keys = set()
+
+        pieces_by_group = {}
+        for piece in pieces:
+            try:
+                gidx = int(piece.get('group_idx', 0) or 0)
+            except Exception:
+                gidx = 0
+            pieces_by_group.setdefault(gidx, []).append(piece)
+
+        removed_clusters_total = 0
+        removed_pixels_total = 0
+        used_components = 0
+        rebuilt_components_total = 0
+        rebuilt_pixels_total = 0
+        rebuild_preserve_pixels_total = 0
+
+        for _group_idx, comp_pieces in sorted(pieces_by_group.items(), key=lambda it: it[0]):
+            comp_pieces = list(comp_pieces or [])
+            if not comp_pieces:
+                continue
+
+            comp_union = np.zeros((h, w), dtype=np.uint8)
+            for piece in comp_pieces:
+                try:
+                    pm = self._auto_clean_piece_mask(piece, (h, w), pad_ratio=0.04, min_px=0)
+                    comp_union = cv2.bitwise_or(comp_union, pm)
+                except Exception:
+                    continue
+            if cv2.countNonZero(comp_union) <= 0:
+                continue
+
+            group_domain, domain_label_ids = self._auto_clean_component_domain_from_seed(mask_bin, component_labels, comp_union)
+            if group_domain is None or cv2.countNonZero(group_domain) <= 0:
+                comp_mask = cv2.bitwise_and(comp_union, mask_bin)
+                if cv2.countNonZero(comp_mask) <= 0:
+                    continue
+                group_domain = comp_mask
+                domain_key = ('mask', int(_group_idx))
+            else:
+                try:
+                    domain_key = tuple(sorted(int(v) for v in (domain_label_ids or []) if int(v) > 0))
+                except Exception:
+                    domain_key = tuple()
+            if domain_key in processed_domain_keys:
+                continue
+            processed_domain_keys.add(domain_key)
+            used_components += 1
+
+            domain_pieces = self._auto_clean_pieces_overlapping_domain(pieces, group_domain, (h, w))
+            if not domain_pieces:
+                domain_pieces = comp_pieces
+            old_domain_pixels_for_log = int(cv2.countNonZero(group_domain))
+            domain_sizes_for_log = sorted(max(1.0, float(p.get('size_score', 1.0) or 1.0)) for p in domain_pieces)
+            if domain_sizes_for_log:
+                _debug_log(
+                    f"group={_group_idx} domain_px={old_domain_pixels_for_log} pieces={len(domain_pieces)} "
+                    f"size[min/med/max]={domain_sizes_for_log[0]:.1f}/{domain_sizes_for_log[len(domain_sizes_for_log)//2]:.1f}/{domain_sizes_for_log[-1]:.1f}px"
+                )
+                try:
+                    glens = [len(''.join(ch for ch in str(p.get('text', '') or '') if not ch.isspace())) for p in domain_pieces]
+                    gsingle = sum(1 for v in glens if v == 1)
+                    gmulti = sum(1 for v in glens if v > 1)
+                    glong = sum(1 for v in glens if v >= 6)
+                    _debug_log(f"group={_group_idx} OCR_단위요약: single={gsingle} multi={gmulti} long>=6={glong} max_len={(max(glens) if glens else 0)}")
+                    if gsingle > 0 and gmulti > 0:
+                        _debug_log(f"group={_group_idx} OCR_단위혼합주의: 1글자/다글자 OCR 조각이 같은 마스크 도메인 안에 섞임")
+                except Exception:
+                    pass
+            for raw_i, raw_piece in enumerate(domain_pieces[:18]):
+                _debug_log(f"  OCR_PIECE[{raw_i}] {_piece_summary_for_log(raw_piece)}")
+            if len(domain_pieces) > 18:
+                _debug_log(f"  OCR_PIECE: 이하 {len(domain_pieces) - 18}개 생략")
+            for raw_i, raw_piece in enumerate(domain_pieces[:18]):
+                try:
+                    text_len = len(''.join(ch for ch in str(raw_piece.get('text', '') or '') if not ch.isspace()))
+                    rect_area = float(self._auto_clean_rect_area(raw_piece.get('rect') or [0, 0, 1, 1]))
+                    size = max(1.0, float(raw_piece.get('size_score', 1.0) or 1.0))
+                    if text_len >= 6 or rect_area >= max(2500.0, size * size * 9.0):
+                        _debug_log(
+                            f"  OCR_품질주의[{raw_i}]: 큰 OCR 조각/긴 문자열 가능 text_len={text_len} area={rect_area:.0f}px² size={size:.1f}px -> 글자 단위 군체 판정 한계 가능"
+                        )
+                except Exception:
+                    pass
+            neighbors = self._auto_clean_build_same_size_neighbor_graph(domain_pieces, page_median=page_median)
+            edge_count = int(sum(len(v) for v in neighbors.values()) // 2)
+            edge_log_count = 0
+            for i in range(len(domain_pieces)):
+                if edge_log_count >= 36:
+                    break
+                a = domain_pieces[i]
+                try:
+                    sa = max(1.0, float(a.get('size_score', 1.0) or 1.0))
+                except Exception:
+                    sa = page_median
+                for j in range(i + 1, len(domain_pieces)):
+                    if edge_log_count >= 36:
+                        break
+                    b = domain_pieces[j]
+                    try:
+                        sb = max(1.0, float(b.get('size_score', 1.0) or 1.0))
+                    except Exception:
+                        sb = page_median
+                    min_size = max(1.0, min(sa, sb))
+                    max_size = max(sa, sb)
+                    size_ratio = max_size / min_size
+                    gap = self._auto_clean_rect_gap(a.get('rect') or [0, 0, 1, 1], b.get('rect') or [0, 0, 1, 1])
+                    near_limit = max(10.0, min_size * 1.42, page_median * 0.92)
+                    loose_limit = max(12.0, min_size * 1.80, page_median * 1.05)
+                    edge = bool(j in neighbors.get(i, set()))
+                    # 모든 pair를 찍으면 로그가 터지므로, 실제 연결됐거나 경계 근처/가까운 pair만 남긴다.
+                    interesting = bool(edge or gap <= max(loose_limit * 1.15, 18.0) or size_ratio >= 1.35)
+                    if not interesting:
+                        continue
+                    reason = 'edge' if edge else ('size_diff' if size_ratio > 1.22 else 'gap_over')
+                    _debug_log(
+                        f"  EDGE[{i}-{j}] {reason}: text='{_short_text_for_log(a.get('text'), 8)}'↔'{_short_text_for_log(b.get('text'), 8)}' "
+                        f"size={sa:.1f}/{sb:.1f}px ratio={size_ratio:.2f} gap={gap:.1f}px limit={near_limit:.1f}/{loose_limit:.1f}px edge={edge}"
+                    )
+                    edge_log_count += 1
+            if edge_log_count >= 36:
+                _debug_log("  EDGE: 이하 pair 로그 생략")
+            spatial_groups = self._auto_clean_spatial_groups(domain_pieces, neighbors)
+            if not spatial_groups:
+                _debug_log(f"group={_group_idx} 공간 군체 없음: edge={edge_count}")
+                continue
+            before_split_count = int(len(spatial_groups))
+            spatial_groups, split_events = self._auto_clean_split_groups_by_size_range(spatial_groups)
+            if split_events:
+                for ev in split_events[:8]:
+                    _debug_log(
+                        f"group={_group_idx} 크기범위 재분리: pcs={ev.get('source_piece_count')} "
+                        f"size={float(ev.get('source_min', 0)):.1f}~{float(ev.get('source_max', 0)):.1f}px "
+                        f"ratio={float(ev.get('source_ratio', 0)):.2f} -> buckets={ev.get('bucket_count')}"
+                    )
+            after_size_split_count = int(len(spatial_groups))
+            spatial_groups, lane_events = self._auto_clean_split_groups_by_text_lane(spatial_groups, domain_pieces, page_median=page_median)
+            if lane_events:
+                for ev in lane_events[:10]:
+                    _debug_log(
+                        f"group={_group_idx} 라인분리: axis={ev.get('axis')} pcs={ev.get('source_piece_count')} "
+                        f"chars={ev.get('source_char_count')} lane={ev.get('lane_count')} "
+                        f"tol={float(ev.get('lane_tol', 0) or 0):.1f}px line_size={float(ev.get('median_size', 0) or 0):.1f}px"
+                    )
+            _debug_log(f"group={_group_idx} edge={edge_count} spatial_groups={before_split_count}->{after_size_split_count}->{len(spatial_groups)}")
+            if debug_line_count < debug_line_limit:
+                for gi, sg in enumerate(spatial_groups[:10]):
+                    _debug_log(
+                        f"  군체#{gi}: pieces={int(sg.get('piece_count', 0) or 0)} chars={int(sg.get('char_count', 0) or 0)} "
+                        f"axis={sg.get('lane_axis', '')} key={float(sg.get('lane_key', 0) or 0):.1f} src={sg.get('lane_source', '')} "
+                        f"size[min/med/max]={float(sg.get('min_size', sg.get('median_size', 0)) or 0):.1f}/"
+                        f"{float(sg.get('median_size', sg.get('avg_size', 0)) or 0):.1f}/"
+                        f"{float(sg.get('max_size', sg.get('median_size', 0)) or 0):.1f}px "
+                        f"range={float(sg.get('size_range_ratio', 1.0) or 1.0):.2f}"
+                    )
+            priority_clusters = self._auto_clean_build_priority_clusters(spatial_groups, dominant_sizes, page_median=page_median)
+            try:
+                for cluster in priority_clusters[:16]:
+                    if int(cluster.get('furigana_child_count', 0) or 0) > 0:
+                        _debug_log(
+                            f"  FURIGANA_ATTACH: parent_cid={cluster.get('cluster_id')} child_count={cluster.get('furigana_child_count')} "
+                            f"base_pieces={cluster.get('base_piece_count')} base_chars={cluster.get('base_char_count')} size={float(cluster.get('median_size', 0) or 0):.1f}px"
+                        )
+            except Exception:
+                pass
+            if not priority_clusters:
+                _debug_log(f"group={_group_idx} priority cluster 없음")
+                continue
+
+            # 군체별 keep/drop 판정 후 보호 마스크 생성
+            live_clusters = []
+            dropped_clusters = []
+            for cluster in priority_clusters:
+                cluster = dict(cluster)
+                keep, keep_reason = self._auto_clean_cluster_keep_decision(cluster, page_median=page_median)
+                cluster['keep_decision'] = 'keep' if keep else 'drop'
+                cluster['keep_reason'] = str(keep_reason)
+                if not keep:
+                    dropped_clusters.append(cluster)
+                    _debug_log(
+                        f"  DROP_CLUSTER: cid={cluster.get('cluster_id')} reason={keep_reason} "
+                        f"base_pieces={int(cluster.get('base_piece_count', 0) or 0)} base_chars={int(cluster.get('base_char_count', 0) or 0)} "
+                        f"size={float(cluster.get('median_size', 0) or 0):.1f}px axis={cluster.get('lane_axis', '')} src={cluster.get('lane_source', '')}"
+                    )
+                    continue
+                cmask = self._auto_clean_cluster_mask_with_text_options(cluster, (h, w), domain_mask=group_domain)
+                pixels = int(cv2.countNonZero(cmask))
+                if pixels <= 0:
+                    _debug_log(f"  KEEP_CLUSTER_EMPTY_MASK: cid={cluster.get('cluster_id')} reason={keep_reason}")
+                    continue
+                cluster['mask'] = cmask
+                cluster['mask_pixels'] = pixels
+                cut_pad = int(cluster.get('cut_pad_px', 0) or 0)
+                if cut_pad <= 0:
+                    cut_pad, base_pad, scale, factor, reason = self._auto_clean_cut_padding_for_cluster(cluster, (h, w))
+                    cluster['cut_pad_px'] = int(cut_pad)
+                    cluster['cut_pad_base'] = float(base_pad)
+                    cluster['cut_pad_scale'] = float(scale)
+                    cluster['cut_pad_factor'] = float(factor)
+                    cluster['cut_pad_reason'] = str(reason)
+                cluster['pad_min'] = cluster['pad_med'] = cluster['pad_max'] = int(cluster.get('cut_pad_px', cut_pad))
+                live_clusters.append(cluster)
+            if not live_clusters:
+                if dropped_clusters:
+                    old_pixels = int(cv2.countNonZero(group_domain))
+                    if old_pixels > 0:
+                        _debug_log(f"group={_group_idx} 결과: old={old_pixels}px new=0px cut={old_pixels}px drop_only={len(dropped_clusters)}")
+                        corrected[group_domain > 0] = 0
+                        removed_pixels_total += int(old_pixels)
+                        removed_clusters_total += int(len(dropped_clusters))
+                    continue
+                _debug_log(f"group={_group_idx} live cluster 없음")
+                continue
+
+            live_clusters.sort(key=lambda c: c.get('priority_key', (1, 0, 1, 1, 0, -1.0)), reverse=True)
+            for order, cluster in enumerate(live_clusters[:10]):
+                _debug_log(
+                    f"  우선순위#{order}: cid={cluster.get('cluster_id')} key={cluster.get('priority_key')} "
+                    f"base_pieces={int(cluster.get('base_piece_count', 0) or 0)} base_chars={int(cluster.get('base_char_count', 0) or 0)} "
+                    f"pieces={int(cluster.get('piece_count', 0) or 0)} chars={int(cluster.get('char_count', 0) or 0)} "
+                    f"furi_child={int(cluster.get('furigana_child_count', 0) or 0)} single_large_penalty={int(cluster.get('single_large_penalty', 0) or 0)} "
+                    f"size={float(cluster.get('median_size', 0) or 0):.1f}px axis={cluster.get('lane_axis', '')} src={cluster.get('lane_source', '')} "
+                    f"keep={cluster.get('keep_decision', 'keep')} keep_reason={cluster.get('keep_reason', '')} "
+                    f"cut_pad={cluster.get('cut_pad_px')}px base={float(cluster.get('cut_pad_base', 0) or 0):.1f}px "
+                    f"factor={float(cluster.get('cut_pad_factor', 0) or 0):.2f} reason={cluster.get('cut_pad_reason')} "
+                    f"local_recover={int(cluster.get('local_recover_added', 0) or 0)}px/r{int(cluster.get('local_recover_radius', 0) or 0)} "
+                    f"mask_px={int(cluster.get('mask_pixels', 0) or 0)}"
+                )
+            owner = np.full((h, w), -1, dtype=np.int32)
+            cluster_slot = {}
+            slot_cluster = {}
+            for slot, cluster in enumerate(live_clusters):
+                cmask = cluster.get('mask')
+                claim = (cmask > 0) & (group_domain > 0) & (owner < 0)
+                owner[claim] = slot
+                cluster_slot[int(cluster.get('cluster_id', slot))] = slot
+                slot_cluster[slot] = cluster
+
+            new_domain = (owner >= 0).astype(np.uint8) * 255
+            old_pixels = int(cv2.countNonZero(group_domain))
+            new_pixels = int(cv2.countNonZero(new_domain))
+            if old_pixels <= 0 or new_pixels <= 0:
+                continue
+            removed_pixels = int(old_pixels - new_pixels)
+
+            cut_cluster_count = 0
+            for slot, cluster in slot_cluster.items():
+                owned_pixels = int(np.count_nonzero(owner == slot))
+                original_pixels = int(cluster.get('mask_pixels', 0) or 0)
+                if owned_pixels < original_pixels:
+                    cut_cluster_count += 1
+
+            _debug_log(
+                f"group={_group_idx} 결과: old={old_pixels}px new={new_pixels}px cut={max(0, removed_pixels)}px cut_clusters={cut_cluster_count}"
+            )
+            if removed_pixels <= 0 and cut_cluster_count <= 0:
+                continue
+
+            domain_bool = group_domain > 0
+            corrected[domain_bool] = 0
+            corrected[new_domain > 0] = 255
+            removed_pixels_total += max(0, removed_pixels)
+            removed_clusters_total += int(cut_cluster_count)
+
+        changed = bool(removed_pixels_total > 0 and not np.array_equal(mask_bin, corrected))
+        stats = {
+            'changed': changed,
+            'removed_clusters': int(removed_clusters_total),
+            'removed_pixels': int(removed_pixels_total),
+            'dropped_clusters': int(removed_clusters_total),
+            'tumor_removed_pixels': 0,
+            'rebuilt_components': int(rebuilt_components_total),
+            'rebuilt_removed_pixels': int(rebuilt_pixels_total),
+            'rebuilt_preserve_pixels': int(rebuild_preserve_pixels_total),
+            'components': int(used_components),
+            'pieces': int(len(pieces)),
+        }
+        return corrected, stats
+
+    def auto_clean_detection_mask_current(self):
+        """텍스트 마스크 탭에서 OCR 조각을 군체로 묶고, 군체 우선순위에 따라 감지 마스크를 커팅한다."""
+        debug_path = None
+        try:
+            debug_path = make_log_path("detection_cluster_debug")
+        except Exception:
+            debug_path = None
+
+        def _auto_return(reason, **fields):
+            try:
+                append_log(debug_path, "AUTO_CLEAN_RETURN", reason=reason, **fields, memory=memory_text())
+            except Exception:
+                pass
+
+        try:
+            mode_idx = int(self.cb_mode.currentIndex()) if hasattr(self, 'cb_mode') else -1
+        except Exception:
+            mode_idx = -1
+        try:
+            target_idx = int(getattr(self, 'idx', 0) or 0)
+        except Exception:
+            target_idx = 0
+        try:
+            append_log(debug_path, "AUTO_CLEAN_ENTER", page_idx=target_idx, mode_idx=mode_idx, memory=memory_text())
+            if debug_path:
+                self.log(f"🧾 감지 마스크 군체 디버그 로그: {debug_path}")
+        except Exception:
+            pass
+
+        if mode_idx != 2:
+            self.log(self.tr_msg("⚠️ 감지 마스크 자동 정리는 텍스트 마스크 탭에서만 사용할 수 있습니다."))
+            _auto_return('wrong_mode', mode_idx=mode_idx)
+            return
+        if not getattr(self, 'paths', None):
+            self.log(self.tr_msg("⚠️ 이미지가 없습니다. 먼저 프로젝트에 이미지를 불러와 주세요."))
+            _auto_return('no_paths')
+            return
+        curr = self.data.get(target_idx) if isinstance(getattr(self, 'data', None), dict) else None
+        if not isinstance(curr, dict):
+            self.log(self.tr_msg("⚠️ 현재 페이지 데이터가 없습니다."))
+            _auto_return('no_page_data', page_idx=target_idx)
+            return
+
+        m = self.view.get_mask_np() if getattr(self, 'view', None) is not None else None
+        shape_hint = None
+        try:
+            ori = curr.get('ori')
+            if isinstance(ori, np.ndarray):
+                shape_hint = ori.shape[:2]
+        except Exception:
+            shape_hint = None
+        mask_bin = self._normalize_detection_mask_for_auto_clean(m, shape_hint=shape_hint)
+        try:
+            mask_nonzero = int(cv2.countNonZero(mask_bin)) if isinstance(mask_bin, np.ndarray) else -1
+            append_log(debug_path, "AUTO_CLEAN_MASK", mask=numpy_shape_text(mask_bin), nonzero=mask_nonzero, shape_hint=str(shape_hint), memory=memory_text())
+        except Exception:
+            mask_nonzero = -1
+        if mask_bin is None or cv2.countNonZero(mask_bin) <= 0:
+            self.log(self.tr_msg("⚠️ 정리할 텍스트 마스크가 없습니다."))
+            _auto_return('empty_text_mask', mask_nonzero=mask_nonzero, active_key='mask_merge')
+            return
+
+        pieces = self._auto_clean_collect_detection_pieces(curr)
+        try:
+            char_lengths = [len(''.join(ch for ch in str(p.get('text', '') or '') if not ch.isspace())) for p in pieces]
+            append_log(
+                debug_path,
+                "AUTO_CLEAN_OCR_UNIT_SUMMARY",
+                piece_count=len(pieces),
+                single=sum(1 for v in char_lengths if v == 1),
+                multi=sum(1 for v in char_lengths if v > 1),
+                long_ge_6=sum(1 for v in char_lengths if v >= 6),
+                max_len=(max(char_lengths) if char_lengths else 0),
+                memory=memory_text(),
+            )
+        except Exception:
+            pass
+        if not pieces:
+            self.log(self.tr_msg("⚠️ OCR 조각 정보가 없어 감지 마스크 자동 정리를 건너뜁니다."))
+            _auto_return('no_ocr_pieces')
+            return
+
+        try:
+            append_log(debug_path, "DETECTION_CLUSTER_DEBUG_REQUEST", page_idx=target_idx, mode_idx=mode_idx, mask_nonzero=mask_nonzero, piece_count=len(pieces), memory=memory_text())
+        except Exception:
+            pass
+        cleaned, stats = self._auto_clean_detection_mask_by_priority(mask_bin, pieces, page_data=curr, debug_path=debug_path)
+        try:
+            append_log(debug_path, "DETECTION_CLUSTER_DEBUG_SUMMARY", **{str(k): v for k, v in (stats or {}).items()}, memory=memory_text())
+        except Exception:
+            pass
+        if not isinstance(cleaned, np.ndarray) or not stats.get('changed'):
+            self.log(self.tr_msg("ℹ️ 감지 마스크 자동 정리: 군체 커팅으로 바뀔 영역이 없습니다."))
+            _auto_return('no_changed_area', **({str(k): v for k, v in (stats or {}).items()} if isinstance(stats, dict) else {}))
+            return
+
+        # Undo는 실제 적용 직전에 현재 마스크 상태를 포함해 저장한다.
+        try:
+            self.push_project_undo("감지 마스크 자동 정리")
+        except Exception:
+            try:
+                self.push_text_line_undo("감지 마스크 자동 정리", page_idx=target_idx, include_masks=True)
+            except Exception:
+                pass
+
+        self.set_active_mask(curr, cleaned.copy(), mode_idx=2)
+        curr['mask_toggle_enabled'] = True
+        try:
+            color = self.current_mask_overlay_color(2)
+            self.view.set_user_mask_np(cleaned.copy(), color)
+        except Exception:
+            try:
+                self.view.set_user_mask_np(cleaned.copy())
+            except Exception:
+                pass
+        try:
+            self.mark_active_page_dirty("mask")
+        except Exception:
+            pass
+        try:
+            self.schedule_deferred_auto_save_project(600)
+        except Exception:
+            self.auto_save_project()
+
+        try:
+            append_log(debug_path, "AUTO_CLEAN_APPLIED", page_idx=target_idx, before_nonzero=mask_nonzero, after_nonzero=int(cv2.countNonZero(cleaned)), memory=memory_text())
+        except Exception:
+            pass
+        self.log(self.tr_msg(
+            f"🧹 감지 마스크 자동 정리 완료: 군체 커팅 {int(stats.get('removed_clusters', 0))}건, {int(stats.get('removed_pixels', 0))}px 커팅"
+        ))
 
     def reanalyze_mask(self):
         mode_idx = self.cb_mode.currentIndex()
@@ -4097,7 +7134,11 @@ class MainWindowOperationsMixin:
 
             if not self.check_ocr_api_or_alert():
                 return
+            if not self.run_local_cuda_preflight_or_alert("reanalyze"):
+                return
 
+            self._long_task_cancel_requested = False
+            self.prepare_task_progress_overlay("텍스트 마스크 재분석", "현재 작업: 재분석 준비 중", total=100, cancellable=True)
             self.begin_busy_state("텍스트 마스크 재분석")
             self.w = AnalysisWorker(
                 self.engine,
@@ -4105,7 +7146,9 @@ class MainWindowOperationsMixin:
                 m.copy(),
                 existing_data
             )
-            self.w.log.connect(self.log)
+            self.w.log.connect(lambda msg: self.handle_long_task_message(msg))
+            if hasattr(self.w, "failed"):
+                self.w.failed.connect(lambda msg, page_idx=target_idx: self.on_analysis_worker_failed(page_idx, msg, preserve_text_mask=True))
             self.w.finished.connect(
                 lambda o, d, mm, mi, page_idx=target_idx:
                     self.anal_end_for_page(page_idx, o, d, mm, mi, preserve_text_mask=True)
@@ -4234,6 +7277,12 @@ class MainWindowOperationsMixin:
                 else f"✅ {page_idx + 1}페이지 분석 결과 반영 완료 (텍스트 마스크 새로 생성)"
             ))
 
+        try:
+            if hasattr(self, 'clip_page_masks_to_active_ocr_regions'):
+                self.clip_page_masks_to_active_ocr_regions(page_idx, reason='analysis_result_apply')
+        except Exception:
+            pass
+
         # 현재 보고 있는 페이지가 작업 완료된 페이지일 때만 화면 갱신
         if page_idx == self.idx:
             self.ref_tab()
@@ -4257,6 +7306,21 @@ class MainWindowOperationsMixin:
         # ON 강제 조건 1/2: 분석 결과가 들어온 페이지는 분석 마스크 사용 상태로 저장한다.
         # 사용자가 이후 직접 OFF로 바꾸면 다시 임의로 ON시키지 않는다.
         self.data[page_idx]['mask_toggle_enabled'] = True
+
+        # 분석 결과는 OCR 텍스트/마스크/레이아웃 데이터가 실제로 교체되는 작업이다.
+        # 체크포인트 dirty가 찍히지 않은 상태에서 auto_save_project()가 호출되면
+        # PROJECT_DELTA_SAVE_DONE ok=False가 떠 사용자가 빨간 오류처럼 보게 된다.
+        # 분석 반영 직후에는 현재 페이지를 명시 dirty로 등록한 뒤 델타 저장을 시도한다.
+        try:
+            if hasattr(self, "mark_page_data_dirty_explicit"):
+                self.mark_page_data_dirty_explicit(page_idx, "analysis")
+            else:
+                self.has_unsaved_changes = True
+        except Exception:
+            try:
+                self.has_unsaved_changes = True
+            except Exception:
+                pass
 
         self.auto_save_project()
 
@@ -4308,10 +7372,15 @@ class MainWindowOperationsMixin:
         provider = str(getattr(settings, "selected_ocr_provider", "clova") or "clova").lower()
 
         if provider in ("local_paddle_ocr", "local_manga_ocr"):
+            # Local OCR dependency/runtime verification is intentionally not run
+            # synchronously here.  The user should see the progress dialog first,
+            # then runtime checks/model loading/errors inside that progress flow.
+            # Keep only the edition guard so Lite does not try to run Local-only
+            # features accidentally.
             try:
                 from ysb.editions.current import is_local_edition
-                local_name = "LOCAL Manga OCR" if provider == "local_manga_ocr" else "LOCAL Paddle OCR"
                 if not is_local_edition():
+                    local_name = "LOCAL Manga OCR" if provider == "local_manga_ocr" else "LOCAL Paddle OCR"
                     QMessageBox.critical(
                         self,
                         "Local OCR 사용 불가",
@@ -4319,51 +7388,9 @@ class MainWindowOperationsMixin:
                     )
                     self.log(f"❌ {local_name}은 Local판에서만 사용할 수 있습니다.")
                     return False
-                from ysb.engines.text_detection.comic_text_detector import ComicTextDetectorEngine
-                ok, reason = ComicTextDetectorEngine().available()
-                if not ok:
-                    QMessageBox.critical(
-                        self,
-                        "Local OCR 준비 필요",
-                        f"{local_name}을 실행할 수 없습니다.\n\n"
-                        "comic_text_detector 런타임/모델 파일을 확인해 주세요.\n\n"
-                        f"상세: {reason}"
-                    )
-                    self.log(f"❌ {local_name} 준비 실패: {reason}")
-                    return False
-                try:
-                    from ysb.editions.local.local_dependency_check import paddleocr_available, manga_ocr_ready
-                    if provider == "local_manga_ocr":
-                        ok, detail = manga_ocr_ready()
-                        if not ok:
-                            QMessageBox.critical(
-                                self,
-                                "Manga OCR 설치 필요",
-                                "LOCAL Manga OCR 문자 인식에 필요한 런타임 또는 모델을 찾을 수 없습니다.\n\n"
-                                "배포판은 local_runtime/manga_ocr, 개발 환경은 setup_manga_ocr_v2_2_0.bat 실행 상태를 확인해 주세요.\n\n"
-                                f"상세: {detail}"
-                            )
-                            self.log(f"❌ Manga OCR 준비 실패: {detail}")
-                            return False
-                    else:
-                        if not paddleocr_available():
-                            QMessageBox.critical(
-                                self,
-                                "PaddleOCR 설치 필요",
-                                "LOCAL Paddle OCR 문자 인식에 필요한 paddleocr 패키지를 찾을 수 없습니다.\n\n"
-                                "setup_local_core_venv_v2_1_0.bat을 다시 실행하거나 requirements/local.txt 설치 상태를 확인해 주세요."
-                            )
-                            self.log("❌ paddleocr 패키지를 찾을 수 없습니다.")
-                            return False
-                except Exception as e:
-                    QMessageBox.critical(self, "Local OCR 확인 오류", f"Local OCR 설치 확인 중 오류가 발생했습니다.\n\n{e}")
-                    self.log(f"❌ Local OCR 설치 확인 오류: {e}")
-                    return False
-                return True
             except Exception as e:
-                QMessageBox.critical(self, "Local OCR 오류", f"Local OCR 준비 확인 중 오류가 발생했습니다.\n\n{e}")
-                self.log(f"❌ Local OCR 준비 확인 오류: {e}")
-                return False
+                self.log(f"⚠️ Local OCR 에디션 확인 실패: {e}")
+            return True
 
         if provider == "google_vision":
             if not str(getattr(settings, "google_vision_api_key", "") or "").strip():
@@ -4401,6 +7428,10 @@ class MainWindowOperationsMixin:
         provider_name = provider_name_map.get(provider, "Replicate LaMa")
 
         if provider == "local_lama":
+            # LOCAL LaMa is not an API provider and must not go through the
+            # old API-key/package popup path.  Its runtime check is deliberately
+            # performed inside the inpainting progress dialog/worker so the UI
+            # does not appear frozen before the task window is shown.
             try:
                 from ysb.editions.current import is_local_edition
                 if not is_local_edition():
@@ -4410,27 +7441,8 @@ class MainWindowOperationsMixin:
                         "LOCAL Inpainting은 Local판 전용입니다.",
                         "LOCAL Inpainting is only available in the Local edition.",
                     )
-                # If custom model path is set, we use LocalInpaintEngine (requires PyTorch)
-                # Otherwise we require simple_lama_inpainting
-                model_path = getattr(settings, "local_inpaint_model_path", "").strip()
-                if model_path:
-                    import torch  # noqa: F401
-                else:
-                    from simple_lama_inpainting import SimpleLama  # noqa: F401
-            except ImportError as e:
-                return self._show_api_missing_and_open_settings(
-                    "inpaint",
-                    provider_name,
-                    "LOCAL Inpainting 구동용 패키지(simple-lama-inpainting 또는 PyTorch)가 설치되어 있지 않습니다. setup_local_core_venv_v2_1_0.bat를 실행해 주세요.",
-                    "LOCAL Inpainting package (simple-lama-inpainting or PyTorch) is not installed. Run setup_local_core_venv_v2_1_0.bat first.",
-                )
             except Exception as e:
-                return self._show_api_missing_and_open_settings(
-                    "inpaint",
-                    provider_name,
-                    f"LOCAL Inpainting 준비 확인 중 오류가 발생했습니다: {e}",
-                    f"LOCAL Inpainting readiness check failed: {e}",
-                )
+                self.log(f"⚠️ LOCAL LaMa 에디션 확인 실패: {e}")
             return True
 
         if provider == "gemini_inpaint":
@@ -4496,7 +7508,9 @@ class MainWindowOperationsMixin:
                 "deepseek": "DeepSeek",
                 "google": "Google Translate",
                 "gemini": "Gemini",
+                "gemini_deferred": "Gemini Flex / Batch",
                 "custom": "Custom / OpenAI-Compatible",
+                "lm_studio": "LM Studio / Local OpenAI-Compatible",
             }
             return mapping.get((code or "").lower(), str(code or "OpenAI"))
 
@@ -4515,6 +7529,19 @@ class MainWindowOperationsMixin:
         elif provider == "gemini":
             if not str(getattr(settings, "gemini_api_key", "") or "").strip():
                 return self._show_api_missing_and_open_settings("translation", provider_name, "Gemini API Key가 비어있습니다.", "Gemini API Key is empty.")
+        elif provider == "gemini_deferred":
+            missing = []
+            if not str(getattr(settings, "gemini_delayed_api_key", "") or "").strip():
+                missing.append("API Key")
+            if not str(getattr(settings, "gemini_delayed_model", "") or "").strip():
+                missing.append("Model")
+            if missing:
+                return self._show_api_missing_and_open_settings(
+                    "translation",
+                    provider_name,
+                    "Gemini Flex / Batch " + ", ".join(missing) + " 설정이 비어있습니다.",
+                    "Gemini Flex / Batch " + ", ".join(missing) + " setting(s) are empty.",
+                )
         elif provider == "custom":
             missing = []
             if not str(getattr(settings, "custom_translation_base_url", "") or "").strip():
@@ -4529,6 +7556,19 @@ class MainWindowOperationsMixin:
                     provider_name,
                     "Custom 번역 API " + ", ".join(missing) + " 설정이 비어있습니다.",
                     "Custom translation API " + ", ".join(missing) + " setting(s) are empty.",
+                )
+        elif provider == "lm_studio":
+            missing = []
+            if not str(getattr(settings, "lm_studio_base_url", "") or "").strip():
+                missing.append("Base URL")
+            if not str(getattr(settings, "lm_studio_model", "") or "").strip():
+                missing.append("Model")
+            if missing:
+                return self._show_api_missing_and_open_settings(
+                    "translation",
+                    provider_name,
+                    "LM Studio " + ", ".join(missing) + " 설정이 비어있습니다.",
+                    "LM Studio " + ", ".join(missing) + " setting(s) are empty.",
                 )
         else:
             if not str(getattr(settings, "openai_api_key", "") or "").strip():
@@ -4572,29 +7612,51 @@ class MainWindowOperationsMixin:
             provider = self.cb_trans_provider.currentData()
             if not self.check_translation_api_key_or_alert(provider):
                 return
-            chunk_size = self.get_current_translation_chunk_size()
+            chunk_size = self.get_current_translation_chunk_size(len(texts))
+            chunk_setting = self.get_current_translation_chunk_setting()
+            chunk_label = "자동(페이지별)" if chunk_setting <= 0 else f"{chunk_size}개"
+            target_lang = str(getattr(getattr(self, "api_settings", None), "translation_target_language", "ko") or "ko")
             self.log(
                 f"🌐 번역 엔진: {self.cb_trans_provider.currentText()} / "
-                f"대상 {len(texts)}개 / 묶음 {chunk_size}개"
+                f"번역 대상 언어 {target_lang} / 대상 {len(texts)}개 / 묶음 {chunk_label}"
             )
             self._translation_target_rows = list(target_rows)
             self._translation_target_texts = list(texts)
             self._long_task_cancel_requested = False
+            if str(provider or "") == "gemini_deferred":
+                self._run_gemini_delayed_translation(texts=texts, chunk_size=chunk_size)
+                return
             self.prepare_task_progress_overlay(
                 "번역",
-                f"번역 준비 중... 대상 {len(texts)}개 / 묶음 {chunk_size}개",
+                f"번역 준비 중... 대상 {len(texts)}개 / 묶음 {chunk_label}",
                 total=len(texts),
                 cancellable=True,
             )
+            try:
+                if hasattr(self, 'audit_boundary_event'):
+                    self.audit_boundary_event(
+                        "TRANSLATE_SINGLE_REQUEST_PREPARED",
+                        provider=provider,
+                        target_language=target_lang,
+                        target_count=len(texts),
+                        nonempty_count=sum(1 for _t in texts if str(_t or '').strip()),
+                        total_chars=sum(len(str(_t or '')) for _t in texts),
+                        chunk_size=chunk_size,
+                    )
+            except Exception:
+                pass
             self.begin_busy_state("번역")
             self.translation_worker = TranslationWorker(
                 self.engine,
                 texts,
                 provider=provider,
                 chunk_size=chunk_size,
+                target_language=target_lang,
             )
             self._active_task_worker = self.translation_worker
             self.translation_worker.progress.connect(self.on_translation_worker_progress)
+            if hasattr(self.translation_worker, "trace"):
+                self.translation_worker.trace.connect(self.on_translation_worker_trace)
             self.translation_worker.finished.connect(self.on_translation_worker_finished)
             self.translation_worker.canceled.connect(self.on_translation_worker_canceled)
             self.translation_worker.error.connect(self.on_translation_worker_error)
@@ -4616,15 +7678,132 @@ class MainWindowOperationsMixin:
                 self.end_busy_state("번역")
 
 
+    def _run_gemini_delayed_translation(self, *, texts, chunk_size):
+        settings = getattr(self, "api_settings", None) or ApiSettingsStore.load()
+        mode = str(getattr(settings, "gemini_delayed_mode", "flex") or "flex").strip().lower()
+        mode = "batch" if mode == "batch" else "flex"
+        api_key = str(getattr(settings, "gemini_delayed_api_key", "") or "").strip()
+        model = str(getattr(settings, "gemini_delayed_model", "gemini-2.5-flash-lite") or "gemini-2.5-flash-lite").strip()
+        chunk_size = max(1, min(int(chunk_size or 50), 100))
+        chunks = []
+        for start in range(0, len(texts or []), chunk_size):
+            end = min(len(texts), start + chunk_size)
+            chunks.append({"start": start, "end": end})
+        if not chunks:
+            self.log("⚠️ Gemini 지연 번역 대상이 없습니다.")
+            return
+
+        self._gemini_delayed_translation_active = True
+        self._active_long_task_kind = "gemini_delayed_translation"
+        controller = GeminiDelayedTranslationController(
+            self.engine,
+            chunks,
+            mode=mode,
+            api_key=api_key,
+            model=model,
+            source_texts=list(texts or []),
+            source_contexts=None,
+            language=getattr(self, "ui_language", LANG_KO),
+            parent=self,
+        )
+        self._gemini_delayed_controller = controller
+
+        def apply_chunk(row_index, results):
+            if not (0 <= int(row_index) < len(controller.rows)):
+                return False
+            chunk = controller.rows[int(row_index)]
+            start = int(chunk.get("start", 0) or 0)
+            end = int(chunk.get("end", start) or start)
+            rows = (getattr(self, "_translation_target_rows", []) or [])[start:end]
+            source_texts = (getattr(self, "_translation_target_texts", []) or [])[start:end]
+            ok = self._apply_translation_results_to_current_page(
+                results or [],
+                target_rows_override=rows,
+                texts_override=source_texts,
+                partial_chunk=True,
+            )
+            if ok:
+                try:
+                    self.log(self.tr_ui("✅ 지연 번역 청크 {chunk} 완료 및 즉시 반영").format(chunk=int(row_index) + 1))
+                except Exception:
+                    pass
+            return bool(ok)
+
+        dialog = GeminiDelayedTranslationDialog(
+            controller,
+            apply_chunk=apply_chunk,
+            language=getattr(self, "ui_language", LANG_KO),
+            parent=self,
+        )
+        self._gemini_delayed_dialog = dialog
+        result = QDialog.DialogCode.Rejected
+        try:
+            result = dialog.exec()
+        finally:
+            completed = sum(1 for row in controller.rows if row.get("status") == "completed")
+            failed = sum(1 for row in controller.rows if row.get("status") == "failed")
+            total = len(controller.rows)
+            try:
+                if result == QDialog.DialogCode.Accepted:
+                    self.log(self.tr_ui("✅ Gemini 지연 번역 완료: 전체 {total}개 청크").format(total=total))
+                else:
+                    self.log(self.tr_ui("⏹️ Gemini 지연 번역 취소: 완료 {completed}개 / 실패 {failed}개 / 전체 {total}개").format(completed=completed, failed=failed, total=total))
+            except Exception:
+                pass
+            self._gemini_delayed_translation_active = False
+            self._gemini_delayed_controller = None
+            self._gemini_delayed_dialog = None
+            self._active_long_task_kind = ""
+            try:
+                controller.deleteLater()
+                dialog.deleteLater()
+            except Exception:
+                pass
+            try:
+                self.macro_mark_current_step_done("work_translate")
+            except Exception:
+                pass
+
     def on_translation_worker_progress(self, detail, current, total):
+        try:
+            if hasattr(self, 'audit_boundary_event'):
+                self.audit_boundary_event(
+                    "TRANSLATE_SINGLE_PROGRESS",
+                    detail=str(detail),
+                    current=int(current or 0),
+                    total=int(total or 0),
+                    throttle_ms=80,
+                )
+        except Exception:
+            pass
         self.handle_long_task_message(str(detail), current=current, total=total)
 
-    def _apply_translation_results_to_current_page(self, res):
+    def on_translation_worker_trace(self, event, fields):
+        try:
+            event_name = str(event or "TRANSLATE_SINGLE_TRACE")
+            payload = dict(fields or {}) if isinstance(fields, dict) else {"payload": repr(fields)}
+            if hasattr(self, 'audit_boundary_event'):
+                self.audit_boundary_event(event_name, **payload)
+        except Exception:
+            pass
+
+    def _apply_translation_results_to_current_page(self, res, target_rows_override=None, texts_override=None, partial_chunk=False):
+        apply_t0 = time.perf_counter()
         curr = self.data.get(self.idx)
         if not curr or not curr.get('data'):
             return False
-        target_rows = list(getattr(self, "_translation_target_rows", []) or [])
-        texts = list(getattr(self, "_translation_target_texts", []) or [])
+        target_rows = list(target_rows_override if target_rows_override is not None else (getattr(self, "_translation_target_rows", []) or []))
+        texts = list(texts_override if texts_override is not None else (getattr(self, "_translation_target_texts", []) or []))
+        try:
+            if hasattr(self, 'audit_boundary_event'):
+                self.audit_boundary_event(
+                    "TRANSLATE_SINGLE_APPLY_BEGIN",
+                    result_count=len(res or []),
+                    target_rows=len(target_rows),
+                    source_chars=sum(len(str(_t or '')) for _t in texts),
+                )
+        except Exception:
+            pass
         if len(res) != len(target_rows):
             QMessageBox.warning(
                 self,
@@ -4671,10 +7850,27 @@ class MainWindowOperationsMixin:
             except Exception:
                 pass
         self.undo_break_boundary("translation")
+        try:
+            if hasattr(self, 'audit_boundary_event'):
+                self.audit_boundary_event(
+                    "TRANSLATE_SINGLE_APPLY_DONE",
+                    elapsed_ms=int((time.perf_counter() - apply_t0) * 1000),
+                    result_count=len(res or []),
+                    affected_count=len(affected_ids or []),
+                    current_mode=(self.cb_mode.currentIndex() if hasattr(self, 'cb_mode') else None),
+                )
+        except Exception:
+            pass
         return True
 
     def on_translation_worker_finished(self, res):
+        finish_t0 = time.perf_counter()
         try:
+            try:
+                if hasattr(self, 'audit_boundary_event'):
+                    self.audit_boundary_event("TRANSLATE_SINGLE_FINISHED_SIGNAL", result_count=len(res or []))
+            except Exception:
+                pass
             if self._apply_translation_results_to_current_page(list(res or [])):
                 self.log("✅ 번역 완료")
         except Exception as e:
@@ -4683,6 +7879,14 @@ class MainWindowOperationsMixin:
             self.log(f"❌ 번역 결과 반영 중 오류: {e}")
             QMessageBox.critical(self, self.tr_ui("번역 오류"), f"{self.tr_ui('에러가 발생했습니다:')}\n{e}")
         finally:
+            try:
+                if hasattr(self, 'audit_boundary_event'):
+                    self.audit_boundary_event(
+                        "TRANSLATE_SINGLE_FINISHED_HANDLER_DONE",
+                        elapsed_ms=int((time.perf_counter() - finish_t0) * 1000),
+                    )
+            except Exception:
+                pass
             self._active_task_worker = None
             self.translation_worker = None
             self.end_busy_state("번역")
@@ -4704,6 +7908,291 @@ class MainWindowOperationsMixin:
             self._active_task_worker = None
             self.translation_worker = None
             self.end_busy_state("번역")
+
+    def _ensure_inpaint_group_preview_exit_button(self):
+        btn = getattr(self, "btn_inpaint_group_preview_exit", None)
+        if btn is None:
+            btn = QPushButton(self.tr_ui("미리보기 나가기"), self)
+            btn.setObjectName("InpaintGroupPreviewExitButton")
+            btn.setFixedHeight(26)
+            btn.setMinimumWidth(106)
+            btn.clicked.connect(self.exit_inpaint_group_preview)
+            self.btn_inpaint_group_preview_exit = btn
+            try:
+                btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            except Exception:
+                pass
+        try:
+            btn.setText(self.tr_ui("미리보기 나가기"))
+        except Exception:
+            pass
+        return btn
+
+    def _normalize_inpaint_group_preview_mask(self, mask):
+        if mask is None:
+            return None
+        try:
+            if getattr(mask, "ndim", 2) == 3:
+                mask = cv2.cvtColor(mask, cv2.COLOR_RGB2GRAY)
+            else:
+                mask = mask.copy()
+            return mask.astype(np.uint8, copy=False)
+        except Exception:
+            return None
+
+    def _preview_mask_nonzero_count(self, mask):
+        try:
+            norm = self._normalize_inpaint_group_preview_mask(mask)
+            if norm is None:
+                return 0
+            return int(np.count_nonzero(norm))
+        except Exception:
+            return 0
+
+    def _rect_beacon_mask_from_current_data(self, curr, base_shape):
+        """Last-resort preview beacon mask from OCR/text rectangles.
+
+        This is used only for the preview overlay when saved inpainting masks are
+        missing or not loaded yet.  Real inpainting still uses the actual mask
+        path/payload; this fallback only prevents the preview from becoming a
+        dead end when a page has boxes but its mask arrays were evicted from RAM.
+        """
+        try:
+            h, w = base_shape[:2]
+        except Exception:
+            return None
+        if h <= 0 or w <= 0:
+            return None
+        out = np.zeros((int(h), int(w)), dtype=np.uint8)
+        used = 0
+        for item in curr.get('data', []) or []:
+            if not isinstance(item, dict):
+                continue
+            if not bool(item.get('use_inpaint', True)):
+                continue
+            rect = item.get('rect')
+            if rect and len(rect) >= 4:
+                try:
+                    rx, ry, rw, rh = [int(round(float(v))) for v in rect[:4]]
+                    x1 = max(0, min(int(w), rx))
+                    y1 = max(0, min(int(h), ry))
+                    x2 = max(0, min(int(w), rx + max(1, rw)))
+                    y2 = max(0, min(int(h), ry + max(1, rh)))
+                    if x2 > x1 and y2 > y1:
+                        out[y1:y2, x1:x2] = 255
+                        used += 1
+                        continue
+                except Exception:
+                    pass
+            pts = item.get('vertices_list') or item.get('vertices')
+            if pts:
+                try:
+                    arr = np.array(pts, dtype=np.int32).reshape((-1, 1, 2))
+                    cv2.fillPoly(out, [arr], 255)
+                    used += 1
+                except Exception:
+                    pass
+        return out if used > 0 and int(np.count_nonzero(out)) > 0 else None
+
+    def _current_inpaint_group_preview_mask(self):
+        try:
+            page_idx = int(getattr(self, "idx", 0) or 0)
+        except Exception:
+            page_idx = 0
+        try:
+            if hasattr(self, "ensure_page_runtime_loaded"):
+                self.ensure_page_runtime_loaded(page_idx, include_ori=False, include_heavy=False, include_masks=True)
+            elif hasattr(self, "ensure_page_masks_loaded"):
+                self.ensure_page_masks_loaded(page_idx)
+        except Exception:
+            pass
+        try:
+            curr = self.data.get(page_idx) if isinstance(getattr(self, "data", None), dict) else None
+        except Exception:
+            curr = None
+        if not curr:
+            return None
+        try:
+            if hasattr(self, "ensure_page_masks_loaded"):
+                self.ensure_page_masks_loaded(page_idx, keys=("mask_inpaint", "mask_inpaint_off", "mask_merge", "mask_merge_off"))
+        except Exception:
+            pass
+
+        diagnostics = []
+
+        def accept_mask(label, candidate):
+            norm = self._normalize_inpaint_group_preview_mask(candidate)
+            pixels = self._preview_mask_nonzero_count(norm)
+            diagnostics.append(f"{label}={pixels}")
+            if norm is not None and pixels > 0:
+                try:
+                    self._inpaint_group_preview_mask_source = label
+                    self._inpaint_group_preview_mask_diagnostics = ", ".join(diagnostics)
+                except Exception:
+                    pass
+                return norm
+            return None
+
+        # 1) First try the exact inpainting payload for the current toggle state.
+        try:
+            _data, payload_mask = self.build_inpainting_payload_for_current_toggle(curr)
+            accepted = accept_mask("payload", payload_mask)
+            if accepted is not None:
+                return accepted
+        except Exception as e:
+            diagnostics.append(f"payload_error={type(e).__name__}")
+
+        # 2) If payload clipping produced an empty mask, fall back to the raw
+        # saved/current mask.  The preview should not disappear just because the
+        # checkbox/rect clipping step cannot build a nonzero payload yet.
+        toggle_on = bool(getattr(self, "mask_toggle_enabled", True))
+        primary_keys = ("mask_inpaint", "mask_inpaint_off") if toggle_on else ("mask_inpaint_off", "mask_inpaint")
+        for key in primary_keys:
+            accepted = accept_mask(key, curr.get(key))
+            if accepted is not None:
+                return accepted
+
+        # 3) Diagnostic-only fallback: if only analysis/merge masks are loaded,
+        # use them for the preview overlay so the user can still inspect grouping.
+        # Actual inpainting execution remains tied to mask_inpaint/mask_inpaint_off.
+        for key in ("mask_merge", "mask_merge_off"):
+            accepted = accept_mask(key, curr.get(key))
+            if accepted is not None:
+                return accepted
+
+        # 4) Last resort for old/partial project states: build preview beacons
+        # from OCR/text rectangles when any image-sized mask gives us dimensions.
+        base_shape = None
+        for key in ("mask_inpaint", "mask_inpaint_off", "mask_merge", "mask_merge_off"):
+            m = self._normalize_inpaint_group_preview_mask(curr.get(key))
+            if m is not None:
+                base_shape = m.shape
+                break
+        if base_shape is None:
+            try:
+                if curr.get('ori') is not None:
+                    base_shape = curr.get('ori').shape[:2]
+            except Exception:
+                base_shape = None
+        if base_shape is not None:
+            accepted = accept_mask("text_rect_beacon", self._rect_beacon_mask_from_current_data(curr, base_shape))
+            if accepted is not None:
+                return accepted
+
+        try:
+            self._inpaint_group_preview_mask_source = None
+            self._inpaint_group_preview_mask_diagnostics = ", ".join(diagnostics)
+            if hasattr(self, "log"):
+                self.log("⚠️ 인페인팅 그룹 미리보기 마스크 없음: " + ", ".join(diagnostics))
+        except Exception:
+            pass
+        return None
+
+    def _bbox_gap_distance(self, a, b):
+        ax1, ay1, ax2, ay2 = a
+        bx1, by1, bx2, by2 = b
+        dx = max(0, max(bx1 - ax2, ax1 - bx2))
+        dy = max(0, max(by1 - ay2, ay1 - by2))
+        return max(dx, dy)
+
+    def _padded_bbox(self, bbox, pad, w, h):
+        x1, y1, x2, y2 = [int(v) for v in bbox]
+        return (
+            max(0, x1 - int(pad)),
+            max(0, y1 - int(pad)),
+            min(int(w), x2 + int(pad)),
+            min(int(h), y2 + int(pad)),
+        )
+
+    def build_inpaint_group_preview_regions(self, mask, max_side=2800):
+        """Build mask-beacon based inpainting crop groups for preview.
+
+        The mask determines the beacons.  Components are packed from top to
+        bottom into the largest possible padded crop groups that fit inside the
+        requested max-side work canvas.  This is intentionally shared with the
+        future real grouped inpainting path through ysb.core.inpaint_grouping.
+        """
+        try:
+            return build_inpaint_mask_groups(mask, max_work_side=max_side)
+        except Exception:
+            return []
+
+    def refresh_inpaint_group_preview_for_current_page(self, *, silent=True):
+        """Rebuild preview overlay for the current page while staying in preview mode.
+
+        Inpaint group preview is a mode, not a one-shot drawing.  When the user
+        moves to another page, the same mode must remain active and the overlay
+        must be recalculated from that page's mask beacons.
+        """
+        mask = self._current_inpaint_group_preview_mask()
+        groups = self.build_inpaint_group_preview_regions(mask, max_side=2800)
+        self._inpaint_group_preview_groups = groups or []
+        self._inpaint_group_preview_active = True
+        try:
+            view = getattr(self, "view", None)
+            if view is not None:
+                if groups:
+                    view.draw_inpaint_group_preview_regions(groups)
+                elif hasattr(view, "clear_inpaint_group_preview_overlay"):
+                    view.clear_inpaint_group_preview_overlay()
+                view.draw_mode = "inpaint_group_preview"
+                if hasattr(view, "sync_drag_mode_from_operation"):
+                    view.sync_drag_mode_from_operation()
+        except Exception:
+            pass
+        try:
+            self.refresh_shared_option_bar()
+        except Exception:
+            pass
+        try:
+            src = str(getattr(self, "_inpaint_group_preview_mask_source", "") or "")
+            diag = str(getattr(self, "_inpaint_group_preview_mask_diagnostics", "") or "")
+            if groups:
+                extra = f" source={src}" if src else ""
+                if diag:
+                    extra += f" diag=({diag})"
+                self.log(f"🧩 인페인팅 그룹 미리보기 갱신: {len(groups)}개 그룹" + extra)
+            elif not silent:
+                detail = self.tr_ui("표시할 인페인팅 마스크 그룹이 없습니다.")
+                if diag:
+                    detail = detail + "\n" + self.tr_ui("마스크 진단") + ": " + diag
+                QMessageBox.information(self, self.tr_ui("인페인팅 그룹 미리보기"), detail)
+            else:
+                self.log("🧩 인페인팅 그룹 미리보기 갱신: 0개 그룹" + (f" diag=({diag})" if diag else ""))
+        except Exception:
+            pass
+        return groups
+
+    def show_inpaint_group_preview(self):
+        groups = self.refresh_inpaint_group_preview_for_current_page(silent=False)
+        if not groups:
+            return
+
+    def exit_inpaint_group_preview(self):
+        self._inpaint_group_preview_active = False
+        self._inpaint_group_preview_groups = []
+        try:
+            self._inpaint_group_preview_mask_source = None
+            self._inpaint_group_preview_mask_diagnostics = ""
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "view") and hasattr(self.view, "clear_inpaint_group_preview_overlay"):
+                self.view.clear_inpaint_group_preview_overlay()
+            if getattr(getattr(self, "view", None), "draw_mode", None) == "inpaint_group_preview":
+                self.view.draw_mode = None
+                if hasattr(self.view, "sync_drag_mode_from_operation"):
+                    self.view.sync_drag_mode_from_operation()
+        except Exception:
+            pass
+        try:
+            self.refresh_shared_option_bar()
+        except Exception:
+            pass
+        try:
+            self.log("↩️ 인페인팅 그룹 미리보기 종료")
+        except Exception:
+            pass
 
     def clip_mask_to_checked_text_boxes(self, mask, data):
         """
@@ -4910,93 +8399,25 @@ class MainWindowOperationsMixin:
         return "cancel"
 
     def _prepare_single_inpaint_request_with_resize_prompt(self, page_idx, input_path, inpaint_mask):
-        plan = self._inspect_inpaint_resize_plan(input_path, self._get_current_inpaint_provider())
-        if not plan:
-            return input_path, inpaint_mask, True
-        decision = self._ask_single_inpaint_resize(page_idx, plan)
-        if decision == "cancel":
-            self.log("↩️ 인페인팅 리사이즈 취소")
-            return input_path, inpaint_mask, False
-        if decision != "resize":
-            self.log("ℹ️ 인페인팅은 원본 해상도로 그대로 진행합니다.")
-            return input_path, inpaint_mask, True
-        new_path, new_mask = self._write_resized_inpaint_request(page_idx, input_path, inpaint_mask, plan)
-        return new_path, new_mask, True
+        """Legacy compatibility shim.
+
+        인페인팅은 이제 전체 페이지를 LaMa 권장 해상도에 맞춰 리사이즈하지 않는다.
+        실제 실행은 미리보기와 동일한 마스크-비콘 그룹 crop 단위로만 수행하므로,
+        전체 웹툰 페이지 높이가 크다는 이유로 리사이즈 선택창을 띄우면 안 된다.
+        """
+        return input_path, inpaint_mask, True
 
     def _ask_batch_inpaint_resize(self, selected_page_indices):
-        provider = self._get_current_inpaint_provider()
-        limits = self._get_inpaint_resize_limits(provider)
+        """Legacy compatibility shim for old batch preflight.
+
+        그룹 인페인팅에서는 페이지 전체가 아니라 각 그룹 crop이 LaMa 입력 단위다.
+        따라서 선택 페이지 전체 해상도 기준 리사이즈 옵션/경고창은 사용하지 않는다.
+        """
         self._batch_inpaint_resize_policy = None
-        if not limits:
-            return True
-
-        overs = []
-        for page_idx in list(selected_page_indices or []):
-            try:
-                input_path = self.get_inpainting_input_path(int(page_idx))
-            except Exception:
-                input_path = None
-            plan = self._inspect_inpaint_resize_plan(input_path, provider)
-            if plan:
-                plan["page_idx"] = int(page_idx)
-                overs.append(plan)
-
-        if not overs:
-            return True
-
-        preview_lines = []
-        for plan in overs[:6]:
-            preview_lines.append(
-                f"- {int(plan.get('page_idx', 0)) + 1}{self.tr_ui('페이지')}: "
-                f"{int(plan.get('orig_width', 0))}x{int(plan.get('orig_height', 0))} → "
-                f"{int(plan.get('target_width', 0))}x{int(plan.get('target_height', 0))}"
-            )
-        if len(overs) > 6:
-            preview_lines.append(self.tr_ui("외 추가 페이지가 있습니다.").format(count=len(overs) - 6))
-
-        provider_label = str(limits.get("provider_label") or "LaMa")
-        warn_text = f"장변 {int(limits.get('warn_max_side', 0)):,}px / {float(int(limits.get('warn_max_pixels', 0))/1_000_000.0):.1f}MP"
-        detail = (
-            f"{self.tr_ui('기준 초과 페이지')}: {len(overs)}\n"
-            f"{self.tr_ui('권장 기준')}: {provider_label} · {warn_text}\n\n"
-            + "\n".join(preview_lines)
-        )
-
-        msg = QMessageBox(self)
-        msg.setIcon(QMessageBox.Icon.Warning)
-        msg.setWindowTitle(self.tr_ui("일괄 인페인팅 해상도 확인"))
-        msg.setText(self.tr_ui("선택한 페이지 중 일부가 LaMa 권장 해상도를 넘습니다."))
-        msg.setInformativeText(detail)
-        cb = QCheckBox(self.tr_ui("선택한 전체 페이지에 같은 기준으로 적용"), msg)
-        cb.setChecked(True)
-        msg.setCheckBox(cb)
-        resize_btn = msg.addButton(self.tr_ui("리사이즈 후 진행"), QMessageBox.ButtonRole.AcceptRole)
-        keep_btn = msg.addButton(self.tr_ui("그대로 진행"), QMessageBox.ButtonRole.ActionRole)
-        cancel_btn = msg.addButton(self.tr_ui("취소"), QMessageBox.ButtonRole.RejectRole)
-        msg.setDefaultButton(resize_btn)
-        msg.exec()
-        clicked = msg.clickedButton()
-        if clicked == cancel_btn:
-            self.log("↩️ 인페인팅 리사이즈 취소")
-            return False
-        if clicked == keep_btn:
-            self.log("ℹ️ 일괄 인페인팅은 원본 해상도로 그대로 진행합니다.")
-            return True
-
-        if cb.isChecked():
-            apply_indices = [int(i) for i in selected_page_indices or []]
-        else:
-            apply_indices = [int(plan.get("page_idx", -1)) for plan in overs]
-        self._batch_inpaint_resize_policy = {
-            "enabled": True,
-            "provider": provider,
-            "target_max_side": int(limits.get("target_max_side", 0) or 0),
-            "target_max_pixels": int(limits.get("target_max_pixels", 0) or 0),
-            "warn_max_side": int(limits.get("warn_max_side", 0) or 0),
-            "warn_max_pixels": int(limits.get("warn_max_pixels", 0) or 0),
-            "page_indices": [int(i) for i in apply_indices if int(i) >= 0],
-        }
-        self.log(f"↘️ 일괄 인페인팅 리사이즈 적용 예정: {len(overs)}페이지 감지")
+        try:
+            self.log("ℹ️ 인페인팅은 그룹 crop 기준으로 실행하므로 전체 페이지 리사이즈 확인을 건너뜁니다.")
+        except Exception:
+            pass
         return True
 
     def run_inpainting(self):
@@ -5041,12 +8462,6 @@ class MainWindowOperationsMixin:
 
         inpaint_mask = self.normalize_inpaint_mask_to_input_image(input_path, inpaint_mask)
 
-        original_input_path = str(input_path)
-        input_path, inpaint_mask, proceed_inpaint = self._prepare_single_inpaint_request_with_resize_prompt(page_idx, input_path, inpaint_mask)
-        if not proceed_inpaint:
-            return
-        cleanup_input_path = str(input_path) if str(input_path) != original_input_path else None
-
         if not mask_toggle_enabled and inpaint_mask is None:
             self.log("⚠️ OFF 페인팅 마스크가 없습니다. 마스크 OFF 상태에서는 직접 칠한 마스크가 필요합니다.")
             return
@@ -5055,14 +8470,30 @@ class MainWindowOperationsMixin:
             self.log("⚠️ 인페인팅 마스크가 비어 있습니다.")
             return
 
+        # 실제 인페인팅도 미리보기와 같은 마스크-비콘 2800 패킹 그룹만 사용한다.
+        # 전체 페이지를 리사이즈해서 한 번에 보내지 않고, 그룹 crop 단위로 LaMa에 전달한다.
+        try:
+            inpaint_groups = build_inpaint_mask_groups(inpaint_mask, max_work_side=2800)
+        except Exception:
+            inpaint_groups = []
+        if not inpaint_groups:
+            self.log("⚠️ 인페인팅 마스크 그룹이 없습니다.")
+            return
+
+        if not self.run_local_cuda_preflight_or_alert("inpaint"):
+            return
+
         self.log(f"🧾 인페인팅 입력: {input_path}")
+        self.log(f"🧩 인페인팅 그룹: {len(inpaint_groups)}개")
         self._long_task_cancel_requested = False
         self._inpaint_target_page_idx = page_idx
-        self.prepare_task_progress_overlay("인페인팅", f"{page_idx + 1}페이지 인페인팅 요청을 처리하는 중입니다.", total=0, cancellable=True)
+        self.prepare_task_progress_overlay("인페인팅", f"현재 작업: {page_idx + 1}페이지 인페인팅 그룹 준비 중\n전체 그룹: {len(inpaint_groups)}개", total=100, cancellable=True)
         self.begin_busy_state("인페인팅")
-        self.iw = InpaintWorker(self.engine, input_path, inpaint_data, inpaint_mask, page_idx=page_idx, cleanup_path=cleanup_input_path)
+        self.iw = GroupedInpaintWorker(self.engine, input_path, inpaint_data, inpaint_mask, page_idx=page_idx, groups=inpaint_groups, max_work_side=2800)
         self._active_task_worker = self.iw
         self.iw.log.connect(lambda msg: self.handle_long_task_message(msg))
+        if hasattr(self.iw, "failed"):
+            self.iw.failed.connect(self.on_inpaint_worker_failed)
         self.iw.finished.connect(self.inpaint_end)
         self.iw.start()
 
@@ -5100,7 +8531,182 @@ class MainWindowOperationsMixin:
                 self.save_to_work_cache()
             except Exception as e:
                 self.has_unsaved_changes = True
-                self.log(f"⚠️ 인페인팅 작업 캐시 저장 실패({page_idx + 1}p): {e}")
+                self.log(f"⚠️ 인페인팅 결과 저장 상태 갱신 실패({page_idx + 1}p): {e}")
+
+    def _audit_inpaint_result_event(self, event_name, **payload):
+        try:
+            if hasattr(self, "audit_boundary_event"):
+                self.audit_boundary_event(str(event_name), **payload)
+                return
+        except Exception:
+            pass
+        try:
+            parts = " ".join(f"{k}={v}" for k, v in sorted((payload or {}).items()))
+            self.log(f"{event_name} | {parts}")
+        except Exception:
+            pass
+
+    def _inpaint_payload_size(self, payload):
+        try:
+            if isinstance(payload, (bytes, bytearray)):
+                return len(payload)
+            if isinstance(payload, np.ndarray):
+                return int(payload.nbytes)
+        except Exception:
+            pass
+        return -1
+
+    def _invalidate_inpaint_result_base_cache(self, page_idx):
+        """Drop cached base pixmaps that can keep showing the pre-inpaint image."""
+        view = getattr(self, "view", None)
+        removed = 0
+        if view is None:
+            return 0
+        prefixes = (f"page:{int(page_idx)}:final:", f"page:{int(page_idx)}:source:")
+        try:
+            if getattr(view, "_layer_base_key", None) and str(getattr(view, "_layer_base_key", "")).startswith(prefixes):
+                view._layer_base_key = None
+                view._layer_base_item = None
+        except Exception:
+            pass
+        try:
+            cache = getattr(view, "_layer_base_pixmap_cache", None)
+            if isinstance(cache, dict):
+                for key in list(cache.keys()):
+                    if str(key).startswith(prefixes):
+                        cache.pop(key, None)
+                        removed += 1
+                view._layer_base_pixmap_cache = cache
+        except Exception:
+            pass
+        try:
+            order = getattr(view, "_layer_base_pixmap_cache_order", None)
+            if isinstance(order, list):
+                view._layer_base_pixmap_cache_order = [key for key in order if not str(key).startswith(prefixes)]
+        except Exception:
+            pass
+        return removed
+
+    def _refresh_source_compare_after_inpaint_result(self, page_idx):
+        self._audit_inpaint_result_event("INPAINT_RESULT_SOURCE_COMPARE_REFRESH_BEGIN", page_idx=page_idx)
+        try:
+            if hasattr(self, "refresh_source_compare_view") and self.source_compare_is_visible():
+                self.refresh_source_compare_view(fit=False)
+            if hasattr(self, "schedule_source_compare_sync"):
+                self.schedule_source_compare_sync(0)
+            self._audit_inpaint_result_event("INPAINT_RESULT_SOURCE_COMPARE_REFRESH_DONE", page_idx=page_idx)
+        except Exception as exc:
+            self._audit_inpaint_result_event("INPAINT_RESULT_SOURCE_COMPARE_REFRESH_ERROR", page_idx=page_idx, error=repr(exc))
+
+    def refresh_view_after_inpaint_result(self, page_idx):
+        """Force the current viewer to see the newly saved bg_clean.
+
+        The inpaint worker may return valid bytes and flush them to the workspace
+        while the current QGraphicsView still reuses the previous base pixmap.
+        This method separates "data saved" from "viewer now points to the new
+        clean background" and is intentionally called after bg_clean is updated.
+        """
+        try:
+            page_idx = int(page_idx)
+        except Exception:
+            page_idx = int(getattr(self, "idx", 0) or 0)
+        current_page_idx = int(getattr(self, "idx", -1) or -1)
+        same_page = page_idx == current_page_idx
+        view = getattr(self, "view", None)
+        try:
+            current_mode = int(self.cb_mode.currentIndex())
+        except Exception:
+            current_mode = int(getattr(self, "last_mode", 4) or 4)
+        cache_key_before = str(getattr(view, "_layer_base_key", "")) if view is not None else ""
+        viewer_has_base = bool(getattr(view, "_layer_base_item", None)) if view is not None else False
+
+        self._audit_inpaint_result_event(
+            "INPAINT_RESULT_VIEW_REFRESH_BEGIN",
+            page_idx=page_idx,
+            current_page_idx=current_page_idx,
+            mode=current_mode,
+            viewer_has_base=viewer_has_base,
+            cache_key_before=cache_key_before,
+        )
+
+        removed_cache = self._invalidate_inpaint_result_base_cache(page_idx)
+        if not same_page:
+            self._audit_inpaint_result_event(
+                "INPAINT_RESULT_VIEW_REFRESH_SKIPPED_NOT_CURRENT_PAGE",
+                page_idx=page_idx,
+                current_page_idx=current_page_idx,
+                removed_cache=removed_cache,
+            )
+            return False
+
+        old_suppress = getattr(self, "_suppress_mode_undo", False)
+        old_skip_mask = getattr(self, "_skip_mode_mask_commit", False)
+        old_skip_paint = getattr(self, "_skip_mode_paint_commit", False)
+        old_force_rebuild = getattr(view, "_force_layer_base_rebuild", False) if view is not None else False
+        self._suppress_mode_undo = True
+        self._skip_mode_mask_commit = True
+        self._skip_mode_paint_commit = True
+        if view is not None:
+            try:
+                view._force_layer_base_rebuild = True
+            except Exception:
+                pass
+        try:
+            # Same-mode mode_chg is used deliberately: it rebuilds the correct
+            # layer stack for Original/Mask/Final without pretending the user
+            # changed tabs.  _skip_mode_paint_commit prevents stale final paint
+            # from being written back over the freshly cleared inpaint result.
+            self.mode_chg(current_mode)
+            try:
+                scene = getattr(view, "scene", None)
+                if scene is not None:
+                    scene.update()
+            except Exception:
+                pass
+            try:
+                vp = view.viewport() if view is not None else None
+                if vp is not None:
+                    vp.update()
+                    vp.repaint()
+            except Exception:
+                pass
+            try:
+                self._refresh_source_compare_after_inpaint_result(page_idx)
+            except Exception:
+                pass
+            cache_key_after = str(getattr(view, "_layer_base_key", "")) if view is not None else ""
+            try:
+                scene_items_count = len(getattr(view, "scene", None).items()) if view is not None and getattr(view, "scene", None) is not None else -1
+            except Exception:
+                scene_items_count = -1
+            self._audit_inpaint_result_event(
+                "INPAINT_RESULT_VIEW_REFRESH_DONE",
+                page_idx=page_idx,
+                current_page_idx=current_page_idx,
+                mode=current_mode,
+                removed_cache=removed_cache,
+                cache_key_after=cache_key_after,
+                scene_items_count=scene_items_count,
+            )
+            return True
+        except Exception as exc:
+            self._audit_inpaint_result_event(
+                "INPAINT_RESULT_APPLY_ERROR",
+                page_idx=page_idx,
+                current_page_idx=current_page_idx,
+                mode=current_mode,
+                error=repr(exc),
+            )
+            return False
+        finally:
+            self._suppress_mode_undo = old_suppress
+            self._skip_mode_mask_commit = old_skip_mask
+            self._skip_mode_paint_commit = old_skip_paint
+            if view is not None:
+                try:
+                    view._force_layer_base_rebuild = old_force_rebuild
+                except Exception:
+                    pass
 
     def inpaint_end(self, page_idx, bg):
         try:
@@ -5109,16 +8715,19 @@ class MainWindowOperationsMixin:
             page_idx = int(getattr(self, "_inpaint_target_page_idx", getattr(self, "idx", 0)) or 0)
 
         if not bg:
-            self.log("⚠️ 식질 실패: 결과물이 비어있습니다.")
+            msg = "인페인팅 결과물이 비어 있습니다. 작업은 완료로 처리하지 않습니다."
+            self.log(f"❌ 식질 실패: {msg}")
             self._active_task_worker = None
             self.end_busy_state("인페인팅")
-            self.macro_mark_current_step_done("work_inpaint")
+            self.show_worker_failure_alert("인페인팅 오류", msg)
             return
 
         if page_idx < 0 or page_idx >= len(getattr(self, "paths", []) or []):
-            self.log("⚠️ 인페인팅 결과를 반영할 페이지를 찾지 못했습니다.")
+            msg = "인페인팅 결과를 반영할 페이지를 찾지 못했습니다."
+            self.log(f"❌ {msg}")
             self._active_task_worker = None
             self.end_busy_state("인페인팅")
+            self.show_worker_failure_alert("인페인팅 오류", msg)
             return
 
         curr = self.data.get(page_idx)
@@ -5126,17 +8735,48 @@ class MainWindowOperationsMixin:
             curr = self.make_page_data_for_image(self.paths[page_idx])
             self.data[page_idx] = curr
 
+        self._audit_inpaint_result_event(
+            "INPAINT_RESULT_DECODE_BEGIN",
+            page_idx=page_idx,
+            payload_bytes=self._inpaint_payload_size(bg),
+        )
         img = self.bg_clean_to_np_image(bg)
         if img is not None:
+            result_h, result_w = img.shape[:2]
+            source_w = -1
+            source_h = -1
+            try:
+                ref = self.get_real_original_image(page_idx) if hasattr(self, "get_real_original_image") else None
+                if ref is not None:
+                    source_h, source_w = ref.shape[:2]
+            except Exception:
+                pass
             img = self.normalize_image_to_original_size(page_idx, img)
+            image_h, image_w = img.shape[:2]
             encoded = self.encode_np_image_to_png_bytes(img)
             curr['bg_clean'] = encoded if encoded is not None else bg
+            self._audit_inpaint_result_event(
+                "INPAINT_RESULT_DECODE_DONE",
+                page_idx=page_idx,
+                result_size=f"{result_w}x{result_h}",
+                image_width=image_w,
+                image_height=image_h,
+                source_width=source_w,
+                source_height=source_h,
+                encoded_bytes=self._inpaint_payload_size(curr.get('bg_clean')),
+            )
 
             # 인페인팅을 원본으로 쓰는 상태라면, 새 결과를 작업중 원본으로 갱신한다.
             if curr.get('use_inpainted_as_source'):
                 self.set_working_source_image(curr, img, page_idx=page_idx)
         else:
             curr['bg_clean'] = bg
+            self._audit_inpaint_result_event(
+                "INPAINT_RESULT_DECODE_ERROR",
+                page_idx=page_idx,
+                payload_type=type(bg).__name__,
+                payload_bytes=self._inpaint_payload_size(bg),
+            )
 
         curr['final_paint'] = None
         curr['final_paint_above'] = None
@@ -5146,12 +8786,31 @@ class MainWindowOperationsMixin:
         except Exception:
             pass
 
+        try:
+            self._audit_inpaint_result_event(
+                "INPAINT_RESULT_APPLY_PAGE",
+                page_idx=page_idx,
+                has_bg_clean=bool(curr.get('bg_clean') is not None),
+                clean_background_path=str(curr.get('clean_path') or curr.get('bg_clean_path') or ''),
+                dirty_kinds="clean_background",
+            )
+        except Exception:
+            pass
+
         same_page = (page_idx == int(getattr(self, "idx", -1) or -1))
         try:
+            self._audit_inpaint_result_event("INPAINT_RESULT_WORK_CACHE_SAVE_BEGIN", page_idx=page_idx, same_page=same_page)
+            queued = False
             if hasattr(self, 'flush_workspace_image_pages'):
-                self.flush_workspace_image_pages([page_idx], reason='inpaint_result', release_non_current=not same_page)
+                queued = bool(self.flush_workspace_image_pages([page_idx], reason='inpaint_result', release_non_current=not same_page))
             else:
                 self.save_changed_page_without_ui_commit(page_idx)
+            self._audit_inpaint_result_event(
+                "INPAINT_RESULT_WORK_CACHE_SAVE_ENQUEUED" if queued else "INPAINT_RESULT_WORK_CACHE_SAVE_DONE",
+                page_idx=page_idx,
+                same_page=same_page,
+                queued=bool(queued),
+            )
         except Exception as e:
             try:
                 self.log(f"⚠️ 인페인팅 결과 workspace 저장 실패({page_idx + 1}p): {e}")
@@ -5162,35 +8821,17 @@ class MainWindowOperationsMixin:
             except Exception:
                 self.auto_save_project()
 
+        refreshed = False
+        try:
+            refreshed = bool(self.refresh_view_after_inpaint_result(page_idx))
+        except Exception as exc:
+            self._audit_inpaint_result_event("INPAINT_RESULT_APPLY_ERROR", page_idx=page_idx, error=repr(exc))
+
         if same_page:
-            # 인페인팅 완료 후 현재 작업 탭을 강제로 최종결과로 넘기지 않는다.
-            # 마스크 탭에서 실행했다면 마스크가 그대로 보여야 하고, 최종결과 탭이면 텍스트만 갱신한다.
-            try:
-                current_mode = int(self.cb_mode.currentIndex())
-            except Exception:
-                current_mode = 4
-            old_suppress = getattr(self, "_suppress_mode_undo", False)
-            old_skip_commit = getattr(self, "_skip_mode_mask_commit", False)
-            self._suppress_mode_undo = True
-            self._skip_mode_mask_commit = True
-            try:
-                if current_mode == 4:
-                    self.refresh_final_text_scene_preserving_selection()
-                elif current_mode in (2, 3):
-                    try:
-                        self.ensure_page_masks_loaded(page_idx, keys=("mask_merge", "mask_inpaint", "mask_merge_off", "mask_inpaint_off"))
-                    except Exception:
-                        pass
-                    self.mode_chg(current_mode)
-                elif current_mode == 1:
-                    self.refresh_boxes_only()
-                else:
-                    # 원본 탭 등은 화면을 굳이 다시 만들 필요가 없다.
-                    pass
-            finally:
-                self._suppress_mode_undo = old_suppress
-                self._skip_mode_mask_commit = old_skip_commit
-            self.log(f"✅ {page_idx + 1}페이지 인페인팅 완료 (클린본 즉시 저장)")
+            if refreshed:
+                self.log(f"✅ {page_idx + 1}페이지 인페인팅 완료 (클린본 저장 + 화면 갱신)")
+            else:
+                self.log(f"✅ {page_idx + 1}페이지 인페인팅 완료 (클린본 저장, 화면 갱신 확인 필요)")
         else:
             self.log(f"✅ {page_idx + 1}페이지 인페인팅 결과 저장 완료: 현재 작업 페이지는 건드리지 않았습니다.")
 
@@ -5370,26 +9011,41 @@ class MainWindowOperationsMixin:
         can reuse the same base pixmap without a full scene rebuild.  Content
         changing operations still clear/reload the page or call the full image
         path elsewhere.
+
+        Inpaint/clean-background results can be replaced without changing the
+        page number or clean_path.  Length-only keys can therefore keep showing a
+        stale cached QPixmap when two PNG payloads happen to have the same size.
+        Include a cheap CRC marker so content changes always invalidate the base.
         """
         try:
             page_idx = int(page_idx)
         except Exception:
             page_idx = int(getattr(self, "idx", 0) or 0)
+
+        def _payload_marker(blob, label):
+            if not isinstance(blob, (bytes, bytearray)):
+                return ""
+            try:
+                raw = bytes(blob)
+                import zlib
+                return f":{label}{len(raw)}:{zlib.crc32(raw) & 0xffffffff:08x}"
+            except Exception:
+                try:
+                    return f":{label}{len(blob)}:{id(blob)}"
+                except Exception:
+                    return f":{label}:unknown"
+
         kind = str(kind or "source")
         curr = curr if isinstance(curr, dict) else (self.data.get(page_idx) or {})
         try:
             if kind == "final":
                 marker = curr.get("clean_path") or curr.get("bg_clean_path") or ""
-                blob = curr.get("bg_clean")
-                if isinstance(blob, (bytes, bytearray)):
-                    marker = f"{marker}:bg{len(blob)}"
+                marker = f"{marker}{_payload_marker(curr.get('bg_clean'), 'bg')}"
                 return f"page:{page_idx}:final:{marker}"
             marker = self.paths[page_idx] if 0 <= page_idx < len(getattr(self, "paths", []) or []) else ""
             if curr.get("use_inpainted_as_source"):
                 blob = curr.get("working_source") or curr.get("bg_clean")
-                if isinstance(blob, (bytes, bytearray)):
-                    marker = f"{marker}:work{len(blob)}"
-                marker = f"{marker}:use_work"
+                marker = f"{marker}{_payload_marker(blob, 'work')}:use_work"
             return f"page:{page_idx}:source:{marker}"
         except Exception:
             return f"page:{page_idx}:{kind}"
@@ -5503,10 +9159,9 @@ class MainWindowOperationsMixin:
                     curr_data['data'][data_index][key] = new_text
                     item.setData(Qt.ItemDataRole.UserRole, new_text)
                     if col == 3:
-                        try:
-                            self.shrink_text_rect_to_content(curr_data['data'][data_index])
-                        except Exception:
-                            pass
+                        # 우측 표 번역문 수정은 텍스트 내용만 바꾼다.
+                        # OCR/작업 영역 rect는 자동 줄내림 기준이므로 자동 shrink 하지 않는다.
+                        pass
                     if self.cb_mode.currentIndex() == 4:
                         try:
                             if target_id is not None:
@@ -5674,6 +9329,7 @@ class MainWindowOperationsMixin:
             and not self.is_page_loading
             and not self.is_batch_running
             and not getattr(self, "_skip_mode_mask_commit", False)
+            and not getattr(self, "_skip_view_mask_commit", False)
             and self.last_mode in [2, 3]
         ):
             curr = self.data.get(self.idx)
@@ -5682,6 +9338,21 @@ class MainWindowOperationsMixin:
                 self.set_active_mask(curr, m, self.last_mode)
                 curr['mask_toggle_enabled'] = self.mask_toggle_enabled
                 self.schedule_deferred_auto_save_project()
+        elif (
+            self.last_mode in [2, 3]
+            and (getattr(self, "_skip_mode_mask_commit", False) or getattr(self, "_skip_view_mask_commit", False))
+        ):
+            try:
+                self.audit_boundary_event(
+                    'MASK_LEAVE_COMMIT_SKIPPED',
+                    reason=str(getattr(self, '_skip_view_mask_commit_reason', '') or 'programmatic_refresh'),
+                    last_mode=int(self.last_mode),
+                    new_mode=int(i),
+                    view_mask_nonzero=self._debug_mask_nonzero(self.view.get_mask_np() if getattr(self, 'view', None) is not None else None),
+                    active_key=str(self.active_mask_key(self.last_mode)) if hasattr(self, 'active_mask_key') else '',
+                )
+            except Exception:
+                pass
 
         should_commit_paint_on_leave = True
         try:
@@ -5693,14 +9364,21 @@ class MainWindowOperationsMixin:
             should_commit_paint_on_leave
             and not self.is_page_loading
             and not self.is_batch_running
+            and not getattr(self, "_skip_mode_paint_commit", False)
             and self.last_mode == 4
         ):
-            curr = self.data.get(self.idx)
-            if curr is not None and hasattr(self.view, "get_final_paint_png_bytes"):
-                curr['final_paint'] = self.view.get_final_paint_png_bytes()
-                if hasattr(self.view, "get_final_paint_above_png_bytes"):
-                    curr['final_paint_above'] = self.view.get_final_paint_above_png_bytes()
-                self.schedule_deferred_auto_save_project()
+            # 탭 이동 순간에 전체 final_paint QPixmap을 PNG로 인코딩하면 UI가 멈춘다.
+            # 현재 레이어는 view-layer save queue가 QImage snapshot만 뜬 뒤 worker에서 저장한다.
+            try:
+                if hasattr(self, "schedule_deferred_view_layer_commit"):
+                    self.schedule_deferred_view_layer_commit("final_paint", delay_ms=180)
+                else:
+                    self.schedule_deferred_auto_save_project()
+            except Exception:
+                try:
+                    self.schedule_deferred_auto_save_project()
+                except Exception:
+                    pass
 
         # 사용자가 작업 탭을 바꾸면 브러시/지우개/요술봉/텍스트 입력 같은 도구는
         # 새 탭에서 그대로 이어지면 오작동하기 쉽다. 탭 이동은 항상 이동 모드로 정리한다.
@@ -5790,31 +9468,89 @@ class MainWindowOperationsMixin:
                 if i == 1:
                     self.view.draw_static_boxes(curr['data'])
                 elif i in (2, 3):
-                    color = QColor(0, 0, 255, 100) if i == 3 else QColor(255, 0, 0, 100)
+                    color = self.current_mask_overlay_color(i)
+                    active_key = None
+                    active_mask = None
+                    try:
+                        active_key = self.active_mask_key(i) if hasattr(self, 'active_mask_key') else None
+                        active_mask = self.get_active_mask(curr, i)
+                        self.audit_boundary_event(
+                            'MASK_OVERLAY_DISPLAY',
+                            page_idx=self.idx,
+                            mode_idx=int(i),
+                            mask_toggle_enabled=bool(getattr(self, 'mask_toggle_enabled', False)),
+                            active_key=str(active_key),
+                            active_nonzero=self._debug_mask_nonzero(active_mask) if hasattr(self, '_debug_mask_nonzero') else -1,
+                            mask_merge_nonzero=self._debug_mask_nonzero(curr.get('mask_merge')) if hasattr(self, '_debug_mask_nonzero') else -1,
+                            mask_inpaint_nonzero=self._debug_mask_nonzero(curr.get('mask_inpaint')) if hasattr(self, '_debug_mask_nonzero') else -1,
+                            mask_inpaint_off_nonzero=self._debug_mask_nonzero(curr.get('mask_inpaint_off')) if hasattr(self, '_debug_mask_nonzero') else -1,
+                            color_rgba=f"{color.red()},{color.green()},{color.blue()},{color.alpha()}" if hasattr(color, 'red') else '',
+                        )
+                    except Exception:
+                        try:
+                            active_mask = self.get_active_mask(curr, i)
+                        except Exception:
+                            active_mask = None
                     if hasattr(self.view, "set_mask_overlay_layer"):
-                        self.view.set_mask_overlay_layer(self.get_active_mask(curr, i), color)
+                        self.view.set_mask_overlay_layer(active_mask, color)
                     else:
-                        self.view.set_overlay(source_img, self.get_active_mask(curr, i), color, fit=not preserve_view_state)
+                        self.view.set_overlay(source_img, active_mask, color, fit=not preserve_view_state)
                     self.view.draw_static_boxes(curr['data'])
                 self.refresh_ocr_region_overlay()
             elif i == 4:
                 self.ensure_item_style_defaults_for_page(self.idx)
+                try:
+                    self.log_text_layer_lifecycle_snapshot(reason='mode_chg_final', stage='before_final_layer_clear', max_items=20, stack=True)
+                except Exception:
+                    pass
                 final_base = self.final_base_image_for_page(self.idx)
                 self.view.set_layer_base_image(final_base, key=self._work_mode_base_key(self.idx, "final", curr), fit=not preserve_view_state, clear_paint_history=False)
+                try:
+                    self.log_text_layer_lifecycle_snapshot(reason='mode_chg_final', stage='after_set_layer_base_before_clear_mode_layers', max_items=20, stack=False)
+                except Exception:
+                    pass
                 self.view.clear_mode_layers(clear_boxes=True, clear_text=True, clear_mask=True, clear_final_paint=True)
+                try:
+                    self.log_text_layer_lifecycle_snapshot(reason='mode_chg_final', stage='after_clear_mode_layers_before_draw_text', max_items=20, stack=False)
+                except Exception:
+                    pass
                 self.view.set_final_paint_overlay(curr.get('final_paint'), curr.get('final_paint_above'), fit=False)
                 self.update_final_paint_z_order()
+                show_final_text = bool(self.cb_show_final_text.isChecked())
+                try:
+                    self.audit_boundary_event(
+                        'MODE_CHG_FINAL_TEXT_DRAW_REQUEST',
+                        show_text=show_final_text,
+                        data_count=len(curr.get('data', []) or []),
+                        renderable_count=sum(1 for _d in (curr.get('data', []) or []) if isinstance(_d, dict) and bool(_d.get('use_inpaint', True)) and bool(str(_d.get('translated_text', '') or '').strip() or _d.get('force_show'))),
+                        source='cb_show_final_text',
+                    )
+                except Exception:
+                    pass
                 self.view.draw_movable_texts(
                     curr['data'],
                     self.cb_font.currentFont().family(),
                     self.sb_font_size.value(),
                     self.sb_strk.value(),
-                    show_text=self.cb_show_final_text.isChecked(),
+                    show_text=show_final_text,
                     text_color=self.default_text_color,
                     stroke_color=self.default_stroke_color,
                     align=self.default_align,
                 )
-        except Exception:
+                try:
+                    self.audit_boundary_event('MODE_CHG_FINAL_TEXT_DRAW_DONE', data_count=len(curr.get('data', []) or []), show_text=bool(self.cb_show_final_text.isChecked()))
+                    self.log_text_layer_lifecycle_snapshot(reason='mode_chg_final', stage='after_draw_movable_texts', max_items=20, stack=False)
+                except Exception:
+                    pass
+                try:
+                    self.ensure_final_text_layer_bound('after_mode_chg_final_draw', delay_ms=80)
+                except Exception:
+                    pass
+        except Exception as _mode_chg_exc:
+            try:
+                self.audit_boundary_event('MODE_CHG_LAYER_REFRESH_EXCEPTION', mode_idx=int(i), error=repr(_mode_chg_exc), stack=True)
+            except Exception:
+                pass
             # 안전 폴백: 가벼운 레이어 갱신에 실패하면 기존 전체 rebuild 경로로 복구한다.
             if i == 0:
                 self.view.set_image(source_img, fit=not preserve_view_state)
@@ -5824,11 +9560,11 @@ class MainWindowOperationsMixin:
                 self.view.draw_static_boxes(curr['data'])
                 self.refresh_ocr_region_overlay()
             elif i == 2:
-                self.view.set_overlay(source_img, self.get_active_mask(curr, 2), QColor(255, 0, 0, 100), fit=not preserve_view_state)
+                self.view.set_overlay(source_img, self.get_active_mask(curr, 2), self.current_mask_overlay_color(2), fit=not preserve_view_state)
                 self.view.draw_static_boxes(curr['data'])
                 self.refresh_ocr_region_overlay()
             elif i == 3:
-                self.view.set_overlay(source_img, self.get_active_mask(curr, 3), QColor(0, 0, 255, 100), fit=not preserve_view_state)
+                self.view.set_overlay(source_img, self.get_active_mask(curr, 3), self.current_mask_overlay_color(3), fit=not preserve_view_state)
                 self.view.draw_static_boxes(curr['data'])
                 self.refresh_ocr_region_overlay()
             elif i == 4:
@@ -5837,16 +9573,31 @@ class MainWindowOperationsMixin:
                 self.view.set_image(final_base, fit=not preserve_view_state)
                 self.view.set_final_paint_overlay(curr.get('final_paint'), curr.get('final_paint_above'), fit=False)
                 self.update_final_paint_z_order()
+                show_final_text = bool(self.cb_show_final_text.isChecked())
+                try:
+                    self.audit_boundary_event(
+                        'MODE_CHG_FINAL_TEXT_DRAW_REQUEST',
+                        show_text=show_final_text,
+                        data_count=len(curr.get('data', []) or []),
+                        renderable_count=sum(1 for _d in (curr.get('data', []) or []) if isinstance(_d, dict) and bool(_d.get('use_inpaint', True)) and bool(str(_d.get('translated_text', '') or '').strip() or _d.get('force_show'))),
+                        source='cb_show_final_text',
+                    )
+                except Exception:
+                    pass
                 self.view.draw_movable_texts(
                     curr['data'],
                     self.cb_font.currentFont().family(),
                     self.sb_font_size.value(),
                     self.sb_strk.value(),
-                    show_text=self.cb_show_final_text.isChecked(),
+                    show_text=show_final_text,
                     text_color=self.default_text_color,
                     stroke_color=self.default_stroke_color,
                     align=self.default_align,
                 )
+                try:
+                    self.log_text_layer_lifecycle_snapshot(reason='mode_chg_final_fallback', stage='after_fallback_draw_movable_texts', max_items=20, stack=True)
+                except Exception:
+                    pass
 
         restore_view_state_later()
         try:
@@ -6481,9 +10232,10 @@ class MainWindowOperationsMixin:
         """Render and show the current page exactly as export will save it.
 
         Export Preview is not a separate approximate renderer.  It opens the same
-        output options dialog, renders through the same current-page export path,
-        writes the encoded image into a temporary result folder, reads that exact
-        encoded file back, and displays it in the preview viewer.
+        output options dialog, renders the current page through an offscreen export
+        scene without changing the live editor tab/scene, writes the encoded image
+        into a temporary result folder, reads that exact encoded file back, and
+        displays it in the preview viewer.
         """
         curr = self.data.get(self.idx) if hasattr(self, 'data') else None
         if not curr:
@@ -6571,7 +10323,7 @@ class MainWindowOperationsMixin:
 
             tmp_dir = tempfile.mkdtemp(prefix="ysb_output_preview_exact_")
             output_stem = self.output_display_stem(self.idx)
-            clean_stem = self.get_page_stem(self.idx)
+            clean_stem = f"{int(self.idx) + 1:04d}"
             source_path_for_export = None
             try:
                 source_path_for_export = self.paths[self.idx] if self.paths and self.idx < len(self.paths) else self.path_for_output_display(self.idx)
@@ -6588,64 +10340,45 @@ class MainWindowOperationsMixin:
                 QApplication.processEvents()
             except Exception:
                 pass
-            try:
-                self.is_batch_running = True
-                self.engine.export_project_result(
-                    curr['data'],
-                    source_path_for_export,
-                    export_bg,
-                    self.cb_font.currentFont().family(),
-                    self.sb_strk.value(),
-                    self.sb_font_size.value(),
-                    output_root=tmp_dir,
-                    output_name_stem=output_stem,
-                    clean_name_stem=clean_stem,
-                    output_image_format=self.current_output_image_format(),
-                    clean_image_format=self.current_clean_image_format(),
-                    output_image_quality=self.current_output_image_quality(),
-                    clean_image_quality=self.current_clean_image_quality(),
-                )
-            finally:
-                self.is_batch_running = old_batch_running
+            self.engine.export_project_result(
+                curr['data'],
+                source_path_for_export,
+                export_bg,
+                self.cb_font.currentFont().family(),
+                self.sb_strk.value(),
+                self.sb_font_size.value(),
+                output_root=tmp_dir,
+                output_name_stem=output_stem,
+                clean_name_stem=clean_stem,
+                output_image_format=self.current_output_image_format(),
+                clean_image_format=self.current_clean_image_format(),
+                output_image_quality=self.current_output_image_quality(),
+                clean_image_quality=self.current_clean_image_quality(),
+            )
 
             try:
-                self.update_task_progress_overlay(current=4, total=7, detail=self.tr_ui("최종화면 기준으로 텍스트를 렌더링하는 중입니다."))
+                self.update_task_progress_overlay(current=4, total=7, detail=self.tr_ui("오프스크린에서 최종 텍스트를 렌더링하는 중입니다."))
                 QApplication.processEvents()
             except Exception:
                 pass
-            qt_result_rendered = False
+
+            # 출력 미리보기는 절대 실제 최종결과 탭/scene을 건드리지 않는다.
+            # render_final_tab_scene_for_export_qt()는 mode_chg/load/ref_tab을 거치며
+            # Qt UI scene을 재구성하므로, 미리보기 중 Abort/access violation의 원인이 될 수 있다.
+            # 대신 현재 페이지 데이터 snapshot + 배경만으로 오프스크린 QGraphicsScene을 만들어
+            # 실제 출력 파일과 같은 포맷으로 저장한 뒤 그 파일을 다시 읽어 미리보기한다.
+            old_preview_guard = bool(getattr(self, "_output_preview_offscreen_rendering", False))
+            self._output_preview_offscreen_rendering = True
             try:
-                # Use the same high-fidelity path as actual single export.  This may
-                # temporarily sync the Final Result tab, but it guarantees that the
-                # preview and the file export use identical conditions.
-                qt_result_rendered = self.render_final_tab_scene_for_export_qt(tmp_path)
-            except Exception:
-                qt_result_rendered = False
+                qt_result_rendered = self.render_final_result_image_qt(tmp_path, export_bg, curr.get('final_paint_above'))
+            finally:
+                try:
+                    self._output_preview_offscreen_rendering = old_preview_guard
+                except Exception:
+                    pass
 
             if not qt_result_rendered:
-                try:
-                    self.update_task_progress_overlay(current=5, total=7, detail=self.tr_ui("최종 이미지를 재구성 렌더링하는 중입니다."))
-                    QApplication.processEvents()
-                except Exception:
-                    pass
-                qt_result_rendered = self.render_final_result_image_qt(tmp_path, export_bg, curr.get('final_paint_above'))
-
-            if curr.get('final_paint_above') and (not qt_result_rendered) and os.path.exists(tmp_path):
-                try:
-                    self.update_task_progress_overlay(current=6, total=7, detail=self.tr_ui("텍스트 위 페인팅을 합성하는 중입니다."))
-                    QApplication.processEvents()
-                except Exception:
-                    pass
-                try:
-                    result_img = cv2.imdecode(np.fromfile(tmp_path, np.uint8), cv2.IMREAD_COLOR)
-                    if result_img is not None:
-                        result_img = self.compose_final_paint_on_bgr(result_img, curr.get('final_paint_above'))
-                        self.save_bgr_image_for_output(result_img, tmp_path)
-                except Exception as e:
-                    try:
-                        self.log(f"⚠️ 텍스트 위 페인팅 미리보기 합성 실패: {e}")
-                    except Exception:
-                        pass
+                raise RuntimeError(self.tr_msg("오프스크린 출력 렌더링에 실패했습니다."))
 
             if not os.path.exists(tmp_path):
                 raise RuntimeError(self.tr_msg("출력 미리보기를 생성하지 못했습니다."))
@@ -6723,7 +10456,7 @@ class MainWindowOperationsMixin:
             d.mkdir(parents=True, exist_ok=True)
 
         output_stem = safe_page_file_stem(self.output_display_stem(self.idx), "output")
-        clean_source_stem = safe_page_file_stem(self.get_page_stem(self.idx), "clean")
+        clean_source_stem = f"{int(self.idx) + 1:04d}"
         clean_stem = clean_source_stem if clean_source_stem.lower().startswith("clean_") else f"clean_{clean_source_stem}"
 
         # Remove old variants for this page before copying the exact preview files.
@@ -7002,11 +10735,12 @@ class MainWindowOperationsMixin:
                 self.sb_font_size.value(),
                 output_root=self.get_output_root(),
                 output_name_stem=output_stem,
-                clean_name_stem=self.get_page_stem(self.idx),
+                clean_name_stem=f"{int(self.idx) + 1:04d}",
                 output_image_format=self.current_output_image_format(),
                 clean_image_format=self.current_clean_image_format(),
                 output_image_quality=self.current_output_image_quality(),
                 clean_image_quality=self.current_clean_image_quality(),
+                preserve_output_folder_contents=bool(getattr(self, "_batch_export_streaming", False)),
             )
             result_path = self.output_result_file_path(output_stem)
 
@@ -7144,8 +10878,8 @@ class MainWindowOperationsMixin:
             "import_translation": "번역문 불러오기",
             "clear_translation": "일괄 번역문 내용 지우기",
             "clean_text": "일괄 텍스트 정리",
-            "auto_text_size": "일괄 자동 텍스트 크기 조정",
-            "auto_linebreak": "일괄 자동 줄 내림",
+            "auto_text_size": "일괄 텍스트 자동 조정",
+            "auto_linebreak": "일괄 텍스트 자동 조정(줄내림 호환)",
             "reset_text_rects": "일괄 현재 텍스트 기준으로 영역 재설정",
             "refresh": "일괄 텍스트 갱신",
         }.get(str(mode or ""), "일괄 작업")
@@ -7164,6 +10898,37 @@ class MainWindowOperationsMixin:
         if not name:
             name = f"page{page_no:03d}"
         return f"{page_no}p - {name}"
+
+    def batch_export_output_basename(self, page_idx):
+        """일괄 출력 진행창에 표시할 실제 Result 출력 파일명.
+
+        소스 페이지명은 095-vert.jpg처럼 원본 확장자를 가진다.
+        그러나 출력은 사용자가 선택한 PNG/JPG/WebP 형식으로 저장되므로,
+        진행창에서는 원본 파일명이 아니라 실제 출력 대상 파일명을 보여줘야 한다.
+        """
+        try:
+            output_stem = self.output_display_stem(int(page_idx))
+            return os.path.basename(str(self.output_result_file_path(output_stem)))
+        except Exception:
+            try:
+                stem = safe_page_file_stem(self.output_display_stem(int(page_idx)), f"page{int(page_idx) + 1:03d}")
+            except Exception:
+                try:
+                    stem = f"page{int(page_idx) + 1:03d}"
+                except Exception:
+                    stem = "page"
+            try:
+                ext = output_image_extension(self.current_output_image_format())
+            except Exception:
+                ext = ".png"
+            return f"Result_{stem}{ext}"
+
+    def batch_export_page_display_label(self, page_idx):
+        try:
+            page_no = int(page_idx) + 1
+        except Exception:
+            page_no = 0
+        return f"{page_no}p - {self.batch_export_output_basename(page_idx)}"
 
     def wait_for_batch_preview(self, delay_ms=None):
         try:
@@ -7201,7 +10966,13 @@ class MainWindowOperationsMixin:
         status = str(status or "done").lower()
         if status not in ("done", "skipped", "failed"):
             status = "done"
-        entry = {"index": page_idx, "label": self.batch_page_display_label(page_idx), "message": str(message or "")}
+        label = self.batch_page_display_label(page_idx)
+        try:
+            if str(result.get("mode") or "").lower() == "export":
+                label = self.batch_export_page_display_label(page_idx)
+        except Exception:
+            pass
+        entry = {"index": page_idx, "label": label, "message": str(message or "")}
         result.setdefault(status, []).append(entry)
         if message:
             result.setdefault("messages", []).append(entry)
@@ -7282,6 +11053,17 @@ class MainWindowOperationsMixin:
 
     def batch_prepare_progress(self, title, page_indices, page_label="", cancellable=True, start_delay=True):
         total = len(page_indices or [])
+        try:
+            if "텍스트 자동 조정" in str(title or ""):
+                unit_total = int(getattr(self, "_batch_progress_units_total", 0) or 0)
+                show_total = max(1, unit_total or total)
+                detail = f"진행: 0/{show_total}"
+                self.show_task_progress_overlay(title, detail, total=show_total, cancellable=cancellable)
+                self.update_task_progress_overlay(current=0, total=show_total, detail=detail)
+                QApplication.processEvents()
+                return
+        except Exception:
+            pass
         lines = [f"대상 페이지: {total}개"]
         if page_label:
             lines[0] += f" ({page_label})"
@@ -7300,9 +11082,25 @@ class MainWindowOperationsMixin:
             pass
 
     def batch_progress_detail(self, prefix, current, total, page_idx=None, extra=""):
+        try:
+            if str(prefix or "") == "auto_text_size":
+                unit_total = int(getattr(self, "_batch_progress_units_total", 0) or 0)
+                if unit_total > 0:
+                    unit_current = int(getattr(self, "_batch_progress_units_done", current) or 0)
+                    return f"진행: {unit_current}/{unit_total}"
+                return f"진행: {int(current)}/{max(1, int(total or 0))}"
+        except Exception:
+            pass
         lines = [f"선택 페이지 진행: {current}/{total}"]
         if page_idx is not None:
-            lines.append(f"현재 페이지: {self.batch_page_display_label(page_idx)}")
+            try:
+                is_export_mode = str(getattr(self, "current_batch_mode", "") or "").lower() == "export"
+            except Exception:
+                is_export_mode = False
+            if is_export_mode:
+                lines.append(f"현재 페이지: {self.batch_export_page_display_label(page_idx)}")
+            else:
+                lines.append(f"현재 페이지: {self.batch_page_display_label(page_idx)}")
         else:
             lines.append("현재 페이지: 대기 중")
         done = len((getattr(self, "_batch_result", {}) or {}).get("done") or [])
@@ -7312,6 +11110,91 @@ class MainWindowOperationsMixin:
         if extra:
             lines.append(str(extra))
         return "\n".join(lines)
+
+    def _batch_unit_progress_enabled(self):
+        try:
+            return int(getattr(self, "_batch_progress_units_total", 0) or 0) > 0
+        except Exception:
+            return False
+
+    def _batch_set_unit_progress_page_start(self, page_idx):
+        """페이지 내부 단계가 있는 일괄 작업에서 통합 게이지의 시작 위치를 맞춘다."""
+        try:
+            if not self._batch_unit_progress_enabled():
+                return
+            bases = getattr(self, "_batch_progress_unit_page_bases", None)
+            if isinstance(bases, dict) and page_idx in bases:
+                self._batch_progress_units_done = int(bases.get(page_idx) or 0)
+        except Exception:
+            pass
+
+    def _batch_set_unit_progress_page_done(self, page_idx):
+        """페이지 작업이 끝났을 때 통합 게이지를 해당 페이지 끝 위치로 보정한다."""
+        try:
+            if not self._batch_unit_progress_enabled():
+                return
+            bases = getattr(self, "_batch_progress_unit_page_bases", None)
+            units = getattr(self, "_batch_progress_unit_page_units", None)
+            if isinstance(bases, dict) and isinstance(units, dict) and page_idx in bases:
+                base = int(bases.get(page_idx) or 0)
+                unit = max(1, int(units.get(page_idx) or 1))
+                total_units = max(1, int(getattr(self, "_batch_progress_units_total", 1) or 1))
+                self._batch_progress_units_done = min(total_units, base + unit)
+        except Exception:
+            pass
+
+    def _batch_progress_overlay_values(self, current, total):
+        """진행창 게이지 값을 반환한다.
+
+        기본 일괄 작업은 페이지 단위 게이지를 쓴다.
+        일괄 텍스트 자동 조정처럼 페이지 내부 단계가 있는 작업은
+        _batch_progress_units_* 값을 사용해 전체 통합 게이지를 유지한다.
+        """
+        try:
+            if self._batch_unit_progress_enabled():
+                unit_total = max(1, int(getattr(self, "_batch_progress_units_total", 1) or 1))
+                unit_current = max(0, min(int(getattr(self, "_batch_progress_units_done", 0) or 0), unit_total))
+                return unit_current, unit_total
+        except Exception:
+            pass
+        return current, total
+
+    def _clear_batch_unit_progress_state(self):
+        for attr in (
+            "_batch_progress_units_total",
+            "_batch_progress_units_done",
+            "_batch_progress_unit_page_bases",
+            "_batch_progress_unit_page_units",
+            "_batch_progress_unit_page_orders",
+        ):
+            try:
+                if hasattr(self, attr):
+                    delattr(self, attr)
+            except Exception:
+                try:
+                    setattr(self, attr, None)
+                except Exception:
+                    pass
+
+    def batch_checkpoint_kind_for_mode(self, mode):
+        """데이터형 일괄 작업을 작업 폴더 복구 체크포인트 kind로 매핑한다."""
+        mode_s = str(mode or "")
+        if mode_s in {"import_translation", "clear_translation"}:
+            return "translation"
+        if mode_s in {"auto_text_size", "reset_text_rects", "clean_text"}:
+            return mode_s
+        if mode_s in {"clean_mask"}:
+            return "mask"
+        if mode_s in {"extract_text"}:
+            return ""
+        return mode_s or "data"
+
+    def batch_checkpoint_interval_for_mode(self, mode, default_interval=25):
+        """복구 중요도가 높은 텍스트 데이터 작업은 더 촘촘하게 workspace project.json에 남긴다."""
+        mode_s = str(mode or "")
+        if mode_s in {"import_translation", "clear_translation", "auto_text_size", "reset_text_rects", "clean_text"}:
+            return 5
+        return default_interval
 
     def run_page_queue_batch(self, title, mode, page_indices, page_label, page_func, *, visual=False, cancellable=True, restore_page=True, save_work_cache=True):
         """빠른 일괄 데이터 작업을 공통 페이지 큐로 실행한다.
@@ -7361,15 +11244,35 @@ class MainWindowOperationsMixin:
         total = len(indices)
         completed = 0
         data_only = not bool(visual)
+        mode_s = str(mode or "")
+        clean_import_progress_every_page = (mode_s == "import_clean_background")
+
+        def _pump_clean_import_progress_events():
+            # 클린본 불러오기는 visual=False 데이터 작업이지만 파일 하나 처리할 때마다
+            # 사용자가 전체 진행 게이지 변화를 바로 봐야 한다.
+            # 사용자 입력은 끌어들이지 않고 paint/timer 정도만 처리해 진행창이 멈춰 보이지 않게 한다.
+            if not clean_import_progress_every_page:
+                return
+            try:
+                QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+            except Exception:
+                try:
+                    QApplication.processEvents()
+                except Exception:
+                    pass
+
         # O단계: 데이터형 일괄 작업은 화면 없는 순차 처리로 유지한다.
         # 페이지를 실제로 넘기지 않고 data만 한 페이지씩 수정하며,
         # Undo는 일괄 작업 시작/종료 경계에서만 끊는다. 매 페이지마다
         # work cache 저장/Undo 경계/진행창 강제 갱신을 반복하면 300+장
         # 프로젝트에서 체감 속도가 크게 떨어진다.
-        data_progress_interval = 5
+        # 일반 데이터 일괄 작업은 너무 자주 UI를 갱신하지 않는다.
+        # 단, 클린본 불러오기는 사용자가 파일 하나가 적용될 때마다 전체 진행도를 확인해야 하므로 1페이지 단위로 갱신한다.
+        data_progress_interval = 1 if clean_import_progress_every_page else 5
         heavy_data_modes = {"import_clean_background", "use_background_as_source", "restore_original_source"}
-        data_checkpoint_interval = None if str(mode or "") in heavy_data_modes else 25
-        heavy_cleanup_interval = 3 if str(mode or "") == "import_clean_background" else 10
+        data_checkpoint_interval = None if mode_s in heavy_data_modes else self.batch_checkpoint_interval_for_mode(mode, 25)
+        checkpoint_kind_for_mode = self.batch_checkpoint_kind_for_mode(mode)
+        heavy_cleanup_interval = 3 if mode_s == "import_clean_background" else 10
         data_changed_since_checkpoint = False
         try:
             for order, page_idx in enumerate(indices, 1):
@@ -7377,8 +11280,11 @@ class MainWindowOperationsMixin:
                     result["cancelled"] = True
                     break
                 try:
+                    self._batch_set_unit_progress_page_start(page_idx)
                     if (not data_only) or order == 1 or (order - 1) % data_progress_interval == 0:
-                        self.update_task_progress_overlay(current=completed, total=total, detail=self.batch_progress_detail(title, completed, total, page_idx, "페이지 작업 중..."))
+                        bar_current, bar_total = self._batch_progress_overlay_values(completed, total)
+                        self.update_task_progress_overlay(current=bar_current, total=bar_total, detail=self.batch_progress_detail(title, completed, total, page_idx, "페이지 작업 중..."))
+                        _pump_clean_import_progress_events()
                     if visual:
                         self.show_batch_page_progress(page_idx, mode=mode, finished=False)
                     self.log(f"[Batch] 처리 시작: {order}/{total} - {self.batch_page_display_label(page_idx)}")
@@ -7392,11 +11298,17 @@ class MainWindowOperationsMixin:
                     self._batch_result_record(page_idx, status=status, message=message)
                     if str(status or "").lower() == "done":
                         data_changed_since_checkpoint = True
+                        if checkpoint_kind_for_mode:
+                            try:
+                                self.mark_page_data_dirty_explicit(page_idx, checkpoint_kind_for_mode)
+                            except Exception:
+                                pass
                     self.log(f"[Batch] 처리 {status}: {order}/{total} - {self.batch_page_display_label(page_idx)} {message or ''}".rstrip())
                 except Exception as e:
                     self._batch_result_record(page_idx, status="failed", message=str(e))
                     self.log(f"[Batch] 처리 실패: {order}/{total} - {self.batch_page_display_label(page_idx)} - {e}")
                 completed += 1
+                self._batch_set_unit_progress_page_done(page_idx)
 
                 if data_only:
                     # 데이터 작업은 페이지마다 디스크 저장하지 않고, 일정 단위로만 체크포인트 저장한다.
@@ -7409,9 +11321,17 @@ class MainWindowOperationsMixin:
                         and (completed % data_checkpoint_interval == 0 or completed >= total)
                     ):
                         try:
+                            try:
+                                self.audit_boundary_event("BATCH_WORK_CACHE_CHECKPOINT_ENTER", mode=str(mode or ""), completed=int(completed), total=int(total), throttle_ms=300)
+                            except Exception:
+                                pass
                             self.save_to_work_cache()
                             self.has_unsaved_changes = True
                             data_changed_since_checkpoint = False
+                            try:
+                                self.audit_boundary_event("BATCH_WORK_CACHE_CHECKPOINT_DONE", mode=str(mode or ""), completed=int(completed), total=int(total), throttle_ms=300)
+                            except Exception:
+                                pass
                         except Exception as e:
                             self.log(f"⚠️ [Batch] 작업 캐시 체크포인트 저장 실패: {e}")
                 else:
@@ -7424,7 +11344,7 @@ class MainWindowOperationsMixin:
 
                 # 이미지 대량 데이터 작업은 페이지 처리 후 지역/Qt 캐시를 주기적으로 비운다.
                 # 클린본 교체는 기존/신규 이미지가 겹치는 순간이 생길 수 있어 더 짧은 주기로 비운다.
-                if data_only and str(mode or "") in heavy_data_modes and (completed % heavy_cleanup_interval == 0 or completed >= total):
+                if data_only and mode_s in heavy_data_modes and (completed % heavy_cleanup_interval == 0 or completed >= total):
                     try:
                         QPixmapCache.clear()
                     except Exception:
@@ -7436,9 +11356,11 @@ class MainWindowOperationsMixin:
 
                 # 일괄 작업은 작업 단위 자체가 Undo 경계다. 매 페이지마다 Undo를 다시 끊지 않는다.
                 if (not data_only) or completed == total or completed % data_progress_interval == 0:
-                    self.update_task_progress_overlay(current=completed, total=total, detail=self.batch_progress_detail(title, completed, total, page_idx, "페이지 작업 완료"))
-                # 진행 UI는 QTimer 지연 갱신으로 처리한다.
-                # 여기서 processEvents()를 호출하면 queued batch 신호가 현재 스택으로 재진입할 수 있다.
+                    bar_current, bar_total = self._batch_progress_overlay_values(completed, total)
+                    self.update_task_progress_overlay(current=bar_current, total=bar_total, detail=self.batch_progress_detail(title, completed, total, page_idx, "페이지 작업 완료"))
+                    _pump_clean_import_progress_events()
+                # 일반 데이터 작업은 QTimer 지연 갱신으로 처리한다.
+                # 클린본 불러오기는 예외적으로 입력 제외 processEvents를 돌려 파일 단위 진행도가 즉시 보이게 한다.
         finally:
             if data_only and save_work_cache and data_changed_since_checkpoint:
                 try:
@@ -7463,6 +11385,7 @@ class MainWindowOperationsMixin:
             self._active_task_worker = None
             self._batch_total = None
             self._batch_current_page_idx = None
+            self._clear_batch_unit_progress_state()
             self.set_project_action_interlock(False)
             self.end_busy_state(title)
             try:
@@ -7645,7 +11568,8 @@ class MainWindowOperationsMixin:
                 if i >= len(self.paths):
                     continue
                 path = self.paths[i]
-                base_name = os.path.basename(str(path or f"page{i + 1:03d}.png"))
+                source_base_name = os.path.basename(str(path or f"page{i + 1:03d}.png"))
+                base_name = self.batch_export_output_basename(i)
                 prefix = f"[{seq_no + 1}/{total} | {i + 1}p]"
                 try:
                     self._batch_total = total
@@ -7653,7 +11577,20 @@ class MainWindowOperationsMixin:
                     self._batch_current_page_idx = i
                     self.update_task_progress_overlay(current=seq_no, total=total, detail=self.batch_progress_detail(title, seq_no, total, i, f"출력 중: {base_name}"))
                     _keep_export_progress_on_top()
-                    self.log(f"{prefix} 출력: {base_name}")
+                    self.log(f"{prefix} 출력: {base_name} (원본: {source_base_name})")
+                    try:
+                        if hasattr(self, 'audit_boundary_event'):
+                            self.audit_boundary_event(
+                                "BATCH_EXPORT_PAGE_BEGIN",
+                                target_page=i,
+                                page_no=i + 1,
+                                seq=seq_no + 1,
+                                total=total,
+                                base_name=base_name,
+                                source_base_name=source_base_name,
+                            )
+                    except Exception:
+                        pass
                     self.idx = i
                     self.ensure_page_source_path(i)
                     # 진행 중에는 최종결과 탭을 유지한다. load() 직후 진행창을 다시 올려
@@ -7665,7 +11602,17 @@ class MainWindowOperationsMixin:
                             self.cb_mode.blockSignals(False)
                     except Exception:
                         pass
+                    try:
+                        if hasattr(self, 'audit_boundary_event'):
+                            self.audit_boundary_event("BATCH_EXPORT_PAGE_LOAD_BEGIN", target_page=i, page_no=i + 1)
+                    except Exception:
+                        pass
                     self.load()
+                    try:
+                        if hasattr(self, 'audit_boundary_event'):
+                            self.audit_boundary_event("BATCH_EXPORT_PAGE_LOAD_DONE", target_page=i, page_no=i + 1)
+                    except Exception:
+                        pass
                     _keep_export_progress_on_top()
                     QApplication.processEvents()
                     _keep_export_progress_on_top()
@@ -7674,7 +11621,17 @@ class MainWindowOperationsMixin:
                     # 이 경로를 타야 개별 출력과 일괄 출력의 결과가 같은 렌더러를 사용한다.
                     # 일괄 출력에서는 800MB+ YSBT가 매 페이지마다 통째로 자동저장되지 않게 막고,
                     # 페이지 저장 직후 씬/이미지 캐시를 해제한다.
+                    try:
+                        if hasattr(self, 'audit_boundary_event'):
+                            self.audit_boundary_event("BATCH_EXPORT_RESULT_BEGIN", target_page=i, page_no=i + 1)
+                    except Exception:
+                        pass
                     self.export_result(autosave=False, prompt_options=False)
+                    try:
+                        if hasattr(self, 'audit_boundary_event'):
+                            self.audit_boundary_event("BATCH_EXPORT_RESULT_DONE", target_page=i, page_no=i + 1)
+                    except Exception:
+                        pass
                     ok_count += 1
                     self._batch_result_record(i, status="done", message="출력 완료")
                     self._batch_progress_done = seq_no + 1
@@ -7685,6 +11642,16 @@ class MainWindowOperationsMixin:
                 except Exception as e:
                     fail_count += 1
                     self._batch_result_record(i, status="failed", message=str(e))
+                    try:
+                        if hasattr(self, 'audit_boundary_event'):
+                            self.audit_boundary_event(
+                                "BATCH_EXPORT_PAGE_ERROR",
+                                target_page=i,
+                                page_no=i + 1,
+                                error=repr(e),
+                            )
+                    except Exception:
+                        pass
                     self.log(f"{prefix} ❌ 출력 에러: {e}")
                 finally:
                     self.release_batch_export_page_memory(i)
@@ -7816,7 +11783,8 @@ class MainWindowOperationsMixin:
         dialog = QDialog(self)
         dialog.setWindowTitle(self.tr_ui(title))
         dialog.setModal(True)
-        dialog.resize(440, 220 if include_current_page else 190)
+        dialog_extra_h = 34 if str(mode or "") == "extract_text" else 0
+        dialog.resize(440, (220 if include_current_page else 190) + dialog_extra_h)
 
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(16, 16, 16, 16)
@@ -7854,6 +11822,19 @@ class MainWindowOperationsMixin:
         note.setStyleSheet("color: #8ea0b8;")
         layout.addWidget(note)
 
+        project_combined_cb = None
+        if str(mode or "") == "extract_text":
+            project_combined_cb = QCheckBox(self.tr_ui("프로젝트 통합 지문 추출"), dialog)
+            try:
+                project_combined_cb.setToolTip(self.tr_ui("선택한 페이지의 지문을 프로젝트 제목의 단일 TXT 파일로도 함께 추출합니다."))
+            except Exception:
+                pass
+            try:
+                project_combined_cb.setChecked(bool(getattr(self, "_batch_extract_project_combined", False)))
+            except Exception:
+                pass
+            layout.addWidget(project_combined_cb)
+
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dialog)
         try:
             buttons.button(QDialogButtonBox.StandardButton.Ok).setText(self.tr_ui("확인"))
@@ -7873,9 +11854,9 @@ class MainWindowOperationsMixin:
             rb_current.toggled.connect(sync_enabled)
 
         if rb_current is not None:
-            result = {"accepted": False, "indices": [current_idx], "label": self.tr_ui("현재 페이지")}
+            result = {"accepted": False, "indices": [current_idx], "label": self.tr_ui("현재 페이지"), "project_combined": False}
         else:
-            result = {"accepted": False, "indices": list(range(total_pages)), "label": self.tr_ui("전체 페이지")}
+            result = {"accepted": False, "indices": list(range(total_pages)), "label": self.tr_ui("전체 페이지"), "project_combined": False}
 
         def on_accept():
             try:
@@ -7889,6 +11870,8 @@ class MainWindowOperationsMixin:
                 else:
                     result["indices"] = list(range(total_pages))
                     result["label"] = self.tr_ui("전체 페이지")
+                if project_combined_cb is not None:
+                    result["project_combined"] = bool(project_combined_cb.isChecked())
                 result["accepted"] = True
                 dialog.accept()
             except Exception as e:
@@ -7898,7 +11881,17 @@ class MainWindowOperationsMixin:
         buttons.rejected.connect(dialog.reject)
 
         if dialog.exec() != QDialog.DialogCode.Accepted or not result.get("accepted"):
+            if str(mode or "") == "extract_text":
+                try:
+                    self._batch_extract_project_combined = False
+                except Exception:
+                    pass
             return None, None
+        if str(mode or "") == "extract_text":
+            try:
+                self._batch_extract_project_combined = bool(result.get("project_combined", False))
+            except Exception:
+                pass
         return result["indices"], result["label"]
 
     def run_batch(self, mode):
@@ -7968,23 +11961,12 @@ class MainWindowOperationsMixin:
 
         self._batch_inpaint_resize_policy = None
         if mode == "inpaint":
-            inpaint_ctx = self.macro_batch_preflight_context_for_mode(mode) if hasattr(self, "macro_batch_preflight_context_for_mode") else {}
-            if getattr(self, "macro_running", False) and (
-                bool((inpaint_ctx or {}).get("inpaint_resize_checked"))
-                or bool(getattr(self, "_macro_preflight_inpaint_resize_checked", False))
-            ):
-                policy = (inpaint_ctx or {}).get("inpaint_resize_policy", None)
-                if not isinstance(policy, dict):
-                    policy = getattr(self, "_macro_preflight_inpaint_resize_policy", None)
-                self._batch_inpaint_resize_policy = copy.deepcopy(policy) if isinstance(policy, dict) else None
-                try:
-                    self.log("🧩 [Macro] 인페인팅 리사이즈 정책 재사용")
-                except Exception:
-                    pass
-            else:
-                if not self._ask_batch_inpaint_resize(selected_page_indices):
-                    self.log(f"↩️ {title} 취소")
-                    return
+            # 그룹 인페인팅은 페이지 전체 리사이즈 프리플라이트를 쓰지 않는다.
+            # 미리보기와 같은 2800 패킹 그룹 crop이 실제 LaMa 입력 단위다.
+            try:
+                self.log("🧩 [Batch] 인페인팅은 그룹 crop 기준으로 진행합니다. 전체 페이지 리사이즈 확인은 건너뜁니다.")
+            except Exception:
+                pass
         try:
             self._batch_return_page_idx = int(self.idx)
             self._batch_return_mode_idx = int(self.cb_mode.currentIndex()) if hasattr(self, "cb_mode") else 0
@@ -7995,6 +11977,19 @@ class MainWindowOperationsMixin:
         if mode == "export":
             self.run_batch_export_preview_sync(title, page_indices=selected_page_indices, page_label=selected_page_label)
             return
+
+        if mode == "translate" and str(self.cb_trans_provider.currentData() or "") == "gemini_deferred":
+            self.run_batch_gemini_delayed_translation(
+                title=title,
+                selected_page_indices=selected_page_indices,
+                selected_page_label=selected_page_label,
+            )
+            return
+
+        if mode in ("analyze", "reanalyze", "inpaint"):
+            preflight_task = {"analyze": "batch_analyze", "reanalyze": "batch_reanalyze", "inpaint": "batch_inpaint"}.get(mode, mode)
+            if not self.run_local_cuda_preflight_or_alert(preflight_task, batch=True):
+                return
 
         self.is_batch_running = True
         self.current_batch_mode = mode
@@ -8017,6 +12012,321 @@ class MainWindowOperationsMixin:
             self.on_batch_finished(mode)
             return
         self.start_universal_batch_worker(mode, selected_page_indices)
+
+
+    def run_batch_gemini_delayed_translation(self, *, title, selected_page_indices, selected_page_label):
+        """Run Gemini Flex/Batch through the normal batch-translate entry point.
+
+        Gemini Flex/Batch is intentionally handled on the UI event loop with its
+        status dialog, not UniversalBatchWorker.  The controller owns async
+        network requests and emits completed chunks back to this method, where
+        translated text is applied to the page data immediately.
+        """
+        settings = getattr(self, "api_settings", None) or ApiSettingsStore.load()
+        mode = str(getattr(settings, "gemini_delayed_mode", "flex") or "flex").strip().lower()
+        mode = "batch" if mode == "batch" else "flex"
+        api_key = str(getattr(settings, "gemini_delayed_api_key", "") or "").strip()
+        model = str(getattr(settings, "gemini_delayed_model", "gemini-2.5-flash-lite") or "gemini-2.5-flash-lite").strip()
+        try:
+            chunk_setting = max(0, min(int(getattr(settings, "gemini_delayed_chunk_size", 0) or 0), 100))
+        except Exception:
+            chunk_setting = 0
+        chunk_auto = chunk_setting <= 0
+        chunk_size = chunk_setting if not chunk_auto else 0
+
+        page_indices = []
+        seen = set()
+        for raw_idx in selected_page_indices or []:
+            try:
+                page_idx = int(raw_idx)
+            except Exception:
+                continue
+            if 0 <= page_idx < len(getattr(self, "paths", []) or []) and page_idx not in seen:
+                page_indices.append(page_idx)
+                seen.add(page_idx)
+        if not page_indices:
+            self.log("⚠️ Gemini Flex/Batch 일괄 번역 대상 페이지가 없습니다.")
+            return
+
+        targets = []
+        source_texts = []
+        skipped_pages = {}
+        page_target_total = {}
+        page_done_count = {}
+        page_recorded = set()
+        for page_idx in page_indices:
+            curr = (getattr(self, "data", {}) or {}).get(page_idx) or {}
+            data_list = curr.get("data") or []
+            if not data_list:
+                skipped_pages[page_idx] = "분석 데이터 없음"
+                continue
+            page_count = 0
+            for item_idx, item in enumerate(data_list):
+                if not isinstance(item, dict):
+                    continue
+                if not bool(item.get("use_inpaint", True)):
+                    continue
+                targets.append({"page_idx": page_idx, "item_idx": item_idx})
+                source_texts.append(str(item.get("text", "") or ""))
+                page_count += 1
+            if page_count <= 0:
+                skipped_pages[page_idx] = "체크된 항목 없음"
+            else:
+                page_target_total[page_idx] = page_count
+                page_done_count[page_idx] = 0
+
+        if not targets:
+            QMessageBox.information(
+                self,
+                self.tr_ui("일괄 번역"),
+                self.tr_msg("Gemini Flex/Batch로 번역할 체크된 항목이 없습니다."),
+            )
+            return
+
+        chunks = []
+        if chunk_auto:
+            # 자동: 각 페이지에 있는 체크된 번역 대상 줄을 한 청크로 묶는다.
+            start = 0
+            while start < len(targets):
+                page_idx = int(targets[start].get("page_idx", -1))
+                end = start + 1
+                while end < len(targets) and int(targets[end].get("page_idx", -2)) == page_idx:
+                    end += 1
+                chunks.append({"start": start, "end": end, "page_idx": page_idx})
+                start = end
+        else:
+            for start in range(0, len(source_texts), chunk_size):
+                end = min(len(source_texts), start + chunk_size)
+                chunks.append({"start": start, "end": end})
+        if not chunks:
+            self.log("⚠️ Gemini Flex/Batch 일괄 번역 청크가 없습니다.")
+            return
+        chunk_label = "자동(페이지별)" if chunk_auto else f"{chunk_size}개"
+
+        log_path = make_log_path("batch_translate_gemini_deferred")
+        self._gemini_batch_log_path = log_path
+        append_log(
+            log_path,
+            "GEMINI BATCH TRANSLATE START",
+            mode=mode,
+            model=model,
+            pages=len(page_indices),
+            targets=len(targets),
+            chunks=len(chunks),
+            chunk_size=chunk_size,
+            chunk_mode="auto_page" if chunk_auto else "fixed",
+            memory=memory_text(),
+        )
+
+        self.is_batch_running = True
+        self.current_batch_mode = "translate"
+        self._batch_progress_done = 0
+        self._batch_total = len(page_indices)
+        self._long_task_cancel_requested = False
+        self._batch_result = self._batch_result_new(title, "translate", page_indices, selected_page_label)
+        self.begin_busy_state(title)
+        self.set_project_action_interlock(True)
+        self.batch_log_undo_boundary("start")
+        self.batch_prepare_progress(title, page_indices, selected_page_label, cancellable=True)
+        self.update_task_progress_overlay(
+            current=0,
+            total=len(page_indices),
+            detail=f"Gemini {mode.title()} 일괄 번역 준비: {len(targets)}개 / {len(chunks)}청크 / 묶음 {chunk_label}",
+        )
+
+        for page_idx, reason in skipped_pages.items():
+            try:
+                self._batch_result_record(page_idx, status="skipped", message=reason)
+                page_recorded.add(page_idx)
+                self._batch_progress_done = int(getattr(self, "_batch_progress_done", 0) or 0) + 1
+            except Exception:
+                pass
+
+        controller = GeminiDelayedTranslationController(
+            self.engine,
+            chunks,
+            mode=mode,
+            api_key=api_key,
+            model=model,
+            source_texts=list(source_texts),
+            source_contexts=None,
+            language=getattr(self, "ui_language", LANG_KO),
+            parent=self,
+        )
+        self._gemini_delayed_controller = controller
+        self._gemini_delayed_translation_active = True
+        self._active_long_task_kind = "gemini_delayed_batch_translation"
+
+        def _refresh_page_if_visible(page_idx, affected_ids):
+            try:
+                if int(page_idx) != int(getattr(self, "idx", 0) or 0):
+                    return
+                if hasattr(self, "tab"):
+                    self.tab.blockSignals(True)
+                    try:
+                        curr = (getattr(self, "data", {}) or {}).get(page_idx) or {}
+                        data_list = curr.get("data") or []
+                        for item_idx in affected_ids.get("indices", []):
+                            row = int(item_idx) + 1
+                            if 0 <= int(item_idx) < len(data_list) and row < self.tab.rowCount():
+                                self.tab.setItem(row, 3, QTableWidgetItem(str(data_list[int(item_idx)].get("translated_text", "") or "")))
+                        try:
+                            self.paint_all_row_header()
+                        except Exception:
+                            pass
+                    finally:
+                        self.tab.blockSignals(False)
+                if getattr(self, "cb_mode", None) is not None and self.cb_mode.currentIndex() == 4:
+                    ids = affected_ids.get("ids", []) if isinstance(affected_ids, dict) else []
+                    if not self.refresh_final_text_items_by_ids(ids):
+                        self.schedule_final_text_scene_refresh(80)
+            except Exception as exc:
+                append_log(log_path, "GEMINI BATCH VISIBLE REFRESH FAILED", index=page_idx, error=repr(exc), memory=memory_text())
+
+        def _record_page_done_if_ready(page_idx):
+            try:
+                page_idx = int(page_idx)
+            except Exception:
+                return
+            if page_idx in page_recorded:
+                return
+            total_for_page = int(page_target_total.get(page_idx, 0) or 0)
+            done_for_page = int(page_done_count.get(page_idx, 0) or 0)
+            if total_for_page <= 0 or done_for_page < total_for_page:
+                return
+            self._batch_result_record(page_idx, status="done", message="")
+            page_recorded.add(page_idx)
+            self._batch_progress_done = int(getattr(self, "_batch_progress_done", 0) or 0) + 1
+            total_pages = int(getattr(self, "_batch_total", len(page_indices)) or len(page_indices))
+            self.update_task_progress_overlay(
+                current=int(getattr(self, "_batch_progress_done", 0) or 0),
+                total=total_pages,
+                detail=self.batch_progress_detail("translate", int(getattr(self, "_batch_progress_done", 0) or 0), total_pages, page_idx, "Gemini 청크 반영 완료"),
+            )
+            self.show_batch_page_progress(page_idx, mode="translate", finished=True)
+
+        def apply_chunk(row_index, results):
+            try:
+                row_index = int(row_index)
+                if not (0 <= row_index < len(controller.rows)):
+                    return False
+                chunk = controller.rows[row_index]
+                start = int(chunk.get("start", 0) or 0)
+                end = int(chunk.get("end", start) or start)
+                expected = max(0, end - start)
+                results = list(results or [])
+                if len(results) != expected:
+                    raise ValueError(f"번역 개수 불일치: 요청 {expected}개 / 응답 {len(results)}개")
+
+                affected_by_page = {}
+                for offset, translated in enumerate(results):
+                    target_index = start + offset
+                    if not (0 <= target_index < len(targets)):
+                        continue
+                    target = targets[target_index]
+                    page_idx = int(target.get("page_idx", -1))
+                    item_idx = int(target.get("item_idx", -1))
+                    curr = (getattr(self, "data", {}) or {}).get(page_idx)
+                    if not isinstance(curr, dict):
+                        continue
+                    data_list = curr.get("data") or []
+                    if not (0 <= item_idx < len(data_list)):
+                        continue
+                    safe_text = str(translated) if translated is not None else ""
+                    data_list[item_idx]["translated_text"] = safe_text
+                    page_done_count[page_idx] = int(page_done_count.get(page_idx, 0) or 0) + 1
+                    bucket = affected_by_page.setdefault(page_idx, {"indices": [], "ids": []})
+                    bucket["indices"].append(item_idx)
+                    bucket["ids"].append(data_list[item_idx].get("id"))
+
+                for page_idx, affected in affected_by_page.items():
+                    try:
+                        self.mark_page_data_dirty_explicit(page_idx, "translation")
+                    except Exception:
+                        pass
+                    _refresh_page_if_visible(page_idx, affected)
+                    _record_page_done_if_ready(page_idx)
+
+                try:
+                    self.has_unsaved_changes = True
+                    self.save_to_work_cache()
+                except Exception as exc:
+                    self.log(f"⚠️ [Gemini Flex/Batch] 청크 작업폴더 저장 실패: {exc}")
+                append_log(
+                    log_path,
+                    "GEMINI BATCH CHUNK APPLIED",
+                    chunk=row_index + 1,
+                    start=start,
+                    end=end,
+                    affected_pages=list(affected_by_page.keys()),
+                    memory=memory_text(),
+                )
+                try:
+                    self.log(self.tr_ui("✅ 지연 번역 청크 {chunk} 완료 및 즉시 반영").format(chunk=row_index + 1))
+                except Exception:
+                    pass
+                return True
+            except Exception as exc:
+                append_log(log_path, "GEMINI BATCH CHUNK APPLY FAILED", chunk=int(row_index) + 1 if str(row_index).isdigit() else row_index, error=repr(exc), memory=memory_text())
+                try:
+                    self.log(f"❌ Gemini Flex/Batch 청크 반영 실패: {exc}")
+                except Exception:
+                    pass
+                return False
+
+        dialog = GeminiDelayedTranslationDialog(
+            controller,
+            apply_chunk=apply_chunk,
+            language=getattr(self, "ui_language", LANG_KO),
+            parent=self,
+        )
+        self._gemini_delayed_dialog = dialog
+        result = QDialog.DialogCode.Rejected
+        try:
+            result = dialog.exec()
+        finally:
+            completed_chunks = sum(1 for row in controller.rows if row.get("status") == "completed")
+            failed_chunks = sum(1 for row in controller.rows if row.get("status") == "failed")
+            canceled_chunks = sum(1 for row in controller.rows if row.get("status") == "canceled")
+            for page_idx in page_indices:
+                if page_idx in page_recorded:
+                    continue
+                if int(page_target_total.get(page_idx, 0) or 0) <= 0:
+                    continue
+                done_for_page = int(page_done_count.get(page_idx, 0) or 0)
+                total_for_page = int(page_target_total.get(page_idx, 0) or 0)
+                if result == QDialog.DialogCode.Accepted and failed_chunks <= 0 and canceled_chunks <= 0:
+                    status = "done"
+                    msg = ""
+                else:
+                    status = "failed"
+                    msg = f"완료 {done_for_page}/{total_for_page}개, 실패 청크 {failed_chunks}개, 취소 청크 {canceled_chunks}개"
+                self._batch_result_record(page_idx, status=status, message=msg)
+                page_recorded.add(page_idx)
+            try:
+                if result == QDialog.DialogCode.Accepted:
+                    self.log(f"✅ Gemini Flex/Batch 일괄 번역 완료: {completed_chunks}/{len(controller.rows)}청크")
+                else:
+                    self.log(f"⏹️ Gemini Flex/Batch 일괄 번역 종료: 완료 {completed_chunks} / 실패 {failed_chunks} / 취소 {canceled_chunks} / 전체 {len(controller.rows)}청크")
+                    if isinstance(getattr(self, "_batch_result", None), dict):
+                        self._batch_result["cancelled"] = bool(canceled_chunks > 0 or result != QDialog.DialogCode.Accepted)
+            except Exception:
+                pass
+            try:
+                controller.deleteLater()
+                dialog.deleteLater()
+            except Exception:
+                pass
+            self._gemini_delayed_controller = None
+            self._gemini_delayed_dialog = None
+            self._gemini_delayed_translation_active = False
+            self._active_long_task_kind = ""
+            try:
+                self.has_unsaved_changes = True
+                self.save_to_work_cache()
+            except Exception:
+                pass
+            self.on_batch_finished("translate")
 
     def start_universal_batch_worker(self, mode, selected_page_indices):
         self.bw = UniversalBatchWorker(self, mode, page_indices=selected_page_indices)
@@ -8106,20 +12416,46 @@ class MainWindowOperationsMixin:
                 finished=finished,
                 memory=memory_text(),
             )
+            flush_t0 = time.perf_counter()
             self.idx = int(page_index)
             target_mode = self.batch_visual_mode_for(mode)
+            try:
+                if hasattr(self, 'audit_boundary_event'):
+                    self.audit_boundary_event(
+                        "BATCH_PAGE_PROGRESS_VIEW_BEGIN",
+                        target_page=page_index,
+                        mode=mode,
+                        finished=finished,
+                        target_mode=target_mode,
+                    )
+            except Exception:
+                pass
             if hasattr(self, "cb_mode") and 0 <= target_mode < self.cb_mode.count():
                 if self.cb_mode.currentIndex() != target_mode:
                     self.cb_mode.setCurrentIndex(target_mode)
             self.load()
+            elapsed_ms = int((time.perf_counter() - flush_t0) * 1000)
             append_log(
                 getattr(getattr(self, "bw", None), "batch_log_path", None),
                 "UI SHOW PAGE FLUSH DONE",
                 index=page_index,
                 mode=mode,
                 finished=finished,
+                elapsed_ms=elapsed_ms,
                 memory=memory_text(),
             )
+            try:
+                if hasattr(self, 'audit_boundary_event'):
+                    self.audit_boundary_event(
+                        "BATCH_PAGE_PROGRESS_VIEW_DONE",
+                        target_page=page_index,
+                        mode=mode,
+                        finished=finished,
+                        elapsed_ms=elapsed_ms,
+                        target_mode=target_mode,
+                    )
+            except Exception:
+                pass
         except Exception as e:
             append_log(
                 getattr(getattr(self, "bw", None), "batch_log_path", None),
@@ -8165,13 +12501,27 @@ class MainWindowOperationsMixin:
         )
         payload_status = "done"
         payload_message = ""
+        payload_timing = {}
         try:
             if isinstance(payload, dict):
                 payload_status = str(payload.pop('_batch_status', 'done') or 'done')
                 payload_message = str(payload.pop('_batch_message', '') or '')
+                raw_timing = payload.pop('_batch_timing', {})
+                payload_timing = dict(raw_timing or {}) if isinstance(raw_timing, dict) else {}
         except Exception:
             payload_status = "done"
             payload_message = ""
+            payload_timing = {}
+        try:
+            if payload_timing and hasattr(self, 'audit_boundary_event'):
+                self.audit_boundary_event(
+                    "BATCH_TRANSLATION_TIMING",
+                    target_page=i,
+                    status=payload_status,
+                    **payload_timing,
+                )
+        except Exception:
+            pass
         # workers.py가 payload를 넘기는 새 구조와, main.data를 직접 갱신하는 구 구조를 모두 지원한다.
         # 일괄 중에는 self.load()를 호출하지 않는다. 화면에 남은 마스크가 다른 페이지에 저장될 수 있기 때문.
         if i < 0 or i >= len(self.paths):
@@ -8180,6 +12530,30 @@ class MainWindowOperationsMixin:
                     self.bw.mark_item_applied(i)
             except Exception:
                 pass
+            return
+
+        if payload_status == "failed":
+            try:
+                self.log(f"❌ [Batch] {self.batch_page_display_label(i)} 실패: {payload_message or '오류'}")
+            except Exception:
+                pass
+            try:
+                self._batch_result_record(i, status="failed", message=payload_message or "오류")
+                self._batch_progress_done = int(getattr(self, "_batch_progress_done", 0) or 0) + 1
+                batch_total = int(getattr(self, "_batch_total", len(self.paths)) or len(self.paths))
+                self.update_task_progress_overlay(
+                    current=self._batch_progress_done,
+                    total=batch_total,
+                    detail=self.batch_progress_detail(getattr(self, "current_batch_mode", None), self._batch_progress_done, batch_total, i, payload_message or "페이지 작업 실패"),
+                )
+            except Exception:
+                pass
+            try:
+                if hasattr(getattr(self, "bw", None), "mark_item_applied"):
+                    self.bw.mark_item_applied(i)
+            except Exception:
+                pass
+            append_log(getattr(getattr(self, "bw", None), "batch_log_path", None), "UI BATCH ITEM FAILED SKIP_APPLY", index=i, payload_message=payload_message, memory=memory_text())
             return
 
         if i not in self.data:
@@ -8250,6 +12624,34 @@ class MainWindowOperationsMixin:
             # 원본으로 반영하지 않은 최종 페인팅 레이어는 새 결과 기준으로 초기화한다.
             append_log(getattr(getattr(self, "bw", None), "batch_log_path", None), "UI PAYLOAD APPLY DONE", index=i, memory=memory_text())
 
+            # 일괄 작업 결과는 화면을 직접 거치지 않으므로, payload 적용 직후
+            # 명시 저장용 dirty + 작업폴더 복구 체크포인트 dirty를 반드시 같이 찍는다.
+            # 이 표시가 없으면 save_to_work_cache()가 PROJECT_DELTA_SAVE_SKIP_NO_CHECKPOINT로 빠지고,
+            # 번역/텍스트 정리 결과가 크래시 복구와 YSBT 저장 대상에서 누락될 수 있다.
+            try:
+                batch_mode_for_dirty = str(getattr(self, "current_batch_mode", "") or "")
+                dirty_kind_by_mode = {
+                    "translate": "translation",
+                    "refresh": "text",
+                    "auto_text_size": "auto_text_size",
+                    "inpaint": "clean_background",
+                    "analyze": "analysis",
+                    "reanalyze": "analysis",
+                }
+                dirty_kind = dirty_kind_by_mode.get(batch_mode_for_dirty, "data")
+                if payload_status != "skipped":
+                    self.mark_page_data_dirty_explicit(i, dirty_kind)
+                    if hasattr(self, 'audit_boundary_event'):
+                        self.audit_boundary_event(
+                            "BATCH_PAGE_DIRTY_MARKED",
+                            batch_mode=batch_mode_for_dirty,
+                            dirty_kind=dirty_kind,
+                            target_page=i,
+                            throttle_ms=50,
+                        )
+            except Exception:
+                pass
+
             if getattr(self, "current_batch_mode", None) == "inpaint" and "bg_clean" in payload:
                 img = self.bg_clean_to_np_image(curr.get('bg_clean'))
                 if img is not None:
@@ -8274,6 +12676,11 @@ class MainWindowOperationsMixin:
                 self.data[i]['mask_merge_off'] = None
                 self.data[i]['mask_inpaint_off'] = None
             self.data[i]['mask_toggle_enabled'] = True
+            try:
+                if hasattr(self, 'clip_page_masks_to_active_ocr_regions'):
+                    self.clip_page_masks_to_active_ocr_regions(i, reason=f"batch_{getattr(self, 'current_batch_mode', '')}")
+            except Exception:
+                pass
 
         if getattr(self, "current_batch_mode", None) in ("analyze", "reanalyze", "translate", "inpaint"):
             self.show_batch_page_progress(i, mode=getattr(self, "current_batch_mode", None), finished=True)
@@ -8301,7 +12708,21 @@ class MainWindowOperationsMixin:
                 except Exception as e:
                     self.log(f"⚠️ [Batch] 인페인팅 페이지 즉시 저장 실패: {e}")
             elif getattr(self, "current_batch_mode", None) not in ("analyze", "reanalyze"):
-                self.save_to_work_cache()
+                try:
+                    saved_work_cache = bool(self.save_to_work_cache())
+                    if hasattr(self, 'audit_boundary_event'):
+                        self.audit_boundary_event(
+                            "BATCH_ITEM_WORK_CACHE_SAVE_DONE",
+                            batch_mode=getattr(self, "current_batch_mode", None),
+                            target_page=i,
+                            ok=saved_work_cache,
+                            throttle_ms=50,
+                        )
+                except Exception as e:
+                    try:
+                        self.log(f"⚠️ [Batch] 페이지 작업폴더 저장 실패: {e}")
+                    except Exception:
+                        pass
             else:
                 append_log(getattr(getattr(self, "bw", None), "batch_log_path", None), "UI BATCH ITEM CACHE SAVE SKIPPED", index=i, mode=getattr(self, "current_batch_mode", None), memory=memory_text())
             self.has_unsaved_changes = True
@@ -8320,21 +12741,24 @@ class MainWindowOperationsMixin:
         append_log(getattr(getattr(self, "bw", None), "batch_log_path", None), "UI BATCH ITEM FINISHED DONE", index=i, status=payload_status, payload_message=payload_message, memory=memory_text())
 
     def save_batch_results_without_ui_commit(self):
-        """일괄 결과를 복구용 작업 캐시에 저장한다.
+        """일괄 결과 저장 상태를 갱신한다.
 
-        자동저장 기능은 폐지되었으므로, 일괄 작업 결과도 실제 YSBT 패키지에
-        즉시 반영하지 않는다. 튕김 복구용 작업 캐시에만 저장하고, 실제 YSBT 확정은
-        사용자가 프로젝트 저장/다른 이름으로 저장을 눌렀을 때 수행한다.
+        작업 캐시는 제거했다. 일괄 작업 결과는 현재 메모리/project_dir 기준 데이터에
+        남기고, 실제 YSBT 확정은 사용자가 프로젝트 저장/다른 이름으로 저장을
+        눌렀을 때 수행한다.
         """
         if not getattr(self, "project_dir", None):
             return
         try:
-            self.save_to_work_cache()
             self.has_unsaved_changes = True
-            self.log("💾 [Batch] 작업 캐시에 일괄 작업 결과 저장")
+            try:
+                self.update_window_title()
+            except Exception:
+                pass
+            self.log("💾 [Batch] 일괄 작업 결과 반영됨: 프로젝트 저장 시 YSBT에 확정됩니다")
         except Exception as e:
             self.has_unsaved_changes = True
-            self.log(f"⚠️ [Batch] 작업 캐시 저장 실패: {e}")
+            self.log(f"⚠️ [Batch] 일괄 결과 상태 갱신 실패: {e}")
 
     def on_batch_finished(self, mode):
         append_log(getattr(getattr(self, "bw", None), "batch_log_path", None), "UI BATCH FINISHED ENTER", mode=mode, memory=memory_text())
@@ -8432,19 +12856,385 @@ class MainWindowOperationsMixin:
             pass
         self.macro_mark_current_step_done(self.macro_batch_key_for_mode(mode))
 
+    def _is_plain_text_font_size_key(self, event, inc=True):
+        """Extra plain-key aliases for final-text size shortcuts.
+
+        The default shortcut for enlarge is '=' because many keyboards produce '+' as
+        Shift+=. Treat both '=' and '+' as enlarge, and '-' as shrink, unless Ctrl/Alt/Meta
+        is held. Inline text editors consume these before this global handler.
+        """
+        try:
+            mods = event.modifiers()
+            if mods & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier):
+                return False
+        except Exception:
+            pass
+        try:
+            text = str(event.text() or '')
+        except Exception:
+            text = ''
+        try:
+            key = event.key()
+        except Exception:
+            key = None
+        if inc:
+            if text in ('=', '+'):
+                return True
+            try:
+                return key in (Qt.Key.Key_Equal, getattr(Qt.Key, 'Key_Plus', Qt.Key.Key_Equal))
+            except Exception:
+                return False
+        if text == '-':
+            return True
+        try:
+            return key == Qt.Key.Key_Minus
+        except Exception:
+            return False
+
     def _event_matches_shortcut(self, event, key_name):
         seq = self.shortcut_settings.seq(key_name)
         if not seq or seq.isEmpty():
             return False
-        key = event.key()
-        if key in (Qt.Key.Key_Control, Qt.Key.Key_Shift, Qt.Key.Key_Alt, Qt.Key.Key_Meta):
+        # Qt/Windows 환경에서는 Ctrl+C/V 같은 기본 키도 NumLock/IME/키패드 등
+        # 부가 modifier가 섞이면 단순 QKeySequence(mods|key) 비교가 실패할 수 있다.
+        # 단축키 설정 모듈의 공용 matcher를 사용해 실제 등록 단축키와 같은 기준으로 판정한다.
+        try:
+            return bool(key_event_matches_sequence(event, seq))
+        except Exception:
+            pass
+        try:
+            key = event.key()
+            if key in (Qt.Key.Key_Control, Qt.Key.Key_Shift, Qt.Key.Key_Alt, Qt.Key.Key_Meta):
+                return False
+            try:
+                mods_value = event.modifiers().value
+            except AttributeError:
+                mods_value = int(event.modifiers())
+            pressed = QKeySequence(mods_value | key)
+            return pressed.matches(seq) == QKeySequence.SequenceMatch.ExactMatch
+        except Exception:
+            return False
+
+    def _event_matches_text_delete_shortcut(self, event):
+        """Return True when the current key event is the configured text delete shortcut.
+
+        Delete is a plain editing key, so it is especially sensitive to focus routes.
+        Keep the shortcut configurable through shortcut_settings, but use the same
+        low-level matcher as other YSB shortcuts so canvas/viewport events are stable.
+        """
+        try:
+            return bool(self._event_matches_shortcut(event, "text_delete"))
+        except Exception:
+            pass
+        try:
+            # Defensive fallback for old shortcut caches created before text_delete existed.
+            mods = event.modifiers()
+            if mods & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier):
+                return False
+            return event.key() == Qt.Key.Key_Delete
+        except Exception:
+            return False
+
+    def _final_text_delete_shortcut_guard_active(self, window_ms=1500):
+        """Suppress duplicate Delete handling from ShortcutOverride/KeyPress/QShortcut routes."""
+        try:
+            last = float(getattr(self, '_final_text_delete_shortcut_guard_at', 0.0) or 0.0)
+            return (time.time() - last) * 1000.0 <= float(window_ms)
+        except Exception:
+            return False
+
+    def _mark_final_text_delete_shortcut_guard(self):
+        try:
+            self._final_text_delete_shortcut_guard_at = time.time()
+        except Exception:
+            pass
+
+    def handle_final_text_delete_shortcut_command(self, phase=''):
+        """Delete selected final-text objects from any canvas key focus route."""
+        try:
+            if self._final_text_delete_shortcut_guard_active():
+                try:
+                    self.audit_boundary_event('FINAL_TEXT_DELETE_SHORTCUT_DUPLICATE_SUPPRESSED', phase=str(phase or ''), throttle_ms=80)
+                except Exception:
+                    pass
+                return True
+        except Exception:
+            pass
+        try:
+            if getattr(self, "cb_mode", None) is None or self.cb_mode.currentIndex() != 4:
+                return False
+        except Exception:
             return False
         try:
-            mods_value = event.modifiers().value
-        except AttributeError:
-            mods_value = int(event.modifiers())
-        pressed = QKeySequence(mods_value | key)
-        return pressed.matches(seq) == QKeySequence.SequenceMatch.ExactMatch
+            if getattr(self, "inline_text_editor", None) is not None:
+                return False
+        except Exception:
+            pass
+        try:
+            if self.is_editing_table_text_cell():
+                return False
+        except Exception:
+            pass
+        try:
+            if self.is_text_transform_active():
+                return False
+        except Exception:
+            pass
+        try:
+            selected = self.selected_text_data_items()
+        except Exception:
+            selected = []
+        if not selected:
+            return False
+        self._mark_final_text_delete_shortcut_guard()
+        try:
+            self.audit_boundary_event('FINAL_TEXT_DELETE_SHORTCUT_HANDLED', phase=str(phase or ''), count=len(selected), throttle_ms=80)
+        except Exception:
+            pass
+        self.delete_text_data_items(selected, ask=True)
+        return True
+
+    def _final_text_clipboard_default_sequence(self, action):
+        try:
+            if action == 'copy':
+                return QKeySequence(QKeySequence.StandardKey.Copy)
+            if action == 'paste_mode':
+                return QKeySequence(QKeySequence.StandardKey.Paste)
+            if action == 'paste_same_position':
+                return QKeySequence('Ctrl+Shift+V')
+        except Exception:
+            pass
+        try:
+            if action == 'copy':
+                return QKeySequence('Ctrl+C')
+            if action == 'paste_mode':
+                return QKeySequence('Ctrl+V')
+            if action == 'paste_same_position':
+                return QKeySequence('Ctrl+Shift+V')
+        except Exception:
+            pass
+        return QKeySequence()
+
+    def _final_text_clipboard_shortcut_sequence(self, action):
+        key_name = {
+            'copy': 'text_copy',
+            'paste_mode': 'text_paste',
+            'paste_same_position': 'text_paste_same_position',
+        }.get(str(action or ''))
+        seq = QKeySequence()
+        try:
+            if key_name and hasattr(self, 'shortcut_settings'):
+                seq = self.shortcut_settings.seq(key_name)
+        except Exception:
+            seq = QKeySequence()
+        if seq is None or seq.isEmpty():
+            # 방어용 fallback. 설정 캐시가 꼬여 text_copy가 빈 값이 되어도
+            # 최종 텍스트 객체 복붙의 기본 편집 동작은 죽지 않게 한다.
+            seq = self._final_text_clipboard_default_sequence(action)
+        return seq
+
+    def _event_matches_final_text_clipboard_action(self, event, action):
+        seq = self._final_text_clipboard_shortcut_sequence(action)
+        if seq is not None and not seq.isEmpty():
+            try:
+                if key_event_matches_sequence(event, seq):
+                    return True
+            except Exception:
+                pass
+            try:
+                key = event.key()
+                if key not in (Qt.Key.Key_Control, Qt.Key.Key_Shift, Qt.Key.Key_Alt, Qt.Key.Key_Meta):
+                    try:
+                        mods_value = event.modifiers().value
+                    except AttributeError:
+                        mods_value = int(event.modifiers())
+                    pressed = QKeySequence(mods_value | int(key))
+                    if pressed.matches(seq) == QKeySequence.SequenceMatch.ExactMatch:
+                        return True
+            except Exception:
+                pass
+        try:
+            if action == 'copy' and event.matches(QKeySequence.StandardKey.Copy):
+                return True
+            if action == 'paste_mode' and event.matches(QKeySequence.StandardKey.Paste):
+                return True
+        except Exception:
+            pass
+        return False
+
+    def install_final_text_clipboard_canvas_shortcuts(self):
+        """Install canvas-owned copy/paste shortcuts for final text objects.
+
+        The app-level event filter is still useful, but some QGraphicsView focus
+        routes do not deliver Ctrl+C to MainWindow.keyPressEvent.  These shortcuts
+        live only on the canvas/view, so they catch object copy/paste after canvas
+        selection without stealing normal copy/paste from right-panel editors.
+        """
+        try:
+            for sc in getattr(self, '_final_text_clipboard_canvas_shortcuts', []) or []:
+                try:
+                    sc.setEnabled(False)
+                    sc.setParent(None)
+                    sc.deleteLater()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        shortcuts = []
+        try:
+            view = getattr(self, 'view', None)
+            if view is None:
+                self._final_text_clipboard_canvas_shortcuts = []
+                return False
+            # 한 창 안에 같은 Ctrl+C/V QShortcut을 view와 viewport 양쪽에
+            # 동시에 걸면 Qt가 ambiguous shortcut으로 판단해 activated 자체를
+            # 보내지 않을 수 있다. view 하나에 WidgetWithChildrenShortcut을 걸어
+            # viewport 포커스까지 포함한다.
+            parents = [view]
+
+            def _make(parent, action):
+                seq = self._final_text_clipboard_shortcut_sequence(action)
+                if seq is None or seq.isEmpty():
+                    return
+                sc = QShortcut(seq, parent)
+                sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+                sc.activated.connect(lambda a=action: self.handle_final_text_clipboard_shortcut_command(a, phase='QShortcut'))
+                shortcuts.append(sc)
+
+            def _make_delete(parent):
+                try:
+                    seq = self.shortcut_settings.seq('text_delete')
+                except Exception:
+                    seq = QKeySequence('Delete')
+                if seq is None or seq.isEmpty():
+                    return
+                sc = QShortcut(seq, parent)
+                sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+                sc.activated.connect(lambda: self.handle_final_text_delete_shortcut_command(phase='QShortcut'))
+                shortcuts.append(sc)
+
+            for parent in parents:
+                for action in ('copy', 'paste_same_position', 'paste_mode'):
+                    _make(parent, action)
+                _make_delete(parent)
+            self._final_text_clipboard_canvas_shortcuts = shortcuts
+            try:
+                self.audit_boundary_event('TEXT_CLIPBOARD_CANVAS_QSHORTCUTS_INSTALLED', count=len(shortcuts), throttle_ms=200)
+            except Exception:
+                pass
+            return bool(shortcuts)
+        except Exception as e:
+            self._final_text_clipboard_canvas_shortcuts = shortcuts
+            try:
+                self.audit_boundary_event('TEXT_CLIPBOARD_CANVAS_QSHORTCUTS_ERROR', error=repr(e), throttle_ms=200)
+            except Exception:
+                pass
+            return False
+
+    def handle_final_text_clipboard_shortcut_command(self, action, phase='direct'):
+        """Single owner for final-text object copy/paste shortcuts."""
+        action = str(action or '')
+        try:
+            if getattr(self, 'cb_mode', None) is None or self.cb_mode.currentIndex() != 4:
+                return False
+        except Exception:
+            return False
+        try:
+            if hasattr(self, '_ysb_modal_dialog_owns_keyboard') and self._ysb_modal_dialog_owns_keyboard(None):
+                try:
+                    self.audit_boundary_event('TEXT_CLIPBOARD_SHORTCUT_REJECTED', action=action, reason='modal_dialog_keyboard_owner', phase=phase, throttle_ms=120)
+                except Exception:
+                    pass
+                return False
+        except Exception:
+            pass
+        try:
+            if hasattr(self, '_right_text_table_owns_focus') and self._right_text_table_owns_focus(None):
+                try:
+                    self.audit_boundary_event('TEXT_CLIPBOARD_SHORTCUT_REJECTED', action=action, reason='right_text_table_focus', phase=phase, throttle_ms=80)
+                except Exception:
+                    pass
+                return False
+        except Exception:
+            pass
+        try:
+            if self._inline_text_editor_is_active():
+                return False
+        except Exception:
+            pass
+        try:
+            if self._is_focus_text_input_for_plain_editing(None):
+                if not self._final_text_clipboard_should_ignore_stale_input_focus(action, None):
+                    try:
+                        self.audit_boundary_event('TEXT_CLIPBOARD_SHORTCUT_REJECTED', action=action, reason='active_plain_input_focus', phase=phase, throttle_ms=80)
+                    except Exception:
+                        pass
+                    return False
+                try:
+                    self.audit_boundary_event('TEXT_CLIPBOARD_SHORTCUT_STALE_INPUT_FOCUS_OVERRIDDEN', action=action, phase=phase, throttle_ms=80)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        try:
+            if action == 'copy':
+                selected = list(self.selected_text_data_items() or [])
+                if not selected:
+                    try:
+                        self.audit_boundary_event('TEXT_CLIPBOARD_SHORTCUT_REJECTED', action=action, reason='no_selection', phase=phase, throttle_ms=80)
+                    except Exception:
+                        pass
+                    return False
+                ok = bool(self.copy_text_data_items(selected))
+                try:
+                    self.audit_boundary_event('TEXT_CLIPBOARD_OBJECT_COPY_ROUTED', phase=phase, selected_count=len(selected), stored_count=len(getattr(self, 'text_clipboard', []) or []), is_plain=bool(getattr(self, 'text_clipboard_is_plain', False)), ok=ok, throttle_ms=80)
+                except Exception:
+                    pass
+                return ok
+
+            if action == 'paste_same_position':
+                try:
+                    self.ensure_text_clipboard_for_paste(refresh_plain=False)
+                except Exception:
+                    pass
+                ok = bool(self.paste_text_clipboard_same_position())
+                try:
+                    self.audit_boundary_event('TEXT_CLIPBOARD_OBJECT_PASTE_SAME_POSITION_ROUTED', phase=phase, ok=ok, is_plain=bool(getattr(self, 'text_clipboard_is_plain', False)), throttle_ms=80)
+                except Exception:
+                    pass
+                return ok
+
+            if action == 'paste_mode':
+                try:
+                    had_object = bool(getattr(self, 'text_clipboard', None)) and not bool(getattr(self, 'text_clipboard_is_plain', False))
+                except Exception:
+                    had_object = False
+                if not had_object:
+                    try:
+                        had_object = bool(self.load_text_object_clipboard_from_os())
+                    except Exception:
+                        had_object = False
+                if not had_object:
+                    try:
+                        mime = QApplication.clipboard().mimeData()
+                        if mime is None or not mime.hasText() or not str(mime.text() or '').strip():
+                            self.audit_boundary_event('TEXT_CLIPBOARD_SHORTCUT_REJECTED', action=action, reason='no_source', phase=phase, throttle_ms=80)
+                            return False
+                    except Exception:
+                        return False
+                ok = bool(self.enter_text_paste_mode())
+                try:
+                    self.audit_boundary_event('TEXT_CLIPBOARD_PASTE_MODE_ROUTED', phase=phase, ok=ok, had_object=had_object, is_plain=bool(getattr(self, 'text_clipboard_is_plain', False)), stored_count=len(getattr(self, 'text_clipboard', []) or []), throttle_ms=80)
+                except Exception:
+                    pass
+                return ok
+        except Exception as e:
+            try:
+                self.audit_boundary_event('TEXT_CLIPBOARD_SHORTCUT_ERROR', action=action, phase=phase, error=repr(e), throttle_ms=80)
+            except Exception:
+                pass
+        return False
 
     def keyReleaseEvent(self, event):
         try:
@@ -8495,7 +13285,10 @@ class MainWindowOperationsMixin:
                 self._suppress_shared_option_refresh = True
                 try:
                     if getattr(self, "view", None) is not None and getattr(self.view, "scene", None) is not None:
-                        self.view.scene.clearSelection()
+                        if hasattr(self, 'clear_final_text_selection_safely') and self.cb_mode.currentIndex() == 4:
+                            self.clear_final_text_selection_safely(reason='escape_handled_inline_or_transform')
+                        else:
+                            self.view.scene.clearSelection()
                 except Exception:
                     pass
                 finally:
@@ -8533,6 +13326,19 @@ class MainWindowOperationsMixin:
             if self.edit_selected_translation_text_f2():
                 event.accept()
                 return
+
+        # 최종 텍스트 객체 복붙은 우측 입력칸 stale focus보다 먼저 본다.
+        # 이 처리가 아래 input_target guard 뒤로 밀리면 Ctrl+C가 QLineEdit의
+        # 일반 복사로 빠져 self.text_clipboard가 갱신되지 않는다.
+        try:
+            if self.cb_mode.currentIndex() == 4:
+                for _action in ('paste_same_position', 'copy', 'paste_mode'):
+                    if self._event_matches_final_text_clipboard_action(event, _action):
+                        if self.handle_final_text_clipboard_shortcut_command(_action, phase='MainWindowKeyPress'):
+                            event.accept()
+                            return
+        except Exception:
+            pass
 
         # 텍스트/숫자 입력 중에는 Backspace/숫자/방향키 등이 전역 단축키로 새지 않게 한다.
         # 특히 QSpinBox가 포커스를 가진 상태에서 valueChanged/UI 갱신이 얽히면
@@ -8574,6 +13380,27 @@ class MainWindowOperationsMixin:
         shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
         alt = bool(mods & Qt.KeyboardModifier.AltModifier)
 
+        # 폴리곤 영역 작성 중에는 Ctrl+Z/Backspace가 전체 Undo가 아니라 점 하나 제거로 동작한다.
+        try:
+            if getattr(self, "view", None) is not None and (key == Qt.Key.Key_Backspace or (ctrl and key == Qt.Key.Key_Z)):
+                if hasattr(self.view, "undo_polygon_area_point") and self.view.undo_polygon_area_point():
+                    self.log("↩️ " + self.tr_ui("영역 경로 취소"))
+                    event.accept()
+                    return
+        except Exception:
+            pass
+
+        # CAD 기본 선택 모드에서는 사각형/자유형/단일 클릭으로 누적된 텍스트 선택도 UI undo 대상이다.
+        # 텍스트 이동 같은 실제 데이터 변경은 이동 시작 시 선택 undo stack을 비워 일반 Undo가 우선되게 한다.
+        try:
+            if getattr(self, "view", None) is not None and ctrl and key == Qt.Key.Key_Z:
+                if hasattr(self.view, "undo_cad_text_selection_step") and self.view.undo_cad_text_selection_step():
+                    self.log("↩️ 텍스트 선택 복원")
+                    event.accept()
+                    return
+        except Exception:
+            pass
+
         # 페이지 목록 단축키는 누르고 있는 동안만 표시하고, 키를 떼면 즉시 닫는다.
         if self._event_matches_shortcut(event, "work_page_list"):
             if not event.isAutoRepeat():
@@ -8611,12 +13438,14 @@ class MainWindowOperationsMixin:
                 self.cb_mode.setCurrentIndex(tab_index)
                 return
 
-        if key == Qt.Key.Key_Delete:
+        if self._event_matches_text_delete_shortcut(event):
             if self.cb_mode.currentIndex() == 4 and self.selected_text_data_items():
                 self.delete_text_data_items(ask=True)
+                event.accept()
                 return
             if getattr(self, "tab", None) is not None and self.tab.hasFocus() and self.selected_table_text_ids():
                 self.delete_text_data_items(ask=True)
+                event.accept()
                 return
 
         if self.cb_mode.currentIndex() == 4 and key in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down):
@@ -8630,18 +13459,20 @@ class MainWindowOperationsMixin:
                     event.accept()
                     return
 
-        if ctrl and key == Qt.Key.Key_C:
+        if self._event_matches_final_text_clipboard_action(event, "copy"):
             if self.cb_mode.currentIndex() == 4 and self.selected_text_data_items():
-                self.copy_text_data_items()
+                self.handle_final_text_clipboard_shortcut_command('copy', phase='MainWindowKeyPressLate')
+                event.accept()
                 return
 
-        if self.cb_mode.currentIndex() == 4 and self._event_matches_shortcut(event, "text_paste_same_position"):
-            self.paste_text_clipboard_same_position()
+        if self.cb_mode.currentIndex() == 4 and self._event_matches_final_text_clipboard_action(event, "paste_same_position"):
+            self.handle_final_text_clipboard_shortcut_command('paste_same_position', phase='MainWindowKeyPressLate')
             return
 
-        if ctrl and key == Qt.Key.Key_V:
+        if self._event_matches_final_text_clipboard_action(event, "paste_mode"):
             if self.cb_mode.currentIndex() == 4:
-                if self.enter_text_paste_mode():
+                if self.handle_final_text_clipboard_shortcut_command('paste_mode', phase='MainWindowKeyPressLate'):
+                    event.accept()
                     return
 
         if self.cb_mode.currentIndex() == 4:
@@ -8674,10 +13505,58 @@ class MainWindowOperationsMixin:
                 return
 
         # ESC 동작:
-        # - 그림판/요술봉 도구 사용 중이면 무조건 이동 모드로 복귀
-        # - 최종 화면에서 텍스트가 선택되어 있으면 전체 선택 해제
+        # - 최종 화면에서 텍스트가 선택되어 있으면 먼저 선택만 안전 해제
+        # - 텍스트 도구(final_text)는 선택/이동/새 박스 생성이 함께 쓰이므로,
+        #   선택 취소를 도구 종료보다 우선한다.
+        # - 그 외 도구 사용 중이면 이동 모드로 복귀
         if key == Qt.Key.Key_Escape:
+            try:
+                if getattr(self, "view", None) is not None and hasattr(self.view, "cancel_cad_text_selection_interaction"):
+                    if self.view.cancel_cad_text_selection_interaction(clear_preview=True):
+                        self.log("↩️ 텍스트 선택 영역 취소")
+                        event.accept()
+                        return
+            except Exception:
+                pass
+            try:
+                if getattr(self, "view", None) is not None and hasattr(self.view, "cancel_click_click_area_interaction"):
+                    if self.view.cancel_click_click_area_interaction(clear_tool=False):
+                        self.log("↩️ " + self.tr_ui("영역 지정 취소"))
+                        event.accept()
+                        return
+            except Exception:
+                pass
+            if self.cb_mode.currentIndex() == 4:
+                has_text_selection = False
+                try:
+                    has_text_selection = bool(self.selected_text_items())
+                except Exception:
+                    has_text_selection = False
+                if has_text_selection:
+                    try:
+                        if hasattr(self.view, '_cad_push_text_selection_undo'):
+                            self.view._cad_push_text_selection_undo()
+                    except Exception:
+                        pass
+                    try:
+                        if hasattr(self, 'clear_final_text_selection_safely'):
+                            self.clear_final_text_selection_safely(reason='escape_key')
+                        else:
+                            self.view.scene.clearSelection()
+                            if getattr(self, "tab", None) is not None:
+                                self.tab.clearSelection()
+                            self.on_scene_selection_changed()
+                    except Exception:
+                        pass
+                    self.log("선택 해제")
+                    event.accept()
+                    return
             if getattr(self.view, "draw_mode", None):
+                try:
+                    if hasattr(self, 'clear_final_text_selection_safely') and self.cb_mode.currentIndex() == 4:
+                        self.clear_final_text_selection_safely(reason='escape_tool_off')
+                except Exception:
+                    pass
                 self.set_tool(None)
                 try:
                     fw = QApplication.focusWidget()
@@ -8687,23 +13566,26 @@ class MainWindowOperationsMixin:
                 except Exception:
                     pass
                 self.log("↔️ 이동 모드")
+                event.accept()
                 return
             if self.cb_mode.currentIndex() == 4:
-                self.view.scene.clearSelection()
                 try:
-                    if getattr(self, "tab", None) is not None:
-                        self.tab.clearSelection()
+                    if hasattr(self.view, '_cad_push_text_selection_undo') and self.selected_text_items():
+                        self.view._cad_push_text_selection_undo()
                 except Exception:
                     pass
-                self.on_scene_selection_changed()
                 try:
-                    fw = QApplication.focusWidget()
-                    if fw is not None:
-                        fw.clearFocus()
-                    self.view.setFocus(Qt.FocusReason.OtherFocusReason)
+                    if hasattr(self, 'clear_final_text_selection_safely'):
+                        self.clear_final_text_selection_safely(reason='escape_no_tool')
+                    else:
+                        self.view.scene.clearSelection()
+                        if getattr(self, "tab", None) is not None:
+                            self.tab.clearSelection()
+                        self.on_scene_selection_changed()
                 except Exception:
                     pass
                 self.log("선택 해제")
+                event.accept()
                 return
 
         # 그림판/마스크/최종 페인팅 도구 단축키는 관련 탭에서만 사용한다.
@@ -8711,7 +13593,7 @@ class MainWindowOperationsMixin:
             "paint_magic_select", "paint_magic_expand",
             "paint_magic_tolerance_inc", "paint_magic_tolerance_dec",
             "paint_magic_expand_inc", "paint_magic_expand_dec",
-            "paint_mask_cut", "paint_area_fill",
+            "paint_mask_cut", "paint_color_outline_mask", "paint_original_restore", "paint_area_fill",
             "paint_brush", "paint_erase", "paint_move",
             "paint_zoom_out", "paint_zoom_in", "paint_reanalyze", "paint_undo", "paint_redo",
             "final_paint_color", "paint_area_fill", "final_paint_to_background", "final_text_tool",
@@ -8750,6 +13632,12 @@ class MainWindowOperationsMixin:
         if self._event_matches_shortcut(event, "paint_mask_cut"):
             self.set_tool('mask_cut')
             return
+        if self._event_matches_shortcut(event, "paint_color_outline_mask"):
+            self.set_tool('color_outline_mask')
+            return
+        if self._event_matches_shortcut(event, "paint_original_restore"):
+            self.set_tool('original_restore')
+            return
         if self.cb_mode.currentIndex() in (2, 3) and self._event_matches_shortcut(event, "paint_area_fill"):
             self.set_tool("area_paint")
             return
@@ -8766,22 +13654,45 @@ class MainWindowOperationsMixin:
             if self._event_matches_shortcut(event, "paint_mask_wrap_free"):
                 self.set_ocr_region_shape('free')
                 return
-        if getattr(self.view, "draw_mode", None) in ('mask_wrap', 'mask_cut', 'area_paint'):
+            if self._event_matches_shortcut(event, "paint_mask_wrap_polygon"):
+                self.set_ocr_region_shape('polygon')
+                return
+        if getattr(self.view, "draw_mode", None) in ('mask_wrap', 'mask_cut', 'color_outline_mask', 'area_paint', 'original_restore'):
             if self._event_matches_shortcut(event, "paint_mask_wrap_rect"):
                 if getattr(self.view, "draw_mode", None) == 'mask_cut':
                     self.set_mask_cut_shape('rect')
+                elif getattr(self.view, "draw_mode", None) == 'color_outline_mask':
+                    self.set_color_outline_mask_shape('rect')
                 elif getattr(self.view, "draw_mode", None) == 'area_paint':
                     self.set_area_paint_shape('rect')
+                elif getattr(self.view, "draw_mode", None) == 'original_restore':
+                    self.set_original_restore_shape('rect')
                 else:
                     self.set_mask_wrap_shape('rect')
                 return
             if self._event_matches_shortcut(event, "paint_mask_wrap_free"):
                 if getattr(self.view, "draw_mode", None) == 'mask_cut':
                     self.set_mask_cut_shape('free')
+                elif getattr(self.view, "draw_mode", None) == 'color_outline_mask':
+                    self.set_color_outline_mask_shape('free')
                 elif getattr(self.view, "draw_mode", None) == 'area_paint':
                     self.set_area_paint_shape('free')
+                elif getattr(self.view, "draw_mode", None) == 'original_restore':
+                    self.set_original_restore_shape('free')
                 else:
                     self.set_mask_wrap_shape('free')
+                return
+            if self._event_matches_shortcut(event, "paint_mask_wrap_polygon"):
+                if getattr(self.view, "draw_mode", None) == 'mask_cut':
+                    self.set_mask_cut_shape('polygon')
+                elif getattr(self.view, "draw_mode", None) == 'color_outline_mask':
+                    self.set_color_outline_mask_shape('polygon')
+                elif getattr(self.view, "draw_mode", None) == 'area_paint':
+                    self.set_area_paint_shape('polygon')
+                elif getattr(self.view, "draw_mode", None) == 'original_restore':
+                    self.set_original_restore_shape('polygon')
+                else:
+                    self.set_mask_wrap_shape('polygon')
                 return
 
         if self._event_matches_shortcut(event, "work_tab_cycle"):
@@ -8799,6 +13710,12 @@ class MainWindowOperationsMixin:
         if self.cb_mode.currentIndex() == 4 and self._event_matches_shortcut(event, "item_font_select"):
             self.open_font_select_dialog()
             return
+
+        # 최종 화면 텍스트 활성/비활성 토글.
+        # 캔버스 텍스트 선택뿐 아니라 우측 텍스트 행 선택 상태도 같이 사용한다.
+        if self.cb_mode.currentIndex() == 4 and self._event_matches_shortcut(event, "text_disable_toggle"):
+            if self.toggle_selected_final_text_enabled():
+                return
 
         # 최종 화면에서 텍스트를 선택한 상태일 때만 작동하는 개별 텍스트 단축키
         if self.cb_mode.currentIndex() == 4 and self.selected_text_items():
@@ -8820,21 +13737,31 @@ class MainWindowOperationsMixin:
             if self._event_matches_shortcut(event, "text_rasterize"):
                 self.rasterize_selected_text_quick()
                 return
+            if self._event_matches_shortcut(event, "text_partial_horizontal_toggle"):
+                self.toggle_selected_partial_horizontal_writing_quick()
+                return
             if self._event_matches_shortcut(event, "item_font_select"):
                 self.open_font_select_dialog()
                 return
-            if self._event_matches_shortcut(event, "item_font_inc"):
+            if self._event_matches_shortcut(event, "item_font_inc") or self._is_plain_text_font_size_key(event, inc=True):
                 items = self.selected_text_items()
                 if items:
-                    # TextEngine 2차: 선택 텍스트만 즉시 갱신하고 scene 전체/mode_chg는 깨우지 않는다.
-                    current = int(items[0].data.get('font_size', self.sb_font_size.value()) or self.sb_font_size.value())
-                    self.apply_style_to_selected(font_size=current + 1)
+                    # 확대/축소 단축키는 숫자 절대값 통일이 아니라 각 텍스트 크기를 +1/-1 하는 상대 조정이다.
+                    # 휠은 짧은 시간 묶음 Undo, 키보드 =/+/-는 한 번 누를 때마다 Undo 1개로 확정한다.
+                    if hasattr(self, "apply_font_size_delta_to_selected"):
+                        self.apply_font_size_delta_to_selected(1, undo_delay_ms=0, immediate_undo=True)
+                    else:
+                        current = int(items[0].data.get('font_size', self.sb_font_size.value()) or self.sb_font_size.value())
+                        self.apply_style_to_selected(font_size=current + 1)
                 return
-            if self._event_matches_shortcut(event, "item_font_dec"):
+            if self._event_matches_shortcut(event, "item_font_dec") or self._is_plain_text_font_size_key(event, inc=False):
                 items = self.selected_text_items()
                 if items:
-                    current = int(items[0].data.get('font_size', self.sb_font_size.value()) or self.sb_font_size.value())
-                    self.apply_style_to_selected(font_size=max(1, current - 1))
+                    if hasattr(self, "apply_font_size_delta_to_selected"):
+                        self.apply_font_size_delta_to_selected(-1, undo_delay_ms=0, immediate_undo=True)
+                    else:
+                        current = int(items[0].data.get('font_size', self.sb_font_size.value()) or self.sb_font_size.value())
+                        self.apply_style_to_selected(font_size=max(1, current - 1))
                 return
             if self._event_matches_shortcut(event, "item_align_left"):
                 self.apply_style_to_selected(align="left")
@@ -8906,6 +13833,9 @@ class MainWindowOperationsMixin:
             return
         if self._event_matches_shortcut(event, "paint_zoom_in"):
             self.adjust_brush_size(+1)
+            return
+        if self._event_matches_shortcut(event, "paint_auto_clean_detection_mask"):
+            self.auto_clean_detection_mask_current()
             return
         if self._event_matches_shortcut(event, "paint_reanalyze"):
             self.reanalyze_mask()

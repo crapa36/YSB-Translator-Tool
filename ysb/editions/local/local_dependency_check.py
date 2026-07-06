@@ -20,7 +20,8 @@ def module_available(module_name: str) -> bool:
     return importlib.util.find_spec(module_name) is not None
 
 
-MANGA_OCR_REQUIRED_MODULES = ["torch", "PIL", "transformers", "fugashi", "unidic_lite"]
+MANGA_OCR_REQUIRED_MODULES = ["torch", "PIL", "transformers", "fugashi", "unidic_lite", "safetensors"]
+PADDLE_OCR_REQUIRED_MODULES = ["paddle", "paddleocr"]
 
 
 def _same_path(a: Path, b: Path) -> bool:
@@ -30,7 +31,7 @@ def _same_path(a: Path, b: Path) -> bool:
         return str(a) == str(b)
 
 
-def _python_has_modules(python: Path, modules: list[str]) -> tuple[bool, list[str], str]:
+def _python_has_modules(python: Path, modules: list[str], role: str | None = None) -> tuple[bool, list[str], str]:
     """Check whether *python* can import the required Manga OCR modules."""
     missing: list[str] = []
     if _same_path(python, Path(sys.executable)):
@@ -55,6 +56,7 @@ def _python_has_modules(python: Path, modules: list[str]) -> tuple[bool, list[st
             encoding="utf-8",
             errors="replace",
             timeout=20,
+            env=_managed_runtime_env(role or "", os.environ.copy()) if role else None,
         )
         import json
         try:
@@ -75,47 +77,108 @@ def _app_root() -> Path:
         return Path.cwd()
 
 
+def _packaged_runtime_root() -> Path:
+    return _app_root() / ("local_runtime_exe" if getattr(sys, "frozen", False) else "local_runtime")
+
+
+
+def _managed_runtime_env(role: str, base_env: dict[str, str] | None = None) -> dict[str, str]:
+    env = dict(base_env or os.environ.copy())
+    try:
+        from ysb.editions.local.cuda_runtime_installer import runtime_subprocess_env
+        return runtime_subprocess_env(role, env)
+    except Exception:
+        env.setdefault("PYTHONUTF8", "1")
+        env.setdefault("PYTHONIOENCODING", "utf-8")
+        return env
+
 def _external_paddleocr_worker_file() -> Path:
     """Return the same external PaddleOCR worker path used by ysb.engines.ocr.paddle_ocr."""
-    root = _app_root()
-    preferred = root / "local_runtime" / "paddle" / "paddle_ocr_worker.py"
+    base = _packaged_runtime_root()
+    preferred = base / "paddle" / "paddle_ocr_worker.py"
     if preferred.exists():
         return preferred
-    return root / "local_runtime" / "paddle_ocr_worker.py"
+    return base / "paddle_ocr_worker.py"
 
 
 def _external_paddleocr_python_candidates() -> list[Path]:
     """Return the same PaddleOCR Python runtime candidates used by the real OCR adapter."""
     root = _app_root()
+    base = _packaged_runtime_root()
     candidates: list[Path] = []
-    env_python = os.environ.get("YSB_PADDLEOCR_PYTHON")
-    if env_python:
-        candidates.append(Path(env_python).expanduser())
-    candidates.extend([
-        root / "local_runtime" / "paddle" / "python" / "python.exe",
-        root / "local_runtime" / "python" / "python.exe",
-        root / "local_runtime" / "paddle_ocr_venv" / "Scripts" / "python.exe",
-        root / "local_runtime" / "paddle_ocr_venv" / "bin" / "python",
-        root / "local_runtime" / "ocr_venv" / "Scripts" / "python.exe",
-        root / "local_runtime" / "ocr_venv" / "bin" / "python",
-        root / ".venv" / "Scripts" / "python.exe",
-        root / ".venv" / "bin" / "python",
-    ])
     if not getattr(sys, "frozen", False):
-        candidates.append(Path(sys.executable))
-    return candidates
-
+        env_python = os.environ.get("YSB_PADDLEOCR_PYTHON") or os.environ.get("YSB_PADDLE_GPU_PYTHON")
+        if env_python:
+            candidates.append(Path(env_python).expanduser())
+    try:
+        from ysb.editions.local.cuda_runtime_installer import runtime_python_path
+        candidates.append(runtime_python_path("paddle"))
+    except Exception:
+        pass
+    if getattr(sys, "frozen", False):
+        candidates.extend([
+            base / "paddle" / "python" / "python.exe",
+            base / "bootstrap_python" / "python.exe",
+        ])
+    else:
+        for managed_base in (root / "local_runtime_bat", root / "local_runtime_exe"):
+            candidates.extend([
+                managed_base / "paddle_gpu_venv" / "Scripts" / "python.exe",
+                managed_base / "paddle_gpu_venv" / "bin" / "python",
+                managed_base / "paddle" / "python" / "python.exe",
+                managed_base / "bootstrap_python" / "python.exe",
+                managed_base / "paddle_gpu" / "python" / "python.exe",
+            ])
+        candidates.extend([
+            base / "paddle" / "python" / "python.exe",
+            base / "python" / "python.exe",
+            base / "paddle_ocr_venv" / "Scripts" / "python.exe",
+            base / "paddle_ocr_venv" / "bin" / "python",
+            base / "ocr_venv" / "Scripts" / "python.exe",
+            base / "ocr_venv" / "bin" / "python",
+            root / ".venv" / "Scripts" / "python.exe",
+            root / ".venv" / "bin" / "python",
+            Path(sys.executable),
+        ])
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for py in candidates:
+        try:
+            key = str(py.resolve())
+        except Exception:
+            key = str(py)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(py)
+    return unique
 
 def external_paddleocr_worker_status() -> tuple[bool, str]:
     worker = _external_paddleocr_worker_file()
     python_candidates = _external_paddleocr_python_candidates()
     if not worker.exists():
         return False, f"External PaddleOCR worker not found: {worker}"
+    checked: list[str] = []
     for py in python_candidates:
-        if py.exists():
+        if not py.exists():
+            continue
+        deps_ok, missing, detail = _python_has_modules(py, PADDLE_OCR_REQUIRED_MODULES, role="paddle")
+        if deps_ok:
             return True, f"External PaddleOCR worker ready: {py} / worker: {worker}"
-    return False, "External PaddleOCR Python runtime not found. local_runtime/paddle/python/python.exe를 확인해 주세요."
-
+        checked.append(f"{py}: missing {', '.join(missing)}; {detail}")
+        # The real adapter uses the first existing managed runtime.  If that
+        # runtime exists but is incomplete, do not silently pass because a later
+        # fallback has paddleocr; the actual OCR run will still pick the managed
+        # runtime and fail.
+        try:
+            from ysb.editions.local.cuda_runtime_installer import runtime_python_path
+            if _same_path(py, runtime_python_path("paddle")):
+                break
+        except Exception:
+            pass
+    if checked:
+        return False, "PaddleOCR runtime exists but required modules are missing. " + " | ".join(checked[:3])
+    return False, "External PaddleOCR Python runtime not found. 설정 -> 로컬 CUDA 진단에서 Paddle GPU 런타임 설치/복구를 실행해 주세요."
 
 def paddleocr_available() -> bool:
     ok, _ = external_paddleocr_worker_status()
@@ -138,35 +201,47 @@ def comic_text_detector_runtime_status() -> tuple[bool, list[str]]:
 
 def _manga_ocr_python_candidates() -> list[Path]:
     root = _app_root()
-    env_python = os.environ.get("YSB_MANGA_OCR_PYTHON") or os.environ.get("YSB_PADDLEOCR_PYTHON")
+    base = _packaged_runtime_root()
     python_candidates: list[Path] = []
-    if env_python:
-        python_candidates.append(Path(env_python).expanduser())
-
     if not getattr(sys, "frozen", False):
-        # Source/test mode: use the active venv/current interpreter first.
-        # local_runtime is only the worker script location here, not a required
-        # Python runtime folder.
+        env_python = os.environ.get("YSB_MANGA_OCR_PYTHON") or os.environ.get("YSB_TORCH_CUDA_PYTHON") or os.environ.get("YSB_PADDLEOCR_PYTHON")
+        if env_python:
+            python_candidates.append(Path(env_python).expanduser())
+
+    try:
+        from ysb.editions.local.cuda_runtime_installer import runtime_python_path
+        python_candidates.append(runtime_python_path("torch"))
+    except Exception:
+        pass
+
+    if getattr(sys, "frozen", False):
+        python_candidates.extend([
+            base / "manga_ocr" / "python" / "python.exe",
+            base / "paddle" / "python" / "python.exe",
+            base / "bootstrap_python" / "python.exe",
+        ])
+    else:
+        for managed_base in (root / "local_runtime_bat", root / "local_runtime_exe"):
+            python_candidates.extend([
+                managed_base / "torch_cuda_venv" / "Scripts" / "python.exe",
+                managed_base / "torch_cuda_venv" / "bin" / "python",
+                managed_base / "manga_ocr" / "python" / "python.exe",
+                managed_base / "paddle" / "python" / "python.exe",
+                managed_base / "bootstrap_python" / "python.exe",
+                managed_base / "torch_cuda" / "python" / "python.exe",
+                managed_base / "torch" / "python" / "python.exe",
+            ])
         python_candidates.extend([
             Path(sys.executable),
             root / ".venv" / "Scripts" / "python.exe",
             root / ".venv" / "bin" / "python",
+            base / "manga_ocr" / "python" / "python.exe",
+            base / "python" / "python.exe",
+            base / "manga_ocr_venv" / "Scripts" / "python.exe",
+            base / "manga_ocr_venv" / "bin" / "python",
+            base / "ocr_venv" / "Scripts" / "python.exe",
+            base / "ocr_venv" / "bin" / "python",
         ])
-    else:
-        # Packaged Local distribution: the frozen EXE needs a separate Python
-        # runtime for the heavy Manga OCR stack.
-        python_candidates.extend([
-            root / "local_runtime" / "manga_ocr" / "python" / "python.exe",
-            root / "local_runtime" / "python" / "python.exe",
-        ])
-
-    python_candidates.extend([
-        # Optional / backward-compatible explicit runtimes.
-        root / "local_runtime" / "manga_ocr_venv" / "Scripts" / "python.exe",
-        root / "local_runtime" / "manga_ocr_venv" / "bin" / "python",
-        root / "local_runtime" / "ocr_venv" / "Scripts" / "python.exe",
-        root / "local_runtime" / "ocr_venv" / "bin" / "python",
-    ])
 
     unique: list[Path] = []
     seen: set[str] = set()
@@ -181,21 +256,21 @@ def _manga_ocr_python_candidates() -> list[Path]:
         unique.append(py)
     return unique
 
-
 def external_manga_ocr_worker_status() -> tuple[bool, str]:
     root = _app_root()
+    base = _packaged_runtime_root()
     worker_candidates = [
-        root / "local_runtime" / "manga_ocr" / "manga_ocr_worker.py",
-        root / "local_runtime" / "manga_ocr_worker.py",
+        base / "manga_ocr" / "manga_ocr_worker.py",
+        base / "manga_ocr_worker.py",
     ]
     worker = next((w for w in worker_candidates if w.exists()), None)
     if worker is None and getattr(sys, "frozen", False):
-        return False, "External Manga OCR worker not found: local_runtime/manga_ocr/manga_ocr_worker.py"
+        return False, "External Manga OCR worker not found: local_runtime_exe/manga_ocr/manga_ocr_worker.py"
 
     for py in _manga_ocr_python_candidates():
         if not py.exists():
             continue
-        deps_ok, missing, detail = _python_has_modules(py, MANGA_OCR_REQUIRED_MODULES)
+        deps_ok, missing, detail = _python_has_modules(py, MANGA_OCR_REQUIRED_MODULES, role="torch")
         if deps_ok:
             mode = "source/test current Python" if not getattr(sys, "frozen", False) and _same_path(py, Path(sys.executable)) else "external worker Python"
             if worker is not None:
@@ -203,12 +278,12 @@ def external_manga_ocr_worker_status() -> tuple[bool, str]:
             return True, f"Manga OCR direct source/test ready: {py}"
         return False, (
             f"Manga OCR Python dependencies missing in {py}: {', '.join(missing)}. "
-            "소스/테스트판은 setup_manga_ocr_v2_2_1.bat을 실행해 .venv에 설치해 주세요. "
+            "소스/테스트판은 설정 -> 로컬 CUDA 진단의 Torch CUDA 런타임 설치 또는 setup_manga_ocr_v2_2_1.bat 상태를 확인해 주세요. "
             f"Detail: {detail}"
         )
 
     if getattr(sys, "frozen", False):
-        return False, "External Manga OCR Python runtime not found. 배포판에서는 local_runtime/manga_ocr/python/python.exe를 확인해 주세요."
+        return False, "External Manga OCR Python runtime not found. 배포판에서는 local_runtime_exe/manga_ocr/python/python.exe를 확인해 주세요."
     return False, "Manga OCR source/test Python not found. .venv 또는 현재 Python 실행 상태를 확인해 주세요."
 
 
@@ -234,7 +309,7 @@ def manga_ocr_model_status() -> tuple[bool, str]:
     model_rel = Path("huggingface") / "hub" / "models--kha-white--manga-ocr-base"
     candidates = [
         # Final Local distribution: model is bundled inside the Manga OCR runtime.
-        root / "local_runtime" / "manga_ocr" / "model_cache" / model_rel,
+        _packaged_runtime_root() / "manga_ocr" / "model_cache" / model_rel,
         # Source/dev and old test layout fallback.
         root / "local_models" / "manga_ocr" / model_rel,
     ]
@@ -242,7 +317,7 @@ def manga_ocr_model_status() -> tuple[bool, str]:
         if _manga_model_dir_ready(model_dir):
             return True, f"Manga OCR model found: {model_dir}"
     return False, (
-        "Manga OCR model not found. local_models/manga_ocr 또는 배포판의 local_runtime/manga_ocr/model_cache를 확인해 주세요. "
+        "Manga OCR model not found. local_models/manga_ocr 또는 배포판의 local_runtime_exe/manga_ocr/model_cache를 확인해 주세요. "
         f"Checked: {candidates}"
     )
 

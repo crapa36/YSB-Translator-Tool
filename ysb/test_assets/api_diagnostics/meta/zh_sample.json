@@ -1,0 +1,40 @@
+{
+  "key": "zh",
+  "language": "Chinese",
+  "description": "Chinese sample for OCR / translation / inpaint precheck",
+  "image_path": "zh_sample.png",
+  "mask_path": "zh_sample_mask.png",
+  "canvas_size": [
+    1280,
+    720
+  ],
+  "font_size": 78,
+  "stroke_width": 10,
+  "lines": [
+    "今天的测试通过了，",
+    "不过我们还得检查日志。"
+  ],
+  "line_bboxes_xyxy": [
+    {
+      "line_index": 0,
+      "text": "今天的测试通过了，",
+      "bbox": [
+        279,
+        245,
+        1001,
+        344
+      ]
+    },
+    {
+      "line_index": 1,
+      "text": "不过我们还得检查日志。",
+      "bbox": [
+        201,
+        378,
+        1079,
+        474
+      ]
+    }
+  ],
+  "suggested_translation_target": "ko"
+}

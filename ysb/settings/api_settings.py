@@ -8,8 +8,11 @@ from PyQt6.QtWidgets import (
     QGroupBox, QRadioButton, QButtonGroup, QComboBox, QFileDialog,
     QFrame, QWidget, QScrollArea, QTabWidget, QSpinBox
 )
+from PyQt6.QtCore import QObject, QRunnable, QThreadPool, pyqtSignal
 
 from ysb.core.cache_utils import get_cache_file
+from ysb.core.lm_studio_compat import run_lm_studio_json_compatibility_test
+from ysb.core.api_diagnostics import run_api_diagnostic
 
 CACHE_FILE_NAME = "api_cache.json"
 
@@ -239,6 +242,7 @@ class ApiSettings:
     selected_inpaint_provider: str = "replicate_lama"
     selected_translation_provider: str = "openai"
     local_translation_model: str = ""
+    translation_target_language: str = "ko"
 
     # OCR API
     clova_api_url: str = ""
@@ -256,6 +260,7 @@ class ApiSettings:
     # v2.1.0: comic_text_detector로 안전 마스크를 만들고 PaddleOCR로 문자 인식한다.
     local_paddle_mask_device: str = "auto"
     local_paddle_ocr_language: str = "ja"
+    local_manga_ocr_device: str = "auto"
 
     # Translation API
     openai_api_key: str = ""
@@ -266,6 +271,12 @@ class ApiSettings:
     custom_translation_base_url: str = ""
     custom_translation_model: str = ""
     custom_translation_preset_name: str = "Custom Compatible"
+    lm_studio_base_url: str = "http://localhost:1234/v1"
+    lm_studio_model: str = ""
+    lm_studio_api_key: str = ""
+    gemini_delayed_api_key: str = ""
+    gemini_delayed_model: str = "gemini-2.5-flash-lite"
+    gemini_delayed_mode: str = "flex"
     openai_model: str = "gpt-4o-mini"
     deepseek_model: str = "deepseek-v4-flash"
     google_translate_model: str = "google_translate_basic_v2"
@@ -273,11 +284,25 @@ class ApiSettings:
 
     # Translation chunk sizes
     # 상단 툴바에서는 숨기고, API 관리 > 번역 탭에서 제공자별로 관리한다.
-    openai_chunk_size: int = 20
-    deepseek_chunk_size: int = 8
-    google_translate_chunk_size: int = 50
-    gemini_chunk_size: int = 10
-    custom_translation_chunk_size: int = 20
+    # 0이면 자동: 현재 페이지/일괄 페이지 안의 번역 대상 줄을 한 청크로 묶는다.
+    openai_chunk_size: int = 0
+    deepseek_chunk_size: int = 0
+    google_translate_chunk_size: int = 0
+    gemini_chunk_size: int = 0
+    gemini_delayed_chunk_size: int = 0
+    custom_translation_chunk_size: int = 0
+    lm_studio_chunk_size: int = 0
+
+    # OCR 모델별 분석 마스크 효과음 필터링 옵션.
+    # ON이면 선택된 OCR 모델의 분석 결과에서 텍스트와 인접한 큰 효과음 OCR 후보를 마스크 생성 대상에서 제외한다.
+    # 현재는 외부 OCR API인 CLOVA / Google Vision에만 노출·적용한다.
+    clova_remove_adjacent_sfx: bool = True
+    google_vision_remove_adjacent_sfx: bool = True
+    # 구버전 캐시 호환용. 새 UI/실행 경로에서는 사용하지 않는다.
+    clova_exclude_sfx_ocr_candidates: bool = False
+    google_vision_exclude_sfx_ocr_candidates: bool = False
+    local_paddle_ocr_exclude_sfx_ocr_candidates: bool = False
+    local_manga_ocr_exclude_sfx_ocr_candidates: bool = False
 
     # Inpainting API
     # replicate_api_token은 구버전 캐시 호환용으로만 유지한다.
@@ -292,7 +317,13 @@ class ApiSettings:
     stable_inpaint_wait_seconds: int = 3
     local_lama_wait_seconds: int = 0
     local_inpaint_model_path: str = ""
-    gemini_inpaint_model: str = "gemini-2.5-flash-image"
+    local_lama_device: str = "auto"
+    # 구버전 캐시 호환용. UI에서는 더 이상 노출하지 않는다.
+    replicate_lama_exclude_sfx_ocr_candidates: bool = False
+    stable_inpaint_exclude_sfx_ocr_candidates: bool = False
+    gemini_inpaint_exclude_sfx_ocr_candidates: bool = False
+    local_lama_exclude_sfx_ocr_candidates: bool = False
+    gemini_inpaint_model: str = "gemini-3.1-flash-image"
     gemini_inpaint_prompt: str = (
         "Remove the text only inside the white mask area and reconstruct the original manga background. "
         "Keep all characters, panel borders, screentones, line art, and unmasked areas unchanged. "
@@ -338,6 +369,12 @@ class ApiSettingsStore:
                     base["selected_inpaint_provider"] = legacy_inpaint_provider
                 else:
                     base["selected_inpaint_provider"] = "local_lama" if local_enabled else "replicate_lama"
+
+
+            # Stable Diffusion Inpainting은 Replicate API 예제가 version hash가 붙은 ref를 사용한다.
+            # 구버전 캐시에 owner/model만 남아 있으면 실전 prediction에서 404가 날 수 있으므로 자동 보정한다.
+            if str(base.get("stable_inpaint_model", "") or "").strip() == "stability-ai/stable-diffusion-inpainting":
+                base["stable_inpaint_model"] = "stability-ai/stable-diffusion-inpainting:95b7223104132402a9ae91cc677285bc5eb997834bd2349fa486f53910fd68b3"
 
             # v1.6 이전 캐시는 replicate_api_token 하나를 LaMa/Stable이 공유했다.
             # 새 구조에서는 두 토큰을 분리하되, 기존 사용자가 바로 깨지지 않도록 최초 로드 시 양쪽에 복사한다.
@@ -395,10 +432,26 @@ def apply_settings_to_config(settings: ApiSettings):
         # 구버전 호환용 값은 유지하되, UI에서는 더 이상 직접 입력받지 않는다.
         Config.GOOGLE_VISION_LANGUAGE_HINTS = settings.google_vision_language_hints.strip() or Config.GOOGLE_VISION_OCR_LANGUAGE
         Config.LOCAL_PADDLE_MASK_DEVICE = (settings.local_paddle_mask_device or "auto").strip() or "auto"
+        # Historical cache/UI key is named "mask device", but this is now the
+        # shared LOCAL Paddle device policy for both comic_text_detector and
+        # PaddleOCR recognition.
+        Config.LOCAL_PADDLE_OCR_DEVICE = Config.LOCAL_PADDLE_MASK_DEVICE
         Config.LOCAL_PADDLE_MASK_INPUT_SIZE = "auto"
         Config.LOCAL_PADDLE_OCR_LANGUAGE = (settings.local_paddle_ocr_language or "ja").strip() or "ja"
+        Config.LOCAL_MANGA_OCR_DEVICE = (getattr(settings, "local_manga_ocr_device", "auto") or "auto").strip() or "auto"
+        Config.CLOVA_EXCLUDE_SFX_OCR_CANDIDATES = bool(getattr(settings, "clova_remove_adjacent_sfx", True))
+        Config.GOOGLE_VISION_EXCLUDE_SFX_OCR_CANDIDATES = bool(getattr(settings, "google_vision_remove_adjacent_sfx", True))
+        # 현재 텍스트 인접 효과음 제거 옵션은 CLOVA / Google Vision OCR에만 적용한다.
+        Config.LOCAL_PADDLE_OCR_EXCLUDE_SFX_OCR_CANDIDATES = False
+        Config.LOCAL_MANGA_OCR_EXCLUDE_SFX_OCR_CANDIDATES = False
+        _ocr_sfx_map = {
+            "clova": Config.CLOVA_EXCLUDE_SFX_OCR_CANDIDATES,
+            "google_vision": Config.GOOGLE_VISION_EXCLUDE_SFX_OCR_CANDIDATES,
+        }
+        Config.OCR_EXCLUDE_SFX_OCR_CANDIDATES = bool(_ocr_sfx_map.get(Config.OCR_PROVIDER, False))
         # Translation
         Config.TRANSLATION_PROVIDER = (settings.selected_translation_provider or "openai").strip() or "openai"
+        Config.TRANSLATION_TARGET_LANGUAGE = (getattr(settings, "translation_target_language", "ko") or "ko").strip() or "ko"
         Config.OPENAI_API_KEY = settings.openai_api_key.strip()
         Config.DEEPSEEK_API_KEY = settings.deepseek_api_key.strip()
         Config.GOOGLE_TRANSLATE_API_KEY = settings.google_translate_api_key.strip()
@@ -407,6 +460,12 @@ def apply_settings_to_config(settings: ApiSettings):
         Config.CUSTOM_TRANSLATION_BASE_URL = settings.custom_translation_base_url.strip()
         Config.CUSTOM_TRANSLATION_MODEL = settings.custom_translation_model.strip()
         Config.CUSTOM_TRANSLATION_PRESET_NAME = settings.custom_translation_preset_name.strip() or "Custom Compatible"
+        Config.LM_STUDIO_BASE_URL = (settings.lm_studio_base_url.strip() or "http://localhost:1234/v1").rstrip("/")
+        Config.LM_STUDIO_MODEL = settings.lm_studio_model.strip()
+        Config.LM_STUDIO_API_KEY = settings.lm_studio_api_key.strip()
+        Config.GEMINI_DELAYED_API_KEY = settings.gemini_delayed_api_key.strip()
+        Config.GEMINI_DELAYED_TRANSLATION_MODEL = settings.gemini_delayed_model.strip() or "gemini-2.5-flash-lite"
+        Config.GEMINI_DELAYED_MODE = (settings.gemini_delayed_mode or "flex").strip().lower() or "flex"
         Config.OPENAI_TRANSLATION_MODEL = settings.openai_model.strip() or "gpt-4o-mini"
         Config.DEEPSEEK_TRANSLATION_MODEL = settings.deepseek_model.strip() or "deepseek-v4-flash"
         Config.GOOGLE_TRANSLATE_MODEL = settings.google_translate_model.strip() or "google_translate_basic_v2"
@@ -419,6 +478,10 @@ def apply_settings_to_config(settings: ApiSettings):
                 Config.INPAINT_PROVIDER = Config.INPAINT_PROVIDER
             else:
                 Config.INPAINT_PROVIDER = "local_lama" if local_enabled else "replicate_lama"
+
+        # 효과음/손글씨 OCR 후보 제외는 인페인팅 모델이 아니라 OCR/분석 모델 옵션이다.
+        # 구버전 호환용 인페인팅 플래그는 유지하되, 분석 마스크 생성에는 사용하지 않는다.
+        Config.INPAINT_EXCLUDE_SFX_OCR_CANDIDATES = False
 
         legacy_token = settings.replicate_api_token.strip()
         Config.LAMA_REPLICATE_API_TOKEN = (settings.lama_replicate_api_token.strip() or legacy_token)
@@ -435,10 +498,12 @@ def apply_settings_to_config(settings: ApiSettings):
         Config.STABLE_INPAINT_WAIT_SECONDS = max(0, int(getattr(settings, "stable_inpaint_wait_seconds", 3) or 0))
         Config.LOCAL_LAMA_WAIT_SECONDS = max(0, int(getattr(settings, "local_lama_wait_seconds", 0) or 0))
         Config.LOCAL_INPAINT_MODEL_PATH = settings.local_inpaint_model_path.strip()
-        gemini_inpaint_model = settings.gemini_inpaint_model.strip() or "gemini-2.5-flash-image"
-        # The old preview model was shut down; auto-migrate old cache values.
-        if gemini_inpaint_model == "gemini-2.5-flash-image":
-            gemini_inpaint_model = "gemini-2.5-flash-image"
+        Config.LOCAL_LAMA_DEVICE = (getattr(settings, "local_lama_device", "auto") or "auto").strip() or "auto"
+        gemini_inpaint_model = settings.gemini_inpaint_model.strip() or "gemini-3.1-flash-image"
+        # Old/experimental image model names are no longer reliable.  Auto-migrate
+        # them to the current image editing default so existing caches do not fail.
+        if gemini_inpaint_model in ("gemini-2.5-flash-image", "gemini-2.5-flash-image-preview", "gemini-2.0-flash-exp-image-generation"):
+            gemini_inpaint_model = "gemini-3.1-flash-image"
         Config.GEMINI_INPAINT_MODEL = gemini_inpaint_model
         Config.GEMINI_INPAINT_PROMPT = settings.gemini_inpaint_prompt.strip() or (
             "Remove the text only inside the white mask area and reconstruct the original manga background. "
@@ -450,6 +515,72 @@ def apply_settings_to_config(settings: ApiSettings):
             _os.environ["REPLICATE_API_TOKEN"] = Config.REPLICATE_API_TOKEN
     except Exception:
         pass
+
+
+
+
+class LmStudioCompatSignals(QObject):
+    finished = pyqtSignal(dict)
+
+
+class LmStudioCompatRunnable(QRunnable):
+    def __init__(self, base_url: str, model: str, api_key: str):
+        super().__init__()
+        self.base_url = base_url
+        self.model = model
+        self.api_key = api_key
+        self.signals = LmStudioCompatSignals()
+
+    def run(self):
+        try:
+            result = run_lm_studio_json_compatibility_test(
+                self.base_url,
+                self.model,
+                self.api_key,
+                timeout=45,
+            )
+        except Exception as exc:
+            result = {
+                "ok": False,
+                "level": "error",
+                "reason": f"LM Studio 호환성 테스트 중 오류가 발생했습니다: {exc}",
+            }
+        self.signals.finished.emit(result)
+
+
+class ApiDiagnosticSignals(QObject):
+    finished = pyqtSignal(dict)
+
+
+class ApiDiagnosticRunnable(QRunnable):
+    def __init__(self, settings_payload: dict, category: str, provider: str, test_kind: str):
+        super().__init__()
+        self.settings_payload = dict(settings_payload or {})
+        self.category = str(category or "")
+        self.provider = str(provider or "")
+        self.test_kind = str(test_kind or "response")
+        self.signals = ApiDiagnosticSignals()
+
+    def run(self):
+        try:
+            result = run_api_diagnostic(
+                self.settings_payload,
+                self.category,
+                self.provider,
+                self.test_kind,
+            )
+        except Exception as exc:
+            result = {
+                "ok": False,
+                "category": self.category,
+                "provider": self.provider,
+                "test_kind": self.test_kind,
+                "detail": f"API 진단 실행 중 오류가 발생했습니다: {exc}",
+                "steps": [],
+                "log_path": "",
+            }
+        self.signals.finished.emit(result)
+
 
 
 class ApiSettingsDialog(QDialog):
@@ -471,6 +602,8 @@ class ApiSettingsDialog(QDialog):
         self.combos = {}
         self.buttons = {}
         self.button_groups = {}
+        self._provider_categories = {}
+        self._api_diag_buttons = {}
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
@@ -535,6 +668,7 @@ class ApiSettingsDialog(QDialog):
                 "fields": [
                     ("Model", "clova_model", False, "clova_ocr_v2"),
                     ("OCR 언어", "clova_ocr_language", False, "일본어", "combo", [("일본어", "ja"), ("중국어", "zh"), ("한국어", "ko")]),
+                    ("텍스트와 인접한 효과음 제거", "clova_remove_adjacent_sfx", False, "이 OCR 모델로 분석할 때 텍스트와 인접한 큰 효과음 OCR 후보를 마스크 생성 대상에서 제외합니다.", "check"),
                     ("Invoke URL", "clova_api_url", False, "CLOVA OCR Invoke URL"),
                     ("Secret Key", "clova_secret_key", True, "CLOVA OCR Secret Key"),
                 ],
@@ -546,6 +680,7 @@ class ApiSettingsDialog(QDialog):
                     ("Model / Mode", "google_vision_model", False, "DOCUMENT_TEXT_DETECTION"),
                     ("API Key", "google_vision_api_key", True, "Google Cloud Vision API Key"),
                     ("OCR 언어", "google_vision_ocr_language", False, "영어", "combo", [("영어", "en"), ("일본어", "ja"), ("중국어", "zh"), ("한국어", "ko")]),
+                    ("텍스트와 인접한 효과음 제거", "google_vision_remove_adjacent_sfx", False, "이 OCR 모델로 분석할 때 텍스트와 인접한 큰 효과음 OCR 후보를 마스크 생성 대상에서 제외합니다.", "check"),
                 ],
             },
         ]
@@ -557,18 +692,20 @@ class ApiSettingsDialog(QDialog):
                     "title": "LOCAL Paddle OCR",
                     "description": "Local판 전용 OCR입니다. 이미지 안의 텍스트 영역을 찾아 PaddleOCR로 원문을 인식합니다.",
                     "fields": [
-                        ("Device", "local_paddle_mask_device", False, "auto", "combo", [("자동", "auto"), ("CPU", "cpu"), ("CUDA", "cuda")]),
+                        ("Device", "local_paddle_mask_device", False, "auto", "combo", [("자동(CPU 기본/CUDA 우선)", "auto"), ("CPU", "cpu"), ("CUDA", "cuda")]),
                         ("OCR 언어", "local_paddle_ocr_language", False, "일본어", "combo", [("일본어", "ja"), ("영어", "en"), ("한국어", "ko"), ("중국어", "zh")]),
                     ],
                 },
                 {
                     "provider": "local_manga_ocr",
                     "title": "LOCAL Manga OCR",
-                    "description": "Local판 전용 일본어 만화 OCR입니다. 일본어 만화 원문 인식에 특화된 모델을 사용합니다.",
-                    "fields": [],
+                    "description": "Local판 전용 일본어 만화 OCR입니다. Torch 텍스트 디텍터로 영역을 찾고 Manga OCR로 일본어 원문을 인식합니다.",
+                    "fields": [
+                        ("Device", "local_manga_ocr_device", False, "auto", "combo", [("자동(CPU 기본/CUDA 우선)", "auto"), ("CPU", "cpu"), ("CUDA", "cuda")]),
+                    ],
                 },
             ])
-        self._add_api_section(ocr_content_layout, "OCR", ocr_cards, "selected_ocr_provider")
+        self._add_api_section(ocr_content_layout, "OCR", ocr_cards, "selected_ocr_provider", category="ocr")
 
         inpaint_cards = [
             {"_category": True, "title": "API 기반 모델", "description": "외부 API를 사용하는 인페인팅 모델입니다. API 키가 필요합니다."},
@@ -595,7 +732,7 @@ class ApiSettingsDialog(QDialog):
                 "provider": "gemini_inpaint",
                 "title": "Gemini Image Inpainting",
                 "fields": [
-                    ("Model", "gemini_inpaint_model", False, "gemini-2.5-flash-image"),
+                    ("Model", "gemini_inpaint_model", False, "gemini-3.1-flash-image"),
                     ("Prompt", "gemini_inpaint_prompt", False, "Remove text inside the white mask and reconstruct the manga background"),
                     ("API Key", "gemini_api_key", True, "Gemini API Key (shared with translation)"),
                 ],
@@ -610,20 +747,30 @@ class ApiSettingsDialog(QDialog):
                     "description": "Local판 전용 인페인팅입니다. local_models/inpainting 폴더 내의 .pt/.pth 모델(LaMa, MAT, manga 등)을 동적으로 감지하여 사용합니다.",
                     "fields": [
                         ("모델 선택", "local_inpaint_model_path", False, "", "combo", scan_local_inpainting_models()),
+                        ("Device", "local_lama_device", False, "auto", "combo", [("자동(CPU 기본/CUDA 우선)", "auto"), ("CPU", "cpu"), ("CUDA", "cuda")]),
                         ("대기 시간(초)", "local_lama_wait_seconds", False, 0, "spin", (0, 120), " sec" if self._ui_language == LANG_EN else "초"),
                     ],
                 },
             ])
-        self._add_api_section(inpaint_content_layout, tr_api("인페인팅", self._ui_language), inpaint_cards, "selected_inpaint_provider")
+        self._add_api_section(inpaint_content_layout, tr_api("인페인팅", self._ui_language), inpaint_cards, "selected_inpaint_provider", category="inpaint")
 
         translation_cards = [
+            {
+                "provider": "translation_common",
+                "_settings_only": True,
+                "title": "공용 번역 설정",
+                "description": "번역 API와 텍스트 자동 조정에서 공통으로 사용할 번역 대상 언어입니다. 프롬프트 기본 지시와 자동 조판 언어 판단에 사용합니다.",
+                "fields": [
+                    ("번역 대상 언어", "translation_target_language", False, "한국어", "combo", [("한국어", "ko"), ("영어", "en"), ("일본어", "ja"), ("중국어 간체", "zh-cn"), ("중국어 번체", "zh-tw")]),
+                ],
+            },
             {"_category": True, "title": "API 기반 모델", "description": "외부 API를 사용하는 번역 모델입니다. API 키가 필요합니다."},
             {
                 "provider": "openai",
                 "title": "OpenAI",
                 "fields": [
                     ("Model", "openai_model", False, "gpt-4o-mini"),
-                    ("묶음 수", "openai_chunk_size", False, 20, "spin", (1, 100)),
+                    ("묶음 수", "openai_chunk_size", False, 0, "chunk_spin", (0, 100)),
                     ("API Key", "openai_api_key", True, "OpenAI API Key"),
                 ],
             },
@@ -632,7 +779,7 @@ class ApiSettingsDialog(QDialog):
                 "title": "DeepSeek",
                 "fields": [
                     ("Model", "deepseek_model", False, "deepseek-chat"),
-                    ("묶음 수", "deepseek_chunk_size", False, 8, "spin", (1, 100)),
+                    ("묶음 수", "deepseek_chunk_size", False, 0, "chunk_spin", (0, 100)),
                     ("API Key", "deepseek_api_key", True, "DeepSeek API Key"),
                 ],
             },
@@ -641,7 +788,7 @@ class ApiSettingsDialog(QDialog):
                 "title": "Google Translate",
                 "fields": [
                     ("Model", "google_translate_model", False, "google_translate_basic_v2"),
-                    ("묶음 수", "google_translate_chunk_size", False, 50, "spin", (1, 100)),
+                    ("묶음 수", "google_translate_chunk_size", False, 0, "chunk_spin", (0, 100)),
                     ("API Key", "google_translate_api_key", True, "Google Translate API Key"),
                 ],
             },
@@ -650,20 +797,42 @@ class ApiSettingsDialog(QDialog):
                 "title": "Gemini / Google AI Studio",
                 "fields": [
                     ("Model", "gemini_model", False, "gemini-2.5-flash-lite"),
-                    ("묶음 수", "gemini_chunk_size", False, 10, "spin", (1, 100)),
+                    ("묶음 수", "gemini_chunk_size", False, 0, "chunk_spin", (0, 100)),
                     ("API Key", "gemini_api_key", True, "Google AI Studio Gemini API Key"),
+                ],
+            },
+            {
+                "provider": "gemini_deferred",
+                "title": "Gemini Flex / Batch",
+                "description": "일반 번역 진행창 대신 청크 현황 창을 사용합니다. 완료된 청크는 즉시 반영되고, 실패한 청크만 다시 시도할 수 있습니다. 작업 중에는 다른 프로젝트 작업을 할 수 없습니다.",
+                "fields": [
+                    ("요청 방식", "gemini_delayed_mode", False, "Flex API", "combo", [("Flex API", "flex"), ("Batch API", "batch")]),
+                    ("Model", "gemini_delayed_model", False, "gemini-2.5-flash-lite"),
+                    ("묶음 수", "gemini_delayed_chunk_size", False, 0, "chunk_spin", (0, 100)),
+                    ("API Key", "gemini_delayed_api_key", True, "Google AI Studio Gemini API Key"),
                 ],
             },
             {
                 "provider": "custom",
                 "title": "Custom / OpenAI-Compatible",
-                "description": "OpenAI Chat Completions 호환 API만 사용할 수 있습니다. Base URL, Model, API Key를 입력하세요.\n호환 예시: OpenRouter, Groq, xAI Grok, Together, LM Studio, vLLM, Ollama OpenAI 호환 서버",
+                "description": "OpenAI Chat Completions 호환 API만 사용할 수 있습니다. Base URL, Model, API Key를 입력하세요.\n호환 예시: OpenRouter, Groq, xAI Grok, Together, vLLM, Ollama OpenAI 호환 서버",
                 "fields": [
                     ("Preset Name", "custom_translation_preset_name", False, "OpenRouter / Groq / xAI"),
                     ("Base URL", "custom_translation_base_url", False, "https://api.x.ai/v1"),
                     ("Model", "custom_translation_model", False, "grok-4.3"),
-                    ("묶음 수", "custom_translation_chunk_size", False, 20, "spin", (1, 100)),
+                    ("묶음 수", "custom_translation_chunk_size", False, 0, "chunk_spin", (0, 100)),
                     ("API Key", "custom_translation_api_key", True, "OpenAI-compatible API Key"),
+                ],
+            },
+            {
+                "provider": "lm_studio",
+                "title": "LM Studio / Local OpenAI-Compatible",
+                "description": "LM Studio의 Developer 서버를 켠 뒤 사용할 수 있습니다. 기본 주소는 http://localhost:1234/v1 입니다. 모델은 LM Studio에서 먼저 다운로드/로드해야 합니다. API Key는 보통 비워도 됩니다.",
+                "fields": [
+                    ("Base URL", "lm_studio_base_url", False, "http://localhost:1234/v1"),
+                    ("Model", "lm_studio_model", False, "LM Studio에서 로드한 모델명"),
+                    ("묶음 수", "lm_studio_chunk_size", False, 0, "chunk_spin", (0, 100)),
+                    ("API Key", "lm_studio_api_key", True, "비워도 됨 / optional"),
                 ],
             },
         ]
@@ -689,7 +858,7 @@ class ApiSettingsDialog(QDialog):
                     ],
                 },
             ])
-        self._add_api_section(trans_content_layout, tr_api("번역", self._ui_language), translation_cards, "selected_translation_provider")
+        self._add_api_section(trans_content_layout, tr_api("번역", self._ui_language), translation_cards, "selected_translation_provider", category="translation")
 
         ocr_content_layout.addStretch(1)
         inpaint_content_layout.addStretch(1)
@@ -732,7 +901,7 @@ class ApiSettingsDialog(QDialog):
         # 새 카드형 UI에서는 굵은 구분선 대신 섹션 카드 자체의 여백/외곽선으로 구분한다.
         return
 
-    def _add_api_section(self, parent_layout, section_title, cards, selected_attr):
+    def _add_api_section(self, parent_layout, section_title, cards, selected_attr, category=""):
         block = QFrame(self)
         block.setObjectName("SettingsBlock")
         block_layout = QVBoxLayout(block)
@@ -773,7 +942,8 @@ class ApiSettingsDialog(QDialog):
                     cat_desc_label.setWordWrap(True)
                     block_layout.addWidget(cat_desc_label)
                 continue
-            provider = card["provider"]
+            provider = card.get("provider", "")
+            settings_only = bool(card.get("_settings_only", False))
             item = QFrame(block)
             item.setObjectName("SettingsItem")
             item_layout = QVBoxLayout(item)
@@ -783,11 +953,13 @@ class ApiSettingsDialog(QDialog):
             header = QHBoxLayout()
             header.setContentsMargins(0, 0, 0, 0)
             header.setSpacing(8)
-            radio = QRadioButton(item)
-            radio.setToolTip(f"{section_title} {tr_api('제공자를 사용합니다.', self._ui_language)}" if self._ui_language == LANG_EN else f"이 {section_title} 제공자를 사용합니다.")
-            group.addButton(radio)
-            self.buttons[provider] = radio
-            header.addWidget(radio, 0)
+            radio = None
+            if not settings_only:
+                radio = QRadioButton(item)
+                radio.setToolTip(f"{section_title} {tr_api('제공자를 사용합니다.', self._ui_language)}" if self._ui_language == LANG_EN else f"이 {section_title} 제공자를 사용합니다.")
+                group.addButton(radio)
+                self.buttons[provider] = radio
+                header.addWidget(radio, 0)
             card_title = QLabel(card["title"], item)
             card_title.setObjectName("SettingsItemTitle")
             header.addWidget(card_title, 1)
@@ -824,23 +996,40 @@ class ApiSettingsDialog(QDialog):
                         found_index = 0
                     edit.setCurrentIndex(found_index)
                     grid.addWidget(edit, r, 1)
-                elif field_type == "spin":
+                elif field_type in ("spin", "chunk_spin"):
                     edit = QSpinBox(item)
-                    min_v, max_v = (1, 100)
+                    auto_chunk = (field_type == "chunk_spin")
+                    min_v, max_v = ((0, 100) if auto_chunk else (1, 100))
                     try:
                         if field_choices and len(field_choices) >= 2:
                             min_v, max_v = int(field_choices[0]), int(field_choices[1])
                     except Exception:
-                        min_v, max_v = (1, 100)
+                        min_v, max_v = ((0, 100) if auto_chunk else (1, 100))
                     edit.setRange(min_v, max_v)
+                    if auto_chunk:
+                        edit.setSpecialValueText(tr_api("자동", self._ui_language))
+                        edit.setToolTip(tr_api("자동이면 현재 페이지의 번역 대상 줄을 한 청크로 묶습니다. 숫자를 입력하면 그 줄 수대로 나눕니다.", self._ui_language))
                     try:
-                        edit.setValue(int(data.get(key, placeholder) or placeholder or min_v))
+                        raw_value = data.get(key, placeholder)
+                        if raw_value is None or raw_value == "":
+                            raw_value = placeholder if placeholder is not None else min_v
+                        edit.setValue(int(raw_value))
                     except Exception:
                         edit.setValue(min_v)
                     if field_suffix is None:
                         edit.setSuffix(" items" if self._ui_language == LANG_EN else "개")
                     else:
                         edit.setSuffix(str(field_suffix))
+                    grid.addWidget(edit, r, 1)
+                elif field_type == "check":
+                    edit = QCheckBox(item)
+                    try:
+                        edit.setChecked(bool(data.get(key, False)))
+                    except Exception:
+                        edit.setChecked(False)
+                    desc_text = str(placeholder or "")
+                    if desc_text:
+                        edit.setToolTip(tr_api(desc_text, self._ui_language))
                     grid.addWidget(edit, r, 1)
                 else:
                     edit = QLineEdit(item)
@@ -861,14 +1050,191 @@ class ApiSettingsDialog(QDialog):
                         grid.addWidget(edit, r, 1)
                 self.edits.setdefault(key, []).append(edit)
             item_layout.addLayout(grid)
+
+            if (not settings_only) and provider:
+                try:
+                    self._provider_categories[str(provider)] = str(category or "")
+                    diag_row = QHBoxLayout()
+                    diag_row.setContentsMargins(0, 2, 0, 0)
+                    diag_row.setSpacing(8)
+                    response_btn = QPushButton(tr_api("API 사전 점검", self._ui_language), item)
+                    response_btn.setToolTip(tr_api("실제 이미지/번역문/인페인팅 작업을 보내지 않고 토큰, URL, 모델명, 가벼운 연결·인증만 점검합니다.", self._ui_language))
+                    response_btn.clicked.connect(lambda _=False, p=str(provider), c=str(category or ""): self.run_api_diagnostic_test(c, p, "response"))
+                    apply_btn = QPushButton(tr_api("프로그램 내부 점검", self._ui_language), item)
+                    apply_btn.setToolTip(tr_api("외부 API를 호출하지 않고 mock 결과로 YSB 내부 파서/디코더, 한글·일본어 경로 저장·재읽기, 데이터 적용 경로를 점검합니다.", self._ui_language))
+                    apply_btn.clicked.connect(lambda _=False, p=str(provider), c=str(category or ""): self.run_api_diagnostic_test(c, p, "apply"))
+                    practical_btn = QPushButton(tr_api("실전 테스트", self._ui_language), item)
+                    practical_btn.setToolTip(tr_api("내장 샘플 이미지/마스크/문장을 실제 provider에 보내 결과를 확인합니다. API 사용량 또는 비용이 발생할 수 있습니다.", self._ui_language))
+                    practical_btn.clicked.connect(lambda _=False, p=str(provider), c=str(category or ""): self.run_api_diagnostic_test(c, p, "practical"))
+                    self._api_diag_buttons[(str(provider), "response")] = response_btn
+                    self._api_diag_buttons[(str(provider), "apply")] = apply_btn
+                    self._api_diag_buttons[(str(provider), "practical")] = practical_btn
+                    diag_row.addWidget(response_btn)
+                    diag_row.addWidget(apply_btn)
+                    diag_row.addWidget(practical_btn)
+                    diag_row.addStretch(1)
+                    item_layout.addLayout(diag_row)
+                except Exception:
+                    pass
+
+            if provider == "lm_studio":
+                lm_test_row = QHBoxLayout()
+                lm_test_row.setContentsMargins(0, 2, 0, 0)
+                lm_test_row.setSpacing(8)
+                lm_test_btn = QPushButton(tr_api("LM Studio JSON 호환성 테스트", self._ui_language), item)
+                lm_test_btn.setToolTip(tr_api("현재 Base URL과 Model로 짧은 샘플 번역을 보내고, 응답이 YSB 자동 번역용 JSON 형식인지 검사합니다.", self._ui_language))
+                lm_test_btn.clicked.connect(self.test_lm_studio_json_compatibility)
+                self._lm_studio_test_button = lm_test_btn
+                lm_test_row.addWidget(lm_test_btn)
+                lm_test_row.addStretch(1)
+                item_layout.addLayout(lm_test_row)
             block_layout.addWidget(item)
-            if provider == selected_value:
+            if (not settings_only) and radio is not None and provider == selected_value:
                 radio.setChecked(True)
 
         if not any(btn.isChecked() for btn in group.buttons()) and group.buttons():
             group.buttons()[0].setChecked(True)
 
         parent_layout.addWidget(block)
+
+    def run_api_diagnostic_test(self, category: str, provider: str, test_kind: str):
+        settings_payload = asdict(self.get_settings())
+        key = (str(provider), str(test_kind))
+        btn = self._api_diag_buttons.get(key)
+        if btn is not None:
+            btn.setEnabled(False)
+            btn.setText(tr_api("테스트 중...", self._ui_language))
+        worker = ApiDiagnosticRunnable(settings_payload, category, provider, test_kind)
+        worker.signals.finished.connect(self._on_api_diagnostic_test_done)
+        self._api_diag_worker = worker
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_api_diagnostic_test_done(self, result: dict):
+        provider = str(result.get("provider") or "")
+        test_kind = str(result.get("test_kind") or "response")
+        btn = self._api_diag_buttons.get((provider, test_kind))
+        if btn is not None:
+            btn.setEnabled(True)
+            btn.setText(tr_api("API 사전 점검" if test_kind == "response" else ("실전 테스트" if test_kind == "practical" else "프로그램 내부 점검"), self._ui_language))
+        try:
+            self._api_diag_worker = None
+        except Exception:
+            pass
+
+        ok = bool(result.get("ok"))
+        title = tr_api("API 사전 점검" if test_kind == "response" else ("실전 테스트" if test_kind == "practical" else "프로그램 내부 점검"), self._ui_language)
+        category = str(result.get("category") or "")
+        detail = str(result.get("detail") or "")
+        summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+        failed_stage = str(result.get("failed_stage") or summary.get("failed_stage") or "")
+        request_sent = result.get("request_sent", summary.get("request_sent", None))
+        result_kind = str(result.get("result_kind") or summary.get("result_kind") or "")
+        lines = [
+            f"{title}: {'통과' if ok else '실패'}",
+            f"provider: {provider}",
+            f"category: {category}",
+        ]
+        if failed_stage:
+            lines.append(f"failed_stage: {failed_stage}")
+        if request_sent is not None:
+            lines.append(f"request_sent: {bool(request_sent)}")
+        if result_kind:
+            lines.append(f"result_kind: {result_kind}")
+        lines.append("")
+        for step in result.get("steps") or []:
+            if not isinstance(step, dict):
+                continue
+            mark = "✅" if step.get("ok") else "❌"
+            name = str(step.get("name") or "")
+            d = str(step.get("detail") or "")
+            lines.append(f"{mark} {name}")
+            if d:
+                lines.append(f"  {d[:900]}")
+        if detail:
+            lines.append("")
+            lines.append("원인/결과:")
+            lines.append(detail[:1200])
+        log_path = str(result.get("log_path") or "")
+        if log_path:
+            lines.append("")
+            lines.append("진단 로그:")
+            lines.append(log_path)
+        excerpt = str(result.get("data_excerpt") or "")
+        if excerpt:
+            lines.append("")
+            lines.append("응답 일부:")
+            lines.append(excerpt[:700])
+
+        message = "\n".join(lines)
+        if ok:
+            QMessageBox.information(self, title, message)
+        else:
+            QMessageBox.warning(self, title, message)
+
+
+    def test_lm_studio_json_compatibility(self):
+        base_url = self._first_edit_text("lm_studio_base_url") or "http://localhost:1234/v1"
+        model = self._first_edit_text("lm_studio_model")
+        api_key = self._first_edit_text("lm_studio_api_key")
+        btn = getattr(self, "_lm_studio_test_button", None)
+        if btn is not None:
+            btn.setEnabled(False)
+            btn.setText(tr_api("테스트 중...", self._ui_language))
+        worker = LmStudioCompatRunnable(base_url, model, api_key)
+        worker.signals.finished.connect(self._on_lm_studio_json_compatibility_test_done)
+        self._lm_studio_test_worker = worker
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_lm_studio_json_compatibility_test_done(self, result: dict):
+        btn = getattr(self, "_lm_studio_test_button", None)
+        if btn is not None:
+            btn.setEnabled(True)
+            btn.setText(tr_api("LM Studio JSON 호환성 테스트", self._ui_language))
+        try:
+            self._lm_studio_test_worker = None
+        except Exception:
+            pass
+
+        ok = bool(result.get("ok"))
+        level = str(result.get("level") or ("ok" if ok else "error"))
+        reason = str(result.get("reason") or "")
+        chat_url = str(result.get("chat_url") or "")
+        raw_excerpt = str(result.get("raw_excerpt") or "")
+        item_count = result.get("item_count")
+
+        lines = []
+        if ok:
+            lines.append(tr_api("호환성 테스트 통과", self._ui_language))
+            lines.append(tr_api("이 모델은 YSB 자동 번역 JSON 형식으로 사용할 수 있습니다.", self._ui_language))
+            if item_count:
+                lines.append(f"items: {item_count}")
+        else:
+            lines.append(tr_api("호환성 테스트 실패", self._ui_language))
+            lines.append(tr_api("이 모델은 YSB 자동 번역 JSON 형식과 맞지 않을 수 있습니다.", self._ui_language))
+            if result.get("has_reasoning_marker"):
+                lines.append(tr_api("reasoning/channel 토큰이 content에 섞였습니다.", self._ui_language))
+            if result.get("recoverable_json_found"):
+                lines.append(tr_api("응답 안에 JSON 블록은 있지만 앞뒤에 다른 텍스트가 붙어 있습니다.", self._ui_language))
+        if reason:
+            lines.append("")
+            lines.append(reason)
+        if chat_url:
+            lines.append("")
+            lines.append(f"URL: {chat_url}")
+        if raw_excerpt:
+            lines.append("")
+            lines.append(tr_api("응답 일부:", self._ui_language))
+            lines.append(raw_excerpt[:500])
+
+        title = tr_api("LM Studio JSON 호환성 테스트", self._ui_language)
+        message = "\n".join(lines)
+        if ok and level != "warning":
+            QMessageBox.information(self, title, message)
+        elif ok:
+            QMessageBox.warning(self, title, message)
+        else:
+            QMessageBox.warning(self, title, message)
+
 
     def browse_json_file(self, edit: QLineEdit):
         path, _ = QFileDialog.getOpenFileName(
@@ -884,7 +1250,7 @@ class ApiSettingsDialog(QDialog):
         secret_keys = [
             "clova_secret_key", "google_vision_api_key", "openai_api_key",
             "deepseek_api_key", "google_translate_api_key", "gemini_api_key",
-            "custom_translation_api_key", "replicate_api_token",
+            "gemini_delayed_api_key", "custom_translation_api_key", "lm_studio_api_key", "replicate_api_token",
             "lama_replicate_api_token", "stable_replicate_api_token"
         ]
         for key in secret_keys:
@@ -903,6 +1269,8 @@ class ApiSettingsDialog(QDialog):
                 if isinstance(edit, QComboBox):
                     if edit.count() > 0:
                         edit.setCurrentIndex(0)
+                elif isinstance(edit, QCheckBox):
+                    edit.setChecked(False)
                 else:
                     edit.clear()
 
@@ -933,6 +1301,8 @@ class ApiSettingsDialog(QDialog):
                 value = str(edit.currentData() or edit.currentText() or "").strip()
             elif isinstance(edit, QSpinBox):
                 value = str(edit.value()).strip()
+            elif isinstance(edit, QCheckBox):
+                value = "1" if edit.isChecked() else ""
             else:
                 value = edit.text().strip()
             if value:
@@ -942,7 +1312,12 @@ class ApiSettingsDialog(QDialog):
             return str(first.currentData() or first.currentText() or "").strip()
         if isinstance(first, QSpinBox):
             return str(first.value()).strip()
+        if isinstance(first, QCheckBox):
+            return "1" if first.isChecked() else ""
         return first.text().strip()
+
+    def _first_edit_bool(self, key: str) -> bool:
+        return bool(self._first_edit_text(key))
 
     def get_settings(self) -> ApiSettings:
         return ApiSettings(
@@ -950,6 +1325,7 @@ class ApiSettingsDialog(QDialog):
             selected_inpaint_provider=self._selected_provider_for("selected_inpaint_provider", "replicate_lama"),
             selected_translation_provider=self._selected_provider_for("selected_translation_provider", "openai"),
             local_translation_model=self._first_edit_text("local_translation_model"),
+            translation_target_language=self._first_edit_text("translation_target_language") or getattr(self.settings, "translation_target_language", "ko") or "ko",
             clova_api_url=self._first_edit_text("clova_api_url"),
             clova_secret_key=self._first_edit_text("clova_secret_key"),
             clova_model=self._first_edit_text("clova_model") or "clova_ocr_v2",
@@ -961,6 +1337,14 @@ class ApiSettingsDialog(QDialog):
             google_vision_language_hints=self.settings.google_vision_language_hints,
             local_paddle_mask_device=self._first_edit_text("local_paddle_mask_device") or "auto",
             local_paddle_ocr_language=self._first_edit_text("local_paddle_ocr_language") or "ja",
+            local_manga_ocr_device=self._first_edit_text("local_manga_ocr_device") or "auto",
+            clova_remove_adjacent_sfx=self._first_edit_bool("clova_remove_adjacent_sfx"),
+            google_vision_remove_adjacent_sfx=self._first_edit_bool("google_vision_remove_adjacent_sfx"),
+            # 구버전 캐시 호환용. 새 UI에서는 저장하지 않는다.
+            clova_exclude_sfx_ocr_candidates=bool(getattr(self.settings, "clova_exclude_sfx_ocr_candidates", False)),
+            google_vision_exclude_sfx_ocr_candidates=bool(getattr(self.settings, "google_vision_exclude_sfx_ocr_candidates", False)),
+            local_paddle_ocr_exclude_sfx_ocr_candidates=False,
+            local_manga_ocr_exclude_sfx_ocr_candidates=False,
             openai_api_key=self._first_edit_text("openai_api_key"),
             deepseek_api_key=self._first_edit_text("deepseek_api_key"),
             google_translate_api_key=self._first_edit_text("google_translate_api_key"),
@@ -969,15 +1353,23 @@ class ApiSettingsDialog(QDialog):
             custom_translation_base_url=self._first_edit_text("custom_translation_base_url"),
             custom_translation_model=self._first_edit_text("custom_translation_model"),
             custom_translation_preset_name=self._first_edit_text("custom_translation_preset_name") or "Custom Compatible",
+            lm_studio_base_url=self._first_edit_text("lm_studio_base_url") or "http://localhost:1234/v1",
+            lm_studio_model=self._first_edit_text("lm_studio_model"),
+            lm_studio_api_key=self._first_edit_text("lm_studio_api_key"),
+            gemini_delayed_api_key=self._first_edit_text("gemini_delayed_api_key"),
+            gemini_delayed_model=self._first_edit_text("gemini_delayed_model") or "gemini-2.5-flash-lite",
+            gemini_delayed_mode=self._first_edit_text("gemini_delayed_mode") or "flex",
             openai_model=self._first_edit_text("openai_model") or "gpt-4o-mini",
             deepseek_model=self._first_edit_text("deepseek_model") or "deepseek-v4-flash",
             google_translate_model=self._first_edit_text("google_translate_model") or "google_translate_basic_v2",
             gemini_model=self._first_edit_text("gemini_model") or "gemini-2.5-flash-lite",
-            openai_chunk_size=int(self._first_edit_text("openai_chunk_size") or 20),
-            deepseek_chunk_size=int(self._first_edit_text("deepseek_chunk_size") or 8),
-            google_translate_chunk_size=int(self._first_edit_text("google_translate_chunk_size") or 50),
-            gemini_chunk_size=int(self._first_edit_text("gemini_chunk_size") or 10),
-            custom_translation_chunk_size=int(self._first_edit_text("custom_translation_chunk_size") or 20),
+            openai_chunk_size=int(self._first_edit_text("openai_chunk_size") or 0),
+            deepseek_chunk_size=int(self._first_edit_text("deepseek_chunk_size") or 0),
+            google_translate_chunk_size=int(self._first_edit_text("google_translate_chunk_size") or 0),
+            gemini_chunk_size=int(self._first_edit_text("gemini_chunk_size") or 0),
+            gemini_delayed_chunk_size=int(self._first_edit_text("gemini_delayed_chunk_size") or 0),
+            custom_translation_chunk_size=int(self._first_edit_text("custom_translation_chunk_size") or 0),
+            lm_studio_chunk_size=int(self._first_edit_text("lm_studio_chunk_size") or 0),
             # 구버전 캐시 호환: replicate_api_token은 UI에서 더 이상 직접 쓰지 않는다.
             replicate_api_token=self.settings.replicate_api_token,
             lama_replicate_api_token=self._first_edit_text("lama_replicate_api_token") or self.settings.replicate_api_token,
@@ -989,7 +1381,12 @@ class ApiSettingsDialog(QDialog):
             stable_inpaint_wait_seconds=int(self._first_edit_text("stable_inpaint_wait_seconds") or 3),
             local_lama_wait_seconds=int(self._first_edit_text("local_lama_wait_seconds") or 0),
             local_inpaint_model_path=self._first_edit_text("local_inpaint_model_path"),
-            gemini_inpaint_model=self._first_edit_text("gemini_inpaint_model") or "gemini-2.5-flash-image",
+            local_lama_device=self._first_edit_text("local_lama_device") or "auto",
+            replicate_lama_exclude_sfx_ocr_candidates=bool(getattr(self.settings, "replicate_lama_exclude_sfx_ocr_candidates", False)),
+            stable_inpaint_exclude_sfx_ocr_candidates=bool(getattr(self.settings, "stable_inpaint_exclude_sfx_ocr_candidates", False)),
+            gemini_inpaint_exclude_sfx_ocr_candidates=bool(getattr(self.settings, "gemini_inpaint_exclude_sfx_ocr_candidates", False)),
+            local_lama_exclude_sfx_ocr_candidates=bool(getattr(self.settings, "local_lama_exclude_sfx_ocr_candidates", False)),
+            gemini_inpaint_model=self._first_edit_text("gemini_inpaint_model") or "gemini-3.1-flash-image",
             gemini_inpaint_prompt=self._first_edit_text("gemini_inpaint_prompt") or (
                 "Remove the text only inside the white mask area and reconstruct the original manga background. "
                 "Keep all characters, panel borders, screentones, line art, and unmasked areas unchanged. "

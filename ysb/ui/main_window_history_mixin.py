@@ -473,6 +473,10 @@ class MainWindowHistoryMixin:
         try:
             if hasattr(self, "view") and self.view is not None:
                 self.view.brush_size = size
+                if hasattr(self.view, "request_brush_cursor_preview"):
+                    self.view.request_brush_cursor_preview(delay_ms=40)
+                elif hasattr(self.view, "update_brush_cursor_preview"):
+                    self.view.update_brush_cursor_preview()
         except Exception:
             pass
         if hasattr(self, "sb_brush_size"):
@@ -723,7 +727,92 @@ class MainWindowHistoryMixin:
                 self.mark_page_data_dirty_explicit(page_idx, "use_background_as_source")
         except Exception:
             pass
+        try:
+            self.audit_boundary_event(
+                "USE_BACKGROUND_AS_SOURCE_PAGE_APPLIED",
+                target_page=int(page_idx),
+                page_no=int(page_idx) + 1,
+                baked_paint=bool(has_paint),
+                had_clean=bool(has_clean_bg),
+                has_bg_clean=bool(curr.get('bg_clean') is not None),
+                has_working_source=bool(curr.get('working_source') is not None or curr.get('working_source_path')),
+            )
+        except Exception:
+            pass
         return "done", "작업용 원본 반영"
+
+    def page_has_final_paint_payload_for_source_apply(self, page_idx):
+        """Return True when applying background as source would bake final-screen brush layers."""
+        try:
+            page_idx = int(page_idx)
+        except Exception:
+            return False
+        try:
+            if page_idx == int(getattr(self, "idx", -1) or -1):
+                # 현재 페이지는 view에 아직 남은 브러시를 먼저 data로 반영해 판정한다.
+                try:
+                    self.commit_final_paint_view_to_data(log=False)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        curr = (getattr(self, "data", {}) or {}).get(page_idx)
+        if not isinstance(curr, dict):
+            return False
+        for key in ("final_paint", "final_paint_above"):
+            try:
+                v = curr.get(key)
+                if v is not None:
+                    return True
+            except Exception:
+                pass
+        for key in ("final_paint_path", "final_paint_above_path"):
+            try:
+                p = str(curr.get(key) or "")
+                if p and os.path.exists(p):
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def confirm_bake_final_paint_into_clean_if_needed(self, page_indices):
+        """Ask once before baking final-screen brush data into clean backgrounds."""
+        indices = []
+        for raw in list(page_indices or []):
+            try:
+                indices.append(int(raw))
+            except Exception:
+                pass
+        brush_pages = [i for i in indices if self.page_has_final_paint_payload_for_source_apply(i)]
+        if not brush_pages:
+            return True
+        try:
+            self.audit_boundary_event(
+                "USE_BACKGROUND_AS_SOURCE_BRUSH_CONFIRM_REQUIRED",
+                pages=[int(i) + 1 for i in brush_pages[:80]],
+                page_count=len(brush_pages),
+            )
+        except Exception:
+            pass
+        msg = self.tr_msg("브러시가 최종화면에 있는 상태에서 배경을 원본으로 반영하면 브러시 내역이 클린본에 반영됩니다. 계속하시겠습니까?")
+        ret = QMessageBox.question(
+            self,
+            self.tr_ui("배경을 원본으로 쓰기"),
+            msg,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        ok = bool(ret == QMessageBox.StandardButton.Yes)
+        try:
+            self.audit_boundary_event(
+                "USE_BACKGROUND_AS_SOURCE_BRUSH_CONFIRM_RESULT",
+                accepted=ok,
+                pages=[int(i) + 1 for i in brush_pages[:80]],
+                page_count=len(brush_pages),
+            )
+        except Exception:
+            pass
+        return ok
 
     def use_final_background_as_source(self):
         """최종결과 배경(인페인팅/클린본/최종 페인팅 합성본)을 작업용 원본으로 사용한다."""
@@ -745,6 +834,10 @@ class MainWindowHistoryMixin:
         except Exception:
             pass
 
+        if not self.confirm_bake_final_paint_into_clean_if_needed(selected_indices):
+            self.log("↩️ " + self.tr_ui("배경을 원본으로 쓰기") + " " + self.tr_ui("취소"))
+            return
+
         current_idx = int(getattr(self, "idx", 0) or 0)
         try:
             current_mode = int(self.cb_mode.currentIndex()) if hasattr(self, "cb_mode") else -1
@@ -761,6 +854,23 @@ class MainWindowHistoryMixin:
             status, message = self.apply_final_background_as_source_to_page(page_idx)
             if str(status).lower() == "done":
                 changed = True
+                try:
+                    if hasattr(self, "flush_workspace_image_pages"):
+                        self.flush_workspace_image_pages(
+                            [page_idx],
+                            reason="use_background_as_source",
+                            release_non_current=bool(int(page_idx) != int(current_idx)),
+                        )
+                except Exception as e:
+                    try:
+                        self.audit_boundary_event(
+                            "USE_BACKGROUND_AS_SOURCE_FLUSH_FAILED",
+                            target_page=int(page_idx),
+                            page_no=int(page_idx) + 1,
+                            error=repr(e),
+                        )
+                    except Exception:
+                        pass
             return status, message
 
         result = self.run_page_queue_batch(
@@ -772,7 +882,7 @@ class MainWindowHistoryMixin:
             visual=False,
             cancellable=True,
             restore_page=False,
-            save_work_cache=bool(single_current),
+            save_work_cache=False,
         )
 
         if changed:
@@ -795,8 +905,8 @@ class MainWindowHistoryMixin:
                 __import__("gc").collect()
             except Exception:
                 pass
-        # 다중/전체 이미지 작업은 여기서 일반 작업 캐시 저장을 예약하지 않는다.
-        # 정식 반영은 사용자가 [프로젝트 저장]을 눌렀을 때 처리한다.
+        # use_background_as_source는 각 페이지 처리 직후 flush_workspace_image_pages()로
+        # canonical clean/working_source 파일을 즉시 재생성한다. 별도 일반 작업 캐시 예약은 하지 않는다.
         try:
             if single_current:
                 self.mode_chg(current_mode if current_mode >= 0 else self.cb_mode.currentIndex())
@@ -811,6 +921,11 @@ class MainWindowHistoryMixin:
         return self.use_final_background_as_source()
 
     def final_base_image_for_page(self, page_idx):
+        try:
+            if hasattr(self, "_apply_pending_work_cache_image_delta_payload_for_page"):
+                self._apply_pending_work_cache_image_delta_payload_for_page(page_idx, reason="final_base")
+        except Exception:
+            pass
         curr = self.data.get(page_idx)
         if not curr:
             return None
@@ -842,6 +957,18 @@ class MainWindowHistoryMixin:
     def commit_view_mask_to_data(self, log=False):
         if self.is_page_loading or self.is_batch_running:
             return False
+        if getattr(self, "_skip_view_mask_commit", False) or getattr(self, "_skip_mode_mask_commit", False):
+            try:
+                self.audit_boundary_event(
+                    'MASK_VIEW_TO_DATA_COMMIT_SKIPPED',
+                    reason=str(getattr(self, '_skip_view_mask_commit_reason', '') or 'programmatic_refresh'),
+                    source='history_commit_view_mask_to_data',
+                    mode_idx=int(self.cb_mode.currentIndex()) if hasattr(self, 'cb_mode') else -1,
+                    view_mask_nonzero=self._debug_mask_nonzero(self.view.get_mask_np() if getattr(self, 'view', None) is not None else None),
+                )
+            except Exception:
+                pass
+            return False
         curr = self.data.get(self.idx)
         if not curr or not hasattr(self, "view"):
             return False
@@ -856,6 +983,354 @@ class MainWindowHistoryMixin:
                 self.log("💾 마스크 저장 반영")
             return True
         return False
+
+    def _drop_view_layer_checkpoint_kinds(self, page_idx, kinds):
+        """Remove paint/mask checkpoint kinds once their background save is queued.
+
+        Text/data dirty for the same page is intentionally preserved so autosave can
+        still write the small page journal without forcing a heavy image delta save.
+        """
+        try:
+            page_idx = int(page_idx)
+            remove = {str(x or "") for x in (kinds or [])}
+            raw = getattr(self, "_checkpoint_dirty_kinds", None)
+            if isinstance(raw, dict):
+                current = raw.get(page_idx, set())
+                current = {str(x or "") for x in list(current or [])}
+                current.difference_update(remove)
+                if current:
+                    raw[page_idx] = current
+                else:
+                    raw.pop(page_idx, None)
+                    pages = getattr(self, "_checkpoint_dirty_pages", None)
+                    if pages is not None:
+                        pages.discard(page_idx)
+        except Exception:
+            pass
+
+    def _restore_view_layer_checkpoint_kinds(self, page_idx, kinds):
+        try:
+            page_idx = int(page_idx)
+            pages = getattr(self, "_checkpoint_dirty_pages", None)
+            if pages is None:
+                pages = set()
+                self._checkpoint_dirty_pages = pages
+            pages.add(page_idx)
+            raw = getattr(self, "_checkpoint_dirty_kinds", None)
+            if raw is None or not isinstance(raw, dict):
+                raw = {}
+                self._checkpoint_dirty_kinds = raw
+            raw.setdefault(page_idx, set()).update({str(x or "") for x in (kinds or [])})
+            self.has_unsaved_changes = True
+            self.update_window_title()
+        except Exception:
+            pass
+
+    def _make_view_layer_save_job(self, pending):
+        if (
+            getattr(self, "_suppress_work_cache_dirty", False)
+            or getattr(self, "is_loading_project", False)
+            or getattr(self, "is_batch_running", False)
+            or not getattr(self, "project_dir", None)
+            or not getattr(self, "paths", None)
+            or not getattr(self, "data", None)
+            or not getattr(self, "view", None)
+        ):
+            return None, set()
+        try:
+            from ysb.core.view_layer_save_worker import ViewLayerSaveJob
+        except Exception:
+            return None, set()
+        try:
+            page_idx = int(getattr(self, "idx", 0) or 0)
+        except Exception:
+            page_idx = 0
+        curr = self.data.get(page_idx)
+        if not isinstance(curr, dict):
+            return None, set()
+        try:
+            mode_idx = int(self.cb_mode.currentIndex()) if hasattr(self, "cb_mode") else -1
+        except Exception:
+            mode_idx = -1
+
+        pending = {str(x or "") for x in list(pending or [])}
+        process_final_paint = bool("final_paint" in pending and mode_idx == 4)
+        process_mask = bool("mask" in pending and mode_idx in (2, 3))
+        if not process_final_paint and not process_mask:
+            return None, set()
+
+        final_img = None
+        final_above_img = None
+        if process_final_paint:
+            try:
+                if hasattr(self.view, "copy_final_paint_layer_qimage"):
+                    final_img = self.view.copy_final_paint_layer_qimage(False)
+                    final_above_img = self.view.copy_final_paint_layer_qimage(True)
+            except Exception:
+                final_img = None
+                final_above_img = None
+            if final_img is None and final_above_img is None:
+                process_final_paint = False
+
+        mask_key = ""
+        mask_array = None
+        if process_mask:
+            try:
+                mask_key = str(self.active_mask_key(mode_idx) or "") if hasattr(self, "active_mask_key") else ""
+            except Exception:
+                mask_key = ""
+            try:
+                # 마스크 배열은 현재 작업/인페인팅 로직이 곧바로 참조할 수 있으므로
+                # UI thread에서 data에 반영하고, 파일 저장만 worker로 넘긴다.
+                m = self.view.get_mask_np()
+                if m is not None and mask_key:
+                    mask_array = m.copy() if hasattr(m, "copy") else m
+                    try:
+                        self.set_active_mask(curr, mask_array, mode_idx)
+                    except Exception:
+                        curr[mask_key] = mask_array
+                        curr[f"{mask_key}_dirty"] = True
+                    curr["mask_toggle_enabled"] = bool(getattr(self, "mask_toggle_enabled", False))
+                else:
+                    process_mask = False
+            except Exception:
+                process_mask = False
+                mask_array = None
+
+        if not process_final_paint and not process_mask:
+            return None, set()
+
+        try:
+            ui_state = self.current_project_ui_state() if hasattr(self, "current_project_ui_state") else {}
+        except Exception:
+            ui_state = {}
+        try:
+            image_path = str((getattr(self, "paths", []) or [])[page_idx] or "")
+        except Exception:
+            image_path = ""
+
+        job = ViewLayerSaveJob(
+            project_dir=str(getattr(self, "project_dir", "") or ""),
+            page_idx=page_idx,
+            page_count=len(getattr(self, "paths", []) or []),
+            current_index=page_idx,
+            image_path=image_path,
+            original_name=str(curr.get("original_name") or (os.path.basename(image_path) if image_path else "")),
+            ui_state=ui_state if isinstance(ui_state, dict) else {},
+            process_final_paint=bool(process_final_paint),
+            final_paint_qimage=final_img,
+            final_paint_above_qimage=final_above_img,
+            process_mask=bool(process_mask),
+            mask_key=mask_key,
+            mask_array=mask_array,
+            mask_toggle_enabled=bool(getattr(self, "mask_toggle_enabled", curr.get("mask_toggle_enabled", False))),
+            use_inpainted_as_source=bool(curr.get("use_inpainted_as_source", False)),
+        )
+        dropped = set()
+        if process_final_paint:
+            dropped.add("paint")
+        if process_mask:
+            dropped.add("mask")
+        return job, dropped
+
+    def enqueue_view_layer_save_job(self, job, checkpoint_kinds=None):
+        if job is None:
+            return False
+        try:
+            key = str(job.key)
+        except Exception:
+            key = f"{getattr(job, 'project_dir', '')}|{getattr(job, 'page_idx', -1)}"
+        try:
+            if not hasattr(self, "_view_layer_save_active_keys"):
+                self._view_layer_save_active_keys = set()
+            if not hasattr(self, "_view_layer_save_queued_jobs"):
+                self._view_layer_save_queued_jobs = {}
+            if not hasattr(self, "_view_layer_save_job_checkpoint_kinds"):
+                self._view_layer_save_job_checkpoint_kinds = {}
+            self._view_layer_save_job_checkpoint_kinds[key] = set(checkpoint_kinds or set())
+            if key in self._view_layer_save_active_keys:
+                self._view_layer_save_queued_jobs[key] = job
+                try:
+                    self.audit_boundary_event(
+                        "VIEW_LAYER_SAVE_JOB_COALESCED",
+                        page_idx=int(getattr(job, "page_idx", -1) or -1),
+                        process_final_paint=bool(getattr(job, "process_final_paint", False)),
+                        process_mask=bool(getattr(job, "process_mask", False)),
+                        throttle_ms=120,
+                    )
+                except Exception:
+                    pass
+                return True
+            return self._start_view_layer_save_job(job, checkpoint_kinds=checkpoint_kinds)
+        except Exception:
+            return False
+
+    def _start_view_layer_save_job(self, job, checkpoint_kinds=None):
+        try:
+            from PyQt6.QtCore import QThreadPool
+            from ysb.core.view_layer_save_worker import ViewLayerSaveRunnable
+            key = str(job.key)
+            if not hasattr(self, "_view_layer_save_active_keys"):
+                self._view_layer_save_active_keys = set()
+            self._view_layer_save_active_keys.add(key)
+            if not hasattr(self, "_view_layer_save_runnables"):
+                self._view_layer_save_runnables = {}
+            runnable = ViewLayerSaveRunnable(job)
+            try:
+                runnable.signals.started.connect(self._on_view_layer_save_job_started)
+            except Exception:
+                pass
+            runnable.signals.done.connect(self._on_view_layer_save_job_done)
+            runnable.signals.failed.connect(self._on_view_layer_save_job_failed)
+            self._view_layer_save_runnables[str(getattr(job, "token", key))] = runnable
+            try:
+                self.audit_boundary_event(
+                    "VIEW_LAYER_SAVE_JOB_ENQUEUE",
+                    page_idx=int(getattr(job, "page_idx", -1) or -1),
+                    process_final_paint=bool(getattr(job, "process_final_paint", False)),
+                    process_mask=bool(getattr(job, "process_mask", False)),
+                    mask_key=str(getattr(job, "mask_key", "") or ""),
+                    throttle_ms=120,
+                )
+            except Exception:
+                pass
+            QThreadPool.globalInstance().start(runnable)
+            return True
+        except Exception as exc:
+            try:
+                self.audit_boundary_event("VIEW_LAYER_SAVE_JOB_ENQUEUE_FAILED", error=repr(exc), throttle_ms=300)
+            except Exception:
+                pass
+            return False
+
+    def _finish_view_layer_save_key(self, result):
+        key = str((result or {}).get("key") or "")
+        token = str((result or {}).get("token") or "")
+        try:
+            if hasattr(self, "_view_layer_save_active_keys"):
+                self._view_layer_save_active_keys.discard(key)
+            if token and hasattr(self, "_view_layer_save_runnables"):
+                self._view_layer_save_runnables.pop(token, None)
+        except Exception:
+            pass
+        try:
+            queued = None
+            if key and hasattr(self, "_view_layer_save_queued_jobs"):
+                queued = self._view_layer_save_queued_jobs.pop(key, None)
+            if queued is not None:
+                kinds = set()
+                try:
+                    kinds = set(getattr(self, "_view_layer_save_job_checkpoint_kinds", {}).get(key, set()) or set())
+                except Exception:
+                    kinds = set()
+                self._start_view_layer_save_job(queued, checkpoint_kinds=kinds)
+        except Exception:
+            pass
+
+    def _on_view_layer_save_job_started(self, result):
+        try:
+            self.audit_boundary_event(
+                "VIEW_LAYER_SAVE_WORKER_START",
+                page_idx=int((result or {}).get("page_idx", -1)),
+                process_final_paint=bool((result or {}).get("process_final_paint", False)),
+                process_mask=bool((result or {}).get("process_mask", False)),
+                mask_key=str((result or {}).get("mask_key") or ""),
+                throttle_ms=120,
+            )
+        except Exception:
+            pass
+
+    def _on_view_layer_save_job_done(self, result):
+        try:
+            page_idx = int((result or {}).get("page_idx", -1))
+        except Exception:
+            page_idx = -1
+        try:
+            curr = (getattr(self, "data", {}) or {}).get(page_idx)
+            if isinstance(curr, dict):
+                if bool((result or {}).get("processed_final_paint", False)):
+                    curr["final_paint_path"] = (result or {}).get("final_paint_path")
+                    curr["final_paint_above_path"] = (result or {}).get("final_paint_above_path")
+                    # 저장 파일이 source of truth가 되었으므로 무거운 bytes payload는 들고 있지 않는다.
+                    curr["final_paint"] = None
+                    curr["final_paint_above"] = None
+                mask_key = str((result or {}).get("mask_key") or "")
+                if mask_key and (result or {}).get("mask_path"):
+                    curr[f"{mask_key}_path"] = (result or {}).get("mask_path")
+                    curr[f"{mask_key}_dirty"] = False
+            try:
+                self.record_recovery_project_dir(getattr(self, "project_dir", None))
+            except Exception:
+                pass
+            try:
+                self.audit_boundary_event(
+                    "VIEW_LAYER_SAVE_WORKER_DONE",
+                    page_idx=page_idx,
+                    processed_final_paint=bool((result or {}).get("processed_final_paint", False)),
+                    processed_mask=bool((result or {}).get("processed_mask", False)),
+                    mask_key=str((result or {}).get("mask_key") or ""),
+                    throttle_ms=120,
+                )
+            except Exception:
+                pass
+            try:
+                self.update_window_title()
+            except Exception:
+                pass
+        finally:
+            self._finish_view_layer_save_key(result or {})
+
+    def _on_view_layer_save_job_failed(self, result):
+        try:
+            key = str((result or {}).get("key") or "")
+            page_idx = int((result or {}).get("page_idx", -1))
+            kinds = set()
+            try:
+                kinds = set(getattr(self, "_view_layer_save_job_checkpoint_kinds", {}).get(key, set()) or set())
+            except Exception:
+                kinds = {"paint", "mask"}
+            self._restore_view_layer_checkpoint_kinds(page_idx, kinds or {"paint", "mask"})
+            try:
+                self.audit_boundary_event(
+                    "VIEW_LAYER_SAVE_WORKER_FAILED",
+                    page_idx=page_idx,
+                    error=str((result or {}).get("error") or ""),
+                    throttle_ms=120,
+                )
+            except Exception:
+                pass
+            try:
+                if hasattr(self, "_record_background_save_failure_for_explicit_save"):
+                    self._record_background_save_failure_for_explicit_save(result or {}, kind="view_layer")
+            except Exception:
+                pass
+            try:
+                self.schedule_deferred_auto_save_project(1200)
+            except Exception:
+                pass
+        finally:
+            self._finish_view_layer_save_key(result or {})
+
+    def note_paint_undo_redo_activity(self, duration_ms=2200):
+        """Mark paint Undo/Redo as a short busy burst.
+
+        Paint history itself is applied immediately, but the expensive view-layer
+        PNG/data commit and workspace flush should wait until the user stops
+        pressing Ctrl+Z/Ctrl+Y.  This keeps repeated Undo/Redo responsive.
+        """
+        try:
+            import time
+            duration_ms = max(200, min(int(duration_ms or 2200), 6000))
+            until = time.time() + (duration_ms / 1000.0)
+            self._paint_undo_redo_busy_until = max(float(getattr(self, "_paint_undo_redo_busy_until", 0.0) or 0.0), until)
+        except Exception:
+            pass
+        try:
+            view = getattr(self, "view", None)
+            if view is not None and hasattr(view, "suspend_brush_cursor_preview"):
+                view.suspend_brush_cursor_preview(reason="paint_undo_redo", delay_ms=180)
+        except Exception:
+            pass
 
     def schedule_deferred_view_layer_commit(self, kind=None, delay_ms=1200):
         """브러시/마스크 레이어 변경을 즉시 PNG/numpy로 인코딩하지 않고 묶어서 저장한다.
@@ -915,10 +1390,63 @@ class MainWindowHistoryMixin:
         except Exception:
             pass
 
+    def _pending_view_layer_commit_busy_ms(self):
+        remaining = 0.0
+        try:
+            if hasattr(self, "ui_interaction_busy_remaining_ms"):
+                remaining = max(remaining, float(int(self.ui_interaction_busy_remaining_ms(minimum_when_view_fast_path=900))) / 1000.0)
+        except Exception:
+            pass
+        try:
+            now = __import__("time").time()
+            for attr in ("_ui_interaction_busy_until", "_progressive_page_load_pause_until", "_paint_undo_redo_busy_until"):
+                until = float(getattr(self, attr, 0.0) or 0.0)
+                if until > now:
+                    remaining = max(remaining, until - now)
+        except Exception:
+            pass
+        try:
+            view = getattr(self, "view", None)
+            if view is not None and bool(getattr(view, "_view_interaction_fast_path_active", False)):
+                remaining = max(remaining, 0.9)
+        except Exception:
+            pass
+        try:
+            return max(0, int(round(remaining * 1000.0)))
+        except Exception:
+            return 0
+
     def flush_pending_view_layer_commit(self, save_after=False):
         pending = getattr(self, "_pending_view_layer_commit_kinds", set())
         if not pending:
             return False
+        if save_after:
+            try:
+                busy_ms = int(self._pending_view_layer_commit_busy_ms())
+            except Exception:
+                busy_ms = 0
+            if busy_ms > 0:
+                try:
+                    self.audit_boundary_event(
+                        "VIEW_LAYER_COMMIT_DEFERRED_DURING_UI_ACTIVITY",
+                        pending=sorted(str(x) for x in pending),
+                        busy_ms=int(busy_ms),
+                        throttle_ms=250,
+                    )
+                except Exception:
+                    pass
+                try:
+                    timer = getattr(self, "_deferred_view_layer_commit_timer", None)
+                    if timer is None:
+                        timer = QTimer(self)
+                        timer.setSingleShot(True)
+                        timer.timeout.connect(lambda: self.flush_pending_view_layer_commit(save_after=True))
+                        self._deferred_view_layer_commit_timer = timer
+                    timer.stop()
+                    timer.start(max(650, min(int(busy_ms) + 550, 2400)))
+                    return False
+                except Exception:
+                    return False
         try:
             timer = getattr(self, "_deferred_view_layer_commit_timer", None)
             if timer is not None:
@@ -926,6 +1454,37 @@ class MainWindowHistoryMixin:
         except Exception:
             pass
         self._pending_view_layer_commit_kinds = set()
+
+        job = None
+        dropped_kinds = set()
+        try:
+            job, dropped_kinds = self._make_view_layer_save_job(pending)
+        except Exception:
+            job = None
+            dropped_kinds = set()
+        if job is not None and self.enqueue_view_layer_save_job(job, checkpoint_kinds=dropped_kinds):
+            try:
+                self._drop_view_layer_checkpoint_kinds(int(getattr(job, "page_idx", 0) or 0), dropped_kinds)
+            except Exception:
+                pass
+            try:
+                self.audit_boundary_event(
+                    "VIEW_LAYER_COMMIT_ENQUEUED_INSTEAD_OF_DIRECT_SAVE",
+                    page_idx=int(getattr(job, "page_idx", -1) or -1),
+                    pending=sorted(str(x) for x in pending),
+                    dropped_checkpoint_kinds=sorted(str(x) for x in dropped_kinds),
+                    throttle_ms=180,
+                )
+            except Exception:
+                pass
+            try:
+                self.has_unsaved_changes = True
+                self.update_window_title()
+            except Exception:
+                pass
+            return True
+
+        # Worker enqueue가 불가능한 예외 상황에서는 기존 동기 경로로 폴백한다.
         changed = False
         try:
             if "final_paint" in pending and hasattr(self, "cb_mode") and self.cb_mode.currentIndex() == 4:
@@ -935,13 +1494,24 @@ class MainWindowHistoryMixin:
         except Exception:
             pass
         if changed and save_after:
+            saved = False
             try:
-                self.schedule_deferred_auto_save_project(200)
+                page_idx = int(getattr(self, "idx", 0) or 0)
             except Exception:
+                page_idx = 0
+            try:
+                if hasattr(self, "flush_workspace_image_pages"):
+                    saved = bool(self.flush_workspace_image_pages([page_idx], reason="view_layer_commit_fallback", release_non_current=False))
+            except Exception:
+                saved = False
+            if not saved:
                 try:
-                    self.auto_save_project()
+                    self.schedule_deferred_auto_save_project(200)
                 except Exception:
-                    pass
+                    try:
+                        self.auto_save_project()
+                    except Exception:
+                        pass
         return changed
 
     def on_final_paint_edited(self):
@@ -961,9 +1531,31 @@ class MainWindowHistoryMixin:
                 return
         except Exception:
             return
+
+        # 텍스트 도구에서 배경 클릭은 새 텍스트 생성이다.
+        # 혹시 직전 직접 편집기가 아직 살아 있으면 먼저 확정하되,
+        # 직전 텍스트를 다시 선택하지 않는다. 그래야 같은 클릭 흐름에서
+        # 포커스가 이전 텍스트에 남아 드래그/이동으로 오판되지 않는다.
+        try:
+            if getattr(self, "inline_text_editor", None) is not None:
+                self.finish_inline_text_edit(commit=True, refresh=True, reselect=False)
+        except TypeError:
+            try:
+                self.finish_inline_text_edit(commit=True, refresh=True)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
         curr = self.data.get(self.idx)
         if not curr:
             return
+
+        try:
+            if getattr(self, "view", None) is not None and getattr(self.view, "scene", None) is not None:
+                self.view.scene.clearSelection()
+        except Exception:
+            pass
 
         data_list = curr.setdefault('data', [])
         max_id = 0
@@ -976,15 +1568,19 @@ class MainWindowHistoryMixin:
 
         w, h = 260, 80
         try:
-            font_family = self.cb_font.currentFont().family()
+            style = self.current_style_snapshot() if hasattr(self, 'current_style_snapshot') else {}
         except Exception:
-            font_family = ''
+            style = {}
         try:
-            font_size = int(self.sb_font_size.value())
+            font_family = str(style.get('font_family') or self.cb_font.currentFont().family())
+        except Exception:
+            font_family = str(style.get('font_family') or '')
+        try:
+            font_size = int(style.get('font_size') or self.sb_font_size.value())
         except Exception:
             font_size = 24
         try:
-            stroke_width = int(self.sb_strk.value())
+            stroke_width = int(style.get('stroke_width') if style.get('stroke_width') is not None else self.sb_strk.value())
         except Exception:
             stroke_width = 2
 
@@ -997,9 +1593,18 @@ class MainWindowHistoryMixin:
             'font_family': font_family,
             'font_size': font_size,
             'stroke_width': stroke_width,
-            'text_color': str(getattr(self, 'default_text_color', None) or '#000000'),
-            'stroke_color': str(getattr(self, 'default_stroke_color', None) or '#FFFFFF'),
-            'align': getattr(self, 'default_align', 'center'),
+            'text_color': str(style.get('text_color') or getattr(self, 'default_text_color', None) or '#000000'),
+            'stroke_color': str(style.get('stroke_color') or getattr(self, 'default_stroke_color', None) or '#FFFFFF'),
+            'align': str(style.get('align') or getattr(self, 'default_align', 'center')),
+            'writing_direction': style.get('writing_direction') or (self.current_default_writing_direction() if hasattr(self, 'current_default_writing_direction') else 'horizontal'),
+            'partial_horizontal_writing_enabled': self.current_default_partial_horizontal_writing_enabled() if hasattr(self, 'current_default_partial_horizontal_writing_enabled') else True,
+            'line_spacing': int(style.get('line_spacing', getattr(self, 'default_line_spacing', 100)) or 100),
+            'letter_spacing': int(style.get('letter_spacing', getattr(self, 'default_letter_spacing', 0)) or 0),
+            'char_width': int(style.get('char_width', getattr(self, 'default_char_width', 100)) or 100),
+            'char_height': int(style.get('char_height', getattr(self, 'default_char_height', 100)) or 100),
+            'bold': bool(style.get('bold', getattr(self, 'default_bold', False))),
+            'italic': bool(style.get('italic', getattr(self, 'default_italic', False))),
+            'strike': bool(style.get('strike', getattr(self, 'default_strike', False))),
             'x_off': 0,
             'y_off': 0,
             'manual_text_rect': True,
@@ -1007,6 +1612,16 @@ class MainWindowHistoryMixin:
             'force_show': True,
             'pending_new_text': True,
         }
+        try:
+            adv = style.get('advanced_text_options') if isinstance(style, dict) else None
+            if isinstance(adv, dict):
+                temp_data['advanced_text_options'] = copy.deepcopy(adv)
+                if hasattr(self, 'advanced_text_effect_fields'):
+                    for _k in self.advanced_text_effect_fields():
+                        if _k in adv:
+                            temp_data[_k] = copy.deepcopy(adv.get(_k))
+        except Exception:
+            pass
 
         item = TypesettingItem(
             temp_data,
@@ -1159,7 +1774,9 @@ class MainWindowHistoryMixin:
             "deepseek": "deepseek_chunk_size",
             "google": "google_translate_chunk_size",
             "gemini": "gemini_chunk_size",
+            "gemini_deferred": "gemini_delayed_chunk_size",
             "custom": "custom_translation_chunk_size",
+            "lm_studio": "lm_studio_chunk_size",
         }.get(str(provider or "openai"), "openai_chunk_size")
 
     def on_translation_provider_changed(self, save=True):
@@ -1176,68 +1793,165 @@ class MainWindowHistoryMixin:
         # v2.1.0 이후 상단 툴바 묶음 입력은 제거되었다.
         # 구버전/호환 위젯이 남아 있을 경우만 캐시에 반영한다.
         provider = self.cb_trans_provider.currentData() or "openai"
-        self.trans_chunk_sizes[provider] = int(value)
+        self.trans_chunk_sizes[provider] = max(0, int(value))
 
-    def get_current_translation_chunk_size(self):
-        provider = self.cb_trans_provider.currentData() or "openai"
+    def get_current_translation_chunk_setting(self, provider=None):
+        provider = provider or self.cb_trans_provider.currentData() or "openai"
         attr = self._chunk_attr_for_provider(provider)
         try:
-            value = int(getattr(self.api_settings, attr, 0) or 0)
+            return max(0, min(int(getattr(self.api_settings, attr, 0) or 0), 100))
         except Exception:
-            value = 0
+            try:
+                return max(0, min(int(self.trans_chunk_sizes.get(provider, 0) or 0), 100))
+            except Exception:
+                return 0
+
+    def get_current_translation_chunk_size(self, target_count=None):
+        provider = self.cb_trans_provider.currentData() or "openai"
+        value = self.get_current_translation_chunk_setting(provider)
         if value <= 0:
-            value = int(self.trans_chunk_sizes.get(provider, 8 if provider == "deepseek" else (50 if provider == "google" else (10 if provider == "gemini" else 20))))
-        return max(1, min(value, 100))
+            try:
+                auto_count = int(target_count or 0)
+            except Exception:
+                auto_count = 0
+            value = auto_count if auto_count > 0 else 1
+        return max(1, min(value, 100000))
 
     def open_text_number_width_dialog(self):
-        """분석도 노란 텍스트 번호 박스 너비를 즉시 조정한다."""
+        """분석 박스 크기 옵션을 설정한다.
+
+        자동값은 페이지 너비 기준으로 각 페이지에 따로 적용한다.
+        수동값은 번호 박스와 분석 외곽선 크기를 전 페이지/새 페이지에 공통 적용한다.
+        """
         dlg = QDialog(self)
-        dlg.setWindowTitle("텍스트 넘버 크기 변경")
-        dlg.resize(360, 120)
+        dlg.setWindowTitle(self.tr_ui("분석 박스 크기"))
+        dlg.resize(460, 220)
+        try:
+            dlg.setStyleSheet(self.settings_dialog_style())
+        except Exception:
+            pass
 
         layout = QVBoxLayout(dlg)
-        info = QLabel("분석도에 표시되는 노란 텍스트 번호 박스의 너비값을 조정합니다.")
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+
+        info = QLabel(self.tr_ui(
+            "분석도에 표시되는 번호 박스와 외곽선 크기를 정합니다. "
+            "자동값은 페이지 너비를 기준으로 각 페이지에 맞춰 계산하고, "
+            "수동값은 모든 페이지와 앞으로 추가될 페이지에 같은 크기로 적용합니다."
+        ))
         info.setWordWrap(True)
+        try:
+            info.setObjectName("SettingsDescription")
+        except Exception:
+            pass
         layout.addWidget(info)
 
-        line = QHBoxLayout()
-        line.addWidget(QLabel("너비값"))
-        spin = QSpinBox()
-        spin.setRange(20, 300)
-        spin.setValue(int(getattr(self, "analysis_number_box_width", 40)))
-        spin.setSuffix(" px")
-        spin.setKeyboardTracking(True)
-        spin.selectAll()
-        line.addWidget(spin, 1)
-        layout.addLayout(line)
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel(self.tr_ui("적용 방식"), dlg))
+        combo_mode = QComboBox(dlg)
+        combo_mode.addItem(self.tr_ui("자동값(페이지별 너비 기준)"), "auto")
+        combo_mode.addItem(self.tr_ui("수동값(전 페이지 공통)"), "manual")
+        current_mode = str(getattr(self, "analysis_box_size_mode", "auto") or "auto").lower()
+        combo_mode.setCurrentIndex(1 if current_mode == "manual" else 0)
+        mode_row.addWidget(combo_mode, 1)
+        layout.addLayout(mode_row)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        number_row = QHBoxLayout()
+        number_row.addWidget(QLabel(self.tr_ui("텍스트 번호 박스 크기"), dlg))
+        spin_number = QSpinBox(dlg)
+        spin_number.setRange(1, 99999)
+        spin_number.setValue(max(1, int(getattr(self, "analysis_number_box_width", 40) or 40)))
+        spin_number.setSuffix(" px")
+        spin_number.setKeyboardTracking(True)
+        spin_number.setMinimumWidth(120)
+        number_row.addWidget(spin_number, 1)
+        layout.addLayout(number_row)
+
+        outline_row = QHBoxLayout()
+        outline_row.addWidget(QLabel(self.tr_ui("분석 외곽선 크기"), dlg))
+        spin_outline = QSpinBox(dlg)
+        spin_outline.setRange(1, 99999)
+        spin_outline.setValue(max(1, int(getattr(self, "analysis_outline_width", 2) or 2)))
+        spin_outline.setSuffix(" px")
+        spin_outline.setKeyboardTracking(True)
+        spin_outline.setMinimumWidth(120)
+        outline_row.addWidget(spin_outline, 1)
+        layout.addLayout(outline_row)
+
+        note = QLabel(self.tr_ui("자동값을 선택하면 위 수동값은 저장되어 있다가 수동값으로 바꿀 때 다시 사용됩니다."), dlg)
+        note.setWordWrap(True)
+        try:
+            note.setObjectName("SettingsDescription")
+        except Exception:
+            pass
+        layout.addWidget(note)
+
+        def refresh_enabled():
+            manual = str(combo_mode.currentData() or "auto") == "manual"
+            spin_number.setEnabled(manual)
+            spin_outline.setEnabled(manual)
+        combo_mode.currentIndexChanged.connect(lambda *_: refresh_enabled())
+        refresh_enabled()
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dlg)
         layout.addWidget(buttons)
-
-        old_value = int(getattr(self, "analysis_number_box_width", 40))
-
-        def apply_value(value):
-            self.analysis_number_box_width = int(value)
-            self.save_app_options_cache()
-            if self.cb_mode.currentIndex() == 1:
-                self.mode_chg(1)
-
-        spin.valueChanged.connect(apply_value)
         buttons.accepted.connect(dlg.accept)
         buttons.rejected.connect(dlg.reject)
 
-        spin.setFocus()
-        spin.selectAll()
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            self.log("↩️ 분석 박스 크기 설정 취소")
+            return False
 
-        result = dlg.exec()
-        if result != QDialog.DialogCode.Accepted:
-            self.analysis_number_box_width = old_value
-            self.save_app_options_cache()
-            if self.cb_mode.currentIndex() == 1:
-                self.mode_chg(1)
+        mode = str(combo_mode.currentData() or "auto")
+        if mode not in ("auto", "manual"):
+            mode = "auto"
+        self.analysis_box_size_mode = mode
+        self.analysis_number_box_width = max(1, int(spin_number.value()))
+        self.analysis_outline_width = max(1, int(spin_outline.value()))
+        self.save_app_options_cache()
+        try:
+            if getattr(self, "cb_mode", None) is not None and self.cb_mode.currentIndex() in (1, 2, 3, 4):
+                self.mode_chg(self.cb_mode.currentIndex())
+        except Exception:
+            pass
+        if mode == "manual":
+            self.log(f"📐 분석 박스 크기 설정: 수동 / 번호 {self.analysis_number_box_width}px / 외곽선 {self.analysis_outline_width}px")
         else:
-            apply_value(spin.value())
-            self.log(f"🔢 텍스트 넘버 박스 너비 변경: {spin.value()}px")
+            self.log("📐 분석 박스 크기 설정: 자동값(페이지별 너비 기준)")
+        return True
+
+    def open_analysis_box_size_dialog(self):
+        """설정/옵션 메뉴용 별칭."""
+        return self.open_text_number_width_dialog()
+
+    def toggle_text_number_boxes_hidden(self):
+        """분석/마스크 계열 작업 화면의 OCR 텍스트 번호 박스를 숨기거나 다시 표시한다."""
+        hidden = not bool(getattr(self, "text_number_boxes_hidden", False))
+        self.text_number_boxes_hidden = hidden
+        try:
+            self.save_app_options_cache()
+        except Exception:
+            pass
+        try:
+            mode = int(self.cb_mode.currentIndex()) if getattr(self, "cb_mode", None) is not None else -1
+        except Exception:
+            mode = -1
+        try:
+            if mode in (1, 2, 3):
+                self.refresh_boxes_only()
+            elif mode == 4 and hasattr(self, "mode_chg"):
+                # 최종결과 탭은 현재 버전에서 번호 박스를 따로 그리지 않지만,
+                # 향후 표시 요소가 추가되어도 상태가 즉시 반영되도록 안전하게 갱신한다.
+                self.mode_chg(4)
+        except Exception:
+            pass
+        try:
+            label = "숨김" if hidden else "표시"
+            self.log(f"🔢 텍스트 넘버 박스: {label}")
+        except Exception:
+            pass
+        return True
 
     def open_shortcut_settings_dialog(self):
         dlg = ShortcutSettingsDialog(self.shortcut_settings, self, show_cache_path=bool(getattr(self, "show_cache_paths_in_settings", False)))
@@ -1795,28 +2509,17 @@ class MainWindowHistoryMixin:
                     return False
 
             if key == "batch_inpaint":
+                # 그룹 인페인팅은 페이지 전체 리사이즈 사전 확인을 쓰지 않는다.
+                # 매크로 프리플라이트에서도 정책 없이 통과시키고, 실제 실행은 그룹 crop 단위로 진행한다.
+                ctx["inpaint_resize_checked"] = True
+                ctx["inpaint_resize_policy"] = None
+                self._macro_preflight_inpaint_resize_policy = None
+                self._macro_preflight_inpaint_resize_checked = True
+                self._batch_inpaint_resize_policy = None
                 try:
-                    old_policy = getattr(self, "_batch_inpaint_resize_policy", None)
-                    self._batch_inpaint_resize_policy = None
-                    if not self._ask_batch_inpaint_resize(valid_shared):
-                        self._batch_inpaint_resize_policy = old_policy
-                        return False
-                    policy = getattr(self, "_batch_inpaint_resize_policy", None)
-                    ctx["inpaint_resize_checked"] = True
-                    ctx["inpaint_resize_policy"] = copy.deepcopy(policy) if isinstance(policy, dict) else None
-                    self._macro_preflight_inpaint_resize_policy = copy.deepcopy(ctx["inpaint_resize_policy"]) if isinstance(ctx.get("inpaint_resize_policy"), dict) else None
-                    self._macro_preflight_inpaint_resize_checked = True
-                    self._batch_inpaint_resize_policy = old_policy
-                    try:
-                        self.log("🧩 매크로 인페인팅 리사이즈 정책 사전 확정")
-                    except Exception:
-                        pass
-                except Exception as e:
-                    try:
-                        self.log(f"⚠️ 매크로 인페인팅 리사이즈 확인 실패: {e}")
-                    except Exception:
-                        pass
-                    return False
+                    self.log("🧩 매크로 인페인팅: 전체 페이지 리사이즈 확인 생략, 그룹 crop 기준으로 진행")
+                except Exception:
+                    pass
 
             if key == "batch_export":
                 try:
@@ -1984,11 +2687,30 @@ class MainWindowHistoryMixin:
         old_restore = getattr(self, "_project_undo_restore_lock", False)
         self._project_undo_restore_lock = True
         try:
-            if hasattr(self, "cb_show_final_text") and "show_final_text" in ui_state:
+            if hasattr(self, "cb_show_final_text"):
+                # 최종 텍스트 표시 토글은 작업용 보기 상태일 뿐이다.
+                # 예전 프로젝트/자동저장 UI 상태에 show_final_text=False가 남아 있으면
+                # 최종결과 탭 진입 시 translated_text가 있어도 draw_movable_texts가 스킵되어
+                # "번역문 데이터는 있는데 화면에만 안 보이는" 상태가 된다.
+                # 프로젝트를 여는 동안에는 저장된 False를 신뢰하지 않고 항상 표시 ON으로 시작한다.
+                # 단, Undo/Redo처럼 사용자가 세션 안에서 직접 토글한 UI 상태 복원은 그대로 둔다.
+                raw_show_final_text = bool(ui_state.get("show_final_text", True)) if isinstance(ui_state, dict) else True
+                force_show_on_load = bool(getattr(self, "is_loading_project", False) and not raw_show_final_text)
+                show_final_text = True if force_show_on_load else raw_show_final_text
+                if force_show_on_load:
+                    try:
+                        self.audit_boundary_event(
+                            "PROJECT_UI_SHOW_FINAL_TEXT_FORCE_ON_LOAD",
+                            stored_show_final_text=False,
+                            applied_show_final_text=True,
+                            reason="final_text_visibility_is_session_view_state",
+                        )
+                    except Exception:
+                        pass
                 self.cb_show_final_text.blockSignals(True)
                 try:
-                    self.cb_show_final_text.setChecked(bool(ui_state.get("show_final_text")))
-                    self._last_show_final_text_checked = bool(ui_state.get("show_final_text"))
+                    self.cb_show_final_text.setChecked(bool(show_final_text))
+                    self._last_show_final_text_checked = bool(show_final_text)
                 finally:
                     self.cb_show_final_text.blockSignals(False)
             if hasattr(self, "act_final_paint_above_text") and "final_paint_above_text" in ui_state:
@@ -2023,7 +2745,10 @@ class MainWindowHistoryMixin:
         return {
             "current_mode": mode,
             "view_states": copy.deepcopy(getattr(self, "project_ui_view_states", {}) or {}),
-            "show_final_text": bool(self.cb_show_final_text.isChecked()) if hasattr(self, "cb_show_final_text") else True,
+            # 텍스트 표시 토글은 작업 중 화면 보기 상태로만 취급한다.
+            # 프로젝트에 False를 저장하면 다음 열기에서 번역문이 실제로 사라진 것처럼 보일 수 있으므로
+            # 저장 UI 상태에는 항상 True를 기록한다. 세션 중 ON/OFF 동작은 cb_show_final_text 자체로만 처리한다.
+            "show_final_text": True,
             "final_paint_above_text": bool(getattr(self, "final_paint_above_text", False)),
         }
 
@@ -2490,7 +3215,55 @@ class MainWindowHistoryMixin:
 
     def is_mask_light_undo_reason(self, reason):
         text = str(reason or "")
-        return text in {"마스크 랩핑", "마스크 커팅", "요술봉 마스킹 칠하기", "마스크 ON/OFF", "텍스트 위 페인팅 ON/OFF"}
+        return text in {"마스크 랩핑", "마스크 커팅", "요술봉 마스킹 칠하기", "마스크 ON/OFF", "텍스트 위 페인팅 ON/OFF", "감지 마스크 자동 정리"}
+
+    def is_project_structure_undo_reason(self, reason, full_project=False):
+        """Return True when an undo record must stay on the project undo stack.
+
+        Full-project records, project-structure records, and multi-page/batch
+        records cannot be safely downgraded to the current page undo stack.
+        Keep this helper local to the history mixin because older/newer undo
+        record factories call it through MainWindow.
+        """
+        if full_project:
+            return True
+        text = str(reason or "").strip()
+        if not text:
+            return False
+        try:
+            from ysb.core.undo_policies import (
+                KIND_BATCH,
+                KIND_EXTERNAL_COMMIT,
+                KIND_PROJECT_STRUCTURE,
+                SCOPE_PROJECT,
+                policy_for,
+            )
+            pol = policy_for(text)
+            if getattr(pol, "scope", "") == SCOPE_PROJECT:
+                return True
+            if getattr(pol, "kind", "") in (KIND_PROJECT_STRUCTURE, KIND_BATCH):
+                return True
+            # External commits are project-level only when the policy itself says
+            # project scope.  Page-level external commits should still use their
+            # boundary policy instead of being stored as normal project undo.
+            if getattr(pol, "kind", "") == KIND_EXTERNAL_COMMIT and getattr(pol, "scope", "") == SCOPE_PROJECT:
+                return True
+        except Exception:
+            pass
+        return text in {
+            "페이지 추가",
+            "페이지 삭제",
+            "페이지 순서 변경",
+            "페이지 이름 변경",
+            "프로젝트 구조 변경",
+            "프로젝트 메타데이터 변경",
+            "전체 페이지 글꼴 프리셋 적용",
+            "일괄 텍스트 정리",
+            "일괄 마스크 정리",
+            "일괄 번역문 불러오기",
+            "일괄 번역문 지우기",
+            "배경을 원본으로 쓰기",
+        }
 
     def is_view_history_record(self, rec):
         """스크롤/확대 같은 보기 전용 Undo인지 판정한다.
@@ -3716,9 +4489,14 @@ class MainWindowHistoryMixin:
                 self.flush_pending_page_view_undo_session()
         except Exception:
             pass
-        # Stage 9 원칙: Ctrl+Z는 먼저 canonical single timeline을 pop한다.
-        # 부채꼴 제어점/OCR 임시 영역/요술봉 선택 history는 이제 앞단에서
-        # 본작업보다 먼저 새지 않고, 구버전 record가 남은 경우에만 fallback 처리한다.
+        # 요술봉은 사용자가 클릭/확장/확정을 한 단계씩 세밀하게 되돌리는 기대가 강하다.
+        # 따라서 요술봉 도구가 활성일 때는 페이지/프로젝트 undo보다 먼저
+        # 전용 history를 소모해 한 단계씩 되돌린다.
+        if getattr(getattr(self, "view", None), 'draw_mode', None) == 'magic_wand' and getattr(self, 'magic_wand_history', None):
+            if self.undo_magic_wand_selection():
+                self.update_undo_redo_buttons()
+                return
+        # Stage 9 원칙: Ctrl+Z는 그 외에는 canonical single timeline을 먼저 pop한다.
         if self.undo_current_page_action():
             return
         if self.undo_project_action():
@@ -3764,16 +4542,16 @@ class MainWindowHistoryMixin:
                 self.flush_pending_page_view_undo_session()
         except Exception:
             pass
+        if getattr(getattr(self, "view", None), 'draw_mode', None) == 'magic_wand' and getattr(self, 'magic_wand_redo_history', None):
+            if self.redo_magic_wand_selection():
+                self.update_undo_redo_buttons()
+                return
         if self.redo_current_page_action():
             return
         if self.redo_project_action():
             return
         if self.redo_current_page_view_action():
             return
-        if getattr(self.view, 'draw_mode', None) == 'magic_wand' and getattr(self, 'magic_wand_redo_history', None):
-            if self.redo_magic_wand_selection():
-                self.update_undo_redo_buttons()
-                return
         try:
             if getattr(getattr(self, "view", None), "redo_history", None):
                 if self.view.redo():

@@ -1,0 +1,41 @@
+{
+  "key": "ja",
+  "language": "Japanese",
+  "description": "Japanese sample for OCR / translation / inpaint practical test",
+  "image_path": "ja_sample.png",
+  "mask_path": "ja_sample_mask.png",
+  "mask_npy_path": "ja_sample_mask.npy",
+  "canvas_size": [
+    1280,
+    720
+  ],
+  "font_size": 70,
+  "stroke_width": 10,
+  "lines": [
+    "今日はいい天気ですね。",
+    "でも、締め切りは待ってくれない。"
+  ],
+  "line_bboxes_xyxy": [
+    {
+      "line_index": 0,
+      "text": "今日はいい天気ですね。",
+      "bbox": [
+        245,
+        254,
+        1035,
+        343
+      ]
+    },
+    {
+      "line_index": 1,
+      "text": "でも、締め切りは待ってくれない。",
+      "bbox": [
+        74,
+        377,
+        1206,
+        465
+      ]
+    }
+  ],
+  "suggested_translation_target": "ko"
+}

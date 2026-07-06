@@ -1,0 +1,134 @@
+[
+  {
+    "key": "en",
+    "language": "English",
+    "description": "English sample in exactly 3 lines for OCR / translation / inpaint practical test",
+    "image_path": "en_sample.png",
+    "mask_path": "en_sample_mask.png",
+    "mask_npy_path": "en_sample_mask.npy",
+    "canvas_size": [
+      1280,
+      720
+    ],
+    "font_size": 72,
+    "stroke_width": 10,
+    "lines": [
+      "The build passed today,",
+      "but the warning log",
+      "still looks suspicious."
+    ],
+    "line_bboxes_xyxy": [
+      {
+        "line_index": 0,
+        "text": "The build passed today,",
+        "bbox": [
+          212,
+          192,
+          1068,
+          286
+        ]
+      },
+      {
+        "line_index": 1,
+        "text": "but the warning log",
+        "bbox": [
+          283,
+          312,
+          996,
+          408
+        ]
+      },
+      {
+        "line_index": 2,
+        "text": "still looks suspicious.",
+        "bbox": [
+          254,
+          434,
+          1025,
+          527
+        ]
+      }
+    ],
+    "suggested_translation_target": "ko"
+  },
+  {
+    "key": "ja",
+    "language": "Japanese",
+    "description": "Japanese sample for OCR / translation / inpaint precheck",
+    "image_path": "ja_sample.png",
+    "mask_path": "ja_sample_mask.png",
+    "canvas_size": [
+      1280,
+      720
+    ],
+    "font_size": 78,
+    "stroke_width": 10,
+    "lines": [
+      "今日はいい天気ですね。",
+      "でも、締め切りは待ってくれない。"
+    ],
+    "line_bboxes_xyxy": [
+      {
+        "line_index": 0,
+        "text": "今日はいい天気ですね。",
+        "bbox": [
+          201,
+          246,
+          1079,
+          343
+        ]
+      },
+      {
+        "line_index": 1,
+        "text": "でも、締め切りは待ってくれない。",
+        "bbox": [
+          10,
+          377,
+          1269,
+          473
+        ]
+      }
+    ],
+    "suggested_translation_target": "ko"
+  },
+  {
+    "key": "zh",
+    "language": "Chinese",
+    "description": "Chinese sample for OCR / translation / inpaint precheck",
+    "image_path": "zh_sample.png",
+    "mask_path": "zh_sample_mask.png",
+    "canvas_size": [
+      1280,
+      720
+    ],
+    "font_size": 78,
+    "stroke_width": 10,
+    "lines": [
+      "今天的测试通过了，",
+      "不过我们还得检查日志。"
+    ],
+    "line_bboxes_xyxy": [
+      {
+        "line_index": 0,
+        "text": "今天的测试通过了，",
+        "bbox": [
+          279,
+          245,
+          1001,
+          344
+        ]
+      },
+      {
+        "line_index": 1,
+        "text": "不过我们还得检查日志。",
+        "bbox": [
+          201,
+          378,
+          1079,
+          474
+        ]
+      }
+    ],
+    "suggested_translation_target": "ko"
+  }
+]

@@ -311,6 +311,367 @@ def ensure_dir(path: str):
 
 
 
+def _clean_numeric_stem_aliases(number: int) -> list[str]:
+    """Return numeric clean stem aliases that may have been created by older naming rules."""
+    try:
+        n = int(number)
+    except Exception:
+        return []
+    if n < 0:
+        return []
+    vals = [str(n), f"{n:02d}", f"{n:03d}", f"{n:04d}", f"{n:05d}"]
+    out = []
+    seen = set()
+    for v in vals:
+        if v not in seen:
+            out.append(v)
+            seen.add(v)
+    return out
+
+
+def _page_number_stem_for_clean(page_idx: int = 0) -> str:
+    """Return the canonical 4-digit page number stem used by clean images."""
+    try:
+        idx = int(page_idx)
+    except Exception:
+        idx = 0
+    if idx < 0:
+        idx = 0
+    return f"{idx + 1:04d}"
+
+
+def canonical_clean_stem_for_page(curr: dict | None, image_path=None, page_idx: int = 0) -> tuple[str, str]:
+    """Return (clean_stem, page_number_stem) for a page's canonical clean image.
+
+    Canonical rule: clean_0001 / clean_0002 / ... based only on project page order.
+    Page original names and imported clean filenames are source/debug material only and
+    must never become the saved clean filename.
+    """
+    number_stem = _page_number_stem_for_clean(page_idx)
+    return f"clean_{number_stem}", number_stem
+
+
+def _original_stem_alias_for_clean(curr: dict | None, image_path=None, page_idx: int = 0) -> str:
+    """Return the page original-name stem only for legacy alias cleanup."""
+    curr = curr if isinstance(curr, dict) else {}
+    try:
+        idx = int(page_idx)
+    except Exception:
+        idx = 0
+    original_name = ""
+    try:
+        original_name = str(curr.get("original_name") or "").strip()
+    except Exception:
+        original_name = ""
+    if not original_name:
+        try:
+            original_name = os.path.basename(str(image_path or f"page{idx + 1:04d}.png"))
+        except Exception:
+            original_name = f"page{idx + 1:04d}.png"
+    return safe_image_file_stem(Path(str(original_name)).stem, fallback=f"page{idx + 1:04d}")
+
+
+def clean_alias_stems_for_page(curr: dict | None, image_path=None, page_idx: int = 0) -> list[str]:
+    """Return same-page clean filename stems that should be cleaned up.
+
+    The canonical clean file is always clean_0001, clean_0002, ... by page order.
+    This list also includes older/original-name based aliases so reopening or saving a
+    project can collapse duplicated files like clean_023 / clean_0023 /
+    clean_원본명_023 into the one canonical page-order file.
+    """
+    clean_stem, number_stem = canonical_clean_stem_for_page(curr, image_path, page_idx)
+    aliases = [clean_stem, number_stem]
+    try:
+        idx = int(page_idx)
+    except Exception:
+        idx = 0
+    for stem in _clean_numeric_stem_aliases(idx + 1):
+        aliases.append(stem)
+        aliases.append(f"clean_{stem}")
+        aliases.append(f"Clean_{stem}")
+
+    # 원본 파일명 기반으로 만들어졌던 잘못된 clean 이름들도 같은 페이지 alias로 취급한다.
+    original_stem = _original_stem_alias_for_clean(curr, image_path, page_idx)
+    if original_stem:
+        aliases.append(original_stem)
+        aliases.append(f"clean_{original_stem}")
+        aliases.append(f"Clean_{original_stem}")
+
+    for raw in (original_stem, clean_stem):
+        try:
+            m = re.search(r"(\d+)$", str(raw or ""))
+            if m:
+                n = int(m.group(1))
+                for stem in _clean_numeric_stem_aliases(n):
+                    aliases.append(stem)
+                    aliases.append(f"clean_{stem}")
+                    aliases.append(f"Clean_{stem}")
+                    prefix = str(raw or "")[: -len(m.group(1))]
+                    if prefix:
+                        aliases.append(prefix + stem)
+                        aliases.append(f"clean_{prefix + stem}")
+                        aliases.append(f"Clean_{prefix + stem}")
+        except Exception:
+            pass
+    out = []
+    seen = set()
+    for stem in aliases:
+        stem = str(stem or "").strip()
+        if not stem:
+            continue
+        key = stem.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(stem)
+    return out
+
+def remove_clean_alias_image_variants(folder: str, curr: dict | None, image_path=None, page_idx: int = 0):
+    """Remove all same-page legacy clean name variants before writing the canonical file."""
+    try:
+        os.makedirs(str(folder), exist_ok=True)
+    except Exception:
+        pass
+    for stem in clean_alias_stems_for_page(curr, image_path, page_idx):
+        remove_same_stem_image_variants(str(folder), stem)
+
+
+def _clean_image_extensions() -> tuple[str, ...]:
+    return (".png", ".jpg", ".jpeg", ".webp")
+
+
+def _clean_existing_files_for_stem(folder: str | Path, stem: str) -> list[Path]:
+    stem = str(stem or "").strip()
+    if not stem:
+        return []
+    root = Path(folder)
+    out: list[Path] = []
+    for ext in _clean_image_extensions():
+        p = root / f"{stem}{ext}"
+        try:
+            if p.is_file():
+                out.append(p)
+        except Exception:
+            pass
+    return out
+
+
+def _same_file_path(a, b) -> bool:
+    try:
+        return os.path.abspath(str(a)) == os.path.abspath(str(b))
+    except Exception:
+        return str(a) == str(b)
+
+
+def _page_original_image_path_for_clean(project_dir: str, page: dict | None) -> str | None:
+    if not isinstance(page, dict):
+        return None
+    image_value = page.get("image")
+    if not image_value:
+        return None
+    try:
+        return abs_from_rel(project_dir, str(image_value))
+    except Exception:
+        return os.path.join(project_dir, str(image_value).replace("/", os.sep))
+
+
+def _page_clean_curr_for_canonical(project_dir: str, page: dict | None, page_idx: int) -> tuple[dict, str | None]:
+    page = page if isinstance(page, dict) else {}
+    image_path = _page_original_image_path_for_clean(project_dir, page)
+    original_name = str(page.get("original_name") or "").strip()
+    if not original_name and image_path:
+        original_name = os.path.basename(image_path)
+    if not original_name:
+        original_name = f"page{int(page_idx) + 1:04d}.png"
+    return {"original_name": original_name}, image_path
+
+
+def _canonical_clean_path_for_page_entry(project_dir: str, page: dict | None, page_idx: int, source_path: str | Path | None = None) -> str:
+    curr, image_path = _page_clean_curr_for_canonical(project_dir, page, page_idx)
+    clean_stem, _original_stem = canonical_clean_stem_for_page(curr, image_path, page_idx)
+    ext = ""
+    try:
+        if source_path:
+            ext = Path(str(source_path)).suffix.lower()
+    except Exception:
+        ext = ""
+    if ext not in _clean_image_extensions():
+        try:
+            clean_rel = str((page or {}).get("clean") or "")
+            ext = Path(clean_rel).suffix.lower()
+        except Exception:
+            ext = ""
+    if ext not in _clean_image_extensions():
+        ext = ".png"
+    return os.path.join(project_dir, "clean", clean_stem + ext)
+
+
+def _candidate_clean_files_for_page(project_dir: str, page: dict | None, page_idx: int) -> list[Path]:
+    page = page if isinstance(page, dict) else {}
+    clean_dir = Path(project_dir) / "clean"
+    curr, image_path = _page_clean_curr_for_canonical(project_dir, page, page_idx)
+    out: list[Path] = []
+    seen: set[str] = set()
+
+    def add_path(path_value):
+        if not path_value:
+            return
+        try:
+            p = str(path_value)
+            if not (os.path.isabs(p) or PureWindowsPath(p).is_absolute() or PurePosixPath(p).is_absolute()):
+                p = abs_from_rel(project_dir, p)
+            pp = Path(p)
+            if pp.is_file():
+                key = str(pp.resolve()).casefold()
+                if key not in seen:
+                    seen.add(key)
+                    out.append(pp)
+        except Exception:
+            pass
+
+    # 1순위: 페이지 순번 canonical clean 파일. 한 번 잘못 매칭된 project.json 참조보다
+    # clean_0001 / clean_0002... 정식 파일을 우선 source of truth로 본다.
+    try:
+        clean_stem, _number_stem = canonical_clean_stem_for_page(curr, image_path, page_idx)
+        for p in _clean_existing_files_for_stem(clean_dir, clean_stem):
+            add_path(p)
+    except Exception:
+        pass
+
+    # 2순위: project.json이 현재 가리키는 파일. canonical이 없을 때 legacy source로 승격한다.
+    add_path(page.get("clean"))
+
+    # 3순위: 같은 페이지에서 생길 수 있는 레거시/제로패딩/원본 stem 변종.
+    try:
+        for stem in clean_alias_stems_for_page(curr, image_path, page_idx):
+            for p in _clean_existing_files_for_stem(clean_dir, stem):
+                add_path(p)
+    except Exception:
+        pass
+
+    return out
+
+
+def normalize_clean_page_refs(project_dir: str, pages: list[dict], *, write_project_json: bool = False, reason: str = "normalize_clean") -> dict:
+    """Normalize every page clean reference to the canonical page filename.
+
+    Canonical rule is always `clean_0001`, `clean_0002`, ... by project page order.
+    Files imported from external folders or created by older original-name/zero-padding
+    rules are treated only as source material, then promoted/copied into the canonical
+    page-order name. This runs at package extraction/load/packaging time so a page that
+    was already matched once can still be repaired.
+    """
+    stats = {
+        "pages": 0,
+        "with_clean_ref": 0,
+        "canonicalized": 0,
+        "removed_aliases": 0,
+        "missing": 0,
+        "errors": 0,
+    }
+    if not isinstance(pages, list):
+        return stats
+    clean_dir = Path(project_dir) / "clean"
+    try:
+        clean_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
+    samples: list[str] = []
+    changed = False
+    for i, page in enumerate(pages):
+        if not isinstance(page, dict):
+            continue
+        stats["pages"] += 1
+        had_ref = bool(page.get("clean"))
+        if had_ref:
+            stats["with_clean_ref"] += 1
+
+        candidates = _candidate_clean_files_for_page(project_dir, page, i)
+        if not candidates:
+            if had_ref:
+                # project.json이 존재하지 않는 클린본 파일을 가리키고 있으면
+                # 패키징 때 유령 참조가 남지 않도록 제거한다.
+                old = str(page.get("clean") or "")
+                page.pop("clean", None)
+                changed = True
+                stats["missing"] += 1
+                if len(samples) < 12:
+                    samples.append(f"p{i+1}:missing:{old}")
+            continue
+
+        src = candidates[0]
+        canonical = Path(_canonical_clean_path_for_page_entry(project_dir, page, i, src))
+        try:
+            canonical.parent.mkdir(parents=True, exist_ok=True)
+            promoted = False
+            if not _same_file_path(src, canonical):
+                shutil.copy2(str(src), str(canonical))
+                promoted = True
+                stats["canonicalized"] += 1
+            elif not canonical.is_file():
+                shutil.copy2(str(src), str(canonical))
+                promoted = True
+                stats["canonicalized"] += 1
+
+            # 같은 페이지의 구명칭/제로패딩 변종은 canonical만 남기고 삭제한다.
+            curr, image_path = _page_clean_curr_for_canonical(project_dir, page, i)
+            removed = 0
+            for stem in clean_alias_stems_for_page(curr, image_path, i):
+                for p in _clean_existing_files_for_stem(clean_dir, stem):
+                    try:
+                        if _same_file_path(p, canonical):
+                            continue
+                        p.unlink()
+                        removed += 1
+                    except Exception:
+                        pass
+            stats["removed_aliases"] += removed
+
+            rel = _normalize_zip_name(relpath(str(canonical), project_dir))
+            if page.get("clean") != rel:
+                page["clean"] = rel
+                changed = True
+            if promoted or removed:
+                changed = True
+            if (promoted or removed) and len(samples) < 12:
+                samples.append(f"p{i+1}:{src.name}->{canonical.name}:removed={removed}")
+        except Exception as e:
+            stats["errors"] += 1
+            if len(samples) < 12:
+                samples.append(f"p{i+1}:error:{repr(e)}")
+
+    stats["changed"] = bool(changed)
+    if changed and write_project_json:
+        try:
+            project_path = os.path.join(project_dir, PROJECT_FILENAME)
+            with open(project_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            if isinstance(payload, dict) and isinstance(payload.get("pages"), list):
+                payload["pages"] = pages
+                tmp_path = project_path + ".tmp"
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, ensure_ascii=False, indent=2)
+                os.replace(tmp_path, project_path)
+                stats["project_json_written"] = True
+        except Exception as e:
+            stats["project_json_write_error"] = repr(e)
+
+    if changed or stats.get("missing") or stats.get("errors"):
+        try:
+            _save_diag_log(
+                "CLEAN_CANONICAL_NORMALIZE_DONE",
+                reason=str(reason or ""),
+                project_dir=str(project_dir),
+                samples=" | ".join(samples),
+                samples_count=len(samples),
+                **stats,
+            )
+        except Exception:
+            pass
+    return stats
+
+
 def safe_image_file_stem(name: str, fallback: str = "image") -> str:
     """Windows 파일명으로 쓸 수 있게 최소 보정하되, 원본 이름은 최대한 보존한다."""
     s = str(name or "").strip()
@@ -759,28 +1120,14 @@ class ProjectStore:
             if bg_clean is not None:
                 clean_fmt = normalize_output_image_format(getattr(self, "clean_image_format", "png"))
                 clean_quality = normalize_output_image_quality(getattr(self, "clean_image_quality", 95))
-                original_name = ""
-                try:
-                    original_name = str(curr.get("original_name") or "").strip()
-                except Exception:
-                    original_name = ""
-                if not original_name:
-                    try:
-                        original_name = os.path.basename(str(image_path or f"page{i + 1:03d}.png"))
-                    except Exception:
-                        original_name = f"page{i + 1:03d}.png"
-                original_stem = safe_image_file_stem(Path(str(original_name)).stem, fallback=f"page{i + 1:03d}")
-                clean_stem = original_stem if original_stem.lower().startswith("clean_") else f"clean_{original_stem}"
-                clean_path = os.path.join(self.project_dir, "clean", clean_stem + output_image_extension(clean_fmt))
+                clean_dir = os.path.join(self.project_dir, "clean")
+                clean_stem, _number_stem = canonical_clean_stem_for_page(curr, image_path, i)
+                clean_path = os.path.join(clean_dir, clean_stem + output_image_extension(clean_fmt))
 
-                # 형식/이름 규칙이 바뀌어 다시 저장되면 같은 클린본의 옛 확장자는 중복으로 남기지 않는다.
-                remove_same_stem_image_variants(os.path.join(self.project_dir, "clean"), clean_stem)
-                # 직전 버전에서 생긴 접두사 없는 원본명 클린본도 정리한다.
-                remove_same_stem_image_variants(os.path.join(self.project_dir, "clean"), original_stem)
-                # 더 오래된 page index 기반 clean_0001.png 계열은 원본 stem과 다를 때만 정리한다.
-                legacy_stem = f"clean_{i + 1:04d}"
-                if legacy_stem != clean_stem:
-                    remove_same_stem_image_variants(os.path.join(self.project_dir, "clean"), legacy_stem)
+                # 클린본 파일은 페이지의 canonical 이름 하나만 남긴다.
+                # 외부에서 불러온 파일명/레거시 zero-padding 변종(clean_023, clean_0023 등)은
+                # 저장 직전에 모두 정리하고 canonical 파일만 다시 생성한다.
+                remove_clean_alias_image_variants(clean_dir, curr, image_path, i)
 
                 if save_image_payload_for_output(clean_path, bg_clean, clean_fmt, clean_quality):
                     curr["clean_path"] = clean_path
@@ -792,9 +1139,11 @@ class ProjectStore:
                 if isinstance(final_paint, (bytes, bytearray)):
                     with open(paint_path, "wb") as f:
                         f.write(final_paint)
+                    curr["final_paint_path"] = paint_path
                     page["final_paint"] = relpath(paint_path, self.project_dir)
                 elif isinstance(final_paint, np.ndarray):
                     imwrite_unicode(paint_path, final_paint)
+                    curr["final_paint_path"] = paint_path
                     page["final_paint"] = relpath(paint_path, self.project_dir)
 
             final_paint_above = curr.get("final_paint_above")
@@ -803,9 +1152,11 @@ class ProjectStore:
                 if isinstance(final_paint_above, (bytes, bytearray)):
                     with open(paint_path, "wb") as f:
                         f.write(final_paint_above)
+                    curr["final_paint_above_path"] = paint_path
                     page["final_paint_above"] = relpath(paint_path, self.project_dir)
                 elif isinstance(final_paint_above, np.ndarray):
                     imwrite_unicode(paint_path, final_paint_above)
+                    curr["final_paint_above_path"] = paint_path
                     page["final_paint_above"] = relpath(paint_path, self.project_dir)
 
             # Lazy-load 상태에서 실제 payload(bytes/ndarray)를 아직 읽지 않았더라도,
@@ -1101,15 +1452,10 @@ class ProjectStore:
                 ensure_dir(os.path.join(self.project_dir, "clean"))
                 clean_fmt = normalize_output_image_format(getattr(self, "clean_image_format", "png"))
                 clean_quality = normalize_output_image_quality(getattr(self, "clean_image_quality", 95))
-                original_name = str(curr.get("original_name") or "").strip() or os.path.basename(str(image_path or f"page{i + 1:03d}.png"))
-                original_stem = safe_image_file_stem(Path(str(original_name)).stem, fallback=f"page{i + 1:03d}")
-                clean_stem = original_stem if original_stem.lower().startswith("clean_") else f"clean_{original_stem}"
-                clean_path = os.path.join(self.project_dir, "clean", clean_stem + output_image_extension(clean_fmt))
-                remove_same_stem_image_variants(os.path.join(self.project_dir, "clean"), clean_stem)
-                remove_same_stem_image_variants(os.path.join(self.project_dir, "clean"), original_stem)
-                legacy_stem = f"clean_{i + 1:04d}"
-                if legacy_stem != clean_stem:
-                    remove_same_stem_image_variants(os.path.join(self.project_dir, "clean"), legacy_stem)
+                clean_dir = os.path.join(self.project_dir, "clean")
+                clean_stem, _number_stem = canonical_clean_stem_for_page(curr, image_path, i)
+                clean_path = os.path.join(clean_dir, clean_stem + output_image_extension(clean_fmt))
+                remove_clean_alias_image_variants(clean_dir, curr, image_path, i)
                 if save_image_payload_for_output(clean_path, bg_clean, clean_fmt, clean_quality):
                     curr["clean_path"] = clean_path
                     page["clean"] = relpath(clean_path, self.project_dir)
@@ -1134,9 +1480,11 @@ class ProjectStore:
                 if isinstance(final_paint, (bytes, bytearray)):
                     with open(paint_path, "wb") as f:
                         f.write(final_paint)
+                    curr["final_paint_path"] = paint_path
                     page["final_paint"] = relpath(paint_path, self.project_dir)
                 elif isinstance(final_paint, np.ndarray):
                     imwrite_unicode(paint_path, final_paint)
+                    curr["final_paint_path"] = paint_path
                     page["final_paint"] = relpath(paint_path, self.project_dir)
 
             final_paint_above = curr.get("final_paint_above")
@@ -1146,9 +1494,11 @@ class ProjectStore:
                 if isinstance(final_paint_above, (bytes, bytearray)):
                     with open(paint_path, "wb") as f:
                         f.write(final_paint_above)
+                    curr["final_paint_above_path"] = paint_path
                     page["final_paint_above"] = relpath(paint_path, self.project_dir)
                 elif isinstance(final_paint_above, np.ndarray):
                     imwrite_unicode(paint_path, final_paint_above)
+                    curr["final_paint_above_path"] = paint_path
                     page["final_paint_above"] = relpath(paint_path, self.project_dir)
 
             # Lazy-load 상태에서 실제 payload(bytes/ndarray)를 아직 읽지 않았더라도,
@@ -1195,6 +1545,12 @@ class ProjectStore:
         with open(project_json_path, "r", encoding="utf-8") as f:
             payload = json.load(f)
         payload = apply_page_journals_to_payload(self.project_dir, payload)
+        try:
+            pages_for_clean = payload.get("pages", []) if isinstance(payload, dict) else []
+            if isinstance(pages_for_clean, list):
+                normalize_clean_page_refs(self.project_dir, pages_for_clean, write_project_json=True, reason="project_load")
+        except Exception:
+            pass
 
         self.ui_state = payload.get("ui_state") if isinstance(payload.get("ui_state"), dict) else {}
 
@@ -1744,7 +2100,10 @@ def _sanitize_project_json_file(project_dir: str) -> dict:
     pages = payload.get("pages", [])
     if isinstance(pages, list):
         cleanup_duplicate_mask_files(project_dir)
-        payload["pages"] = normalize_mask_page_refs(project_dir, _sanitize_page_file_refs_for_project(project_dir, pages))
+        pages = _sanitize_page_file_refs_for_project(project_dir, pages)
+        pages = normalize_mask_page_refs(project_dir, pages)
+        normalize_clean_page_refs(project_dir, pages, write_project_json=False, reason="package_sanitize")
+        payload["pages"] = pages
         with open(project_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
     return payload
@@ -2193,11 +2552,27 @@ def package_project(project_dir: str, ysb_path: str, project_name: str | None = 
         raise
 
 
-def _safe_extract_zip(zf: zipfile.ZipFile, target_dir: str, *, progress_callback=None, cancel_checker=None):
+# YSBT를 다시 열 때 작업 폴더 전체를 밀어버리면 result/txt/scripts처럼
+# 사용자가 기대하는 산출물이 같이 사라질 수 있다.
+# 아래 목록은 패키지 본문과 강하게 동기화되어야 하는 내부 작업 데이터만 대상으로 한다.
+_YSBT_EXTRACT_MANAGED_REPLACE_DIRS = {
+    "images",
+    "masks",
+    "clean",
+    "working_source",
+    "final_paint",
+    "final_paint_above",
+}
+_YSBT_EXTRACT_PRESERVE_DIRS = {
+    "result",
+    "txt",
+    "scripts",
+}
+
+
+def _validate_zip_members_for_extract(zf: zipfile.ZipFile, target_dir: str):
     target_abs = os.path.abspath(target_dir)
     members = zf.infolist()
-    total = len(members)
-
     for member in members:
         name = member.filename.replace("\\", "/")
         if name.startswith("/") or ".." in Path(name).parts:
@@ -2209,6 +2584,95 @@ def _safe_extract_zip(zf: zipfile.ZipFile, target_dir: str, *, progress_callback
             common = ""
         if common != target_abs:
             raise ValueError(f"패키지 경로가 작업 폴더 밖을 가리킵니다: {member.filename}")
+    return members
+
+
+def _prepare_workspace_for_package_overlay(zf: zipfile.ZipFile, target_dir: str, members=None, *, progress_callback=None, cancel_checker=None):
+    """YSBT 재열기 전 기존 작업 폴더를 보존형으로 정리한다.
+
+    예전 방식처럼 target_dir 전체를 삭제하지 않는다. 대신 패키지 내부에 포함된
+    핵심 작업 데이터 폴더만 갱신하고, result/txt/scripts 및 사용자 임의 파일은 보존한다.
+    같은 상대경로가 직접 충돌하는 파일은 zip 추출이 실패하지 않도록 정리한다.
+    """
+    target_abs = os.path.abspath(target_dir)
+    members = members if members is not None else _validate_zip_members_for_extract(zf, target_dir)
+    if not os.path.isdir(target_abs):
+        return
+
+    top_dirs_in_package: set[str] = set()
+    for member in members:
+        name = _normalize_zip_name(member.filename.replace("\\", "/"))
+        if not name:
+            continue
+        first = name.split("/", 1)[0].strip()
+        if first:
+            top_dirs_in_package.add(first)
+
+    # 이미지/마스크/클린본 등 project.json과 직접 연결되는 내부 작업 데이터는
+    # 현재 YSBT의 내용이 기준이므로 폴더 단위로 새로 맞춘다.
+    managed_to_reset = sorted((top_dirs_in_package & _YSBT_EXTRACT_MANAGED_REPLACE_DIRS) - _YSBT_EXTRACT_PRESERVE_DIRS)
+    if managed_to_reset and callable(progress_callback):
+        try:
+            progress_callback(0, len(members), "기존 작업 폴더의 내부 데이터 정리 중...\n" + ", ".join(managed_to_reset))
+        except Exception:
+            pass
+    for root_name in managed_to_reset:
+        _check_package_cancel(cancel_checker)
+        target_path = os.path.abspath(os.path.join(target_abs, root_name))
+        try:
+            if os.path.commonpath([target_abs, target_path]) != target_abs:
+                continue
+        except Exception:
+            continue
+        if os.path.isdir(target_path):
+            shutil.rmtree(target_path, ignore_errors=True)
+        elif os.path.exists(target_path):
+            try:
+                os.remove(target_path)
+            except Exception:
+                pass
+
+    # project.json/manifest/.signature처럼 루트의 패키지 메타 파일은 현재 YSBT로 교체한다.
+    for root_file in (PROJECT_FILENAME, MANIFEST_FILENAME, SIGNATURE_FILENAME, WORKSPACE_STATE_FILENAME):
+        if root_file in top_dirs_in_package:
+            p = os.path.join(target_abs, root_file)
+            if os.path.isdir(p):
+                shutil.rmtree(p, ignore_errors=True)
+            elif os.path.exists(p):
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
+
+    # 보존 폴더나 사용자 폴더는 통삭제하지 않는다. 다만 같은 rel 경로가
+    # 파일/폴더 타입 충돌을 일으키면 그 충돌 지점만 정리한다.
+    for member in members:
+        _check_package_cancel(cancel_checker)
+        name = _normalize_zip_name(member.filename.replace("\\", "/"))
+        if not name:
+            continue
+        dest = os.path.abspath(os.path.join(target_abs, name))
+        try:
+            if os.path.commonpath([target_abs, dest]) != target_abs:
+                continue
+        except Exception:
+            continue
+        is_dir_member = member.is_dir() or name.endswith("/")
+        if is_dir_member:
+            if os.path.isfile(dest) or os.path.islink(dest):
+                try:
+                    os.remove(dest)
+                except Exception:
+                    pass
+        else:
+            if os.path.isdir(dest):
+                shutil.rmtree(dest, ignore_errors=True)
+
+
+def _safe_extract_zip(zf: zipfile.ZipFile, target_dir: str, *, progress_callback=None, cancel_checker=None):
+    target_abs = os.path.abspath(target_dir)
+    members = _validate_zip_members_for_extract(zf, target_dir)
+    total = len(members)
 
     if callable(progress_callback):
         try:
@@ -2443,8 +2907,8 @@ def extract_ysb_package(ysb_path: str, workspaces_root: str, reuse_existing: boo
 
     v2.4 안정화:
     - .ysbt는 항상 본체로 취급한다.
-    - 일반 열기에서는 기존 작업 폴더를 믿지 않고, 같은 이름/uuid 작업 폴더를 비운 뒤
-      현재 .ysbt 내용을 다시 압축 해제한다.
+    - 일반 열기에서는 같은 이름/uuid 작업 폴더를 재사용하되, 폴더 전체를 삭제하지 않는다.
+      현재 .ysbt에 포함된 내부 작업 데이터만 갱신하고 result/txt/scripts/사용자 파일은 보존한다.
     - 저장되지 않은 작업 복구는 이 함수가 아니라 work_sessions/temp 복구 루트에서 별도 처리한다.
     """
     ysb_path = os.path.abspath(ysb_path)
@@ -2482,27 +2946,87 @@ def extract_ysb_package(ysb_path: str, workspaces_root: str, reuse_existing: boo
 
         if os.path.exists(target_abs):
             has_recovery = workspace_is_dirty(target_abs)
+            manifest["workspace_existing_before_open"] = True
+            manifest["workspace_existing_dirty_before_open"] = bool(has_recovery)
+            manifest["workspace_existing_target_before_open"] = target_abs
             if has_recovery and (os.path.exists(os.path.join(target_abs, PROJECT_FILENAME)) or os.listdir(target_abs)):
                 recovery_target = unique_recovery_dir_for_workspace(target_abs)
-                os.replace(target_abs, recovery_target)
-                rebase_workspace_state_project_dir(target_abs, recovery_target)
                 old_uuid = project_uuid
-                project_uuid = uuid.uuid4().hex
-                code = project_uuid[:8]
-                target, _used_code = unique_dir_with_replaced_code_suffix(workspaces_root, file_title, code)
-                target_abs = os.path.abspath(str(target))
-                manifest["project_uuid"] = project_uuid
-                manifest["workspace_rebased_from_project_uuid"] = old_uuid
-                manifest["workspace_recovery_preserved_dir"] = recovery_target
-                os.makedirs(target_abs, exist_ok=True)
+                try:
+                    os.replace(target_abs, recovery_target)
+                    rebase_workspace_state_project_dir(target_abs, recovery_target)
+                    project_uuid = uuid.uuid4().hex
+                    code = project_uuid[:8]
+                    target, _used_code = unique_dir_with_replaced_code_suffix(workspaces_root, file_title, code)
+                    target_abs = os.path.abspath(str(target))
+                    manifest["project_uuid"] = project_uuid
+                    manifest["workspace_rebased_from_project_uuid"] = old_uuid
+                    manifest["workspace_recovery_preserved_dir"] = recovery_target
+                    manifest["workspace_open_action"] = "dirty_workspace_preserved_as_recovery_new_extract"
+                    os.makedirs(target_abs, exist_ok=True)
+                except Exception as e:
+                    # 출력/크래시 직후 Windows가 이전 workspace 안의 이미지 파일 핸들을
+                    # 잡고 있으면 rename 자체가 WinError 5로 실패할 수 있다.
+                    # 이때 YSBT 열기를 중단하지 말고, 잠긴 폴더는 수동 복구 후보로
+                    # 그대로 둔 채 새 workspace 이름으로 fresh extract 한다.
+                    try:
+                        _save_diag_log(
+                            "WORKSPACE_RECOVERY_RENAME_FAILED_FALLBACK",
+                            target=target_abs,
+                            recovery_target=recovery_target,
+                            error=repr(e),
+                        )
+                    except Exception:
+                        pass
+                    project_uuid = uuid.uuid4().hex
+                    code = project_uuid[:8]
+                    target, _used_code = unique_dir_with_replaced_code_suffix(workspaces_root, file_title, code)
+                    target_abs = os.path.abspath(str(target))
+                    manifest["project_uuid"] = project_uuid
+                    manifest["workspace_rebased_from_project_uuid"] = old_uuid
+                    manifest["workspace_recovery_rename_failed_dir"] = os.path.abspath(str(manifest.get("workspace_existing_target_before_open") or ""))
+                    manifest["workspace_recovery_rename_error"] = repr(e)
+                    manifest["workspace_open_action"] = "dirty_workspace_recovery_rename_failed_fresh_extract"
+                    os.makedirs(target_abs, exist_ok=True)
             else:
-                # 복구 이력이 없는 같은 이름+ID workspace는 정상 재열기다.
-                # 기존처럼 내용을 비우고 같은 폴더에 현재 YSBT를 다시 푼다. ID 유지.
+                # YSBT 직접 열기는 패키지 본체가 절대 기준이다.
+                # 이전에 같은 .ysbt를 열어 만든 작업 폴더가 깨끗해 보이더라도,
+                # 로컬 찌꺼기/저널이 패키지 내용에 섞이면 안 되므로 폴더를 통째로 비우고 새로 푼다.
+                cleanup_error = None
+                try:
+                    shutil.rmtree(target_abs)
+                except FileNotFoundError:
+                    pass
+                except Exception as e:
+                    cleanup_error = e
+                    try:
+                        _save_diag_log(
+                            "WORKSPACE_CLEAN_DELETE_FAILED_FALLBACK",
+                            target=target_abs,
+                            error=repr(e),
+                        )
+                    except Exception:
+                        pass
                 if os.path.exists(target_abs):
-                    shutil.rmtree(target_abs, ignore_errors=True)
-                os.makedirs(target_abs, exist_ok=True)
+                    old_uuid = project_uuid
+                    project_uuid = uuid.uuid4().hex
+                    code = project_uuid[:8]
+                    target, _used_code = unique_dir_with_replaced_code_suffix(workspaces_root, file_title, code)
+                    target_abs = os.path.abspath(str(target))
+                    manifest["project_uuid"] = project_uuid
+                    manifest["workspace_rebased_from_project_uuid"] = old_uuid
+                    manifest["workspace_delete_failed_dir"] = str(manifest.get("workspace_existing_target_before_open") or "")
+                    if cleanup_error is not None:
+                        manifest["workspace_delete_error"] = repr(cleanup_error)
+                    manifest["workspace_open_action"] = "clean_workspace_delete_failed_fresh_extract"
+                    os.makedirs(target_abs, exist_ok=True)
+                else:
+                    os.makedirs(target_abs, exist_ok=True)
+                    manifest["workspace_open_action"] = "clean_workspace_deleted_fresh_extract"
         else:
             existing_same_uuid = _find_existing_workspace_by_uuid(workspaces_root, project_uuid)
+            manifest["workspace_existing_before_open"] = False
+            manifest["workspace_existing_dirty_before_open"] = False
             if existing_same_uuid:
                 # 파일명 변경 등으로 이름+ID 조합이 달라진 새 진입.
                 # 기존 작업 인스턴스와 연결을 끊기 위해 새 ID를 부여한다.
@@ -2514,6 +3038,9 @@ def extract_ysb_package(ysb_path: str, workspaces_root: str, reuse_existing: boo
                 manifest["project_uuid"] = project_uuid
                 manifest["workspace_rebased_from_project_uuid"] = old_uuid
                 manifest["workspace_rebased_reason"] = "renamed_package_or_new_title"
+                manifest["workspace_open_action"] = "same_uuid_other_workspace_rebased_new_extract"
+            else:
+                manifest["workspace_open_action"] = "fresh_extract_new_workspace"
             os.makedirs(target_abs, exist_ok=True)
     else:
         if os.path.exists(os.path.join(target, PROJECT_FILENAME)):
@@ -2529,7 +3056,29 @@ def extract_ysb_package(ysb_path: str, workspaces_root: str, reuse_existing: boo
 
     try:
         with zipfile.ZipFile(ysb_path, "r") as zf:
+            members = _validate_zip_members_for_extract(zf, target)
+            if not reuse_existing:
+                _prepare_workspace_for_package_overlay(
+                    zf,
+                    target,
+                    members,
+                    progress_callback=progress_callback,
+                    cancel_checker=cancel_checker,
+                )
             _safe_extract_zip(zf, target, progress_callback=progress_callback, cancel_checker=cancel_checker)
+        try:
+            project_path = os.path.join(target, PROJECT_FILENAME)
+            if os.path.exists(project_path):
+                with open(project_path, "r", encoding="utf-8") as f:
+                    payload = json.load(f)
+                pages = payload.get("pages", []) if isinstance(payload, dict) else []
+                if isinstance(pages, list):
+                    normalize_clean_page_refs(target, pages, write_project_json=True, reason="ysbt_extract")
+        except Exception as e:
+            try:
+                _save_diag_log("CLEAN_CANONICAL_NORMALIZE_EXTRACT_EXCEPTION", target=str(target), error=repr(e))
+            except Exception:
+                pass
     except PackageProjectCancelled:
         # 일반 열기에서는 기존 해제본을 비우고 새로 푸는 중이므로,
         # 취소 시 부분 압축 해제 폴더가 남지 않게 정리한다.

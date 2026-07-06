@@ -7,6 +7,7 @@ from ysb.core.mask_engine import YSBMaskEngine
 from ysb.core.layer_engine import YSBLayerEngine
 from ysb.core.undo_manager import YSBUndoManager
 from ysb.core.engine_boundary_audit import YSBEngineBoundaryAudit
+from ysb.core.log_options import is_log_event_enabled, log_event_default_map, build_log_output_settings, load_log_output_settings, save_log_output_settings, log_output_enabled_map_from_settings, log_output_unregistered_from_settings
 from ysb.ui.main_window_interaction_mixin import MainWindowInteractionMixin
 from ysb.ui.main_window_cloud_mixin import MainWindowCloudMixin
 from ysb.ui.main_window_settings_theme_mixin import MainWindowSettingsThemeMixin
@@ -18,16 +19,58 @@ from ysb.ui.main_window_history_mixin import MainWindowHistoryMixin
 from ysb.ui.main_window_operations_mixin import MainWindowOperationsMixin
 from ysb.utils.runtime_logger import append_log, install_faulthandler_log, log_dir, make_log_path, memory_text, write_fatal_exception_log
 from ysb.ui.bug_report_dialog import maybe_prompt_previous_fatal_report
-from ysb.core.crash_reporter import start_crash_session_marker, mark_crash_session_clean
+from ysb.core.crash_reporter import (
+    start_crash_session_marker,
+    mark_crash_session_clean,
+    cleanup_clean_crash_trace_log,
+)
+
+
+_handling_fatal_exception = False
 
 
 class MainWindow(MainWindowInteractionMixin, MainWindowCloudMixin, MainWindowSettingsThemeMixin, MainWindowTextLayoutMixin, UndoCommandPushMixin, UndoCommandApplyMixin, MainWindowProjectPagesMixin, MainWindowHistoryMixin, MainWindowOperationsMixin, QMainWindow):
+
+    def audit_log_enabled_map(self):
+        try:
+            settings = getattr(self, "log_output_settings", None)
+            if not isinstance(settings, dict):
+                settings = load_log_output_settings(getattr(self, "app_options", {}) or {})
+                self.log_output_settings = settings
+            return log_output_enabled_map_from_settings(settings)
+        except Exception:
+            return log_event_default_map()
+
+    def set_audit_log_enabled_map(self, enabled_map, *, save=True):
+        try:
+            current = getattr(self, "log_output_settings", None)
+            unregistered = log_output_unregistered_from_settings(current)
+            settings = build_log_output_settings(enabled_map, unregistered_enabled=unregistered)
+            self.log_output_settings = settings
+            if save:
+                save_log_output_settings(settings)
+        except Exception:
+            pass
+
+    def is_audit_log_event_enabled(self, event):
+        try:
+            settings = getattr(self, "log_output_settings", None)
+            if not isinstance(settings, dict):
+                settings = load_log_output_settings(getattr(self, "app_options", {}) or {})
+                self.log_output_settings = settings
+            enabled_map = log_output_enabled_map_from_settings(settings)
+            unregistered = log_output_unregistered_from_settings(settings)
+            return bool(is_log_event_enabled(str(event or ""), enabled_map, unregistered_enabled=unregistered))
+        except Exception:
+            return True
 
     def audit_boundary_event(self, event, **fields):
         """Best-effort audit for PageEngine/ProjectEngine boundary leaks."""
         try:
             audit = getattr(self, "engine_boundary_audit", None)
             if audit is None:
+                return
+            if not self.is_audit_log_event_enabled(event):
                 return
             try:
                 mode = int(self.cb_mode.currentIndex()) if hasattr(self, "cb_mode") else None
@@ -43,18 +86,29 @@ class MainWindow(MainWindowInteractionMixin, MainWindowCloudMixin, MainWindowSet
                 page_dirty = sorted(getattr(session, "dirty_kinds", set()) or []) if session is not None else []
             except Exception:
                 page_dirty = []
-            audit.note(
-                event,
-                page_idx=getattr(self, "idx", None),
-                mode=mode,
-                is_page_loading=bool(getattr(self, "is_page_loading", False)),
-                is_batch_running=bool(getattr(self, "is_batch_running", False)),
-                is_autosaving=bool(getattr(self, "is_autosaving", False)),
-                has_unsaved=bool(getattr(self, "has_unsaved_changes", False)),
-                page_dirty=page_dirty,
-                project_dirty=dirty_summary,
-                **fields,
-            )
+            # Some diagnostic callers pass fields named page_idx/mode/etc.
+            # Passing them together with the base audit fields used to raise
+            # TypeError: got multiple values for keyword argument. Because this
+            # method is best-effort and swallows exceptions, important logs such
+            # as TEXT_AUTO_ADJUST_APPLIED/PAGE_POSTPASS silently disappeared.
+            # Keep the common audit fields stable and preserve conflicting
+            # caller fields under detail_* names.
+            audit_payload = {
+                "page_idx": getattr(self, "idx", None),
+                "mode": mode,
+                "is_page_loading": bool(getattr(self, "is_page_loading", False)),
+                "is_batch_running": bool(getattr(self, "is_batch_running", False)),
+                "is_autosaving": bool(getattr(self, "is_autosaving", False)),
+                "has_unsaved": bool(getattr(self, "has_unsaved_changes", False)),
+                "page_dirty": page_dirty,
+                "project_dirty": dirty_summary,
+            }
+            for _k, _v in dict(fields or {}).items():
+                if _k in audit_payload:
+                    audit_payload[f"detail_{_k}"] = _v
+                else:
+                    audit_payload[_k] = _v
+            audit.note(event, **audit_payload)
         except Exception:
             pass
 
@@ -132,10 +186,29 @@ class MainWindow(MainWindowInteractionMixin, MainWindowCloudMixin, MainWindowSet
 
         self.app_options = load_app_options()
         try:
+            self.log_output_settings = load_log_output_settings(self.app_options)
+        except Exception:
+            self.log_output_settings = build_log_output_settings()
+        try:
             self.engine_boundary_audit = YSBEngineBoundaryAudit(enabled=bool(self.app_options.get("engine_boundary_audit_enabled", True)))
             self.audit_boundary_event("APP_INIT", phase="after_app_options")
         except Exception:
             self.engine_boundary_audit = None
+        try:
+            imported_font_families = FontSelectDialog.load_imported_program_fonts(force=True)
+            try:
+                self.audit_boundary_event(
+                    "IMPORTED_FONT_STARTUP_SCAN",
+                    family_count=len(imported_font_families or []),
+                    families=", ".join(list(imported_font_families or [])[:20]),
+                )
+            except Exception:
+                pass
+        except Exception as exc:
+            try:
+                self.audit_boundary_event("IMPORTED_FONT_STARTUP_SCAN_FAIL", error=str(exc))
+            except Exception:
+                pass
         try:
             self.page_image_cache_limit = max(1, int(self.app_options.get("page_image_cache_limit", self.page_image_cache_limit) or self.page_image_cache_limit))
         except Exception:
@@ -157,7 +230,18 @@ class MainWindow(MainWindowInteractionMixin, MainWindowCloudMixin, MainWindowSet
         if self.ui_theme not in (THEME_DARK, THEME_LIGHT):
             self.ui_theme = THEME_DARK
         self.ui_language = normalize_ui_language(self.app_options.get(UI_LANGUAGE_KEY, LANG_KO))
-        self.analysis_number_box_width = int(self.app_options.get("analysis_number_box_width", 40) or 40)
+        self.analysis_box_size_mode = str(self.app_options.get("analysis_box_size_mode", "auto") or "auto").lower()
+        if self.analysis_box_size_mode not in ("auto", "manual"):
+            self.analysis_box_size_mode = "auto"
+        try:
+            self.analysis_number_box_width = max(1, int(self.app_options.get("analysis_number_box_width", 40) or 40))
+        except Exception:
+            self.analysis_number_box_width = 40
+        try:
+            self.analysis_outline_width = max(1, int(self.app_options.get("analysis_outline_width", 2) or 2))
+        except Exception:
+            self.analysis_outline_width = 2
+        self.text_number_boxes_hidden = bool(self.app_options.get("text_number_boxes_hidden", False))
         self.page_tab_display_name_mode = normalize_page_display_mode(self.app_options.get(PAGE_TAB_DISPLAY_MODE_KEY, DEFAULT_PAGE_DISPLAY_MODE))
         self.output_display_name_mode = normalize_page_display_mode(self.app_options.get(OUTPUT_DISPLAY_MODE_KEY, DEFAULT_PAGE_DISPLAY_MODE))
         self.output_image_format = normalize_output_image_format(self.app_options.get(OUTPUT_IMAGE_FORMAT_KEY, DEFAULT_OUTPUT_IMAGE_FORMAT))
@@ -167,7 +251,14 @@ class MainWindow(MainWindowInteractionMixin, MainWindowCloudMixin, MainWindowSet
         self.output_text_render_quality = normalize_output_text_render_quality(self.app_options.get(OUTPUT_TEXT_RENDER_QUALITY_KEY, DEFAULT_OUTPUT_TEXT_RENDER_QUALITY))
         self.show_paths_in_log = bool(self.app_options.get(SHOW_PATHS_IN_LOG_KEY, False))
         self.show_cache_paths_in_settings = bool(self.app_options.get(SHOW_CACHE_PATHS_IN_SETTINGS_KEY, False))
+        self.operation_mode = normalize_operation_mode(self.app_options.get(OPERATION_MODE_KEY, DEFAULT_OPERATION_MODE))
         self.interface_tooltips_enabled = bool(self.app_options.get("interface_tooltips_enabled", True))
+        # 보기 옵션: 배경 가리기는 작업 화면에서만 base 이미지 레이어를 숨긴다.
+        # 원본 비교/클론창과 실제 저장/출력에는 영향을 주지 않는다.
+        self.hide_background_enabled = bool(self.app_options.get("hide_background_enabled", False))
+        # 자동 텍스트 조정 중 렌더된 텍스트가 이미지 캔버스 밖으로 넘는지 검사한다.
+        # 기본 ON으로 기존 안전 동작을 유지하고, 옵션 메뉴에서 OFF로 바꾸면 예전처럼 넘침을 허용한다.
+        self.text_image_overflow_check_enabled = bool(self.app_options.get("text_image_overflow_check_enabled", True))
         # 텍스트 이펙트 미리보기는 페이지별 설정이다.
         # 기본값은 항상 ON이며, 후광/그림자/2중 획이 무거운 페이지에서만 사용자가 끈다.
         # 예전 전역 캐시값이 False로 남아 있더라도 새 페이지/기본값에는 영향을 주지 않게 한다.
@@ -178,6 +269,12 @@ class MainWindow(MainWindowInteractionMixin, MainWindowCloudMixin, MainWindowSet
         # Windows native QFileDialog가 느린 환경이 있어 기본은 경량 Qt 파일창을 사용한다.
         # 설정 / 옵션에서 끌 수 있다.
         self.use_light_file_dialog = bool(self.app_options.get("use_light_file_dialog", True))
+        # 새 YSB 직접 텍스트 편집기는 기본적으로 세로쓰기에 쓰고, 이 옵션을 켜면
+        # 가로쓰기에도 같은 직접 편집기(글자별 hit/caret 계산)를 사용한다.
+        self.use_direct_inline_text_editor_horizontal = bool(self.app_options.get("use_direct_inline_text_editor_horizontal", True))
+        # 텍스트 수정 후 실제 렌더 bounds로 줄어든 작업 박스도, 박스 내부 전체를
+        # OCR 영역처럼 클릭 가능하게 유지한다. 이 동작은 기본 UX로 고정하며 ON/OFF 옵션을 두지 않는다.
+        self.text_full_area_hit_after_edit = True
         self.log_panel_collapsed = bool(self.app_options.get(LOG_PANEL_COLLAPSED_KEY, DEFAULT_LOG_PANEL_COLLAPSED))
         self.work_project_store = None
         self.work_project_dir = None
@@ -205,13 +302,20 @@ class MainWindow(MainWindowInteractionMixin, MainWindowCloudMixin, MainWindowSet
         self._global_event_filter_installed = False
 
         # 번역 묶음 수: 한 번의 API 요청에 몇 줄을 묶어 보낼지.
-        # v2.1.0: 상단 툴바에서는 숨기고 API 관리 > 번역 탭에서 제공자별로 관리한다.
+        # 0이면 자동이며, 현재 페이지/일괄 페이지의 번역 대상 줄을 한 청크로 묶는다.
+        def _chunk_setting(attr_name):
+            try:
+                return max(0, min(int(getattr(self.api_settings, attr_name, 0) or 0), 100))
+            except Exception:
+                return 0
         self.trans_chunk_sizes = {
-            "openai": int(getattr(self.api_settings, "openai_chunk_size", 20) or 20),
-            "deepseek": int(getattr(self.api_settings, "deepseek_chunk_size", 8) or 8),
-            "google": int(getattr(self.api_settings, "google_translate_chunk_size", 50) or 50),
-            "gemini": int(getattr(self.api_settings, "gemini_chunk_size", 10) or 10),
-            "custom": int(getattr(self.api_settings, "custom_translation_chunk_size", 20) or 20),
+            "openai": _chunk_setting("openai_chunk_size"),
+            "deepseek": _chunk_setting("deepseek_chunk_size"),
+            "google": _chunk_setting("google_translate_chunk_size"),
+            "gemini": _chunk_setting("gemini_chunk_size"),
+            "gemini_deferred": _chunk_setting("gemini_delayed_chunk_size"),
+            "custom": _chunk_setting("custom_translation_chunk_size"),
+            "lm_studio": _chunk_setting("lm_studio_chunk_size"),
         }
 
         self.default_text_color = "#000000"
@@ -223,6 +327,14 @@ class MainWindow(MainWindowInteractionMixin, MainWindowCloudMixin, MainWindowSet
         self.default_bold = False
         self.default_italic = False
         self.default_strike = False
+        try:
+            self.default_writing_direction = self.normalize_writing_direction(self.app_options.get("default_writing_direction", "horizontal"))
+        except Exception:
+            self.default_writing_direction = "horizontal"
+        try:
+            self.default_partial_horizontal_writing_enabled = self.normalize_partial_horizontal_writing_enabled(self.app_options.get("default_partial_horizontal_writing_enabled", True), True)
+        except Exception:
+            self.default_partial_horizontal_writing_enabled = True
         self.final_paint_color = "#FFFFFF"
         self.final_paint_above_text = False
         self.final_paint_opacity = 100
@@ -232,6 +344,8 @@ class MainWindow(MainWindowInteractionMixin, MainWindowCloudMixin, MainWindowSet
         self.magic_wand_seed = None
         self.magic_wand_seeds = []
         self.magic_wand_history = []
+        self.original_restore_mask = None
+        self.original_restore_path = None
         self._style_signal_lock = False
         self._preset_loading = False
         self._syncing_selection = False
@@ -348,6 +462,10 @@ def exception_hook(exctype, value, traceback):
     import traceback as tb
     error_msg = "".join(tb.format_exception(exctype, value, traceback))
     fatal_log_path = write_fatal_exception_log(exctype, value, traceback, error_msg)
+    try:
+        append_log(make_log_path('ysb_crash_trace'), 'PYTHON_EXCEPTION_HOOK', exctype=getattr(exctype, '__name__', str(exctype)), value=str(value), fatal_log=str(fatal_log_path or ''), memory=memory_text())
+    except Exception:
+        pass
     print(error_msg)
 
     # 예외 표시 중 Qt 이벤트가 다시 들어와 같은 예외를 반복 발생시키면
@@ -379,11 +497,30 @@ def exception_hook(exctype, value, traceback):
 
 
 def _exec_app_with_clean_crash_session(app):
-    """Run QApplication and mark the startup session clean only on normal exit."""
+    """Run QApplication and keep crash-trace files only for real failures."""
+    crash_trace_path = getattr(app, "_ysb_crash_trace_log_path", None)
+    if crash_trace_path is None:
+        try:
+            crash_trace_path = make_log_path('ysb_crash_trace')
+            setattr(app, "_ysb_crash_trace_log_path", crash_trace_path)
+        except Exception:
+            crash_trace_path = None
+    try:
+        append_log(crash_trace_path, 'APP_EXEC_ENTER', memory=memory_text())
+    except Exception:
+        pass
     try:
         ret = app.exec()
         try:
+            append_log(crash_trace_path, 'APP_EXEC_RETURN', return_code=ret, memory=memory_text())
+        except Exception:
+            pass
+        try:
             mark_crash_session_clean()
+        except Exception:
+            pass
+        try:
+            cleanup_clean_crash_trace_log(crash_trace_path)
         except Exception:
             pass
         sys.exit(ret)
@@ -391,6 +528,12 @@ def _exec_app_with_clean_crash_session(app):
         # If app.exec() returned and sys.exit() raises, the session was already
         # marked clean above. If a SystemExit is raised earlier, leave marker state
         # as-is so abnormal startup exits can be diagnosed conservatively.
+        raise
+    except BaseException as exc:
+        try:
+            append_log(crash_trace_path, 'APP_EXEC_EXCEPTION', exc=repr(exc), memory=memory_text())
+        except Exception:
+            pass
         raise
 
 
@@ -508,8 +651,15 @@ def run_app() -> None:
     if not single_instance_server.start():
         QMessageBox.warning(None, "단일 실행 경고", "단일 실행 서버를 시작하지 못했습니다.\n프로그램은 계속 실행되지만 중복 실행 차단이 정상 동작하지 않을 수 있습니다.")
 
+    crash_trace_log_path = None
     try:
-        start_crash_session_marker(runtime_log_path=runtime_log_path, faulthandler_log_path=fault_log_path)
+        crash_trace_log_path = make_log_path('ysb_crash_trace')
+        setattr(app, "_ysb_crash_trace_log_path", crash_trace_log_path)
+    except Exception:
+        crash_trace_log_path = None
+
+    try:
+        start_crash_session_marker(runtime_log_path=runtime_log_path, faulthandler_log_path=fault_log_path, crash_trace_log_path=crash_trace_log_path)
     except Exception:
         pass
     try:

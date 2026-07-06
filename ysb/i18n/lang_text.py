@@ -46,6 +46,61 @@ def tr_shortcut(text, lang=LANG_KO, **kwargs):
 
 
 UI_KO_EN = {
+ '인페인팅 그룹 미리보기': 'Inpainting Group Preview',
+ '미리보기 나가기': 'Exit Preview',
+ '표시할 인페인팅 마스크 그룹이 없습니다.': 'No inpainting mask groups to display.',
+ '마스크 진단': 'Mask diagnostics',
+ '현재 마스크를 비콘으로 사용해 인페인팅 전송 그룹을 오버레이로 미리 봅니다.': 'Preview inpainting transfer groups as an overlay using the current mask as beacons.',
+ '배경 가리기': 'Hide Background',
+ '텍스트 넘침 검사': 'Text Overflow Check',
+ '자동 텍스트 조정 중 실제 렌더된 텍스트가 이미지 캔버스 밖으로 나가지 못하게 검사합니다. 끄면 예전처럼 이미지 밖 넘침을 허용합니다.': 'During auto text adjustment, check that the actual rendered text does not overflow outside the image canvas. Turn this off to allow overflow like older builds.',
+ '📐 텍스트 넘침 검사: ON': '📐 Text Overflow Check: ON',
+ '📐 텍스트 넘침 검사: OFF': '📐 Text Overflow Check: OFF',
+ '로그 옵션': 'Log Options',
+ '로그 출력 설정': 'Log Output Settings',
+ '엔진/자동 조정/렌더링 진단 로그 중 어떤 이벤트를 파일에 남길지 선택합니다. 기본값은 필수 로그만 켜져 있습니다.': 'Choose which engine/auto-adjust/render diagnostic events are written to the log file. Only essential logs are enabled by default.',
+ '엔진/자동 조정/렌더링 진단 로그 중 어떤 이벤트를 파일에 출력할지 선택합니다. 설정은 별도 캐시 JSON에 저장됩니다.': 'Choose which engine/auto-adjust/render diagnostic events are written to the log file. The setting is stored in a separate cache JSON.',
+ '로그 파일에 남길 진단 이벤트를 선택합니다. 기본값은 필수 로그와 오류/실패 로그 중심입니다. 후보 계산, 레이어 스냅샷, item별 스캔은 로그가 매우 커지므로 디버깅할 때만 켜세요.': 'Choose which diagnostic events to write to the log file. By default, only essential logs and error/failure logs are enabled. Candidate calculations, layer snapshots, and per-item scans can greatly increase log size, so enable them only while debugging.',
+ '로그 파일에 출력할 진단 이벤트를 선택합니다. 이 설정은 별도 캐시 JSON에 저장됩니다. 기본값은 필수 로그와 오류/실패 로그 중심입니다. 후보 계산, 레이어 스냅샷, item별 스캔은 로그가 매우 커지므로 디버깅할 때만 켜세요.': 'Choose which diagnostic events to output to the log file. This setting is stored in a separate cache JSON. By default, only essential logs and error/failure logs are enabled. Candidate calculations, layer snapshots, and per-item scans can greatly increase log size, so enable them only while debugging.',
+ '검색: 로그 이름, 그룹, 설명': 'Search: log name, group, description',
+ '검색': 'Search',
+ '그룹': 'Group',
+ '전체': 'All',
+ '기본값': 'Default',
+ '최소 로그': 'Minimal Logs',
+ '자동 텍스트 조정 디버그': 'Auto Text Adjust Debug',
+ '렌더링/레이어 디버그': 'Rendering/Layer Debug',
+ 'Undo 디버그': 'Undo Debug',
+ '전체 ON': 'All ON',
+ '전체 OFF': 'All OFF',
+ '사용': 'Enabled',
+ '로그 이름': 'Log Name',
+ '설명': 'Description',
+ '필수 로그라서 끌 수 없습니다.': 'This is an essential log and cannot be disabled.',
+ '확인을 누르면 설정이 저장됩니다. 취소/닫기는 변경하지 않습니다.': 'Click OK to save the settings. Cancel/close leaves changes unapplied.',
+ '자동 텍스트 조정': 'Auto Text Adjust',
+ '텍스트 레이어/렌더링': 'Text Layer/Rendering',
+ '뷰/페이지 전환': 'View/Page Switch',
+ 'Undo': 'Undo',
+ '저장/프로젝트': 'Save/Project',
+ '일괄 작업': 'Batch Work',
+ 'UI 진단': 'UI Diagnostics',
+ '마스크/페인팅': 'Mask/Painting',
+ '번역/OCR': 'Translation/OCR',
+ '출력': 'Export',
+ '시스템': 'System',
+ '기타': 'Other',
+ '자동 텍스트 조정 후보 계산 상세입니다. 로그가 매우 커질 수 있습니다.': 'Detailed auto text adjustment candidate calculations. This can greatly increase log size.',
+ '텍스트 item별 스캔 상세입니다. 일괄 작업에서 로그가 크게 늘어납니다.': 'Detailed per-text-item scan logs. These can grow quickly during batch work.',
+ '텍스트 레이어의 data_rows/scene_rows 상세 스냅샷입니다. 가장 로그가 큽니다.': 'Detailed data_rows/scene_rows snapshot for the text layer. This is one of the largest logs.',
+ '텍스트 렌더 item별 추가 로그입니다. 페이지마다 많이 찍힙니다.': 'Per-rendered-text item add logs. These are written many times per page.',
+ '텍스트가 이미지 캔버스를 넘는지 검사/수정하는 로그입니다.': 'Logs that check/fix text overflowing outside the image canvas.',
+ '오류/실패/미해결 상황 추적용 로그입니다.': 'Logs for tracking errors, failures, and unresolved cases.',
+ '엔진 경계/작업 진단 로그입니다.': 'Engine-boundary/work diagnostic log.',
+ '작업 화면의 이미지 배경을 짙은 회색으로 가리고, 이미지 바깥쪽에 밝은 페이드 테두리를 표시합니다. 텍스트, 박스, 마스크는 보이고 원본 비교창에는 적용되지 않습니다.': 'Hide only the image background in the work canvas with a dark gray fill and an outside light fade border. Text, boxes, and masks remain visible, and the source compare window is not affected.',
+ '작업 화면의 이미지 배경을 짙은 회색으로 가리고 이미지 바깥쪽 페이드 테두리로 실제 캔버스 크기를 표시합니다. 원본 비교창과 실제 출력에는 영향이 없습니다.': 'Hide the image background in the work canvas with a dark gray fill and an outside fade border so text, boxes, and the actual canvas size are easier to see. This does not affect the source compare window or actual export.',
+ '🕶️ 배경 가리기: ON': '🕶️ Hide Background: ON',
+ '🕶️ 배경 가리기: OFF': '🕶️ Hide Background: OFF',
  '작업 로그': 'Work Log',
  '로그 숨기기': 'Hide Log',
  '로그 열기': 'Open Log',
@@ -274,7 +329,7 @@ UI_KO_EN = {
  '번역문 불러오기 완료': 'Translation import complete',
  '번역문만': 'Translation Only',
  '번역할 데이터가 없습니다.': 'No data to translate.',
- '변경 사항은 작업 캐시에만 저장됩니다.': 'Changes are saved only to the work cache.',
+ '변경 사항은 메모리에 반영되며, 프로젝트 저장 시 YSBT에 확정됩니다.': 'Changes are kept in memory and committed to YSBT when you save the project.',
  '변경 사항이 실제 프로젝트에 바로 저장됩니다.': 'Changes are saved directly to the actual project.',
  '복사할 텍스트가 없습니다.': 'There is no text to copy.',
  '분석': 'Analyze',
@@ -437,10 +492,10 @@ UI_KO_EN = {
     '일괄 재분석': 'Batch Re-analyze',
  '일괄 불러오기 실패': 'Batch Import Failed',
  '일괄 인페인팅': 'Batch Inpaint',
- '일괄 자동 줄 내림': 'Batch Auto Line Break',
- '일괄 자동 줄 내림 완료': 'Batch Auto Line Break complete',
- '일괄 자동 텍스트 크기 조정': 'Batch Auto Text Size',
- '일괄 자동 텍스트 크기 조정 완료': 'Batch Auto Text Size complete',
+ '일괄 텍스트 자동 조정(줄내림 호환)': 'Batch Text Auto Adjust (Line Break Alias)',
+ '일괄 텍스트 자동 조정(줄내림 호환) 완료': 'Batch Text Auto Adjust (Line Break Alias) complete',
+ '일괄 텍스트 자동 조정': 'Batch Text Auto Adjust',
+ '일괄 텍스트 자동 조정 완료': 'Batch Text Auto Adjust complete',
  '일괄 작업': 'Batch Work',
  '일괄 작업 중': 'Batch Work Running',
  '일괄 작업 중 차단됨': 'Blocked during batch work',
@@ -459,16 +514,16 @@ UI_KO_EN = {
  '임시 프로젝트를 작업 폴더로 옮기지 못했습니다.': 'Could not move the temporary project to the workspace folder.',
  '자간': 'Letter',
  '자동': 'Auto',
- '자동 줄 내림': 'Auto Line Break',
- '자동 줄 내림 완료': 'Auto Line Break complete',
- '자동 줄 내림을': 'Run Auto Line Break on',
- '자동 텍스트 크기 조정': 'Auto Text Size',
- '자동 텍스트 크기 조정 완료': 'Auto Text Size complete',
- '자동 텍스트 크기 조정을': 'Run Auto Text Size on',
+ '텍스트 자동 조정(줄내림 호환)': 'Text Auto Adjust (Line Break Alias)',
+ '텍스트 자동 조정(줄내림 호환) 완료': 'Text Auto Adjust (Line Break Alias) complete',
+ '텍스트 자동 조정(줄내림 호환)을': 'Run Text Auto Adjust (Line Break Alias) on',
+ '텍스트 자동 조정': 'Text Auto Adjust',
+ '텍스트 자동 조정 완료': 'Text Auto Adjust complete',
+ '텍스트 자동 조정을': 'Run Text Auto Adjust on',
  '자동저장 모드': 'Auto Save Mode',
  '자동저장 모드 OFF': 'Auto Save Mode OFF',
- '자동저장 모드 OFF: 변경 사항은 작업 캐시에만 저장됩니다.': 'Auto Save Mode OFF: changes are saved only to the work cache.',
-'자동저장 모드는 폐지되었습니다. 변경 사항은 작업 캐시에 보관되고, 프로젝트 저장 시 YSBT에 확정됩니다.': 'Auto Save has been removed. Changes are kept in the work cache and are committed to YSBT when you save the project.',
+ '자동저장 모드 OFF: 변경 사항은 메모리에 반영되며, 프로젝트 저장 시 확정됩니다.': 'Auto Save Mode OFF: changes are kept in memory and committed when you save the project.',
+'자동저장 모드는 폐지되었습니다. 변경 사항은 메모리에 반영되고, 프로젝트 저장 시 YSBT에 확정됩니다.': 'Auto Save has been removed. Changes are kept in memory and committed to YSBT when you save the project.',
  '자동저장 모드 ON': 'Auto Save Mode ON',
  '자동저장 모드 ON: 변경 사항이 실제 프로젝트에 바로 저장됩니다.': 'Auto Save Mode ON: changes are saved directly to the actual project.',
  '자동저장 전환': 'Switch Auto Save',
@@ -480,7 +535,7 @@ UI_KO_EN = {
  '되돌릴 수 있는 작업이 있으면 이전 상태로 돌아갑니다.': 'Return to the previous state when an undoable action exists.',
  '되돌린 작업을 다시 적용합니다.': 'Reapply the last undone action.',
  '다시 실행할 내역이 없습니다.': 'There is no action to redo.',
- '작업 캐시 시작': 'Work cache started',
+ '작업 기준 폴더 사용': 'Using workspace folder',
  '작업 폴더 경로가 올바르지 않습니다.': 'The workspace folder path is invalid.',
  '작업 폴더 설정': 'Workspace Folder Settings',
  '작업 폴더 설정 변경 취소': 'Workspace folder settings change canceled',
@@ -559,6 +614,7 @@ UI_KO_EN = {
  '이미지 파일': 'Image Files',
  '모든 파일': 'All Files',
  '배경을 원본으로 쓰기': 'Use Background as Source',
+ '브러시가 최종화면에 있는 상태에서 배경을 원본으로 반영하면 브러시 내역이 클린본에 반영됩니다. 계속하시겠습니까?': 'If you apply the background as the source while final-screen brush strokes exist, those brush strokes will be baked into the clean background. Continue?',
  '최종결과 배경을 원본 탭의 작업용 기준 이미지로 반영했습니다.': 'Final result background has been applied as the Original tab working source image.',
  '원본으로 쓸 최종결과 배경이 없습니다. 먼저 인페인팅/클린본/최종 페인팅을 준비해 주세요.': 'There is no final-result background to use as the source. Prepare an inpainted image, clean image, or final paint first.',
  '반영할 배경 이미지를 만들 수 없습니다.': 'Could not create a background image to apply.',
@@ -591,6 +647,7 @@ UI_KO_EN = {
  '텍스트 마스크 재분석은 텍스트 마스크 탭에서만 사용할 수 있습니다.': 'Text mask re-analysis is only available in the Text Mask tab.',
  '텍스트 박스가 없어서 번역할 게 없습니다.': 'No text boxes to translate.',
  '텍스트 변형': 'Text Transform',
+ '텍스트 비율/회전': 'Text Scale/Rotation',
  '텍스트 변형 모드 OFF': 'Text transform mode OFF',
  '텍스트 변형 모드 ON': 'Text transform mode ON',
  '텍스트 변형 모드 종료': 'Text transform mode ended',
@@ -602,6 +659,13 @@ UI_KO_EN = {
  '텍스트 붙여넣기는 최종화면에서만 사용할 수 있습니다.': 'Paste Text can only be used on the final screen.',
  '텍스트 삭제': 'Delete Text',
  '텍스트 삭제 완료': 'Text deletion complete',
+ '텍스트 비활성화': 'Disable Text',
+ '텍스트 활성화': 'Enable Text',
+ '텍스트 활성/비활성 전환': 'Toggle Text Active',
+ '텍스트 비활성화/활성화': 'Disable/Enable Text',
+ '선택한 텍스트를 최종 화면과 출력 대상에서 제외하거나 다시 포함합니다.': 'Exclude the selected text from the final view and output, or include it again.',
+ '토글할 텍스트가 선택되어 있지 않습니다.': 'No text is selected to toggle.',
+ '텍스트 활성/비활성 변경': 'Text active state changed',
  '텍스트 영역/비율 조정': 'Text area/scale adjustment',
  '텍스트 영역/비율 조정 Undo': 'Text area/scale undo',
  '텍스트 위 페인팅 ON/OFF': 'Paint Above Text ON/OFF',
@@ -616,6 +680,8 @@ UI_KO_EN = {
  '텍스트 직접 수정 완료': 'Direct text edit complete',
  '텍스트 직접 수정 취소': 'Direct text edit canceled',
  '텍스트 직접 편집 시작': 'Direct text edit started',
+ '가로쓰기 새 직접 편집기: ON': 'Horizontal direct editor: ON',
+ '가로쓰기 새 직접 편집기: OFF': 'Horizontal direct editor: OFF',
  '텍스트 표시': 'Show Text',
  '텍스트 표시 ON/OFF': 'Show Text ON/OFF',
  '텍스트 회전': 'Text Rotation',
@@ -809,7 +875,7 @@ UI_KO_EN.update({
     '설정은 프로그램 환경, 옵션은 작업 기능 관리 항목입니다. 자주 쓰는 설정은 이 창에서 바로 바꾸고, 복잡한 항목은 관리 버튼으로 엽니다.': 'Settings are program environment items, while options manage work features. Frequently used settings can be changed here, and complex items open their dedicated management windows.',
     '프로그램의 기본 동작, 표시 방식, 작업 폴더, 임시 파일, YSBT 연결처럼 환경에 가까운 항목입니다.': 'Environment-level items such as basic behavior, display, workspace folder, temporary files, and YSBT association.',
     'API, 프롬프트, 단어장, 단축키, 매크로, 프리셋처럼 작업 기능을 관리하는 항목입니다. 복잡한 항목은 기존 전용 창으로 엽니다.': 'Work-feature items such as APIs, prompts, glossary, shortcuts, macros, and presets. Complex items open their existing dedicated windows.',
-    'ON이면 변경 사항이 실제 프로젝트에 바로 저장되고, OFF이면 작업 캐시에만 저장됩니다.': 'When ON, changes are saved directly to the real project. When OFF, changes are saved only to the work cache.',
+    '자동저장은 현재 사용하지 않습니다. 변경 사항은 메모리에 반영되고, 프로젝트 저장 시 확정됩니다.': 'Auto Save is currently not used. Changes are kept in memory and committed when you save the project.',
     '창과 작업 화면의 밝기 테마를 바꿉니다.': 'Changes the brightness theme of the window and work area.',
     '사용자 인터페이스 표시 언어를 바꿉니다.': 'Changes the user interface display language.',
     '프로젝트 작업 폴더와 캐시가 저장되는 기준 위치입니다.': 'The base location where project work folders and caches are saved.',
@@ -866,6 +932,10 @@ UI_KO_EN.update({
     "효과": "Effects",
     "인터페이스 툴팁 표시": "Show Interface Tooltips",
     "버튼, 메뉴, 툴바에 뜨는 설명용 툴팁을 표시합니다. 스포이드 색상 표시 같은 작업용 안내는 이 설정과 별개로 유지됩니다.": "Show helper tooltips for buttons, menus, and toolbars. Working hints such as the eyedropper color popup remain separate from this setting.",
+    "가로쓰기 새 직접 편집기 사용": "Use New Direct Editor for Horizontal Text",
+    "가로쓰기 텍스트도 YSB 직접 편집기로 수정합니다. 글자 사이 클릭, 커서 위치, OCR 박스 hit 판정을 YSB 방식으로 처리하며, 문제가 있으면 끄고 기존 Qt 편집기로 되돌릴 수 있습니다.": "Edit horizontal text with the YSB direct editor too. It handles character hit testing, caret placement, and OCR-box hit areas in the YSB way. Turn it off to fall back to the old Qt editor if needed.",
+    "가로쓰기 새 직접 편집기: ON": "Horizontal direct editor: ON",
+    "가로쓰기 새 직접 편집기: OFF": "Horizontal direct editor: OFF",
     "불투명도": "Opacity",
     "X 이동": "X Offset",
     "Y 이동": "Y Offset",
@@ -907,6 +977,29 @@ UI_KO_EN.update({
     "도구: 텍스트 객체 일부 지우기": "Tool: Erase text object",
     "효과를 적용할 편집 가능한 텍스트가 없습니다.": "There is no editable text to apply effects to.",
     "객체로 변환할 일반 텍스트가 없습니다.": "There is no normal text to convert to objects.",
+})
+
+UI_KO_EN.update({
+    '△ 폴리곤': '△ Polygon',
+    '△': '△',
+    '폴리곤': 'Polygon',
+    '마스크 선택 폴리곤': 'Mask Selection Polygon',
+    '마스크 랩핑 모드': 'Mask Wrapping Mode',
+    '마스크 커팅 모드': 'Mask Cutting Mode',
+    '색상/테두리 마스크 모드': 'Color/Outline Mask Mode',
+    '영역 페인팅 모드': 'Area Painting Mode',
+    '영역 원본 복구 모드': 'Original Region Restore Mode',
+    '폴리곤 점 취소': 'Polygon Point Undo',
+    '영역 경로 취소': 'Area Path Undo',
+    '폴리곤 영역': 'Polygon Area',
+    '폴리곤으로 영역 그리기': 'Draw Polygon Area',
+    '폴리곤 영역 지정': 'Polygon Area Selection',
+    '폴리곤 OCR 분석 영역': 'Polygon OCR Analysis Area',
+    '점을 하나씩 찍어 직선으로 닫힌 영역을 만든 뒤 영역 마스킹/페인팅을 수행합니다. 작성 중 Ctrl+Z/Backspace는 마지막 점만 취소합니다.': 'Click points one by one to create a closed straight-line area, then mask or paint that area. While drawing, Ctrl+Z/Backspace removes only the last point.',
+    '점을 하나씩 찍어 만든 닫힌 다각형 안에서만 마스크들을 하나로 감싸 채웁니다.': 'Wraps and fills masks only inside the closed polygon made from clicked points.',
+    '점을 하나씩 찍어 만든 닫힌 다각형 보존 영역의 바깥 경계를 지정 픽셀만큼 잘라냅니다.': 'Cuts the outside boundary of the closed polygon keep area by the specified pixels.',
+    '점을 하나씩 찍어 만든 닫힌 다각형 안에서 조건에 맞는 부분만 마스크합니다.': 'Masks only the matching parts inside the closed polygon made from clicked points.',
+    '점을 하나씩 찍어 만든 닫힌 다각형을 OCR 분석 영역으로 지정합니다.': 'Sets the closed polygon made from clicked points as the OCR analysis area.',
 })
 
 API_TR_KO_EN = {'API 관리': 'API Settings',
@@ -986,6 +1079,11 @@ API_TR_KO_EN.update({
     "API Token": "API Token",
     "Preset Name": "Preset Name",
     "Base URL": "Base URL",
+    "효과음/손글씨 OCR 후보 자동 제외": "Exclude SFX/handwritten OCR candidates",
+    "텍스트와 인접한 효과음 제거": "Remove SFX adjacent to text",
+    "분석 중 마스크 생성 전에 큰 효과음/손글씨성 OCR 후보를 제외합니다.": "During analysis, exclude large SFX/handwritten OCR candidates before creating masks.",
+    "이 OCR 모델로 분석할 때 큰 효과음/손글씨성 OCR 후보를 마스크 생성 대상에서 제외합니다.": "When analyzing with this OCR model, exclude large SFX/handwritten OCR candidates from mask creation.",
+    "이 OCR 모델로 분석할 때 텍스트와 인접한 큰 효과음 OCR 후보를 마스크 생성 대상에서 제외합니다.": "When analyzing with this OCR model, exclude large SFX OCR candidates adjacent to text from mask creation.",
 })
 
 SHORTCUT_TR_KO_EN = {'.ysbt 확장자 연결 등록': 'Register .ysbt Association',
@@ -1018,7 +1116,7 @@ SHORTCUT_TR_KO_EN = {'.ysbt 확장자 연결 등록': 'Register .ysbt Associatio
  '기능 추가': 'Add Function',
  '기능은 더블클릭하거나 검색창/목록에 포커스를 둔 상태에서 실제 단축키를 눌러 추가합니다. Enter는 기능 추가가 아니라 확인으로 동작합니다. 확인을 누르면 현재 매크로 기능 목록을 저장하고, 닫기를 누르면 저장하지 않고 나갑니다. 단축키 OFF/없음은 단축키 상태 표시일 뿐, 매크로 실행에는 영향 없습니다.': 'Double-click a function or press the actual shortcut while the search box/list has focus to add it. Press OK to save the current macro function list, or Close to leave without saving. Shortcut OFF/none is only a shortcut status; it does not affect macro execution.',
  '기능 선택': 'Select Function',
- '기능명 / 그룹 / 단축키 검색  예: 자동 줄 내림, Ctrl+B': 'Search function / group / shortcut  e.g. Auto Line Break, Ctrl+B',
+ '기능명 / 그룹 / 단축키 검색  예: 텍스트 자동 조정, Ctrl+B': 'Search function / group / shortcut  e.g. Text Auto Adjust, Ctrl+B',
  '기능을 더블클릭하거나, 선택 후 [기능 추가]를 누르면 창을 닫지 않고 계속 추가됩니다. 검색창/목록에 포커스를 둔 상태에서 실제 단축키를 누르면 즉시 추가됩니다. 단축키 OFF/없음은 단축키 상태 표시일 뿐, 매크로 실행에는 영향 없습니다.': 'Double-click '
                                                                                                                                             'a '
                                                                                                                                             'function, '
@@ -1158,14 +1256,14 @@ SHORTCUT_TR_KO_EN = {'.ysbt 확장자 연결 등록': 'Register .ysbt Associatio
  '일괄 분석': 'Batch Analyze',
     '일괄 재분석': 'Batch Re-analyze',
  '일괄 인페인팅': 'Batch Inpaint',
- '일괄 자동 줄 내림': 'Batch Auto Line Break',
- '일괄 자동 텍스트 크기 조정': 'Batch Auto Text Size',
+ '일괄 텍스트 자동 조정(줄내림 호환)': 'Batch Text Auto Adjust (Line Break Alias)',
+ '일괄 텍스트 자동 조정': 'Batch Text Auto Adjust',
  '일괄 작업 옵션': 'Batch Work',
  '일괄 지문 추출': 'Batch Extract Text',
  '일괄 출력': 'Batch Export',
  '일괄 텍스트 정리': 'Batch Clean Text',
- '자동 줄 내림': 'Auto Line Break',
- '자동 텍스트 크기 조정': 'Auto Text Size',
+ '텍스트 자동 조정(줄내림 호환)': 'Text Auto Adjust (Line Break Alias)',
+ '텍스트 자동 조정': 'Text Auto Adjust',
  '자동저장 모드': 'Auto Save Mode',
  '자동화 작업 옵션': 'Automation',
  '작업 옵션': 'Work',
@@ -1251,7 +1349,7 @@ SHORTCUT_TR_KO_EN = {'.ysbt 확장자 연결 등록': 'Register .ysbt Associatio
 UI_KO_EN.update({
     '확인을 누르면 이 창에서 바꾼 설정이 저장됩니다. 닫기나 X를 누르면 이 창에서 바꾼 설정은 저장하지 않습니다. 복잡한 항목은 오른쪽 버튼으로 전용 관리창을 엽니다.': 'Click OK to save the settings changed in this window. Click Close or X to leave without saving changes made in this window. Complex items open their dedicated management windows from the button on the right.',
     '프로그램의 기본 동작과 작업 환경을 정하는 항목입니다. 여기서 직접 바꾼 값은 확인을 눌러야 저장됩니다.': 'Items that define the program behavior and work environment. Values changed directly here are saved only when you click OK.',
-    'ON이면 변경 사항을 실제 프로젝트에 바로 저장합니다. OFF이면 임시 작업 캐시에 먼저 저장하고, 프로젝트 저장 시 확정합니다.': 'When ON, changes are saved directly to the real project. When OFF, changes are saved to the temporary work cache first and finalized when the project is saved.',
+    '자동저장은 현재 사용하지 않습니다. 변경 사항은 메모리에 반영되고, 프로젝트 저장 시 확정됩니다.': 'Auto Save is currently not used. Changes are kept in memory and finalized when the project is saved.',
     '프로그램 전체의 밝기 테마를 정합니다. 확인을 누르면 선택한 테마가 적용됩니다.': 'Sets the brightness theme for the whole program. The selected theme is applied when you click OK.',
     '메뉴와 안내 문구의 표시 언어를 정합니다. 확인을 누르면 선택한 언어가 적용됩니다.': 'Sets the display language for menus and guidance text. The selected language is applied when you click OK.',
     '프로젝트 작업 폴더와 캐시가 저장되는 기준 위치입니다. 변경은 전용 작업 폴더 설정창에서 확인을 눌러야 적용됩니다.': 'The base location where project work folders and caches are stored. Changes are applied only when you click OK in the dedicated workspace folder dialog.',
@@ -2117,3 +2215,518 @@ _OUTPUT_RENDER_OPTIONS_KO_EN = {
 }
 UI_KO_EN.update(_OUTPUT_RENDER_OPTIONS_KO_EN)
 UI_EN_KO.update({en: ko for ko, en in _OUTPUT_RENDER_OPTIONS_KO_EN.items()})
+
+_OUTPUT_ORIGINAL_RESTORE_KO_EN = {
+    '영역 원본 복구': 'Original Region Restore',
+    '원복 확정': 'Apply Restore',
+    '원본 조각을 현재 최종결과 위에 다시 덧씌웁니다.': 'Overlay the original image patch back onto the current final result.',
+    '⚠️ 영역 원본 복구는 최종결과 탭에서만 사용할 수 있습니다.': '⚠️ Original Region Restore can only be used in the Final Result tab.',
+    '⚠️ 먼저 복구할 영역을 드래그로 지정하세요.': '⚠️ First drag to select the region to restore.',
+    '⚠️ 영역 원본 복구 실패: {e}': '⚠️ Original region restore failed: {e}',
+    '🧩 선택한 영역에 원본 조각을 다시 덧씌웠습니다.': '🧩 The original patch has been overlaid on the selected area.',
+    '🧩 도구: 영역 원본 복구': '🧩 Tool: Original Region Restore',
+    '🧩 영역 원본 복구 모드: 사각형': '🧩 Original Region Restore Mode: Rectangle',
+    '🧩 영역 원본 복구 모드: 자유형': '🧩 Original Region Restore Mode: Freeform',
+}
+UI_KO_EN.update(_OUTPUT_ORIGINAL_RESTORE_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _OUTPUT_ORIGINAL_RESTORE_KO_EN.items()})
+
+
+# v2.4 mask color settings
+_MASK_COLOR_SETTINGS_KO_EN = {
+    "마스크 색상 지정": "Mask Color Settings",
+    "마스크 데이터는 바꾸지 않고 화면에 보이는 색상과 불투명도만 바꿉니다.\n현재 페이지 적용은 즉시 화면을 갱신하고, 전체 페이지 적용은 각 페이지의 표시 설정만 저장합니다.": "Changes only the visible mask color and opacity without changing mask data.\nApply to current page refreshes the current view immediately, while apply to all pages stores display settings for each page.",
+    "마스크 표시 색상": "Mask Display Color",
+    "텍스트 인식 마스크 색상": "Text Detection Mask Color",
+    "텍스트 인식 마스크 불투명도": "Text Detection Mask Opacity",
+    "페인팅 마스크 색상": "Painting Mask Color",
+    "페인팅 마스크 불투명도": "Painting Mask Opacity",
+    "마스크 색상 선택": "Select Mask Color",
+    "텍스트 인식": "Text Detection",
+    "페인팅": "Painting",
+    "현재 페이지에 적용": "Apply to Current Page",
+    "전체 페이지에 적용": "Apply to All Pages",
+    "기본값": "Default",
+    "닫기": "Close",
+    "🎨 현재 페이지 마스크 색상 설정 적용": "🎨 Applied mask color settings to the current page",
+    "🎨 전체 페이지 마스크 색상 설정 적용": "🎨 Applied mask color settings to all pages",
+}
+UI_KO_EN.update(_MASK_COLOR_SETTINGS_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _MASK_COLOR_SETTINGS_KO_EN.items()})
+
+# mask cleanup action
+_MASK_CLEANUP_ACTION_KO_EN = {
+    "체크 해제한 OCR/텍스트 항목을 삭제하고 번호를 재정렬합니다. 활성 OCR 영역 밖의 자동 마스크도 함께 정리하며, 사용자 수정 마스크는 유지합니다.": "Deletes unchecked OCR/text items and renumbers them. It also cleans generated masks outside active OCR regions while preserving user-edited masks.",
+    "마스크 정리": "Clean Masks",
+    "일괄 마스크 정리": "Batch Clean Masks",
+    "🧽 마스크 정리": "🧽 Clean Masks",
+    "활성 OCR 영역 밖의 자동 마스크만 제거합니다. 사용자 수정 마스크는 유지합니다.": "Removes only generated masks outside active OCR regions. User-edited masks are preserved.",
+    "현재 페이지에서 활성 OCR 영역 밖의 자동 마스크만 제거합니다. 사용자 수정 마스크는 유지합니다.": "Removes only generated masks outside active OCR regions on the current page. User-edited masks are preserved.",
+    "선택한 페이지들에서 활성 OCR 영역 밖의 자동 마스크만 일괄 제거합니다. 사용자 수정 마스크는 유지합니다.": "Batch-removes only generated masks outside active OCR regions on selected pages. User-edited masks are preserved.",
+    "선택한 페이지에서 활성 OCR 영역 밖의 자동 마스크만 정리할까요?\n사용자 수정 마스크는 유지됩니다.": "Clean only generated masks outside active OCR regions in selected pages?\nUser-edited masks will be preserved.",
+    "🧽 자동 정리할 마스크가 없습니다.": "🧽 There are no generated masks to clean.",
+    "🧽 마스크 정리 완료": "🧽 Mask cleanup complete",
+}
+UI_KO_EN.update(_MASK_CLEANUP_ACTION_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _MASK_CLEANUP_ACTION_KO_EN.items()})
+
+# text auto adjust action
+_TEXT_AUTO_ADJUST_KO_EN = {
+    "텍스트 자동 조정": "Text Auto Adjust",
+    "일괄 텍스트 자동 조정": "Batch Text Auto Adjust",
+    "텍스트 자동 조정(줄내림 호환)": "Text Auto Adjust (Line Break Alias)",
+    "일괄 텍스트 자동 조정(줄내림 호환)": "Batch Text Auto Adjust (Line Break Alias)",
+    "번역문을 OCR 영역 안에 자동 배치하고, 한국어 줄내림과 텍스트 크기를 점수 기반으로 함께 조정합니다.": "Automatically places translated text inside OCR regions and adjusts Korean line breaks and text size together using a score-based layout.",
+    "선택한 페이지의 번역문을 OCR 영역 안에 자동 배치하고, 한국어 줄내림과 텍스트 크기를 점수 기반으로 함께 조정합니다.": "Automatically places translated text inside OCR regions on selected pages and adjusts Korean line breaks and text size together using a score-based layout.",
+    "OCR 영역에 닿도록 줄 구조와 글자 크기를 계산하는 중입니다.": "Calculating line breaks and text size so the text reaches the OCR region edges.",
+    "텍스트 자동 조정 진행": "Text auto adjust progress",
+    "현재 텍스트 ID": "Current text ID",
+    "계산 중...": "Calculating...",
+    "적용 완료": "Applied",
+}
+UI_KO_EN.update(_TEXT_AUTO_ADJUST_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _TEXT_AUTO_ADJUST_KO_EN.items()})
+
+# PATCH: translation target language / auto text adjustment
+API_TR_KO_EN.update({
+    "공용 번역 설정": "Common Translation Settings",
+    "번역 대상 언어": "Target Translation Language",
+    "번역 API와 텍스트 자동 조정에서 공통으로 사용할 번역 대상 언어입니다. 프롬프트 기본 지시와 자동 조판 언어 판단에 사용합니다.": "Target language shared by translation APIs and automatic text adjustment. It is used for default prompt instructions and layout language detection.",
+    "중국어 간체": "Simplified Chinese",
+    "중국어 번체": "Traditional Chinese",
+})
+
+
+# optional real-run developer test panel
+_DEVTOOLS_REAL_TEST_KO_EN = {
+    "개발 도구": "Developer Tools",
+    "실전 테스트": "Real-run Test",
+    "본체 함수 경로를 실제로 타는 개발용 테스트 패널을 엽니다.": "Open the developer test panel that runs through real application function paths.",
+    "개발용 패널입니다. 외부 API는 기본적으로 더미 결과로 대체하지만, 결과 반영은 실제 본체 함수 경로를 탑니다.": "This is a developer panel. External APIs are replaced with dummy results by default, but result application uses real application paths.",
+    "코스": "Courses",
+    "실행 제어": "Run Controls",
+    "실행": "Run",
+    "일시정지": "Pause",
+    "다음 단계만 실행": "Run Next Step Only",
+    "중지": "Stop",
+    "리포트 저장": "Save Report",
+    "로그 복사": "Copy Log",
+    "속도": "Speed",
+    "느림": "Slow",
+    "보통": "Normal",
+    "빠름": "Fast",
+    "실패 시 중단": "Stop on Failure",
+    "샘플 프로젝트 사용": "Use Sample Project",
+    "가짜 OCR/번역/인페인팅 사용": "Use Fake OCR/Translation/Inpainting",
+    "실제 API 사용": "Use Real API",
+    "1차 패널에서는 실제 API 호출을 막고 더미 결과만 사용합니다.": "The first-stage panel blocks real API calls and only uses dummy results.",
+    "현재 상태": "Current Status",
+    "현재 코스명": "Current Course",
+    "현재 단계명": "Current Step",
+    "진행률": "Progress",
+    "현재 페이지": "Current Page",
+    "현재 dirty 상태": "Current Dirty State",
+    "마지막 리포트": "Last Report",
+    "실시간 로그": "Live Log",
+    "에러가 발생했습니다:": "An error occurred:",
+}
+UI_KO_EN.update(_DEVTOOLS_REAL_TEST_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _DEVTOOLS_REAL_TEST_KO_EN.items()})
+
+# writing direction step 1
+_WRITING_DIRECTION_KO_EN = {
+    "쓰기 방향": "Writing Direction",
+    "가로쓰기": "Horizontal",
+    "세로쓰기": "Vertical",
+    "새 텍스트 쓰기 방향": "New Text Writing Direction",
+    "쓰기 방향 변경": "Change Writing Direction",
+    "부분 가로쓰기": "Partial Horizontal Writing",
+    "부분 가로쓰기 사용": "Use Partial Horizontal Writing",
+    "새 텍스트 부분 가로쓰기": "New Text Partial Horizontal Writing",
+    "부분 가로쓰기 변경": "Change Partial Horizontal Writing",
+    "세로쓰기 중 숫자, 영어, 일부 특문을 입력하면 부분 가로쓰기 모드로 자동 진입하고, 스페이스바로 탈출합니다.": "In vertical writing, entering numbers, English letters, or some symbols automatically enters partial horizontal writing mode. Press Space to exit it.",
+    "텍스트 변형이 적용된 객체는 쓰기 방향을 변경할 수 없습니다.": "Writing direction cannot be changed for transformed text objects.",
+    "현재 페이지 글꼴 프리셋의 기본 쓰기 방향을 선택합니다.": "Choose the default writing direction for this page font preset.",
+    "개별 글꼴 프리셋에 포함할 쓰기 방향을 선택합니다.": "Choose the writing direction included in this item font preset.",
+}
+UI_KO_EN.update(_WRITING_DIRECTION_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _WRITING_DIRECTION_KO_EN.items()})
+
+# full-area text hit option
+_FULL_AREA_TEXT_HIT_KO_EN = {
+    "수정 후 텍스트 영역 전체 클릭 허용": "Allow Full Text Area Click After Edit",
+    "텍스트 수정 후 실제 글자 범위로 줄어든 작업 박스 안에서는 공백과 글자 사이 빈칸까지 OCR 영역처럼 클릭 가능하게 합니다. 끄면 더 엄격하게 실제 글자 근처만 잡습니다.": "After text editing, keep the adjusted work box fully clickable, including spaces and blank slots, like an OCR area. Turn this off for stricter glyph-near-only hit testing.",
+    "수정 후 텍스트 영역 전체 클릭: ON": "Full text-area click after edit: ON",
+    "수정 후 텍스트 영역 전체 클릭: OFF": "Full text-area click after edit: OFF",
+}
+UI_KO_EN.update(_FULL_AREA_TEXT_HIT_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _FULL_AREA_TEXT_HIT_KO_EN.items()})
+
+
+# detection mask auto priority cleanup
+_DETECTION_MASK_AUTO_CLEAN_KO_EN = {
+    "감지 마스크 자동 정리": "Auto Clean Detection Mask",
+    "🧹 자동 정리": "🧹 Auto Clean",
+    "자동 정리": "Auto Clean",
+    "현재 OCR 병합 영역 안의 OCR 조각을 군체 단위로 묶고, 군체별 보호 영역을 만든 뒤 우선순위가 낮은 겹침 마스크를 자동 커팅합니다.": "Groups OCR pieces into text clusters, builds a protected mask for each cluster, and cuts overlapping mask areas owned by lower-priority clusters.",
+    "현재 OCR 병합 영역 안의 OCR 조각을 군체 단위로 묶고, 군체별 보호 영역을 만든 뒤 우선순위가 낮은 겹침 마스크를 자동 커팅합니다. 정리 후 재분석을 실행하세요.": "Groups OCR pieces into text clusters, builds a protected mask for each cluster, and cuts overlapping mask areas owned by lower-priority clusters. Run Re-analyze after cleanup.",
+    "현재 OCR 병합 영역 안에서 큰 종양형 조각을 제거하고, 과하게 부푼 손글씨형 통마스크는 OCR 글자 seed 주변만 다시 살립니다. 정리 후 재분석을 실행하세요.": "Removes large tumor-like pieces inside the current OCR merged region, and rebuilds over-expanded handwriting-like masks by keeping only OCR text seed areas. Run Re-analyze after cleanup.",
+    "⚠️ 감지 마스크 자동 정리는 텍스트 마스크 탭에서만 사용할 수 있습니다.": "⚠️ Auto Clean Detection Mask is only available in the Text Mask tab.",
+    "⚠️ 현재 페이지 데이터가 없습니다.": "⚠️ There is no current page data.",
+    "⚠️ 정리할 텍스트 마스크가 없습니다.": "⚠️ There is no text mask to clean.",
+    "⚠️ OCR 조각 정보가 없어 감지 마스크 군체 커팅을 건너뜁니다.": "⚠️ OCR piece data is missing, so cluster mask cutting was skipped.",
+    "ℹ️ 감지 마스크 자동 정리: 군체 커팅할 겹침 영역이 없습니다.": "ℹ️ Auto Clean Detection Mask: no overlapping cluster area to cut.",
+    "ℹ️ 감지 마스크 자동 정리: 군체 커팅으로 바뀔 영역이 없습니다.": "ℹ️ Auto Clean Detection Mask: no area changed by cluster cutting.",
+    "🧹 감지 마스크 자동 정리 완료": "🧹 Auto Clean Detection Mask complete",
+}
+UI_KO_EN.update(_DETECTION_MASK_AUTO_CLEAN_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _DETECTION_MASK_AUTO_CLEAN_KO_EN.items()})
+
+# color / outline mask tool
+_COLOR_OUTLINE_MASK_KO_EN = {
+    "색상/테두리 마스크": "Color/Outline Mask",
+    "색상 영역 마스크": "Color Region Mask",
+    "영역 지정": "Region",
+    "텍스트": "Text",
+    "획": "Stroke",
+    "허용치": "Tolerance",
+    "확장": "Expand",
+    "영역 확장": "Expand Area",
+    "획 감지": "Detect Stroke",
+    "글자 색상": "Text Color",
+    "색상 허용치": "Color Tolerance",
+    "테두리": "Outline",
+    "색상": "Color",
+    "색상 선택": "Choose Color",
+    "스포이드: 텍스트 색상": "Eyedropper: Text Color",
+    "스포이드: 획 색상": "Eyedropper: Stroke Color",
+    "🎯 색상/테두리 마스크 모드: 사각형": "🎯 Color/Outline Mask Mode: Rectangle",
+    "🎯 색상/테두리 마스크 모드: 자유형": "🎯 Color/Outline Mask Mode: Freeform",
+    "🎯 도구: 색상/테두리 마스크": "🎯 Tool: Color/Outline Mask",
+    "⚠️ 색상/테두리 마스크는 텍스트 마스크/페인팅 마스크 탭에서 사용하세요.": "⚠️ Color/Outline Mask is only available in the Text Mask / Painting Mask tabs.",
+    "⚠️ 색상/테두리 마스크 영역이 비어 있습니다.": "⚠️ The Color/Outline Mask region is empty.",
+    "⚠️ 색상/테두리 마스크 기준 이미지가 없습니다.": "⚠️ There is no source image for Color/Outline Mask.",
+    "⚠️ 선택 영역에서 조건에 맞는 픽셀을 찾지 못했습니다.": "⚠️ No pixels matching the condition were found in the selected region.",
+    "⚠️ 닫힌 획 영역을 찾지 못했습니다.": "⚠️ No closed stroke area was found.",
+    "⚠️ 색상/테두리 마스크로 추가될 영역이 없습니다.": "⚠️ Color/Outline Mask has no new area to add.",
+    "⚠️ 색상/테두리 마스크 실패:": "⚠️ Color/Outline Mask failed:",
+}
+UI_KO_EN.update(_COLOR_OUTLINE_MASK_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _COLOR_OUTLINE_MASK_KO_EN.items()})
+_COLOR_OUTLINE_MASK_TOOLTIP_KO_EN = {
+    "드래그한 영역 안에서 텍스트 색상 또는 닫힌 획 내부를 현재 마스크에 추가합니다. Alt+클릭으로 기준 색상을 찍습니다.": "Adds pixels matching the text color or enclosed by a closed stroke inside the dragged region to the current mask. Alt-click to pick the reference color.",
+    "획 감지 OFF일 때 이 색상과 가까운 픽셀을 마스크합니다.": "When Detect Stroke is off, pixels close to this color are masked.",
+    "텍스트 또는 획 색상을 얼마나 넓게 허용할지 정합니다.": "Sets how widely the text or stroke color is tolerated.",
+    "켜면 텍스트 색상은 무시하고 지정한 획 색의 닫힌 윤곽 내부를 마스크합니다. 획이 그림이나 배경선과 이어진 경우에는 의도하지 않은 영역이 잡힐 수 있습니다.": "When enabled, the text color is ignored and the enclosed area of closed strokes using the selected stroke color is masked. Strokes connected to artwork or background lines may select unintended areas.",
+    "사각형으로 영역을 잡고, 그 안에서 조건에 맞는 부분만 마스크합니다.": "Selects a rectangular region and masks only the matching parts inside it.",
+    "자유형으로 영역을 잡고, 그 안에서 조건에 맞는 부분만 마스크합니다.": "Selects a freeform region and masks only the matching parts inside it.",
+    "켜면 텍스트 색상은 무시하고, 옆 색상칩의 획 색으로 닫힌 윤곽 내부를 마스크합니다. 획이 그림이나 배경선과 이어진 경우에는 의도하지 않은 영역이 잡힐 수 있습니다.": "When enabled, the text color is ignored and closed areas using the stroke color chip next to it are masked. Strokes connected to artwork or background lines may select unintended areas.",
+    "획 감지 ON일 때 닫힌 윤곽을 찾을 기준 색상입니다.": "Reference color for finding closed strokes when Detect Stroke is on.",
+    "최종 마스크를 지정 픽셀만큼 확장합니다.": "Expands the final mask by the specified number of pixels.",
+}
+UI_KO_EN.update(_COLOR_OUTLINE_MASK_TOOLTIP_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _COLOR_OUTLINE_MASK_TOOLTIP_KO_EN.items()})
+
+
+# LM Studio / Gemini Flex-Batch translation providers
+_LM_STUDIO_INTERLOCK_KO_EN = {
+    'LM Studio 연결 실패': 'LM Studio Connection Failed',
+    'LM Studio Local Server에 연결할 수 없습니다.': 'Cannot connect to the LM Studio Local Server.',
+    'LM Studio > Developer > Local Server에서 서버를 켠 뒤 다시 시도해 주세요.': 'Start the server in LM Studio > Developer > Local Server, then try again.',
+    'LM Studio 서버는 켜져 있지만 로드된 모델이 없습니다.': 'The LM Studio server is running, but no model is loaded.',
+    'LM Studio에서 모델을 로드한 뒤 다시 시도해 주세요.': 'Load a model in LM Studio, then try again.',
+    '확인 주소': 'Check URL',
+}
+UI_KO_EN.update(_LM_STUDIO_INTERLOCK_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _LM_STUDIO_INTERLOCK_KO_EN.items()})
+
+API_TR_KO_EN.update({
+    'LM Studio / Local OpenAI-Compatible': 'LM Studio / Local OpenAI-Compatible',
+    'LM Studio의 Developer 서버를 켠 뒤 사용할 수 있습니다. 기본 주소는 http://localhost:1234/v1 입니다. 모델은 LM Studio에서 먼저 다운로드/로드해야 합니다. API Key는 보통 비워도 됩니다.': 'Use this after starting the LM Studio Developer server. The default address is http://localhost:1234/v1. Download/load a model in LM Studio first. API Key can usually be left empty.',
+    '비워도 됨 / optional': 'Optional / can be empty',
+    'LM Studio에서 로드한 모델명': 'Model name loaded in LM Studio',
+    'LM Studio': 'LM Studio',
+    'Gemini Flex / Batch': 'Gemini Flex / Batch',
+    '일반 번역 진행창 대신 청크 현황 창을 사용합니다. 완료된 청크는 즉시 반영되고, 실패한 청크만 다시 시도할 수 있습니다. 작업 중에는 다른 프로젝트 작업을 할 수 없습니다.': 'Uses a chunk status window instead of the normal translation progress window. Completed chunks are applied immediately, and only failed chunks can be retried. Other project work is unavailable while this task is running.',
+    '요청 방식': 'Request Mode',
+    'Flex API': 'Flex API',
+    'Batch API': 'Batch API',
+})
+
+# Patch: LM Studio JSON compatibility test
+API_TR_KO_EN.update({
+    "LM Studio JSON 호환성 테스트": "LM Studio JSON Compatibility Test",
+    "현재 Base URL과 Model로 짧은 샘플 번역을 보내고, 응답이 YSB 자동 번역용 JSON 형식인지 검사합니다.": "Sends a short sample translation with the current Base URL and Model, then checks whether the response matches YSB's automatic translation JSON format.",
+    "테스트 중...": "Testing...",
+    "호환성 테스트 통과": "Compatibility test passed",
+    "이 모델은 YSB 자동 번역 JSON 형식으로 사용할 수 있습니다.": "This model can be used with YSB's automatic translation JSON format.",
+    "호환성 테스트 실패": "Compatibility test failed",
+    "이 모델은 YSB 자동 번역 JSON 형식과 맞지 않을 수 있습니다.": "This model may not match YSB's automatic translation JSON format.",
+    "reasoning/channel 토큰이 content에 섞였습니다.": "Reasoning/channel tokens were mixed into the content field.",
+    "응답 안에 JSON 블록은 있지만 앞뒤에 다른 텍스트가 붙어 있습니다.": "A JSON block exists in the response, but other text is attached before or after it.",
+    "응답 일부:": "Response excerpt:",
+})
+
+
+_GEMINI_DELAYED_TRANSLATION_KO_EN = {
+    '청크': 'Chunk',
+    '대상 범위': 'Target Range',
+    '방식': 'Mode',
+    '상태': 'Status',
+    '경과 시간': 'Elapsed',
+    '재시도 횟수': 'Retries',
+    '재시도': 'Retry',
+    '상세': 'Details',
+    '{seconds}초': '{seconds}s',
+    '{minutes}분 {seconds}초': '{minutes}m {seconds}s',
+    '{hours}시간 {minutes}분': '{hours}h {minutes}m',
+    '대기': 'Queued',
+    '제출 중': 'Submitting',
+    '제출됨': 'Submitted',
+    '처리 중': 'Processing',
+    '응답 대기': 'Waiting for Response',
+    '결과 적용 중': 'Applying Result',
+    '완료': 'Completed',
+    '실패': 'Failed',
+    '취소됨': 'Canceled',
+    'Gemini 지연 번역 청크 현황': 'Gemini Delayed Translation Chunk Status',
+    '{mode} 요청을 청크별로 처리합니다. 완료된 청크는 즉시 번역문에 반영됩니다. 작업 중에는 이 창만 조작할 수 있습니다.': '{mode} requests are processed chunk by chunk. Completed chunks are applied immediately. Only this window can be used while the task is running.',
+    '실패 청크 전체 재시도': 'Retry All Failed Chunks',
+    '작업 취소': 'Cancel Task',
+    '전체 {total}개 · 완료 {completed}개 · 처리 중 {active}개 · 실패 {failed}개 · 대기 {waiting}개': 'Total {total} · Completed {completed} · Active {active} · Failed {failed} · Queued {waiting}',
+    '번역 결과를 프로젝트에 적용하지 못했습니다.': 'Could not apply the translation result to the project.',
+    '번역 결과 적용 실패': 'Failed to apply translation result',
+    '모든 청크가 완료되어 번역문에 반영되었습니다. 확인을 눌러 작업 화면으로 돌아가세요.': 'All chunks have completed and were applied. Click OK to return to the workspace.',
+    'Gemini 지연 번역 취소': 'Cancel Gemini Delayed Translation',
+    '현재 지연 번역 작업을 취소할까요?\n\n이미 완료되어 반영된 청크는 유지합니다. 대기·처리 중인 청크는 중단하고, 뒤늦게 도착한 응답은 번역문에 반영하지 않습니다.': 'Cancel the current delayed translation task?\n\nChunks already completed and applied will be kept. Queued and active chunks will stop, and late responses will not be applied.',
+    'Batch 작업 ID가 비어 있습니다.': 'The Batch job ID is empty.',
+    'Batch 작업 ID를 받지 못했습니다.': 'No Batch job ID was returned.',
+    'Batch 요청이 실패했습니다.': 'The Batch request failed.',
+    '알 수 없는 API 오류': 'Unknown API error.',
+    'Batch 작업이 실패했습니다.': 'The Batch job failed.',
+    '✅ 지연 번역 청크 {chunk} 완료 및 즉시 반영': '✅ Delayed translation chunk {chunk} completed and applied immediately',
+    '⚠️ 지연 번역 마무리 처리 실패: {error}': '⚠️ Failed to finalize delayed translation: {error}',
+    '✅ Gemini 지연 번역 완료: 전체 {total}개 청크': '✅ Gemini delayed translation complete: {total} chunks',
+    '⏹️ Gemini 지연 번역 취소: 완료 {completed}개 / 실패 {failed}개 / 전체 {total}개': '⏹️ Gemini delayed translation canceled: {completed} completed / {failed} failed / {total} total',
+}
+UI_KO_EN.update(_GEMINI_DELAYED_TRANSLATION_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _GEMINI_DELAYED_TRANSLATION_KO_EN.items()})
+
+API_TR_KO_EN.update({
+    "자동이면 현재 페이지의 번역 대상 줄을 한 청크로 묶습니다. 숫자를 입력하면 그 줄 수대로 나눕니다.": "Auto groups the current page's translatable lines into one chunk. Enter a number to split by that many lines.",
+})
+
+SHORTCUT_TR_KO_EN.update({'텍스트 비활성화/활성화': 'Disable/Enable Text'})
+
+_AUTO_TEXT_ADJUST_OPTIONS_KO_EN = {
+    '최소 텍스트 크기 보정': 'Minimum Text Size Correction',
+    '자동 텍스트 조정 후 비정상적으로 작아진 텍스트만 마지막에 페이지 최다 빈도 글자 크기로 끌어올립니다.': 'After auto text adjustment, only abnormally small text is raised to the page most frequent font size at the final step.',
+    '작은 텍스트 기준': 'Small Text Threshold',
+    '페이지에서 가장 많이 나온 글자 크기(최다 빈도 크기)를 기준으로, 사용자가 설정한 비율 이하의 텍스트만 비정상적으로 작다고 보고 그 최다 빈도 크기로 키웁니다. 기본값은 33%이며, 0%는 사용하지 않습니다.': 'Using the page most frequent font size as the reference, only text at or below the user-set percentage is treated as abnormally small and raised to that most frequent size. The default is 33%; 0% disables it.',
+    '현재 설정값이 {value}%이면 페이지 최다 빈도 글자 크기의 {value}% 이하인 텍스트만 보정합니다. 기준보다 큰 텍스트는 그대로 둡니다.': 'With the current setting at {value}%, only text at or below {value}% of the page most frequent font size is corrected. Text above the threshold is left unchanged.',
+}
+UI_KO_EN.update(_AUTO_TEXT_ADJUST_OPTIONS_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _AUTO_TEXT_ADJUST_OPTIONS_KO_EN.items()})
+SHORTCUT_TR_KO_EN.update({'최소 텍스트 크기 보정': 'Minimum Text Size Correction'})
+
+
+_AUTO_TEXT_VERTICAL_OPTIONS_KO_EN = {
+    '자동 텍스트 조정 옵션': 'Auto Text Adjustment Options',
+    '텍스트 자동 조정에서 OCR 세로쓰기 후보 자동 적용과 최소 텍스트 크기 보정을 설정합니다.': 'Configure vertical writing auto-apply for OCR candidates and minimum text size correction used by auto text adjustment.',
+    '텍스트 조정 시 세로쓰기 자동 적용': 'Auto-apply Vertical Writing During Text Adjustment',
+    '분석 단계에서 세로쓰기 한 줄 후보로 태깅된 OCR 영역을 자동 텍스트 조정 시 세로쓰기 모드로 전환합니다. 세로쓰기는 줄내림 없이 한 세로 열만 사용합니다.': 'When auto text adjustment runs, convert OCR regions tagged as single-column vertical writing to vertical writing mode. Vertical writing uses one vertical column without line breaking.',
+    'OCR 박스의 세로/가로 비율과 글자 수를 비교해 세로쓰기 한 줄 후보로 태깅된 항목만 자동 전환합니다. 체크를 끄면 이미 세로쓰기로 지정된 텍스트만 세로쓰기 전용 조정을 탑니다.': 'Only items tagged as single-column vertical candidates by comparing OCR box height/width ratio with character count are converted automatically. If unchecked, only text already set to vertical writing uses the vertical adjustment route.',
+}
+UI_KO_EN.update(_AUTO_TEXT_VERTICAL_OPTIONS_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _AUTO_TEXT_VERTICAL_OPTIONS_KO_EN.items()})
+SHORTCUT_TR_KO_EN.update({'자동 텍스트 조정 옵션': 'Auto Text Adjustment Options'})
+
+UI_KO_EN.setdefault('자동 줄내림 옵션', 'Auto Line Break Options')
+UI_EN_KO.setdefault('Auto Line Break Options', '자동 줄내림 옵션')
+
+
+_OPERATION_MODE_KO_EN = {
+    '조작 방식': 'Operation Mode',
+    '그림판 방식': 'Paint mode',
+    'CAD 방식': 'CAD mode',
+    '작업 화면의 이동, 확대/축소, 영역 지정 문법을 한 번에 정합니다. 확인을 눌러야 저장됩니다.': 'Choose the canvas movement, zoom, and area-selection behavior as one preset. Press OK to save.',
+    '작업 화면의 이동, 확대/축소, 영역 지정 문법을 한 번에 정합니다. 그림판 방식은 왼쪽 드래그 이동/Ctrl·Alt+스크롤 확대/누르고 끌기 영역 지정, CAD 방식은 휠 클릭 이동/일반 스크롤 확대/찍고 드래그 영역 지정입니다.': 'Choose the canvas movement, zoom, and area-selection behavior as one preset. Paint mode uses left-drag panning, Ctrl/Alt+wheel zoom, and hold-drag area selection. CAD mode uses middle-button panning, plain wheel zoom, and click-click area selection.',
+    '이동 모드에서 왼쪽 클릭 드래그로 이미지를 이동합니다. 확대/축소는 Ctrl+스크롤 또는 Alt+스크롤로만 동작합니다. 영역 지정은 누르고 끌기 방식입니다.': 'In move mode, left-drag pans the image. Zooming works only with Ctrl+wheel or Alt+wheel. Area selection uses hold-and-drag.',
+    '이미지 이동은 휠 클릭 드래그로만 합니다. 일반 스크롤로 바로 확대/축소합니다. 영역 지정은 첫 클릭으로 시작하고 두 번째 클릭으로 확정합니다.': 'Panning uses middle-button drag only. Plain mouse wheel zooms directly. Area selection starts with the first click and confirms with the second click.',
+    '영역 지정 취소': 'Area selection canceled',
+}
+UI_KO_EN.update(_OPERATION_MODE_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _OPERATION_MODE_KO_EN.items()})
+SHORTCUT_TR_KO_EN.update({'조작 방식': 'Operation Mode'})
+
+SHORTCUT_TR_KO_EN.update({
+    '마스크 선택 폴리곤': 'Mask Selection Polygon',
+})
+
+_LOCAL_CUDA_RUNTIME_KO_EN = {
+    '로컬 CUDA 진단': 'Local CUDA Diagnosis',
+    '설정 -> 로컬 CUDA 진단': 'Settings -> Local CUDA Diagnosis',
+    '설정 -> 로컬 CUDA 진단에서': 'in Settings -> Local CUDA Diagnosis',
+    '설정 -> 로컬 CUDA 진단에서 런타임 설치/복구를 진행해 주세요.': 'Go to Settings -> Local CUDA Diagnosis and run runtime install/repair.',
+    '설정 -> 로컬 CUDA 진단에서 Torch CUDA 런타임 설치/복구를 실행해 주세요.': 'Go to Settings -> Local CUDA Diagnosis and run Torch CUDA runtime install/repair.',
+    '설정 -> 로컬 CUDA 진단에서 Paddle GPU 런타임 설치/복구를 실행해 주세요.': 'Go to Settings -> Local CUDA Diagnosis and run Paddle GPU runtime install/repair.',
+    '설정 -> 로컬 CUDA 진단에서 Torch CUDA 런타임 설치/복구를 확인하세요.': 'Check Torch CUDA runtime install/repair in Settings -> Local CUDA Diagnosis.',
+    '설정 -> 로컬 CUDA 진단에서 Paddle GPU 런타임 설치/복구를 확인하세요.': 'Check Paddle GPU runtime install/repair in Settings -> Local CUDA Diagnosis.',
+    '로컬 CUDA 진단은 Local판 전용입니다. Lite판은 API/편집 기능 중심이라 내장 GPU 런타임을 검사하지 않습니다.': 'Local CUDA diagnosis is available in the Local edition only. The Lite edition focuses on API/editing features and does not inspect bundled GPU runtimes.',
+    '로컬 CUDA 진단 실패': 'Local CUDA Diagnosis Failed',
+    'NVIDIA 드라이버, 내장 Python 런타임, Torch/Paddle GPU 사용 가능 여부를 검사합니다. 사용자 PC에 Python을 따로 설치하지 않아도 됩니다.': 'Checks the NVIDIA driver, bundled Python runtimes, and Torch/Paddle GPU availability. The user does not need to install Python separately.',
+    '진단 실행을 누르면 local_runtime 안의 내장 런타임과 현재 개발 Python을 검사합니다.': 'Click Run Diagnosis to inspect bundled runtimes under local_runtime and the current development Python.',
+    '진단 실행': 'Run Diagnosis',
+    '보고서 복사': 'Copy Report',
+    '보고서 폴더 열기': 'Open Report Folder',
+    '닫기': 'Close',
+    'GPU 가능': 'GPU Available',
+    'CPU 가능': 'CPU Available',
+    'Torch 런타임 없음': 'Torch Runtime Missing',
+    'Paddle 런타임 없음': 'Paddle Runtime Missing',
+    '검사 대상 없음': 'No Probe Target',
+    '설치됨': 'Installed',
+    '미설치': 'Not Installed',
+    'GPU 통과': 'GPU Passed',
+    'GPU 미통과': 'GPU Not Passed',
+    '로컬 CUDA 진단 결과': 'Local CUDA Diagnosis Result',
+    '검사 시간': 'Probe Time',
+    '소요 시간': 'Elapsed Time',
+    '앱 루트': 'App Root',
+    'nvidia-smi': 'nvidia-smi',
+    '드라이버 CUDA 표시값': 'Driver CUDA Capability',
+    '감지 안 됨': 'Not Detected',
+    '후보 수': 'Candidate Count',
+    '권장 조치': 'Recommended Actions',
+    '추가 권장 조치가 없습니다.': 'No additional recommended actions.',
+    '보고서 저장 위치': 'Report Path',
+    '보고서 저장 실패': 'Failed to Save Report',
+    '진단 중입니다. Torch/Paddle 런타임을 실제로 실행해 보므로 잠시 걸릴 수 있습니다.': 'Diagnosing. This can take a moment because Torch/Paddle runtimes are actually executed.',
+    '진단 보고서를 클립보드에 복사했습니다.': 'The diagnosis report was copied to the clipboard.',
+    '보고서 복사 실패': 'Failed to Copy Report',
+    '보고서 폴더 열기 실패': 'Failed to Open Report Folder',
+
+    'NVIDIA 드라이버, 프로그램 관리 런타임, Torch/Paddle GPU 사용 가능 여부를 검사합니다. 사용자 PC에 Python을 따로 설치하지 않아도 됩니다.': 'Checks the NVIDIA driver, program-managed runtimes, and Torch/Paddle GPU availability. The user does not need to install Python separately.',
+    '진단 실행을 누르면 프로그램이 관리하는 별도 런타임 폴더만 검사합니다. BAT/source 실행과 EXE 실행의 런타임 폴더는 서로 분리됩니다.': 'Click Run Diagnosis to inspect only the separate runtime folder managed by the program. BAT/source and EXE launches use separate runtime folders.',
+    'Torch CUDA 런타임 설치': 'Install Torch CUDA Runtime',
+    'Paddle GPU 런타임 설치': 'Install Paddle GPU Runtime',
+    '런타임 폴더 삭제': 'Delete Runtime Folder',
+    '런타임/보고서 폴더 열기': 'Open Runtime/Report Folder',
+    'BAT/source 실행': 'BAT/source launch',
+    'EXE 실행': 'EXE launch',
+    '실행 모드': 'Launch Mode',
+    '관리 런타임 폴더': 'Managed Runtime Folder',
+    '관리 런타임만 검사': 'Probe Managed Runtime Only',
+    '있음': 'Found',
+    '없음': 'Missing',
+    '선택한 런타임을 프로그램 관리 폴더에 다운로드/설치합니다. 시간이 오래 걸리고 인터넷 연결이 필요합니다. 계속할까요?': 'The selected runtime will be downloaded/installed into the program-managed folder. This may take a long time and requires an internet connection. Continue?',
+    '로컬 런타임 설치': 'Local Runtime Install',
+    '설치 시작': 'Install Started',
+    '설치가 끝났습니다. 진단 실행으로 GPU 사용 가능 여부를 확인하세요.': 'Installation finished. Run Diagnosis to confirm GPU availability.',
+    '로컬 런타임 설치 실패': 'Local Runtime Install Failed',
+    '프로그램 관리 런타임 폴더를 삭제합니다. 설치된 Torch/Paddle 런타임이 모두 제거됩니다. 계속할까요?': 'The program-managed runtime folder will be deleted. Installed Torch/Paddle runtimes will be removed. Continue?',
+    '런타임 폴더 삭제 실패': 'Failed to Delete Runtime Folder',
+    '진단 중입니다. 관리 런타임 폴더의 Torch/Paddle을 실제로 실행해 보므로 잠시 걸릴 수 있습니다.': 'Diagnosing. This can take a moment because Torch/Paddle inside the managed runtime folder is actually executed.',
+}
+UI_KO_EN.update(_LOCAL_CUDA_RUNTIME_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _LOCAL_CUDA_RUNTIME_KO_EN.items()})
+SHORTCUT_TR_KO_EN.update({'로컬 CUDA 진단': 'Local CUDA Diagnosis'})
+
+_CUDA_PREFLIGHT_KO_EN = {
+    'CUDA 사전검사': 'CUDA Preflight',
+    'PaddleOCR CUDA 실행 불가': 'PaddleOCR CUDA Unavailable',
+    'CUDA 진단 열기': 'Open CUDA Diagnosis',
+    '계속': 'Continue',
+    '취소': 'Cancel',
+    'CUDA 사전검사 통과': 'CUDA preflight passed',
+    'Torch CUDA 런타임 사전검사를 통과했습니다.': 'Torch CUDA runtime preflight passed.',
+    'Paddle GPU 런타임 사전검사를 통과했습니다.': 'Paddle GPU runtime preflight passed.',
+    'CUDA 런타임 상태를 확인해야 합니다.': 'CUDA runtime status must be checked.',
+}
+UI_KO_EN.update(_CUDA_PREFLIGHT_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _CUDA_PREFLIGHT_KO_EN.items()})
+
+# Patch: compact runtime wording / log option import
+_RUNTIME_LOG_UI_PATCH_KO_EN = {
+    '이 PC에서 로컬 GPU 기능을 사용할 수 있는지 확인합니다.': 'Checks whether this PC can use local GPU features.',
+    '진단 실행을 누르면 Torch/Paddle GPU 사용 가능 여부를 확인합니다.': 'Click Run Diagnosis to check Torch/Paddle GPU availability.',
+    'GPU 런타임 상태 - Torch: {torch_state} / Paddle: {paddle_state}': 'GPU Runtime Status - Torch: {torch_state} / Paddle: {paddle_state}',
+    'GPU 런타임 상태': 'GPU Runtime Status',
+    'GPU 런타임 삭제': 'Delete GPU Runtime',
+    '보고서 폴더 열기': 'Open Report Folder',
+    '선택한 GPU 런타임을 자동으로 다운로드하고 준비합니다. 시간이 오래 걸리고 인터넷 연결이 필요합니다. 계속할까요?': 'The selected GPU runtime will be downloaded and prepared automatically. This may take a long time and requires an internet connection. Continue?',
+    '설치된 Torch/Paddle GPU 런타임을 삭제합니다. 계속할까요?': 'Installed Torch/Paddle GPU runtimes will be deleted. Continue?',
+    '진단 중입니다. Torch/Paddle GPU를 실제로 실행해 확인하므로 잠시 걸릴 수 있습니다.': 'Diagnosing. This can take a moment because Torch/Paddle GPU is actually executed.',
+    '로그 설정 파일 불러오기': 'Import Log Settings File',
+    '로그 설정 파일 불러오기 실패': 'Failed to Import Log Settings File',
+    'JSON 파일 (*.json);;모든 파일 (*)': 'JSON Files (*.json);;All Files (*)',
+    '로그 설정을 불러왔습니다. 확인을 누르면 현재 PC의 YSB Translator 캐시에 저장됩니다.': 'Log settings were imported. Click OK to save them to this PC\'s YSB Translator cache.',
+    '설정 불러오기': 'Import Settings',
+    '다른 PC나 백업에서 가져온 로그 설정 JSON을 읽어 현재 설정창에 반영합니다.': 'Loads a log settings JSON from another PC or backup and applies it to this settings window.',
+}
+UI_KO_EN.update(_RUNTIME_LOG_UI_PATCH_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _RUNTIME_LOG_UI_PATCH_KO_EN.items()})
+
+# Patch: analysis box size option
+_ANALYSIS_BOX_SIZE_KO_EN = {
+    '분석 박스 크기': 'Analysis Box Size',
+    '분석도에 표시되는 텍스트 번호 박스와 외곽선 크기를 정합니다. 자동값은 페이지별 너비 기준, 수동값은 전 페이지 공통으로 적용됩니다.': 'Sets the text number box and outline sizes shown in the analysis view. Auto uses each page width; manual applies one shared value to all pages.',
+    '분석도에 표시되는 번호 박스와 외곽선 크기를 정합니다. 자동값은 페이지 너비를 기준으로 각 페이지에 맞춰 계산하고, 수동값은 모든 페이지와 앞으로 추가될 페이지에 같은 크기로 적용합니다.': 'Sets the number box and outline sizes shown in the analysis view. Auto is calculated per page from page width, while manual applies the same size to all current and future pages.',
+    '적용 방식': 'Apply Mode',
+    '자동값(페이지별 너비 기준)': 'Auto (per-page width based)',
+    '수동값(전 페이지 공통)': 'Manual (shared for all pages)',
+    '텍스트 번호 박스 크기': 'Text Number Box Size',
+    '분석 외곽선 크기': 'Analysis Outline Size',
+    '자동값을 선택하면 위 수동값은 저장되어 있다가 수동값으로 바꿀 때 다시 사용됩니다.': 'When Auto is selected, the manual values above are kept and reused when switching back to Manual.',
+}
+UI_KO_EN.update(_ANALYSIS_BOX_SIZE_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _ANALYSIS_BOX_SIZE_KO_EN.items()})
+SHORTCUT_TR_KO_EN.update({'분석 박스 크기': 'Analysis Box Size'})
+
+
+_BATCH_PROJECT_TEXT_EXPORT_KO_EN = {
+    '내보낼 텍스트가 없습니다.': 'There is no text to export.',
+    '프로젝트 통합 지문 추출': 'Combined project text export',
+    '프로젝트 통합 파일 추출': 'Export combined project TXT',
+    '선택한 페이지의 지문을 프로젝트 제목의 단일 TXT 파일로도 함께 추출합니다.': 'Also export the selected pages into one TXT file named after the project title.',
+    '기존 페이지별 TXT도 함께 생성됩니다.': 'Existing per-page TXT files are also created.',
+    '프로젝트 통합 파일': 'Combined project file',
+    '프로젝트 통합 지문 추출 완료': 'Combined project text export complete',
+    '프로젝트 통합 지문 추출 실패': 'Combined project text export failed',
+}
+UI_KO_EN.update(_BATCH_PROJECT_TEXT_EXPORT_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _BATCH_PROJECT_TEXT_EXPORT_KO_EN.items()})
+
+
+_API_DIAGNOSTICS_KO_EN = {
+    'API 응답 테스트': 'API Response Test',
+    '프로그램 적용 테스트': 'Program Apply Test',
+    'API 사전 점검': 'API Preflight Check',
+    '프로그램 내부 점검': 'Program Internal Check',
+    '실전 테스트': 'Practical Test',
+    '현재 입력값으로 실제 API 요청을 보내고 응답 수신·기본 파싱 여부를 검사합니다.': 'Sends a real API request with the current settings and checks response/parsing.',
+    'API 응답 결과를 YSB 내부 파서/디코더와 임시 파일 저장·재읽기 경로에 적용할 수 있는지 검사합니다.': 'Checks whether the API response can be parsed/decoded and saved/read through YSB.',
+    '실제 이미지/번역문/인페인팅 작업을 보내지 않고 토큰, URL, 모델명, 가벼운 연결·인증만 점검합니다.': 'Checks tokens, URLs, model names, and lightweight connection/auth without sending real images, translation text, or inpainting jobs.',
+    '외부 API를 호출하지 않고 mock 결과로 YSB 내부 파서/디코더, 한글·일본어 경로 저장·재읽기, 데이터 적용 경로를 점검합니다.': 'Checks YSB internal parsers/decoders, Korean/Japanese path save-read, and data application routes with mock results without calling external APIs.',
+    '내장 샘플 이미지/마스크/문장을 실제 provider에 보내 결과를 확인합니다. API 사용량 또는 비용이 발생할 수 있습니다.': 'Sends bundled sample images, masks, or text to the real provider and checks the result. API usage or cost may occur.',
+    '테스트 중...': 'Testing...',
+    '진단 로그': 'Diagnostic log',
+    '원인/결과': 'Cause/result',
+    '응답 일부': 'Response excerpt',
+}
+UI_KO_EN.update(_API_DIAGNOSTICS_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _API_DIAGNOSTICS_KO_EN.items()})
+API_TR_KO_EN.update(_API_DIAGNOSTICS_KO_EN)
+
+
+# Patch: text number box visibility shortcut / paint-mode horizontal wheel scroll
+_TEXT_NUMBER_BOX_VISIBILITY_KO_EN = {
+    '텍스트 넘버 박스 숨기기/표시': 'Hide/Show Text Number Boxes',
+    '텍스트 넘버 박스': 'Text Number Boxes',
+    '화면 가로 이동': 'Horizontal View Scroll',
+}
+UI_KO_EN.update(_TEXT_NUMBER_BOX_VISIBILITY_KO_EN)
+UI_EN_KO.update({en: ko for ko, en in _TEXT_NUMBER_BOX_VISIBILITY_KO_EN.items()})
+SHORTCUT_TR_KO_EN.update({
+    '텍스트 넘버 박스 숨기기/표시': 'Hide/Show Text Number Boxes',
+})
