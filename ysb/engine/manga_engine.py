@@ -105,6 +105,7 @@ class Config:
     STABLE_INPAINT_PROMPT = "remove text and restore the original background"
     STABLE_INPAINT_WAIT_SECONDS = 3
     LOCAL_LAMA_WAIT_SECONDS = 0
+    LOCAL_INPAINT_MODEL_PATH = ""
     GEMINI_INPAINT_MODEL = "gemini-2.5-flash-image"
     GEMINI_INPAINT_PROMPT = (
         "Remove the text only inside the white mask area and reconstruct the original manga background. "
@@ -3649,8 +3650,6 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
             return self._call_gemini_inpaint(image_path, bin_mask)
         if provider == "local_lama":
             return self._call_local_lama(image_path, bin_mask)
-        if provider == "local_sdxl_lightning":
-            return self._call_local_sdxl_lightning(image_path, bin_mask)
         return self._call_lama(image_path, bin_mask)
 
 
@@ -3768,19 +3767,19 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
         print(f">>> [Local Inpaint] WARN: failed to stage LaMa model to ASCII path: {last_error}")
         return str(src)
 
-    def _call_local_sdxl_lightning(self, image_path, mask_img):
-        """Run local SDXL Lightning inpainting on CUDA.
+    def _call_local_lama(self, image_path, mask_img):
+        """Run local LaMa/MAT inpainting using LocalInpaintEngine or fallback to simple-lama-inpainting.
 
         Returns PNG bytes so the existing inpainting workers can reuse the same
-        result pipeline.
+        result pipeline used for API providers.
         """
-        import numpy as np
-        from PIL import Image
-        import cv2
         from io import BytesIO
+        from PIL import Image
+        import numpy as np
+        import cv2
 
         if not image_path or not os.path.exists(str(image_path)):
-            raise ValueError("LOCAL SDXL Lightning 입력 이미지 파일을 찾을 수 없습니다.")
+            raise ValueError("LOCAL 인페인팅 입력 이미지 파일을 찾을 수 없습니다.")
 
         image = Image.open(image_path).convert("RGB")
         mask_arr = np.asarray(mask_img)
@@ -3790,35 +3789,35 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
         if mask_arr.shape[:2] != (image.height, image.width):
             mask_arr = cv2.resize(mask_arr, (image.width, image.height), interpolation=cv2.INTER_NEAREST)
         if int(np.count_nonzero(mask_arr)) <= 0:
-            raise ValueError("LOCAL SDXL Lightning 인페인팅 마스크가 비어 있습니다.")
+            raise ValueError("LOCAL 인페인팅 마스크가 비어 있습니다.")
 
-        image_np = np.array(image)
+        # 1. Custom JIT model loading via LocalInpaintEngine
+        model_path = getattr(Config, "LOCAL_INPAINT_MODEL_PATH", "").strip()
+        if model_path:
+            from ysb.core.inpainting_engine import _app_root, LocalInpaintEngine
+            abs_model_path = model_path
+            if not os.path.isabs(abs_model_path):
+                abs_model_path = os.path.abspath(os.path.join(_app_root(), abs_model_path))
 
-        model = getattr(self, "_local_sdxl_lightning_model", None)
-        if model is None:
-            print(">>> [Local Inpaint] Loading SDXL Lightning model...")
-            from ysb.core.inpainting_engine import SDXLLightningInpaintEngine
-            model = SDXLLightningInpaintEngine("local_models/stable-diffusion-xl-1.0-inpainting-0.1")
-            self._local_sdxl_lightning_model = model
+            if os.path.exists(abs_model_path):
+                model = getattr(self, "_local_inpaint_custom_model", None)
+                loaded_path = getattr(self, "_local_inpaint_custom_model_path", None)
+                if model is None or loaded_path != abs_model_path:
+                    model = LocalInpaintEngine(abs_model_path)
+                    self._local_inpaint_custom_model = model
+                    self._local_inpaint_custom_model_path = abs_model_path
 
-        print(">>> [Local Inpaint] Running LOCAL SDXL Lightning Inpaint...")
-        result_np = model.inpaint(image_np, mask_arr)
+                print(f">>> [Local Inpaint] Running Custom Model Inpaint: {abs_model_path}")
+                image_np = np.array(image)
+                result_np = model.inpaint(image_np, mask_arr)
+                out_img = Image.fromarray(result_np).convert("RGB")
+                bio = BytesIO()
+                out_img.save(bio, format="PNG")
+                return bio.getvalue()
+            else:
+                print(f">>> [Local Inpaint] Custom model file not found: {abs_model_path}, falling back to default LaMa.")
 
-        out_img = Image.fromarray(result_np).convert("RGB")
-        bio = BytesIO()
-        out_img.save(bio, format="PNG")
-        return bio.getvalue()
-
-    def _call_local_lama(self, image_path, mask_img):
-        """Run local LaMa inpainting using simple-lama-inpainting.
-
-        Returns PNG bytes so the existing inpainting workers can reuse the same
-        result pipeline used for API providers.
-        """
-        from io import BytesIO
-        from PIL import Image
-        import numpy as np
-
+        # 2. Fallback to SimpleLama (existing behavior)
         # simple-lama-inpainting은 LAMA_MODEL 환경변수를 지원한다.
         # local_models/lama/big-lama.pt가 있으면 자동 다운로드/cache 대신 그 파일을 사용한다.
         local_model_path = self._find_local_lama_model_path()
@@ -3841,20 +3840,7 @@ OUTPUT FORMAT RULES FOR THIS PROGRAM:
                 f"원문 오류: {e}"
             )
 
-        if not image_path or not os.path.exists(str(image_path)):
-            raise ValueError("LOCAL LaMa 입력 이미지 파일을 찾을 수 없습니다.")
-
-        image = Image.open(image_path).convert("RGB")
-        mask_arr = np.asarray(mask_img)
-        if mask_arr.ndim == 3:
-            mask_arr = cv2.cvtColor(mask_arr, cv2.COLOR_BGR2GRAY)
-        mask_arr = np.where(mask_arr > 10, 255, 0).astype("uint8")
-        if mask_arr.shape[:2] != (image.height, image.width):
-            mask_arr = cv2.resize(mask_arr, (image.width, image.height), interpolation=cv2.INTER_NEAREST)
-        if int(np.count_nonzero(mask_arr)) <= 0:
-            raise ValueError("LOCAL LaMa 인페인팅 마스크가 비어 있습니다.")
         mask = Image.fromarray(mask_arr, mode="L")
-
         model = getattr(self, "_local_lama_model", None)
         if model is None:
             print(">>> [Local Inpaint] Loading SimpleLaMa model...")

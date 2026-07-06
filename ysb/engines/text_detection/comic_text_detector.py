@@ -58,7 +58,7 @@ def _normalize_torch_device(torch_module: Any, device: str) -> str:
     available.
     """
     dev = str(device or "cpu").strip().lower()
-    if dev in ("cuda", "gpu") and bool(getattr(torch_module, "cuda", None)) and torch_module.cuda.is_available():
+    if dev in ("cuda", "gpu", "auto") and bool(getattr(torch_module, "cuda", None)) and torch_module.cuda.is_available():
         return "cuda"
     return "cpu"
 

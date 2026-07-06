@@ -4395,8 +4395,7 @@ class MainWindowOperationsMixin:
         provider_name_map = {
             "replicate_stable": "Replicate Stable Diffusion Inpainting",
             "gemini_inpaint": "Gemini Image Inpainting",
-            "local_lama": "LOCAL LaMa",
-            "local_sdxl_lightning": "LOCAL SDXL Lightning",
+            "local_lama": "LOCAL Inpainting",
             "replicate_lama": "Replicate LaMa",
         }
         provider_name = provider_name_map.get(provider, "Replicate LaMa")
@@ -4408,50 +4407,29 @@ class MainWindowOperationsMixin:
                     return self._show_api_missing_and_open_settings(
                         "inpaint",
                         provider_name,
-                        "LOCAL LaMa는 Local판 전용입니다.",
-                        "LOCAL LaMa is only available in the Local edition.",
+                        "LOCAL Inpainting은 Local판 전용입니다.",
+                        "LOCAL Inpainting is only available in the Local edition.",
                     )
-                from simple_lama_inpainting import SimpleLama  # noqa: F401
+                # If custom model path is set, we use LocalInpaintEngine (requires PyTorch)
+                # Otherwise we require simple_lama_inpainting
+                model_path = getattr(settings, "local_inpaint_model_path", "").strip()
+                if model_path:
+                    import torch  # noqa: F401
+                else:
+                    from simple_lama_inpainting import SimpleLama  # noqa: F401
             except ImportError as e:
                 return self._show_api_missing_and_open_settings(
                     "inpaint",
                     provider_name,
-                    "LOCAL LaMa 패키지가 설치되어 있지 않습니다. setup_local_core_venv_v2_1_0.bat를 실행해 주세요.",
-                    "LOCAL LaMa package is not installed. Run setup_local_core_venv_v2_1_0.bat first.",
+                    "LOCAL Inpainting 구동용 패키지(simple-lama-inpainting 또는 PyTorch)가 설치되어 있지 않습니다. setup_local_core_venv_v2_1_0.bat를 실행해 주세요.",
+                    "LOCAL Inpainting package (simple-lama-inpainting or PyTorch) is not installed. Run setup_local_core_venv_v2_1_0.bat first.",
                 )
             except Exception as e:
                 return self._show_api_missing_and_open_settings(
                     "inpaint",
                     provider_name,
-                    f"LOCAL LaMa 준비 확인 중 오류가 발생했습니다: {e}",
-                    f"LOCAL LaMa readiness check failed: {e}",
-                )
-            return True
-
-        if provider == "local_sdxl_lightning":
-            try:
-                from ysb.editions.current import is_local_edition
-                if not is_local_edition():
-                    return self._show_api_missing_and_open_settings(
-                        "inpaint",
-                        provider_name,
-                        "LOCAL SDXL Lightning은 Local판 전용입니다.",
-                        "LOCAL SDXL Lightning is only available in the Local edition.",
-                    )
-                import diffusers  # noqa: F401
-            except ImportError as e:
-                return self._show_api_missing_and_open_settings(
-                    "inpaint",
-                    provider_name,
-                    "LOCAL SDXL Lightning 패키지(diffusers 등)가 설치되어 있지 않습니다. 의존성 설치를 완료해 주세요.",
-                    "LOCAL SDXL Lightning package (diffusers, etc.) is not installed. Please install dependencies.",
-                )
-            except Exception as e:
-                return self._show_api_missing_and_open_settings(
-                    "inpaint",
-                    provider_name,
-                    f"LOCAL SDXL Lightning 준비 확인 중 오류가 발생했습니다: {e}",
-                    f"LOCAL SDXL Lightning readiness check failed: {e}",
+                    f"LOCAL Inpainting 준비 확인 중 오류가 발생했습니다: {e}",
+                    f"LOCAL Inpainting readiness check failed: {e}",
                 )
             return True
 
@@ -4783,10 +4761,10 @@ class MainWindowOperationsMixin:
 
     def _get_inpaint_resize_limits(self, provider=None):
         provider = str(provider or "replicate_lama").strip().lower()
-        if provider in ("local_lama", "local_sdxl_lightning"):
+        if provider == "local_lama":
             return {
                 "provider": provider,
-                "provider_label": "LOCAL LaMa" if provider == "local_lama" else "LOCAL SDXL Lightning",
+                "provider_label": "LOCAL Inpainting",
                 "warn_max_side": 3000,
                 "warn_max_pixels": 9_000_000,
                 "target_max_side": 2800,

@@ -17,6 +17,63 @@ CACHE_FILE_NAME = "api_cache.json"
 def cache_file():
     return get_cache_file(CACHE_FILE_NAME)
 
+
+def _app_root():
+    from pathlib import Path
+    import sys
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    try:
+        return Path(__file__).resolve().parents[2]
+    except Exception:
+        return Path.cwd()
+
+
+def scan_local_inpainting_models():
+    from pathlib import Path
+    import sys
+    root = _app_root()
+    models_dir = root / "local_models"
+    inpainting_dir = models_dir / "inpainting"
+    
+    # Ensure inpainting directory exists
+    try:
+        inpainting_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+        
+    models = []
+    # 1. Scan inpainting_dir first
+    if inpainting_dir.is_dir():
+        for f in inpainting_dir.rglob("*"):
+            if f.is_file() and f.suffix.lower() in (".pt", ".pth", ".jit"):
+                rel = f.relative_to(root)
+                models.append((f.name, str(rel.as_posix())))
+                
+    # 2. Scan lama_dir as a fallback
+    lama_dir = models_dir / "lama"
+    if lama_dir.is_dir():
+        for f in lama_dir.rglob("*"):
+            if f.is_file() and f.name == "big-lama.pt":
+                rel = f.relative_to(root)
+                models.append((f"big-lama.pt (LaMa)", str(rel.as_posix())))
+
+    # Deduplicate by path
+    seen = set()
+    unique_models = []
+    for label, val in models:
+        val_lower = val.lower()
+        if val_lower not in seen:
+            seen.add(val_lower)
+            unique_models.append((label, val))
+            
+    if not unique_models:
+        # Fallback if no models are found
+        unique_models.append(("No models found in local_models/inpainting", ""))
+        
+    return unique_models
+
+
 LANG_KO = "ko"
 LANG_EN = "en"
 
@@ -234,6 +291,7 @@ class ApiSettings:
     stable_inpaint_prompt: str = "remove text and restore the original background"
     stable_inpaint_wait_seconds: int = 3
     local_lama_wait_seconds: int = 0
+    local_inpaint_model_path: str = ""
     gemini_inpaint_model: str = "gemini-2.5-flash-image"
     gemini_inpaint_prompt: str = (
         "Remove the text only inside the white mask area and reconstruct the original manga background. "
@@ -357,7 +415,7 @@ def apply_settings_to_config(settings: ApiSettings):
         # Inpainting
         Config.INPAINT_PROVIDER = (settings.selected_inpaint_provider or "replicate_lama").strip() or "replicate_lama"
         if Config.INPAINT_PROVIDER.startswith("local_"):
-            if local_enabled and Config.INPAINT_PROVIDER in ("local_lama", "local_sdxl_lightning"):
+            if local_enabled and Config.INPAINT_PROVIDER == "local_lama":
                 Config.INPAINT_PROVIDER = Config.INPAINT_PROVIDER
             else:
                 Config.INPAINT_PROVIDER = "local_lama" if local_enabled else "replicate_lama"
@@ -376,6 +434,7 @@ def apply_settings_to_config(settings: ApiSettings):
         Config.STABLE_INPAINT_PROMPT = settings.stable_inpaint_prompt.strip() or "remove text and restore the original background"
         Config.STABLE_INPAINT_WAIT_SECONDS = max(0, int(getattr(settings, "stable_inpaint_wait_seconds", 3) or 0))
         Config.LOCAL_LAMA_WAIT_SECONDS = max(0, int(getattr(settings, "local_lama_wait_seconds", 0) or 0))
+        Config.LOCAL_INPAINT_MODEL_PATH = settings.local_inpaint_model_path.strip()
         gemini_inpaint_model = settings.gemini_inpaint_model.strip() or "gemini-2.5-flash-image"
         # The old preview model was shut down; auto-migrate old cache values.
         if gemini_inpaint_model == "gemini-2.5-flash-image":
@@ -547,17 +606,12 @@ class ApiSettingsDialog(QDialog):
                 {"_category": True, "title": "LOCAL 모델", "description": "Local판에서만 사용하는 오프라인 인페인팅 모델입니다. API 키가 필요하지 않습니다."},
                 {
                     "provider": "local_lama",
-                    "title": "LOCAL LaMa",
-                    "description": "Local판 전용 인페인팅입니다. 현재 페인팅 마스크를 simple-lama-inpainting으로 로컬에서 지웁니다. API Key를 사용하지 않습니다.",
+                    "title": "LOCAL Inpainting",
+                    "description": "Local판 전용 인페인팅입니다. local_models/inpainting 폴더 내의 .pt/.pth 모델(LaMa, MAT, manga 등)을 동적으로 감지하여 사용합니다.",
                     "fields": [
+                        ("모델 선택", "local_inpaint_model_path", False, "", "combo", scan_local_inpainting_models()),
                         ("대기 시간(초)", "local_lama_wait_seconds", False, 0, "spin", (0, 120), " sec" if self._ui_language == LANG_EN else "초"),
                     ],
-                },
-                {
-                    "provider": "local_sdxl_lightning",
-                    "title": "LOCAL SDXL Lightning",
-                    "description": "Local판 전용 SDXL Lightning 4-Step 고속 디퓨전 인페인팅입니다. API Key를 사용하지 않습니다.",
-                    "fields": [],
                 },
             ])
         self._add_api_section(inpaint_content_layout, tr_api("인페인팅", self._ui_language), inpaint_cards, "selected_inpaint_provider")
@@ -934,6 +988,7 @@ class ApiSettingsDialog(QDialog):
             stable_inpaint_prompt=self._first_edit_text("stable_inpaint_prompt") or "remove text and restore the original background",
             stable_inpaint_wait_seconds=int(self._first_edit_text("stable_inpaint_wait_seconds") or 3),
             local_lama_wait_seconds=int(self._first_edit_text("local_lama_wait_seconds") or 0),
+            local_inpaint_model_path=self._first_edit_text("local_inpaint_model_path"),
             gemini_inpaint_model=self._first_edit_text("gemini_inpaint_model") or "gemini-2.5-flash-image",
             gemini_inpaint_prompt=self._first_edit_text("gemini_inpaint_prompt") or (
                 "Remove the text only inside the white mask area and reconstruct the original manga background. "

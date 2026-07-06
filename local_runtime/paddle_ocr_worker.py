@@ -86,7 +86,21 @@ def _normalize_device(device: str) -> str:
         return "gpu"
     if dev in ("cpu",):
         return "cpu"
-    return "auto"
+    
+    # For "auto", check if CUDA is available
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return "gpu"
+    except Exception:
+        pass
+    try:
+        import paddle
+        if paddle.device.is_compiled_with_cuda() and paddle.device.cuda.device_count() > 0:
+            return "gpu"
+    except Exception:
+        pass
+    return "cpu"
 
 
 def _package_root() -> Path:
